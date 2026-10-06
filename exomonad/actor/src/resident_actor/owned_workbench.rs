@@ -40,6 +40,7 @@ impl WorkbenchCompilationAuthority {
             receipts: Vec::new(),
             actor,
             detail,
+            diagnostic: None,
         };
         if let Some(layers) = source_layers {
             layers
@@ -205,6 +206,7 @@ impl WorkbenchPublicOwner {
             receipts: Vec::new(),
             actor: context.actor,
             detail: detail.into(),
+            diagnostic: None,
         };
         if context.placement != descriptor.placement() {
             return Err(refuse(
@@ -754,6 +756,7 @@ where
                 receipts: Vec::new(),
                 actor: context.actor,
                 detail: "authored execution has no compilation authority".into(),
+                diagnostic: None,
             }));
         }
         let Some(workbench) = self.active_workbench() else {
@@ -761,6 +764,7 @@ where
                 receipts: Vec::new(),
                 actor: context.actor,
                 detail: "actor application has no active Haskell workbench".into(),
+                diagnostic: None,
             }));
         };
         let workbench = match &compilation_authority {

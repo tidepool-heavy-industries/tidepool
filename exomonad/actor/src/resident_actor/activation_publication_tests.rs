@@ -292,6 +292,7 @@ async fn interrupt_during_preview(
                     &ActorTerminal {
                         kind: crate::ActorExitKind::Cancelled,
                         summary: "terminal during original preview".into(),
+                        diagnostic: None,
                     },
                 );
             }
@@ -303,6 +304,7 @@ async fn interrupt_during_preview(
                     .request_shutdown(ActorTerminal {
                         kind: crate::ActorExitKind::Cancelled,
                         summary: "retirement during original preview".into(),
+                        diagnostic: None,
                     });
             }
         }

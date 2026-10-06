@@ -103,6 +103,7 @@ mod tests {
         ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: String::new(),
+            diagnostic: None,
         }
     }
 
@@ -159,6 +160,7 @@ mod tests {
             let terminal = ActorTerminal {
                 kind,
                 summary: "terminal detail: λ".into(),
+                diagnostic: None,
             };
             let value = terminal.to_value(&table).unwrap();
             let HaskellValue::Con(id, fields) = &value else {
@@ -202,6 +204,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "failure".into(),
+            diagnostic: None,
         };
         assert!(matches!(
             terminal.to_value(&table),
@@ -230,6 +233,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "failure".into(),
+            diagnostic: None,
         };
         assert_eq!(
             terminal.visit(&table, &mut RejectBytes),

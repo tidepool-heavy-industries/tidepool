@@ -659,6 +659,7 @@ mod tests {
                         actor,
                         detail: "scheduler worker stopped".into(),
                         receipts: Vec::new(),
+                        diagnostic: None,
                     }
                 }
             };
@@ -845,6 +846,7 @@ mod tests {
                     actor,
                     detail: "scheduler stopped execution".into(),
                     receipts: Vec::new(),
+                    diagnostic: None,
                 }));
                 frozen.send(reply).unwrap();
             }
@@ -922,6 +924,7 @@ mod tests {
             actor,
             detail: "scheduler stopped before issuance".into(),
             receipts: Vec::new(),
+            diagnostic: None,
         }));
         assert!(delivered.as_ref().unwrap_err().receipts().is_empty());
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
@@ -996,6 +999,7 @@ mod tests {
             actor,
             detail: "display refused".into(),
             receipts: Vec::new(),
+            diagnostic: None,
         }));
         let receipt = &delivered.as_ref().unwrap_err().receipts()[0];
         assert_eq!(

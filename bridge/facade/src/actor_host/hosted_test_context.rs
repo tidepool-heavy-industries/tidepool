@@ -50,7 +50,7 @@ enum StartupStage {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(tag = "cause", rename_all = "snake_case")]
-enum StartupFailure {
+pub(super) enum StartupFailure {
     Deadline,
     AssemblyObserverClosed,
     ReadinessObserverClosed,
@@ -64,6 +64,54 @@ enum StartupFailure {
     CoordinationFailed {
         message: String,
     },
+}
+
+#[derive(Debug)]
+pub(super) enum HostedStartupError {
+    Setup(String),
+    Refused {
+        failure: StartupFailure,
+        cleanup: CleanupOutcome,
+        detail: String,
+    },
+}
+
+impl From<String> for HostedStartupError {
+    fn from(detail: String) -> Self {
+        Self::Setup(detail)
+    }
+}
+
+impl std::fmt::Display for HostedStartupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Setup(detail) | Self::Refused { detail, .. } => formatter.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for HostedStartupError {}
+
+impl HostedStartupError {
+    pub(super) fn root_terminal(&self) -> Option<(ActorRef, &exomonad_actor::ActorTerminal)> {
+        match self {
+            Self::Refused {
+                failure: StartupFailure::RootRetired { actor, terminal },
+                ..
+            } => Some((*actor, terminal)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn cleanup_confirmed(&self) -> bool {
+        matches!(
+            self,
+            Self::Refused {
+                cleanup: CleanupOutcome::Confirmed,
+                ..
+            }
+        )
+    }
 }
 
 impl StartupFailure {
@@ -189,7 +237,7 @@ enum ScenarioPhase {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum CleanupOutcome {
+pub(super) enum CleanupOutcome {
     Unknown,
     Confirmed,
     NotStarted {
@@ -204,7 +252,7 @@ enum CleanupOutcome {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum CleanupDomain {
+pub(super) enum CleanupDomain {
     HostRuntime,
 }
 
@@ -659,7 +707,7 @@ impl HostedTestRuntime {
     pub(super) async fn start(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, HostedStartupError> {
         Self::start_configured(settings, transport, |_| {}).await
     }
 
@@ -667,7 +715,7 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
-    ) -> Result<Self, String> {
+    ) -> Result<Self, HostedStartupError> {
         Self::start_owned(settings, configure, Some(Arc::clone(transport)), None).await
     }
 
@@ -680,7 +728,7 @@ impl HostedTestRuntime {
             ) -> Arc<dyn harness::engine::ResponsesTransport>
             + Send
             + 'static,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, HostedStartupError> {
         Self::start_owned(settings, configure, None, Some(Box::new(transport))).await
     }
 
@@ -689,7 +737,7 @@ impl HostedTestRuntime {
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
         transport_factory: Option<HostTransportFactory>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, HostedStartupError> {
         super::test_campaign::install_tracing();
         let startup_policy = StartupPolicy::parse(
             std::env::var(STARTUP_DIAGNOSTIC_SECONDS)
@@ -894,7 +942,7 @@ impl HostedTestRuntime {
                 };
                 let termination = Self::terminate(stop.clone(), outcome, Some(thread)).await;
                 let (detail, cleanup) = termination.startup_failure(
-                    failure,
+                    failure.clone(),
                     assembly_observed,
                     *owner_admission.lock(),
                 );
@@ -909,9 +957,9 @@ impl HostedTestRuntime {
                 } else {
                     Ok(())
                 };
-                return Err(format!(
+                return Err(HostedStartupError::Refused { failure, detail: format!(
                     "production startup failed: {detail}; cleanup: {cleanup:?}; evidence: {evidence:?}"
-                ));
+                ), cleanup });
             }
         };
         let runtime = Arc::clone(&context.runtime);
@@ -1146,14 +1194,28 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            failure.contains("production host failed during startup"),
-            "{failure}"
+            matches!(
+                &failure,
+                HostedStartupError::Refused {
+                    failure: cause,
+                    cleanup: CleanupOutcome::NotStarted {
+                        owner_admission: HostOwnerAdmission::NotAdmitted,
+                        executor_joined: true,
+                        ..
+                    },
+                    ..
+                } if matches!(cause,
+                    StartupFailure::AssemblyObserverClosed | StartupFailure::HostExited { .. })
+            ),
+            "{failure:?}"
         );
+        assert!(failure.root_terminal().is_none());
         assert!(
-            failure.contains(&workspace.display().to_string()),
+            failure
+                .to_string()
+                .contains(&workspace.display().to_string()),
             "{failure}"
         );
-        assert!(failure.contains("cleanup: NotStarted"), "{failure}");
     }
 
     #[tokio::test]
@@ -1261,6 +1323,7 @@ mod tests {
         let terminal = exomonad_actor::ActorTerminal {
             kind: exomonad_actor::ActorExitKind::Failed,
             summary: "tool installation refused".into(),
+            diagnostic: None,
         };
         let failure = StartupFailure::RootRetired {
             actor,

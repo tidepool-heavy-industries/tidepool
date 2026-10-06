@@ -33,6 +33,55 @@ use workbench_step::ActorTaskExecution;
 #[error("{detail}")]
 pub struct KernelBehaviorError {
     pub detail: String,
+    pub diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+}
+
+impl KernelBehaviorError {
+    pub fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            diagnostic: None,
+        }
+    }
+
+    pub(crate) fn with_diagnostic(
+        detail: String,
+        diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+    ) -> Self {
+        Self {
+            detail,
+            diagnostic: crate::termination::retain_failure_diagnostic(diagnostic),
+        }
+    }
+
+    fn context(mut self, detail: String) -> Self {
+        self.detail = detail;
+        self
+    }
+}
+
+impl From<String> for KernelBehaviorError {
+    fn from(detail: String) -> Self {
+        Self::new(detail)
+    }
+}
+
+impl From<&str> for KernelBehaviorError {
+    fn from(detail: &str) -> Self {
+        Self::new(detail)
+    }
+}
+
+impl From<crate::ResidentActorWorkbenchError> for KernelBehaviorError {
+    fn from(error: crate::ResidentActorWorkbenchError) -> Self {
+        error.into_kernel_behavior_error()
+    }
+}
+
+impl From<KernelInvocationFailure> for KernelBehaviorError {
+    fn from(error: KernelInvocationFailure) -> Self {
+        error.into_behavior_error()
+    }
 }
 
 /// One shutdown budget computed once by `finish_actor` and threaded to every
@@ -393,6 +442,7 @@ impl KernelContext {
                     "actor {:?} cannot install session context for {:?}",
                     self.identity, context.actor
                 ),
+                diagnostic: None,
             });
         }
         self.directory
@@ -586,6 +636,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor cannot confirm replacement recipe cleanup".into(),
+                diagnostic: None,
             })
         })
     }
@@ -597,6 +648,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor does not support stateful replacement".into(),
+                diagnostic: None,
             })
         })
     }
@@ -610,6 +662,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor has no prepared replacement".into(),
+                diagnostic: None,
             })
         })
     }
@@ -621,6 +674,7 @@ pub trait KernelBehavior: Send + 'static {
     ) -> Result<(), KernelBehaviorError> {
         Err(KernelBehaviorError {
             detail: "actor has no replacement custody".into(),
+            diagnostic: None,
         })
     }
 
@@ -629,6 +683,7 @@ pub trait KernelBehavior: Send + 'static {
     fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
         Err(KernelBehaviorError {
             detail: "actor does not support draining".into(),
+            diagnostic: None,
         })
     }
 
@@ -641,6 +696,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor does not support draining".into(),
+                diagnostic: None,
             })
         })
     }
@@ -658,6 +714,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor has no installed source handler".into(),
+                diagnostic: None,
             })
         })
     }
@@ -671,6 +728,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor does not support watch continuations".into(),
+                diagnostic: None,
             })
         })
     }
@@ -819,6 +877,7 @@ pub trait KernelBehavior: Send + 'static {
         if kind != crate::kernel::KernelResume::ContinueProgram {
             return Err(KernelBehaviorError {
                 detail: "actor has no child durability confirmation".into(),
+                diagnostic: None,
             });
         }
         Ok(OwnedActorTask::serial(
@@ -828,7 +887,8 @@ pub trait KernelBehavior: Send + 'static {
                         KernelInvocationFailure::Failed {
                             receipts: Vec::new(),
                             actor: context.identity(),
-                            detail: error.to_string(),
+                            detail: error.detail,
+                            diagnostic: error.diagnostic,
                         }
                     });
                     (behavior, OwnedActorCompletion::new(move |_| result))
@@ -846,6 +906,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor has no deferred fork".into(),
+                diagnostic: None,
             })
         })
     }
@@ -870,7 +931,8 @@ pub trait KernelBehavior: Send + 'static {
                         .map_err(|error| KernelInvocationFailure::Failed {
                             receipts: Vec::new(),
                             actor: context.identity(),
-                            detail: error.to_string(),
+                            detail: error.detail,
+                            diagnostic: error.diagnostic,
                         });
                     (behavior, OwnedActorCompletion::new(move |_| result))
                 })
@@ -885,6 +947,7 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor received an internal resume without pending work".into(),
+                diagnostic: None,
             })
         })
     }
@@ -1006,6 +1069,7 @@ impl<B> Drop for LocalActorState<B> {
                             receipts: Vec::new(),
                             actor: self.context.identity,
                             detail: detail.into(),
+                            diagnostic: None,
                         }),
                     );
                 }
@@ -1017,6 +1081,7 @@ impl<B> Drop for LocalActorState<B> {
                             receipts: Vec::new(),
                             actor: self.context.identity,
                             detail: detail.into(),
+                            diagnostic: None,
                         }),
                     );
                 }
@@ -1164,11 +1229,11 @@ async fn fail_kernel_operation<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
     operation: KernelTaskOperation,
-    detail: String,
+    error: KernelBehaviorError,
 ) {
     match operation {
-        KernelTaskOperation::ReleaseFork => fail_actor(myself, state, detail).await,
-        KernelTaskOperation::Resume => fail_handler(myself, state, detail).await,
+        KernelTaskOperation::ReleaseFork => fail_actor_with_error(myself, state, error).await,
+        KernelTaskOperation::Resume => fail_handler_with_error(myself, state, error).await,
     }
 }
 
@@ -1326,6 +1391,7 @@ async fn handle_parked_message<B: KernelBehavior>(
                     receipts: Vec::new(),
                     actor: state.context.identity,
                     detail: "hosted work admission is sealed".into(),
+                    diagnostic: None,
                 });
                 if let Some(control) = control {
                     control.settle(rejection.clone());
@@ -1464,6 +1530,7 @@ where
                     Disposition::Stop(ActorTerminal {
                         kind: crate::ActorExitKind::Cancelled,
                         summary: detail.clone(),
+                        diagnostic: None,
                     }),
                 )
                 .await;
@@ -1486,7 +1553,10 @@ where
                 .await;
             }
             Err(error) => {
-                let terminal = failed_terminal(format!("actor startup failed: {error}"));
+                let terminal = ActorTerminal::failed(
+                    format!("actor startup failed: {error}"),
+                    error.diagnostic.clone(),
+                );
                 finish_actor(
                     &state.context.myself.clone(),
                     &mut state,
@@ -1539,6 +1609,7 @@ where
                     reply
                         .send(Err(KernelBehaviorError {
                             detail: "actor is not a prepared replacement".into(),
+                            diagnostic: None,
                         }))
                         .ok();
                     return Ok(());
@@ -1549,6 +1620,7 @@ where
                     Disposition::Stop(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: "replacement preparation aborted".into(),
+                        diagnostic: None,
                     }),
                 )
                 .await;
@@ -1561,6 +1633,7 @@ where
                 } else {
                     Err(KernelBehaviorError {
                         detail: format!("prepared actor cleanup unconfirmed: {}", terminal.summary),
+                        diagnostic: None,
                     })
                 };
                 reply.send(result).ok();
@@ -1572,6 +1645,7 @@ where
                             receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: "actor replacement is already in progress".into(),
+                            diagnostic: None,
                         },
                         Err(error) => crate::KernelInvocationFailure::Failed {
                             receipts: Vec::new(),
@@ -1579,6 +1653,7 @@ where
                             detail: format!(
                                 "actor replacement is already in progress; rejected recipe cleanup unconfirmed: {error}"
                             ),
+                            diagnostic: error.diagnostic,
                         },
                     };
                     reply.send(Err(failure)).ok();
@@ -1597,6 +1672,7 @@ where
                                     receipts: Vec::new(),
                                     actor: state.context.identity,
                                     detail: error.detail,
+                                    diagnostic: error.diagnostic,
                                 }))
                                 .ok();
                         }
@@ -1629,6 +1705,7 @@ where
                                 receipts: Vec::new(),
                                 actor: state.context.identity,
                                 detail: error.detail,
+                                diagnostic: error.diagnostic,
                             }))
                             .ok();
                     }
@@ -1708,7 +1785,7 @@ where
                 }
                 match state.behavior.activate_replacement(&state.context).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
-                    Err(error) => fail_actor(&myself, state, error.to_string()).await,
+                    Err(error) => fail_actor_with_error(&myself, state, error).await,
                 }
             }
             KernelMessage::Drain { reply } => {
@@ -1716,6 +1793,7 @@ where
                     reply
                         .send(Err(KernelBehaviorError {
                             detail: "actor replacement is in progress".into(),
+                            diagnostic: None,
                         }))
                         .ok();
                     return Ok(());
@@ -1729,6 +1807,7 @@ where
                         .close_with_fence(&myself)
                         .map_err(|error| KernelBehaviorError {
                             detail: error.to_string(),
+                            diagnostic: None,
                         })?;
                     state.behavior.close_sources();
                     state.drain = DrainState::Fencing;
@@ -1743,8 +1822,8 @@ where
                 match state.behavior.source(&state.context, delivery).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
                     Err(error) => {
-                        fail_handler(&myself, state, format!("source handler failed: {error}"))
-                            .await
+                        let detail = format!("source handler failed: {error}");
+                        fail_handler_with_error(&myself, state, error.context(detail)).await
                     }
                 }
             }
@@ -1764,7 +1843,8 @@ where
                 match state.behavior.cast(&state.context, sender, request).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
                     Err(error) => {
-                        fail_handler(&myself, state, format!("actor cast failed: {error}")).await
+                        let detail = format!("actor cast failed: {error}");
+                        fail_handler_with_error(&myself, state, error.context(detail)).await
                     }
                 }
             }
@@ -1794,9 +1874,15 @@ where
                             .send(Err(KernelCallFailure::Handler {
                                 actor: state.context.identity,
                                 detail: detail.clone(),
+                                diagnostic: error.diagnostic.clone(),
                             }))
                             .ok();
-                        fail_handler(&myself, state, format!("actor call failed: {detail}")).await;
+                        fail_handler_with_error(
+                            &myself,
+                            state,
+                            error.context(format!("actor call failed: {detail}")),
+                        )
+                        .await;
                     }
                 },
             },
@@ -1807,6 +1893,7 @@ where
                             receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: "hosted work admission is sealed".into(),
+                            diagnostic: None,
                         }))
                         .ok();
                 } else {
@@ -1825,6 +1912,7 @@ where
                             receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: "hosted work admission is sealed".into(),
+                            diagnostic: None,
                         }))
                         .ok();
                 } else {
@@ -1864,6 +1952,7 @@ where
                         receipts: Vec::new(),
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
+                        diagnostic: None,
                     });
                     if let Some(control) = control {
                         control.settle(rejection.clone());
@@ -2004,6 +2093,7 @@ fn start_workbench<B: KernelBehavior>(
             receipts: Vec::new(),
             actor: state.context.identity,
             detail: "actor step generation exhausted".into(),
+            diagnostic: None,
         });
         if let Some(control) = control {
             control.settle(failure.clone());
@@ -2210,6 +2300,7 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
                         receipts: Vec::new(),
                         actor: state.context.identity,
                         detail: "hosted completion boundary is closed".into(),
+                        diagnostic: None,
                     }))
                     .ok();
                 return;
@@ -2222,7 +2313,8 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
                 .map_err(|error| KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor: state.context.identity,
-                    detail: error.to_string(),
+                    detail: error.detail,
+                    diagnostic: error.diagnostic,
                 });
             reply.send(result).ok();
         }
@@ -2235,7 +2327,8 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
                 .map_err(|error| KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor: state.context.identity,
-                    detail: error.to_string(),
+                    detail: error.detail,
+                    diagnostic: error.diagnostic,
                 });
             reply.send(result).ok();
         }
@@ -2288,6 +2381,7 @@ fn start_tool<B: KernelBehavior>(
                 receipts: Vec::new(),
                 actor: state.context.identity,
                 detail: "actor step generation exhausted".into(),
+                diagnostic: None,
             }),
         );
         return;
@@ -2351,12 +2445,10 @@ async fn start_kernel_task<B: KernelBehavior>(
         Ok(Ok(task)) => spawn_actor_task(myself, state, generation, task),
         Ok(Err(error)) => {
             state.pending_tasks.remove(&generation);
-            fail_kernel_operation(
-                myself,
-                state,
-                operation,
-                format!("{operation:?} dispatch failed: {error}"),
-            )
+            fail_kernel_operation(myself, state, operation, {
+                let detail = format!("{operation:?} dispatch failed: {error}");
+                error.context(detail)
+            })
             .await;
         }
         Err(_) => {
@@ -2563,10 +2655,13 @@ async fn complete_actor_task<B: KernelBehavior>(
                         &error,
                         KernelInvocationFailure::TerminalTransferFailed { .. }
                     );
-                    let detail = error.to_string();
+                    let failure = KernelBehaviorError::with_diagnostic(
+                        error.to_string(),
+                        error.failure_diagnostic().cloned(),
+                    );
                     settle_pending_workbench(pending, Err(error));
                     if retire {
-                        fail_actor(myself, state, detail).await;
+                        fail_actor_with_error(myself, state, failure).await;
                         return;
                     }
                 }
@@ -2598,10 +2693,13 @@ async fn complete_actor_task<B: KernelBehavior>(
                         &error,
                         KernelInvocationFailure::TerminalTransferFailed { .. }
                     );
-                    let detail = error.to_string();
+                    let failure = KernelBehaviorError::with_diagnostic(
+                        error.to_string(),
+                        error.failure_diagnostic().cloned(),
+                    );
                     settle_pending_tool(pending, Err(error));
                     if retire {
-                        fail_actor(myself, state, detail).await;
+                        fail_actor_with_error(myself, state, failure).await;
                         return;
                     }
                 }
@@ -2619,11 +2717,12 @@ async fn complete_actor_task<B: KernelBehavior>(
                 }
                 Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
                 Err(TaskApplyFailure::Invocation(error)) => {
+                    let detail = format!("{:?} failed: {error}", pending.operation);
                     fail_kernel_operation(
                         myself,
                         state,
                         pending.operation,
-                        format!("{:?} failed: {error}", pending.operation),
+                        error.into_behavior_error().context(detail),
                     )
                     .await;
                 }
@@ -2667,7 +2766,10 @@ async fn maybe_drain<B: KernelBehavior>(
     {
         match state.behavior.drain(&state.context).await {
             Ok(step) => finish_after_step(myself, state, step).await,
-            Err(error) => fail_handler(myself, state, format!("actor drain failed: {error}")).await,
+            Err(error) => {
+                let detail = format!("actor drain failed: {error}");
+                fail_handler_with_error(myself, state, error.context(detail)).await;
+            }
         }
     }
 }
@@ -2682,6 +2784,7 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
         receipts: Vec::new(),
         actor: state.context.identity,
         detail: detail.clone(),
+        diagnostic: None,
     };
     match pending {
         PendingActorTask::Workbench(pending) => {
@@ -2954,19 +3057,21 @@ where
 /// instead would leave `drainActor >> awaitExit` waiting with no exit and no
 /// error. Q1-B: a failing queued message behaves like a failing drain
 /// continuation, which already fails outright.
-async fn fail_handler<B>(
+async fn fail_handler_with_error<B>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    detail: String,
+    error: KernelBehaviorError,
 ) where
     B: KernelBehavior,
 {
     if matches!(state.drain, DrainState::Open)
-        && state.behavior.pause_failed_handler(&state.context, &detail)
+        && state
+            .behavior
+            .pause_failed_handler(&state.context, &error.detail)
     {
         return;
     }
-    fail_actor(myself, state, detail).await;
+    fail_actor_with_error(myself, state, error).await;
 }
 
 async fn fail_actor<B>(
@@ -2976,7 +3081,22 @@ async fn fail_actor<B>(
 ) where
     B: KernelBehavior,
 {
-    finish_actor(myself, state, Disposition::Stop(failed_terminal(detail))).await;
+    fail_actor_with_error(myself, state, KernelBehaviorError::new(detail)).await;
+}
+
+async fn fail_actor_with_error<B>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    error: KernelBehaviorError,
+) where
+    B: KernelBehavior,
+{
+    finish_actor(
+        myself,
+        state,
+        Disposition::Stop(ActorTerminal::failed(error.detail, error.diagnostic)),
+    )
+    .await;
 }
 
 async fn finish_after_step<B>(
@@ -3039,6 +3159,7 @@ where
     *state.context.child_admission_closed.write().await = true;
     match disposition {
         Disposition::Stop(requested) => {
+            let requested = requested.bound_diagnostic();
             // One shutdown deadline, computed once: hook admission and resource-scope
             // checkout race it directly, and children get the remainder minus
             // a margin so a child's own budget always expires first and it
@@ -3078,6 +3199,7 @@ where
             let terminal = ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary,
+                diagnostic: None,
             };
             // Custody of every child and resource already moved to the
             // successor before this call (the replacement fence transfers
@@ -3142,10 +3264,7 @@ fn publish_exit(
 }
 
 fn failed_terminal(summary: String) -> ActorTerminal {
-    ActorTerminal {
-        kind: ActorExitKind::Failed,
-        summary,
-    }
+    ActorTerminal::failed(summary, None)
 }
 
 fn combine_cleanup(
@@ -3230,6 +3349,7 @@ async fn shutdown_children(
                     ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
                 },
                 summary: "owner actor stopped".into(),
+                diagnostic: None,
             };
             let result =
                 tokio::time::timeout(timeout, child.shutdown_with_cleanup(requested.clone())).await;
@@ -3298,6 +3418,8 @@ mod tests {
         mailbox_calls: Arc<Mutex<Vec<SessionId>>>,
         release_first: Arc<Notify>,
         fail_cast: bool,
+        resume_failure: Option<KernelBehaviorError>,
+        terminal_callbacks: Arc<Mutex<Vec<ActorTerminal>>>,
         mailbox_ready: bool,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
@@ -3362,6 +3484,7 @@ mod tests {
                 if !self.replacement_staged {
                     return Err(KernelBehaviorError {
                         detail: "probe is not staged".into(),
+                        diagnostic: None,
                     });
                 }
                 self.replacement_staged = false;
@@ -3436,6 +3559,7 @@ mod tests {
                     terminal: ActorTerminal {
                         kind: ActorExitKind::Completed,
                         summary: "drained".into(),
+                        diagnostic: None,
                     },
                 })
             })
@@ -3506,6 +3630,7 @@ mod tests {
                 if fail {
                     Err(KernelBehaviorError {
                         detail: "cast probe".into(),
+                        diagnostic: None,
                     })
                 } else {
                     Ok(KernelStep::Continue(()))
@@ -3541,6 +3666,7 @@ mod tests {
                             receipts: Vec::new(),
                             actor: context.identity(),
                             detail: error.to_string(),
+                            diagnostic: None,
                         })?;
                     *self.spawned_child.lock() = Some(child);
                 } else if name == "spawn_queued" {
@@ -3549,6 +3675,7 @@ mod tests {
                             receipts: Vec::new(),
                             actor: context.identity(),
                             detail: "no queued child behavior".into(),
+                            diagnostic: None,
                         });
                     };
                     let child =
@@ -3559,6 +3686,7 @@ mod tests {
                                 receipts: Vec::new(),
                                 actor: context.identity(),
                                 detail: error.to_string(),
+                                diagnostic: None,
                             })?;
                     self.spawned_children.lock().push(child);
                 } else if name == "finish" {
@@ -3567,6 +3695,7 @@ mod tests {
                         terminal: ActorTerminal {
                             kind: ActorExitKind::Completed,
                             summary: "finished through an agent tool".into(),
+                            diagnostic: None,
                         },
                     });
                 } else if name == "first" {
@@ -3712,6 +3841,7 @@ mod tests {
                             receipts: Vec::new(),
                             actor,
                             detail: "owned completion probe failed".into(),
+                            diagnostic: None,
                         });
                     }
                     Ok(KernelStep::Continue(WorkbenchResponse {
@@ -3747,6 +3877,9 @@ mod tests {
         ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
             Box::pin(async move {
                 self.calls.lock().push("resume-start");
+                if let Some(error) = self.resume_failure.take() {
+                    return Err(error);
+                }
                 self.release_first.notified().await;
                 self.calls.lock().push("resume-end");
                 Ok(KernelStep::Continue(()))
@@ -3764,9 +3897,11 @@ mod tests {
         fn shutdown(
             &mut self,
             _context: &KernelContext,
-            _terminal: &ActorTerminal,
+            terminal: &ActorTerminal,
         ) -> BoxFuture<'_, Result<(), KernelBehaviorError>> {
+            let terminal = terminal.clone();
             Box::pin(async move {
+                self.terminal_callbacks.lock().push(terminal);
                 self.calls.lock().push("shutdown");
                 Ok(())
             })
@@ -3775,8 +3910,9 @@ mod tests {
         fn stopped(
             &mut self,
             _context: &KernelContext,
-            _terminal: &ActorTerminal,
+            terminal: &ActorTerminal,
         ) -> BoxFuture<'_, ()> {
+            self.terminal_callbacks.lock().push(terminal.clone());
             Box::pin(async {})
         }
 
@@ -3804,6 +3940,7 @@ mod tests {
             Box::pin(async {
                 Err(KernelBehaviorError {
                     detail: "child failed".into(),
+                    diagnostic: None,
                 })
             })
         }
@@ -3829,6 +3966,7 @@ mod tests {
                     receipts: Vec::new(),
                     actor: context.identity(),
                     detail: "child has no tool policy".into(),
+                    diagnostic: None,
                 })
             })
         }
@@ -3844,6 +3982,7 @@ mod tests {
                     receipts: Vec::new(),
                     actor: context.identity(),
                     detail: "child has no workbench".into(),
+                    diagnostic: None,
                 })
             })
         }
@@ -3882,6 +4021,7 @@ mod tests {
         release: Arc<Notify>,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
+        terminal_callbacks: Arc<Mutex<Vec<ActorTerminal>>>,
     }
 
     fn behavior(fail_cast: bool) -> ProbeFixture {
@@ -3891,6 +4031,7 @@ mod tests {
         let spawned_child = Arc::new(Mutex::new(None));
         let child_exits = Arc::new(Mutex::new(Vec::new()));
         let spawned_children = Arc::new(Mutex::new(Vec::new()));
+        let terminal_callbacks = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
                 replacement_staged: false,
@@ -3899,6 +4040,8 @@ mod tests {
                 mailbox_calls: Arc::clone(&mailbox_calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
+                resume_failure: None,
+                terminal_callbacks: terminal_callbacks.clone(),
                 mailbox_ready: true,
                 spawned_child: Arc::clone(&spawned_child),
                 child_exits: Arc::clone(&child_exits),
@@ -3923,6 +4066,7 @@ mod tests {
             release,
             spawned_child,
             child_exits,
+            terminal_callbacks,
         }
     }
 
@@ -4067,6 +4211,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "tool initialization queue checked".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -4129,6 +4274,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -4175,6 +4321,7 @@ mod tests {
                 .shutdown(ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "stop during child initialization".into(),
+                    diagnostic: None,
                 })
                 .await
         });
@@ -4266,6 +4413,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4299,6 +4447,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4382,6 +4531,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4465,6 +4615,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4535,6 +4686,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4595,6 +4747,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4642,6 +4795,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4817,6 +4971,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4866,6 +5021,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4900,6 +5056,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4955,6 +5112,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4973,6 +5131,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -4995,6 +5154,7 @@ mod tests {
         let retiring = actor.shutdown(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "done".into(),
+            diagnostic: None,
         });
         tokio::pin!(retiring);
         // Polling submits shutdown and closes admission before yielding.
@@ -5035,6 +5195,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "stop".into(),
+            diagnostic: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         actor
@@ -5147,6 +5308,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -5186,6 +5348,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "stop".into(),
+            diagnostic: None,
         };
         let actor_for_shutdown = actor.clone();
         let requested = terminal.clone();
@@ -5273,6 +5436,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -5377,6 +5541,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .expect("shutdown");
@@ -5517,6 +5682,7 @@ mod tests {
                 terminal: ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "queued shutdown".into(),
+                    diagnostic: None,
                 },
                 reply: reply.into(),
             })
@@ -5613,6 +5779,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "test finished".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -5663,6 +5830,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "done".into(),
+            diagnostic: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         actor
@@ -5708,6 +5876,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "test finished".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -5759,6 +5928,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "target completed".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -5769,6 +5939,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "original caller retires".into(),
+            diagnostic: None,
         };
         retirement.request_shutdown(terminal.clone());
         assert!(matches!(
@@ -5789,7 +5960,8 @@ mod tests {
             actor.drain(),
             actor.shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
-                summary: "owner stopped".into()
+                summary: "owner stopped".into(),
+                diagnostic: None,
             }),
         );
         drained.unwrap();
@@ -5952,6 +6124,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -6035,6 +6208,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "done".into(),
+            diagnostic: None,
         };
         actor.shutdown(terminal).await.expect("shutdown");
         task.await.expect("actor task");
@@ -6076,6 +6250,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "cancel parked actor".into(),
+            diagnostic: None,
         };
         let supervisor = ActorRef::first(crate::ActorId(99));
         actor
@@ -6089,6 +6264,63 @@ mod tests {
         task.await.expect("actor task");
         assert!(call_rx.await.is_err(), "deferred caller must be released");
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn raw_terminal_is_bounded_before_cleanup_callbacks_and_shutdown_reply() {
+        let fixture = behavior(false);
+        let callbacks = fixture.terminal_callbacks.clone();
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let original = ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "original terminal disposition".into(),
+            diagnostic: Some(tidepool_toolchain::failclass::FailureEnvelope {
+                class: tidepool_toolchain::failclass::FailureClass::UserHaskell,
+                phase: tidepool_toolchain::failclass::Phase::Compile,
+                cause: Some(tidepool_toolchain::failclass::CompileFailureCause::SourceDiagnostics),
+                message: "λ\n".repeat(32 * 1024),
+            }),
+        };
+        let (reply, received) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Shutdown {
+                terminal: original.clone(),
+                reply: reply.into(),
+            })
+            .expect("admit raw public terminal without an intent precheck");
+        let returned = received.await.expect("actual shutdown reply");
+        task.await.expect("actor task joined");
+        assert_eq!(returned.kind, original.kind);
+        assert_eq!(returned.summary, original.summary);
+        assert!(returned.diagnostic.as_ref().unwrap().message.len() <= 16 * 1024);
+        assert_eq!(actor.terminal().get(), Some(returned.clone()));
+        assert_eq!(*callbacks.lock(), vec![returned.clone(), returned.clone()]);
+        let directory = tempfile::tempdir().unwrap();
+        let anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let descriptor = crate::ActorDescriptor::new(
+            "raw-terminal",
+            crate::ActorPlacement {
+                session: SessionId(1),
+                lexical_scope: tidepool_codegen::scope::ScopeId(1),
+                resource_scope: tidepool_codegen::suspension::RealmId(1),
+            },
+        );
+        journal.admit(actor.identity(), &descriptor, &[]).unwrap();
+        journal.retire(actor.identity(), original).unwrap();
+        assert_eq!(journal.records()[0].terminal, Some(returned.clone()));
+        assert_eq!(
+            actor
+                .shutdown(ActorTerminal::new(
+                    ActorExitKind::Cancelled,
+                    "later cleanup"
+                ))
+                .await
+                .unwrap(),
+            returned
+        );
     }
 
     #[tokio::test]
@@ -6109,6 +6341,7 @@ mod tests {
         let terminal = actor.terminal().wait().await;
         task.await.expect("actor task");
         assert_eq!(terminal.kind, ActorExitKind::Failed);
+        assert_eq!(terminal.diagnostic, None);
         let supervisor = ActorRef::first(crate::ActorId(99));
         let observed = actor
             .retire_by(
@@ -6116,11 +6349,12 @@ mod tests {
                 ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "late retirement".into(),
+                    diagnostic: None,
                 },
             )
             .await
             .unwrap();
-        assert_eq!(observed.kind, ActorExitKind::Failed);
+        assert_eq!(observed, terminal);
         assert!(!actor.terminal().retirement_acknowledged_by(supervisor));
         assert!(terminal.summary.contains("cast probe"));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -6152,6 +6386,7 @@ mod tests {
             Some(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "finished through an agent tool".into(),
+                diagnostic: None,
             })
         );
         assert_eq!(&*fixture.calls.lock(), &["shutdown"]);
@@ -6191,6 +6426,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "done".into(),
+            diagnostic: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         actor
@@ -6259,6 +6495,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "retire first tree".into(),
+                diagnostic: None,
             })
             .await
             .expect("retire first");
@@ -6287,6 +6524,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "retire sibling".into(),
+                diagnostic: None,
             })
             .await
             .expect("retire sibling");
@@ -6322,6 +6560,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Failed,
                 summary: "recoverable failure".into(),
+                diagnostic: None,
             })
             .await
             .expect("retire predecessor");
@@ -6354,6 +6593,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "test complete".into(),
+                diagnostic: None,
             })
             .await
             .expect("retire successor");
@@ -6393,6 +6633,7 @@ mod tests {
 
         let child_terminal = child.terminal().wait().await;
         assert_eq!(child_terminal.kind, ActorExitKind::Failed);
+        assert_eq!(child_terminal.diagnostic, None);
         assert!(child_terminal.summary.contains("codex did not start"));
         for _ in 0..20 {
             if !fixture.child_exits.lock().is_empty() {
@@ -6419,6 +6660,7 @@ mod tests {
                 terminal: ActorTerminal {
                     kind: ActorExitKind::Completed,
                     summary: "owner done".into(),
+                    diagnostic: None,
                 },
                 reply: shutdown_tx.into(),
             })
@@ -6426,6 +6668,136 @@ mod tests {
         shutdown_rx.await.expect("shutdown reply");
         owner_task.await.expect("owner task");
     }
+    #[tokio::test]
+    async fn compiler_diagnostic_survives_child_kernel_task_and_retirement() {
+        use tidepool_toolchain::failclass::{CompileFailureCause, FailureClass, Phase};
+
+        tidepool_testing::eval_harness::require_extract();
+        let compile_error = tidepool_toolchain::artifacts::check_source(
+            &tidepool_toolchain::artifacts::SourceCheckRequest {
+                source: include_str!("local_actor/failure_origin.hs"),
+                include: &[],
+                fallback_module_name: "FailureOrigin",
+            },
+        )
+        .expect_err("the genuine compiler must reject the authored unknown identifier");
+        assert!(matches!(
+            compile_error,
+            tidepool_toolchain::CompileError::Diagnostics(_)
+        ));
+        let failure =
+            crate::ResidentActorWorkbenchError::Compile(compile_error).into_kernel_behavior_error();
+        let expected = failure
+            .diagnostic
+            .clone()
+            .expect("compiler classification retained");
+        assert_eq!(expected.class, FailureClass::UserHaskell);
+        assert_eq!(expected.phase, Phase::Compile);
+        assert_eq!(expected.cause, Some(CompileFailureCause::SourceDiagnostics));
+        assert!(expected.message.contains("missingChildFailureOrigin"));
+        assert!(expected.message.contains("FailureOrigin.hs"));
+
+        let mut child_fixture = behavior(false);
+        child_fixture.behavior.resume_failure = Some(failure);
+        let mut owner_fixture = behavior(false);
+        owner_fixture
+            .behavior
+            .pending_children
+            .push_back(child_fixture.behavior);
+        let children = owner_fixture.behavior.spawned_children.clone();
+        let (owner, owner_task) = spawn_local_actor(None, owner_fixture.behavior)
+            .await
+            .expect("spawn owning actor");
+        let (reply, receive) = oneshot::channel();
+        owner
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("spawn_queued"),
+                reply: reply.into(),
+            })
+            .expect("admit child through the actual owner");
+        receive
+            .await
+            .expect("child admission reply")
+            .expect("child admitted");
+        let child = children
+            .lock()
+            .first()
+            .cloned()
+            .expect("exact admitted child");
+        child
+            .address()
+            .send_message(KernelMessage::Resume {
+                kind: crate::kernel::KernelResume::ContinueProgram,
+            })
+            .expect("admit serial child kernel task");
+        let terminal = tokio::time::timeout(Duration::from_secs(10), child.terminal().wait())
+            .await
+            .expect("child failure must settle");
+        assert_eq!(terminal.kind, ActorExitKind::Failed);
+        assert_eq!(terminal.diagnostic, Some(expected));
+        let repeated = child
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "later cancellation",
+            ))
+            .await
+            .expect("repeat child observation");
+        assert_eq!(repeated, terminal);
+        assert_eq!(child.terminal().get(), Some(terminal.clone()));
+
+        let directory = tempfile::tempdir().expect("durable lifecycle directory");
+        let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())
+            .expect("durable lifecycle anchor");
+        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .expect("original lifecycle owner");
+        let descriptor = crate::ActorDescriptor::new(
+            "compiler-failure-child",
+            crate::ActorPlacement {
+                session: SessionId(1),
+                lexical_scope: tidepool_codegen::scope::ScopeId(1),
+                resource_scope: tidepool_codegen::suspension::RealmId(1),
+            },
+        );
+        journal
+            .admit(child.identity(), &descriptor, &[])
+            .expect("record exact child identity");
+        journal
+            .retire(child.identity(), terminal.clone())
+            .expect("persist original terminal");
+        journal
+            .retire(child.identity(), terminal.clone())
+            .expect("idempotent same retirement");
+        assert!(journal
+            .retire(
+                child.identity(),
+                ActorTerminal::new(ActorExitKind::Cancelled, "later cleanup",)
+            )
+            .is_err());
+        drop(journal);
+        let journal = crate::ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .expect("reopen typed diagnostic evidence");
+        assert_eq!(journal.records()[0].terminal, Some(terminal));
+
+        let (reply, receive) = oneshot::channel();
+        owner
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("second"),
+                reply: reply.into(),
+            })
+            .expect("failure remains isolated to its child");
+        assert_eq!(
+            receive.await.expect("owner reply").expect("owner alive"),
+            "second"
+        );
+        owner
+            .shutdown(ActorTerminal::new(ActorExitKind::Completed, "owner done"))
+            .await
+            .expect("retire owner");
+        owner_task.await.expect("owner task");
+    }
+
     #[tokio::test]
     async fn owner_failure_propagates_failure_instead_of_intentional_cancellation() {
         for kind in [ActorExitKind::Failed, ActorExitKind::Cancelled] {
@@ -6445,6 +6817,7 @@ mod tests {
                 .shutdown(ActorTerminal {
                     kind,
                     summary: "stop owner".into(),
+                    diagnostic: None,
                 })
                 .await
                 .unwrap();
@@ -6501,6 +6874,7 @@ mod tests {
             .shutdown_with_cleanup(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "observe only".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -6576,6 +6950,7 @@ mod tests {
                 .shutdown_with_cleanup(ActorTerminal {
                     kind: ActorExitKind::Completed,
                     summary: "test done".into(),
+                    diagnostic: None,
                 })
                 .await
                 .unwrap();
@@ -6602,6 +6977,7 @@ mod tests {
             if self.paused.load(Ordering::SeqCst) {
                 Err(KernelBehaviorError {
                     detail: "actor is paused".into(),
+                    diagnostic: None,
                 })
             } else {
                 Ok(())
@@ -6618,6 +6994,7 @@ mod tests {
                     terminal: ActorTerminal {
                         kind: ActorExitKind::Completed,
                         summary: "drained".into(),
+                        diagnostic: None,
                     },
                 })
             })
@@ -6674,6 +7051,7 @@ mod tests {
                 } else {
                     Err(KernelBehaviorError {
                         detail: "second cast failed".into(),
+                        diagnostic: None,
                     })
                 }
             })
@@ -6700,6 +7078,7 @@ mod tests {
                     receipts: Vec::new(),
                     actor: context.identity(),
                     detail: "pausing probe has no tools".into(),
+                    diagnostic: None,
                 })
             })
         }
@@ -6863,6 +7242,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "test finished".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -6951,6 +7331,7 @@ mod tests {
                 .shutdown(ActorTerminal {
                     kind,
                     summary: "test".into(),
+                    diagnostic: None,
                 })
                 .await
                 .unwrap();
@@ -7020,6 +7401,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "owner done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -7090,6 +7472,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "owner done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -7135,6 +7518,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -7206,6 +7590,7 @@ mod tests {
             ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary,
+                diagnostic: None,
             }
         );
         assert_eq!(
@@ -7223,6 +7608,7 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "test done".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();

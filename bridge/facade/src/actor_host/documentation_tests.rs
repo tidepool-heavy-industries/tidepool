@@ -1904,6 +1904,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
                     ActorExitKind::Cancelled
                 },
                 summary: "documentation scenario terminal evidence".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();
@@ -1920,6 +1921,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "documentation scenario complete".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -2590,6 +2592,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "planner finished".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -2635,6 +2638,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "peer finished".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();

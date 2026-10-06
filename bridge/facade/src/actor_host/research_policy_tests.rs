@@ -140,6 +140,7 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "research policy test complete".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -214,6 +215,7 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "preview test complete".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();

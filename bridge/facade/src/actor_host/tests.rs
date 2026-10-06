@@ -52,6 +52,7 @@ async fn unbounded_repository_event_await_joins_before_actor_retirement() {
         actor.shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "retire parked repository event await".into(),
+            diagnostic: None,
         }),
     )
     .await
@@ -244,21 +245,36 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
             panic!("invalid configured spec reached production root readiness");
         }
         Err(failure) => {
-            // The same valid fixture reached Ready first. The only authored
-            // change now fails in the installed-spec compiler check, before
-            // readiness. Full workspace validation checks its exact diagnostic;
-            // the actor terminal retains this phase and count, not the body.
-            assert!(
-                failure.contains("exited before embedded readiness (Failed)"),
-                "{failure}"
+            let (actor, terminal) = failure
+                .root_terminal()
+                .expect("original failed root retained");
+            assert_eq!(actor, ActorRef::first(exomonad_actor::ActorId(1)));
+            assert_eq!(terminal.kind, exomonad_actor::ActorExitKind::Failed);
+            let diagnostic = terminal
+                .diagnostic
+                .as_ref()
+                .expect("original compiler failure retained");
+            assert_eq!(
+                diagnostic.class,
+                tidepool_toolchain::failclass::FailureClass::UserHaskell
+            );
+            assert_eq!(
+                diagnostic.phase,
+                tidepool_toolchain::failclass::Phase::Compile
+            );
+            assert_eq!(
+                diagnostic.cause,
+                Some(tidepool_toolchain::failclass::CompileFailureCause::SourceDiagnostics)
             );
             assert!(
-                failure.contains(
-                    "resident cell check failed: Haskell compilation failed (1 diagnostic(s))"
-                ),
-                "{failure}"
+                diagnostic.message.contains("missingConfiguredStartupSpec"),
+                "{diagnostic:?}"
             );
-            assert!(failure.contains("cleanup: Confirmed"), "{failure}");
+            assert!(
+                diagnostic.message.contains("ConfiguredSpec.hs"),
+                "{diagnostic:?}"
+            );
+            assert!(failure.cleanup_confirmed(), "{failure}");
         }
     }
 }
@@ -553,6 +569,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "recover after losing the native reply".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -737,6 +754,7 @@ async fn progress_retains_closures_and_watch_snapshots_across_calls() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "progress test complete".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -908,10 +926,10 @@ fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
         incarnation: exomonad_actor::Incarnation(2),
     };
     let mut latest = durable_root(second);
-    latest.terminal = Some(exomonad_actor::DurableActorTerminal {
-        kind: exomonad_actor::ActorExitKind::Completed,
-        summary: "retired".into(),
-    });
+    latest.terminal = Some(exomonad_actor::DurableActorTerminal::new(
+        exomonad_actor::ActorExitKind::Completed,
+        "retired",
+    ));
 
     assert_eq!(
         durable_root_identity(&[durable_root(first), latest], Some("source-revision")).unwrap(),
@@ -2418,6 +2436,7 @@ async fn forest_operator_survives_model_root_recovery() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "recovery test".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -2622,6 +2641,7 @@ async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "active update test complete".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();

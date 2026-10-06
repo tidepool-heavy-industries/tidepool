@@ -332,6 +332,7 @@ impl WorkbenchExecutionControl {
                         actor,
                         detail: "actor exited before its admitted workbench owner settled".into(),
                         receipts: Vec::new(),
+                        diagnostic: None,
                     });
                     owner.freeze(&mut projected);
                     if projected
@@ -576,6 +577,7 @@ fn hosted_admission_failure(
             receipts: Vec::new(),
             actor,
             detail: "actor mailbox admission is closed".into(),
+            diagnostic: None,
         },
         crate::KernelCallFailure::TargetExited(_)
         | crate::KernelCallFailure::TargetUnavailable(_) => {
@@ -585,6 +587,7 @@ fn hosted_admission_failure(
             receipts: Vec::new(),
             actor,
             detail: failure.to_string(),
+            diagnostic: None,
         },
     }
 }
@@ -1957,6 +1960,7 @@ mod tests {
             receipts: Vec::new(),
             actor: crate::ActorRef::first(crate::ActorId(1)),
             detail: "publication failed before visibility".into(),
+            diagnostic: None,
         }));
         assert!(matches!(
             control.cancellation_outcome(execution, control.settled().await),

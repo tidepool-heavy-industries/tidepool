@@ -35,6 +35,7 @@ fn replacement_transfers_unlaunched_workspace_without_old_guard_release() {
     transferred.actor_stopped(&ActorTerminal {
         kind: ActorExitKind::Completed,
         summary: "replacement finished".into(),
+        diagnostic: None,
     });
     drop(transferred);
     assert!(bindings.lock().current(fixture.tree.id()).is_none());
@@ -61,6 +62,7 @@ fn replacement_can_restore_original_workspace_owner_before_cutover() {
     restored.actor_stopped(&ActorTerminal {
         kind: ActorExitKind::Completed,
         summary: "original owner finished".into(),
+        diagnostic: None,
     });
     drop(restored);
     assert!(bindings.lock().current(fixture.tree.id()).is_none());
@@ -205,6 +207,7 @@ fn cancelled() -> ActorTerminal {
     ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "test retirement".into(),
+        diagnostic: None,
     }
 }
 
@@ -512,6 +515,7 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
         row.retired(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "duplicate".into(),
+            diagnostic: None,
         });
         assert_eq!(row.terminal, Some(cancelled()));
         match row

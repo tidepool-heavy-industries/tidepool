@@ -12,6 +12,7 @@ fn terminal() -> ActorTerminal {
     ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "exact clock owner retirement".into(),
+        diagnostic: None,
     }
 }
 

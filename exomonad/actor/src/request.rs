@@ -3192,6 +3192,7 @@ mod tests {
             &ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: String::new(),
+                diagnostic: None,
             },
         );
         assert_eq!(
@@ -3433,6 +3434,7 @@ mod tests {
                         &ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "retired".into(),
+                            diagnostic: None,
                         },
                     );
                 }
@@ -4051,6 +4053,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "boom".into(),
+            diagnostic: None,
         };
         let notifications = registry.actor_stopped(target, &terminal);
         assert_eq!(notifications.len(), 1);
@@ -4087,6 +4090,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "boom".into(),
+            diagnostic: None,
         };
         assert!(registry.actor_stopped(failed_target, &terminal).is_empty());
         registry.begin_reply(ready_target, ready).unwrap();
@@ -4416,6 +4420,7 @@ mod tests {
         let terminal = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "owner stopped".into(),
+            diagnostic: None,
         };
 
         assert!(registry.actor_stopped(owner, &terminal).is_empty());

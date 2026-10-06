@@ -114,8 +114,8 @@ pub struct FailureEnvelope {
 }
 
 /// Compiler-owned diagnostic category; it grants no compilation authority.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompileFailureCause {
     Io,
     ExtractorContract,
@@ -142,8 +142,8 @@ pub enum CompileFailureCause {
 
 /// Structured projection of the package owner's refusal. I/O details remain
 /// in the human diagnostic; routing never depends on their rendered text.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModulePackageFailure {
     Io {
         path: std::path::PathBuf,
