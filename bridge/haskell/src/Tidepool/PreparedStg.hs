@@ -491,8 +491,26 @@ newPreparedBodyTaskPreparer env owners bodyCache = do
 acquireRecoveredBodiesUncached :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
   -> IO (Either RecoveredModuleFailure PreparedModuleTask)
 acquireRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
+  resolved <- acquireRecoveredContext hscEnv ownerCache owner
+  case resolved of
+    Left failure -> pure (Left failure)
+    Right context -> acquireRecoveredWithContext hscEnv owner context bindings
+
+acquireRecoveredWithContext :: HscEnv -> Module -> OwnerInterfaceContext -> [CoreBind]
+  -> IO (Either RecoveredModuleFailure PreparedModuleTask)
+acquireRecoveredWithContext hscEnv owner context bindings = do
+  prepared <- trySynchronous (acquireRecoveredModule hscEnv
+    (RecoveredModuleInput owner (ownerInterfaceLocation context)
+      (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
+  pure $ case prepared of
+    Left reason -> Left (RecoveredModulePreparationFailure owner reason)
+    Right value -> Right value
+
+acquireRecoveredContext :: HscEnv -> OwnerInterfaceCache -> Module
+  -> IO (Either RecoveredModuleFailure OwnerInterfaceContext)
+acquireRecoveredContext hscEnv ownerCache owner = do
   cached <- lookupOwnerInterface ownerCache owner
-  resolved <- case cached of
+  case cached of
     Just hit -> pure (Right hit)
     Nothing -> do
       exact <- readExactInterface hscEnv owner
@@ -509,15 +527,6 @@ acquireRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
               let hit = OwnerInterfaceContext location tycons entries
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
-  case resolved of
-    Left failure -> pure (Left failure)
-    Right context -> do
-      prepared <- trySynchronous (acquireRecoveredModule hscEnv
-        (RecoveredModuleInput owner (ownerInterfaceLocation context)
-          (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
-      pure $ case prepared of
-        Left reason -> Left (RecoveredModulePreparationFailure owner reason)
-        Right value -> Right value
   where
     loadDefiningDetails :: HscEnv -> ModIface -> IO ([TyCon], [Id])
     loadDefiningDetails env iface = do
