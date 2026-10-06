@@ -56,9 +56,10 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
 import GHC.Utils.Logger (Logger, popLogHook)
-import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
-import GHC.Unit.Finder.Types (FinderCache(..))
-import GHC.Unit.Module.Location (ml_hi_file)
+import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
+import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
+import GHC.Unit.Module.Location (ml_hi_file, ml_hs_file)
+import GHC.Types.PkgQual (PkgQual(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
@@ -66,7 +67,7 @@ import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (importPaths, targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Driver.Session (importPaths, ghcMode, GhcMode(CompManager), targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.SourceError (SourceError)
@@ -81,7 +82,7 @@ import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (cg_binds)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, removeDirectoryRecursive
@@ -144,6 +145,7 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , generatedActivationPreviewRecipe )
+import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
@@ -5080,3 +5082,69 @@ verifyHydration work cold = do
     case restored of
       Left reason -> liftIO (fail ("fresh SOURCE hydration refused: " ++ reason))
       Right _ -> pure ()
+
+-- Observe actual GHC finder operations, without timing thresholds or compiler
+-- authority fixtures. A missing package key must never consult an ancestor
+-- attempt; package results survive while source choices and file hashes do not.
+packageFinderHistoryIsolation :: IO ()
+packageFinderHistoryIsolation = withScratch $ \work -> do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    initial <- getSession
+    liftIO $ do
+      packages <- newPackageFinderFacts initial
+      ancestorLookups <- newIORef (0 :: Int)
+      let packageOwnerUnit = toUnitId (moduleUnit gHC_PRIM)
+          missing = GWIB (mkModule packageOwnerUnit (mkModuleName "MissingPackageFinderModule")) NotBoot
+          known = GWIB (mkModule packageOwnerUnit (mkModuleName "KnownPackageFinderModule")) NotBoot
+          observe env = env {hsc_FC = (hsc_FC env)
+            {lookupFinderCache = \key -> do
+              modifyIORef' ancestorLookups (+1)
+              lookupFinderCache (hsc_FC env) key}}
+      completed <- foldM (\previous _ -> do
+          attempt <- forkExactContextWithPackageFacts packages (observe previous)
+          result <- lookupFinderCache (hsc_FC attempt) missing
+          unless (isNothing result) (fail "absent package key gained a finder result")
+          pure attempt) initial [1 .. 64 :: Int]
+      consulted <- readIORef ancestorLookups
+      unless (consulted == 0) $
+        fail ("negative package lookup walked completed attempts: " ++ show consulted)
+      addToFinderCache (hsc_FC completed) known (InstalledNotFound [] (Just packageOwnerUnit))
+      next <- forkExactContextWithPackageFacts packages completed
+      lookupFinderCache (hsc_FC next) known >>= \case
+        Just (InstalledNotFound [] (Just owner)) | owner == packageOwnerUnit -> pure ()
+        _ -> fail "fixed-universe package result was lost between attempts"
+      let firstRoot = work </> "first"
+          secondRoot = work </> "second"
+          name = mkModuleName "FinderHomeChoice"
+          source root = root </> "FinderHomeChoice.hs"
+          choose root env = env {hsc_dflags = (hsc_dflags env)
+            {importPaths = [root], ghcMode = CompManager}}
+          requireSource env expected = findImportedModule env name NoPkgQual >>= \case
+            Found location _ | ml_hs_file location == Just expected -> pure ()
+            _ -> fail ("home finder did not select current source root " ++ expected)
+      createDirectory firstRoot
+      createDirectory secondRoot
+      writeFile (source firstRoot) "module FinderHomeChoice where\nvalue = (41 :: Int)\n"
+      writeFile (source secondRoot) "module FinderHomeChoice where\nvalue = (42 :: Int)\n"
+      first <- choose firstRoot <$> forkExactContextWithPackageFacts packages next
+      requireSource first (source firstRoot)
+      firstHash <- lookupFileCache (hsc_FC first) (source firstRoot)
+      second <- choose secondRoot <$> forkExactContextWithPackageFacts packages first
+      requireSource second (source secondRoot)
+      requireSource first (source firstRoot)
+      writeFile (source firstRoot) "module FinderHomeChoice where\nvalue = (43 :: Int)\n"
+      changedHash <- lookupFileCache (hsc_FC second) (source firstRoot)
+      retainedHash <- lookupFileCache (hsc_FC first) (source firstRoot)
+      unless (changedHash /= firstHash && retainedHash == firstHash) $
+        fail "attempt file hashes shared mutable state or inherited stale bytes"
+      flushFinderCaches (hsc_FC second) (hsc_unit_env second)
+      requireSource first (source firstRoot)
+      lookupFinderCache (hsc_FC second) known >>= \case
+        Just (InstalledNotFound [] (Just owner)) | owner == packageOwnerUnit -> pure ()
+        _ -> fail "flushing an attempt discarded fixed-universe package facts"
+      rollback <- choose firstRoot <$> forkExactContextWithPackageFacts packages first
+      requireSource rollback (source firstRoot)
+      rollbackHash <- lookupFileCache (hsc_FC rollback) (source firstRoot)
+      unless (rollbackHash == changedHash) $
+        fail "rollback attempt inherited the completed environment's old file hash"

@@ -6,6 +6,7 @@ module Tidepool.ExactHydration
   , originalInterfaceBytes, originalInterfaceSha256, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , freshExactState, freshExactContext, forkExactContext
+  , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
   , readExactIfaceArtifacts
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
@@ -89,7 +90,7 @@ import Language.Haskell.Syntax (HsModule(..))
 import GHC.Hs (ImportDecl(..), ImportDeclQualifiedStyle(..))
 import GHC.Unit.Module.Deps (dep_orphs, dep_finsts)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
-import GHC.Unit.Types (GenWithIsBoot(..))
+import GHC.Unit.Types (GenWithIsBoot(..), UnitId)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprintByteString, fingerprintString)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts)
@@ -523,24 +524,35 @@ freshExactContext env = do
       , hsc_unit_env = units { ue_eps = eps, ue_home_unit_graph = homes }
       }
 
--- | An attempt shares completed immutable tables, never their mutable cells.
--- Package finder facts have a fixed package closure. Home locations and file
--- hashes must be observed freshly; they cannot inherit a cached source choice.
+-- One compiler universe owns package locations, including unsuccessful searches.
+-- This cache is independent of every attempt's finder, so a miss never walks
+-- completed environments. Its home inventory cannot become package authority.
+data PackageFinderFacts = PackageFinderFacts (Set.Set UnitId) FinderCache
+
+newPackageFinderFacts :: HscEnv -> IO PackageFinderFacts
+newPackageFinderFacts env = PackageFinderFacts (hsc_all_home_unit_ids env)
+  <$> initFinderCache
+
+-- Standalone callers have no retained universe and share no finder facts.
 forkExactContext :: HscEnv -> IO HscEnv
 forkExactContext env = do
+  packages <- newPackageFinderFacts env
+  forkExactContextWithPackageFacts packages env
+
+-- Completed HPT/EPS values are immutable; the attempt receives new EPS cells,
+-- home locations and file hashes. Only fixed-universe package locations share
+-- the stable GHC cache, and flushing an attempt cannot alter another attempt.
+forkExactContextWithPackageFacts :: PackageFinderFacts -> HscEnv -> IO HscEnv
+forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env = do
   eps <- ExternalUnitCache <$> (eucEPS (ue_eps (hsc_unit_env env)) >>= newIORef)
   localFinder <- initFinderCache
-  let previousFinder = hsc_FC env
+  let homeUnits = Set.union packageHomes (hsc_all_home_unit_ids env)
+      selected (GWIB owner _)
+        | moduleUnit owner `Set.member` homeUnits = localFinder
+        | otherwise = packages
       finder = localFinder
-        { lookupFinderCache = \key@(GWIB owner _) -> do
-            current <- lookupFinderCache localFinder key
-            case current of
-              Just _ -> pure current
-              Nothing | moduleUnit owner == homeUnitId (hsc_home_unit env) -> pure Nothing
-              Nothing -> do
-                previous <- lookupFinderCache previousFinder key
-                forM_ previous (addToFinderCache localFinder key)
-                pure previous
+        { lookupFinderCache = \key -> lookupFinderCache (selected key) key
+        , addToFinderCache = \key -> addToFinderCache (selected key) key
         }
   pure (discardIC (withoutPreviewOrphanPlugin env))
     { hsc_FC = finder, hsc_targets = [], hsc_type_env_vars = emptyKnotVars
