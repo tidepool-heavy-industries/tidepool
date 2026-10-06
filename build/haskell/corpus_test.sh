@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# -eq 4 && "$1" == --fresh ]]; then
-  exec "$2" "$3" --fresh-test-inputs "$4"
-fi
 if [[ $# -ne 3 ]]; then
   echo 'usage: corpus-test RUNNER CORPUS EXPECTATIONS' >&2
   exit 2

@@ -1,5 +1,6 @@
 """Native GHC expectations using the existing SuiteOracleTH/Render issuer."""
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=10)
     parser.add_argument("--module", default="Suite")
     parser.add_argument("--contract", action="store_true")
+    parser.add_argument("--scratch-directory")
     args = parser.parse_args()
     if any(not component.isidentifier() or not component[0].isupper() for component in args.module.split(".")):
         parser.error("native oracle requires a Haskell module name")
@@ -56,7 +58,13 @@ def main():
     output = Path(args.output).absolute()
     if output.exists():
         parser.error("oracle output must be absent")
-    with tempfile.TemporaryDirectory(prefix="suite-native-oracle-", dir=Path.cwd()) as scratch:
+    if args.scratch_directory:
+        scratch_path = Path(args.scratch_directory).absolute()
+        scratch_path.mkdir()
+        scratch_owner = nullcontext(str(scratch_path))
+    else:
+        scratch_owner = tempfile.TemporaryDirectory(prefix="suite-native-oracle-", dir=Path.cwd())
+    with scratch_owner as scratch:
         names = Path(scratch) / "names"
         names.write_text("\n".join(keys) + "\n")
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "GHC_ENVIRONMENT": "-", "TMPDIR": scratch, "SUITE_ORACLE_NAMES": str(names)}

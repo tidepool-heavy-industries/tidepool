@@ -140,7 +140,8 @@ def _fresh_corpus_inputs_impl(ctx):
     libdir = read_root_config("nix", "ghc_libdir", "")
     if not libdir.startswith("/nix/store/"):
         fail("fresh corpus requires the pinned production GHC package closure")
-    inputs = ctx.actions.write_json("inputs.json", {
+    inputs = ctx.actions.declare_output("inputs.json")
+    inputs_command = ctx.actions.write_json(inputs, {
         "version": 1,
         "producer": _output(ctx.attrs.producer),
         "validator": _output(ctx.attrs.validator),
@@ -152,7 +153,7 @@ def _fresh_corpus_inputs_impl(ctx):
         "metadata_targets": ctx.attrs.metadata_targets,
         "ghc_libdir": libdir,
         "runtime_libraries": _output(ctx.attrs.runtime_libraries),
-        "ghc": _output(ctx.attrs.ghc),
+        "ghc_command": ctx.attrs.ghc[RunInfo].args,
         "oracle_driver": ctx.attrs.oracle_driver,
         "oracle_source": ctx.attrs.oracle_source,
         "oracle_source_roots": _checked_roots(ctx.attrs.oracle_source_roots),
@@ -160,12 +161,13 @@ def _fresh_corpus_inputs_impl(ctx):
         "nonterminating": ctx.attrs.nonterminating,
         "timeout": ctx.attrs.timeout,
     }, with_inputs = True)
-    return [DefaultInfo(default_output = inputs, other_outputs = [
-        ctx.attrs.source, ctx.attrs.targets_file, ctx.attrs.oracle_source,
-        ctx.attrs.classifications, ctx.attrs.nonterminating, ctx.attrs.oracle_driver,
-        _output(ctx.attrs.producer), _output(ctx.attrs.validator),
-        _output(ctx.attrs.runtime_libraries), _output(ctx.attrs.ghc),
-    ] + [tree for tree, _subdirectory in ctx.attrs.source_roots + ctx.attrs.oracle_source_roots])]
+    return [
+        DefaultInfo(default_output = inputs),
+        RunInfo(args = cmd_args([
+            ctx.attrs.python[RunInfo], ctx.attrs.driver,
+            "--fresh-test-inputs", inputs_command,
+        ], hidden = [ctx.attrs.producer[RunInfo], ctx.attrs.validator[RunInfo]])),
+    ]
 
 _fresh_corpus_inputs = rule(
     impl = _fresh_corpus_inputs_impl,
@@ -185,6 +187,8 @@ _fresh_corpus_inputs = rule(
         "validator": attrs.exec_dep(default = "//tidepool/prepared-corpus:prepared-corpus", providers = [RunInfo]),
         "runtime_libraries": attrs.dep(default = "//build/package:tidepool_extract_runtime_libraries"),
         "ghc": attrs.exec_dep(default = "toolchains//:ghc", providers = [RunInfo]),
+        "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
+        "driver": attrs.source(default = "//build/haskell:corpus_fixture_driver"),
         "oracle_driver": attrs.source(default = "//build/haskell:suite_oracle_driver"),
     },
 )
@@ -195,15 +199,9 @@ def tidepool_fresh_corpus_test(name, visibility = [], **kwargs):
     _fresh_corpus_inputs(name = inputs_name, **kwargs)
     sh_test(
         name = name,
-        test = "//build/haskell:corpus_test",
-        args = [
-            "--fresh",
-            "$(location toolchains//:python)",
-            "$(location //build/haskell:corpus_fixture_driver)",
-            "$(location :" + inputs_name + ")",
-        ],
+        test = ":" + inputs_name,
         env = {"PATH": read_root_config("nix", "action_path")},
-        resources = [":" + inputs_name, "toolchains//:python", "//build/haskell:corpus_fixture_driver"],
+        supports_test_execution_caching = False,
         test_rule_timeout_ms = 14400000,
         visibility = visibility,
     )

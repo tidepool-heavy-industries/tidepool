@@ -60,8 +60,11 @@ def fresh_test(inputs_path):
         ghc_libdir=inputs["ghc_libdir"], module=inputs["module"],
         metadata_target=inputs["metadata_targets"], all_tops=inputs["all_tops"],
     )
+    ghc_command = inputs["ghc_command"]
+    if not isinstance(ghc_command, list) or len(ghc_command) != 1:
+        raise ValueError("native oracle requires the configured single GHC executable")
     oracle = [sys.executable, str(Path(inputs["oracle_driver"]).resolve(strict=True)),
-              "--ghc", str(Path(inputs["ghc"]).resolve(strict=True)),
+              "--ghc", str(Path(ghc_command[0]).resolve(strict=True)),
               "--oracle-source", str(Path(inputs["oracle_source"]).resolve(strict=True)),
               "--classifications", str(Path(inputs["classifications"]).resolve(strict=True)),
               "--nonterminating", str(Path(inputs["nonterminating"]).resolve(strict=True)),
@@ -75,7 +78,8 @@ def fresh_test(inputs_path):
     try:
         validator, environment = generate_corpus(args, scratch, "validate-original")
         expectations = work / "expectations.json"
-        oracle += ["--manifest", str(Path(args.output) / "manifest.json"), "--output", str(expectations)]
+        oracle += ["--manifest", str(Path(args.output) / "manifest.json"), "--output", str(expectations),
+                   "--scratch-directory", str(work / "oracle")]
         subprocess.run(oracle, cwd=work, env=environment, check=True)
         subprocess.run([str(validator), "verify-cohort", args.output, str(expectations), str(work / "results.json")], cwd=work, env=environment, check=True)
     except BaseException:
