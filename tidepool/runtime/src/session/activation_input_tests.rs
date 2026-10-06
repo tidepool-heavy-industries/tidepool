@@ -2314,6 +2314,18 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     };
     resident.set_run_context(public_context).unwrap();
     let before = resident.public_visibility_snapshot_in(public).unwrap();
+    let before_binding_ids = resident
+        .state
+        .bindings()
+        .scope_reachable_binding_ids(resident.state.scope_tree(), public);
+    let before_selection = resident
+        .state
+        .bindings()
+        .source_domain_selection_in(resident.state.scope_tree(), public)
+        .unwrap();
+    assert!(before_selection.inherited().is_empty());
+    let before_binding_tip = resident.state.bindings().tip_id(public);
+
     let producer_execution = Arc::new(
         resident
             .begin_durable_private_execution(&durable, public)
@@ -2335,6 +2347,23 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     );
     assert_eq!(checked.checked.items.len(), 2);
     let private_declaration = checked.adopt_declaration(&mut resident);
+    let private_owner = checked
+        .checked
+        .checked_item(0)
+        .unwrap()
+        .planned_declaration()
+        .unwrap()
+        .product()
+        .owner()
+        .clone();
+    assert_eq!(private_owner.module, private_declaration);
+    assert_eq!(
+        before_selection
+            .domain_for_owner(before_selection.current(), &private_owner)
+            .unwrap(),
+        before_selection.current()
+    );
+
     let (bound, producer, reservation) = checked.compile_binding(&mut resident, 1);
     assert!(bound.is_empty());
     assert!(resident
@@ -2377,6 +2406,8 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .unwrap();
     let (input, interface) = issued_captured_input(&mut resident, captured, recipe.clone());
     let mounted = mount_original(&mut resident, input, interface);
+    let published_binding = mounted.binding();
+    assert!(!before_binding_ids.contains(&published_binding));
     let view = resident
         .compile_view_for_execution(&activation_execution)
         .unwrap()
@@ -2397,7 +2428,55 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     );
     let published = resident.public_visibility_snapshot_in(public).unwrap();
     assert_eq!(published.source_instances, before.source_instances);
-    assert_eq!(published.source_selection, before.source_selection);
+    let mut expected_binding_ids = before_binding_ids;
+    expected_binding_ids.push(published_binding);
+    expected_binding_ids.sort_by_key(|id| id.raw());
+    assert_eq!(
+        resident
+            .state
+            .bindings()
+            .scope_reachable_binding_ids(resident.state.scope_tree(), public),
+        expected_binding_ids
+    );
+    let mut expected_bindings = before.bindings.clone();
+    expected_bindings.push(("sessionInput".into(), published_binding));
+    expected_bindings.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(published.bindings, expected_bindings);
+    assert_eq!(published.epoch, before.epoch + 1);
+    assert_eq!(resident.state.bindings().tip_id(public), before_binding_tip);
+    let selection = resident
+        .state
+        .bindings()
+        .source_domain_selection_in(resident.state.scope_tree(), public)
+        .unwrap();
+    assert_eq!(selection.current(), before_selection.current());
+    let selected_sources =
+        |selection: &tidepool_codegen::prepared_program::SourceDomainSelection| {
+            selection
+                .inherited()
+                .iter()
+                .map(|(binder, lease)| {
+                    (
+                        binder.clone(),
+                        tidepool_codegen::binding_table::SourceLeaseKey::of(lease),
+                        lease.handle(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+    assert_eq!(
+        selected_sources(&selection),
+        selected_sources(&before_selection)
+    );
+    assert_eq!(
+        selection
+            .domain_for_owner(selection.current(), &private_owner)
+            .unwrap(),
+        before_selection
+            .domain_for_owner(before_selection.current(), &private_owner)
+            .unwrap()
+    );
+
     assert_eq!(published.declaration_tip, before.declaration_tip);
     assert!(!resident
         .current_decl_heads_in(public)

@@ -5567,9 +5567,23 @@ mod tests {
             .artifact_view()
             .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")))
             .unwrap();
+        // The source import selects lexical support; this fixture's canonical
+        // interface deliberately has no type dependency on InstanceOwner.
+        assert!(relay[&identity("fixture", "InstanceRelay")]
+            .requirements
+            .is_empty());
         assert_eq!(
-            relay[&identity("fixture", "InstanceRelay")].requirements,
-            vec![identity("fixture", "InstanceOwner")]
+            request.program_source_lexical(),
+            &[
+                ExactLexicalNode {
+                    owner: identity("fixture", "InstanceOwner"),
+                    imports: vec![]
+                },
+                ExactLexicalNode {
+                    owner: identity("fixture", "InstanceRelay"),
+                    imports: vec![identity("fixture", "InstanceOwner")]
+                },
+            ]
         );
         let effective = request
             .in_program_context(&directory.path().join("program-inputs"), context)
@@ -5721,7 +5735,35 @@ mod tests {
         let (view, lexical) = context
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
-        assert_eq!(view.descriptors().len(), 2);
+        let typed_owners = |view: &ArtifactView| {
+            let mut owners = view
+                .descriptors()
+                .into_iter()
+                .map(|entry| (entry.owner, entry.kind))
+                .collect::<Vec<_>>();
+            owners.sort();
+            owners
+        };
+        let expected_owners = vec![
+            (
+                identity("fixture", "InstanceOwner"),
+                ArtifactKind::OriginalModule,
+            ),
+            (
+                identity("fixture", "InstanceOwner"),
+                ArtifactKind::CanonicalModuleInterface,
+            ),
+            (
+                identity("fixture", "InstanceRelay"),
+                ArtifactKind::OriginalModule,
+            ),
+            (
+                identity("fixture", "InstanceRelay"),
+                ArtifactKind::CanonicalModuleInterface,
+            ),
+        ];
+        assert_eq!(typed_owners(&view), expected_owners);
+
         let later = (*context)
             .clone()
             .extend_checked_original_products([2; 32], &[support_product("LaterSupport")])
@@ -5734,7 +5776,8 @@ mod tests {
         let (earlier_view, earlier_lexical) = later
             .retain_value_source_surface(&value, &later_support)
             .unwrap();
-        assert_eq!(earlier_view.descriptors().len(), 2);
+        assert_eq!(typed_owners(&earlier_view), expected_owners);
+        assert_eq!(earlier_view.artifact_ids(), view.artifact_ids());
         assert_eq!(earlier_lexical, lexical);
         assert_eq!(
             lexical,
