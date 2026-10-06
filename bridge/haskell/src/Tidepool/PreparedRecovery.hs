@@ -165,6 +165,7 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache _certifiedHomes
   let factsOf prepared =
         (preparedModuleReferenceFacts baseContext prepared, preparedModuleReachFacts baseContext prepared)
       homeFacts = [(prepared, factsOf prepared) | prepared <- home]
+      runJobs :: (input -> IO output) -> (input -> output -> IO ()) -> [input] -> IO [output]
       runJobs action completed inputs = case executor of
         Just shared -> runCompilerTasks shared action completed inputs
         Nothing -> mapM (\input -> action input >>= \output -> completed input output >> pure output) inputs
