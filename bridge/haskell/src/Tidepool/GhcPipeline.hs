@@ -64,7 +64,7 @@ import GHC.Types.Error (MessageClass(..), mkLocMessage, getMessages, errMsgDiagn
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
-import GHC.Utils.Logger (LogAction)
+import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -2521,6 +2521,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     when (null summaries) $
       liftIO $ ioError (userError (pvLabel variant ++ ": empty module graph"))
     let compileExecutable = do
+          -- One shared outer logger lock protects the request's diagnostic
+          -- hooks for every acquired lowering/recovery task. Per-task logger
+          -- locks would still race the same underlying collector.
+          currentLogger <- hsc_logger <$> getSession
+          loweringLogger <- liftIO (makeThreadSafe currentLogger)
           -- These summed phases cover deferred finalization only. Canonical
           -- frontend work performed by the load hooks belongs to 'ghc_load'.
           tcMsRef <- liftIO (newIORef (0 :: Integer))
@@ -2651,7 +2656,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               acquireFinalized loaded = do
                 current <- getSession
                 let summary = canonicalSummary (loadedSummary loaded)
-                    env = scopeRetainedSummaryHscEnv summary current
+                    env = (scopeRetainedSummaryHscEnv summary current)
+                      { hsc_logger = loweringLogger }
                     cgGuts = finalizedTidyGuts (loadedFinalized loaded)
                     ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
                     importedSiblings = resolvePreparedInterfaceSiblings env
@@ -2699,7 +2705,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 Just factory -> do
                   env <- getSession
                   interfaces <- liftIO (readIORef productInterfacesRef)
-                  liftIO (factory env interfaces targetOwner (pvExactScope variant))
+                  liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
+                    targetOwner (pvExactScope variant))
               lowerTasks observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
                 let lower input = do
                       prepared <- either runPreparedModuleTask pure (snd input)
@@ -3069,7 +3076,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
-                , prHscEnv = cpFinalEnv plan hscFinal
+                , prHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
                 , prCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
                     (pvExactScope variant)
                 , prCapturedType = capturedType
