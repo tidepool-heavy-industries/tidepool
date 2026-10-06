@@ -9,12 +9,16 @@ pub(crate) use newrecovery_v2::*;
 pub use newrecovery_v2::{RecoveryPublicOwner, RecoveryRefusal as RecoveryFormatRefusal};
 
 pub(crate) fn graph_error(path: &Path, error: RecoveryError) -> SessionError {
-    match error.refusal {
-        Some(refusal) => SessionError::RecoveryFormatRefused {
+    match &error.kind {
+        RecoveryErrorKind::Format(refusal) => SessionError::RecoveryFormatRefused {
             path: path.to_path_buf(),
-            refusal,
+            refusal: *refusal,
         },
-        None => SessionError::RecoveryManifest {
+        RecoveryErrorKind::InventoryAccounting(cause) => SessionError::RecoveryInventoryRefused {
+            path: path.to_path_buf(),
+            cause: cause.clone(),
+        },
+        RecoveryErrorKind::Manifest => SessionError::RecoveryManifest {
             path: path.to_path_buf(),
             detail: error.to_string(),
         },

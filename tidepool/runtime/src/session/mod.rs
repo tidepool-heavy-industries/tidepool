@@ -415,6 +415,11 @@ pub enum SessionError {
         path: PathBuf,
         refusal: RecoveryFormatRefusal,
     },
+    #[error("recovery inventory admission at {} refused: {cause}", path.display())]
+    RecoveryInventoryRefused {
+        path: PathBuf,
+        cause: tidepool_repr::execution_schema::ParseError,
+    },
     /// The declaration and binding visibility swap has completed. Retry only
     /// [`SessionLib::confirm_recovery_durability`], never this declaration.
     #[error("declaration was published; recovery durability is unconfirmed at {}: {detail}", path.display())]

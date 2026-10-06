@@ -90,6 +90,10 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         SessionError::RecoveryManifest { .. } | SessionError::RecoveryFormatRefused { .. } => {
             FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
         }
+        // Admission resource refusal is distinct from immutable artifact loss.
+        SessionError::RecoveryInventoryRefused { .. } => {
+            FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
+        }
         // Visibility has committed. The typed error retains the declaration
         // facts; this envelope diagnoses only the outstanding durability sync.
         SessionError::PublishedDeclarationDurabilityUnconfirmed { .. } => {

@@ -422,7 +422,14 @@ enum RecoveryAvailability {
 pub(crate) struct RecoveryError {
     pub path: Option<PathBuf>,
     pub detail: String,
-    pub refusal: Option<RecoveryRefusal>,
+    pub kind: RecoveryErrorKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RecoveryErrorKind {
+    Manifest,
+    Format(RecoveryRefusal),
+    InventoryAccounting(tidepool_repr::execution_schema::ParseError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -758,13 +765,19 @@ pub(crate) fn read_v2_bytes(
     }
     let graph: RecoveryGraph = serde_json::from_value(value)
         .map_err(|e| at(path, format!("invalid v6 recovery graph: {e}")))?;
-    graph.validate().map_err(|e| at(path, e.detail))?;
+    graph.validate().map_err(|mut error| {
+        error.path = Some(path.to_path_buf());
+        error
+    })?;
     let (inventory, artifact_losses) = match purpose {
         RecoveryReadPurpose::Metadata => (
             None,
             graph
                 .validate_artifact_files_after_graph_validation(recovery_root)
-                .map_err(|error| at(path, error.detail))?,
+                .map_err(|mut error| {
+                    error.path = Some(path.to_path_buf());
+                    error
+                })?,
         ),
         RecoveryReadPurpose::Hydration => match graph.capture_inventory(recovery_root) {
             Ok(inventory) => (Some(inventory), BTreeMap::new()),
@@ -777,8 +790,12 @@ pub(crate) fn read_v2_bytes(
                     .collect::<BTreeMap<_, _>>();
                 let losses = errors
                     .into_iter()
-                    .map(|(id, error)| (id, vec![artifact_error_loss(artifacts[&id], error)]))
-                    .collect();
+                    .map(|(id, error)| Ok((id, vec![artifact_error_loss(artifacts[&id], error)?])))
+                    .collect::<Result<_, RecoveryError>>()
+                    .map_err(|mut error| {
+                        error.path = Some(path.to_path_buf());
+                        error
+                    })?;
                 (None, losses)
             }
             Err(error) => return Err(at(path, error.to_string())),
@@ -1029,7 +1046,7 @@ impl RecoveryGraph {
                     }
                 };
                 if let Err(error) = verification {
-                    item_losses.push(artifact_error_loss(artifact, error));
+                    item_losses.push(artifact_error_loss(artifact, error)?);
                 }
                 if !item_losses.is_empty() {
                     losses.insert(key, item_losses);
@@ -1645,8 +1662,17 @@ fn validate_relative(path: &Path) -> Result<(), RecoveryError> {
 fn artifact_error_loss(
     artifact: &RecoveryArtifactClosure,
     error: RecoveryArtifactError,
-) -> RecoveryArtifactLoss {
+) -> Result<RecoveryArtifactLoss, RecoveryError> {
     let (component, path, kind) = match error {
+        RecoveryArtifactError::InventoryAccounting(cause) => {
+            // Exhausted admission accounting says nothing about the immutable
+            // artifact's validity. Abort recovery rather than tombstoning it.
+            return Err(RecoveryError {
+                path: None,
+                detail: format!("recovery inventory admission refused: {cause}"),
+                kind: RecoveryErrorKind::InventoryAccounting(cause),
+            });
+        }
         RecoveryArtifactError::ExecutionSourceProducerMismatch {
             unit,
             module,
@@ -1737,11 +1763,11 @@ fn artifact_error_loss(
             )
         }
     };
-    RecoveryArtifactLoss {
+    Ok(RecoveryArtifactLoss {
         component,
         path,
         kind,
-    }
+    })
 }
 
 fn artifact_component(
@@ -1844,14 +1870,14 @@ fn error(detail: impl Into<String>) -> RecoveryError {
     RecoveryError {
         path: None,
         detail: detail.into(),
-        refusal: None,
+        kind: RecoveryErrorKind::Manifest,
     }
 }
 fn at(path: &Path, detail: impl Into<String>) -> RecoveryError {
     RecoveryError {
         path: Some(path.to_path_buf()),
         detail: detail.into(),
-        refusal: None,
+        kind: RecoveryErrorKind::Manifest,
     }
 }
 
@@ -1867,7 +1893,7 @@ fn refusal_at(path: &Path, refusal: RecoveryRefusal) -> RecoveryError {
     RecoveryError {
         path: Some(path.to_path_buf()),
         detail,
-        refusal: Some(refusal),
+        kind: RecoveryErrorKind::Format(refusal),
     }
 }
 
@@ -2489,6 +2515,38 @@ mod tests {
     }
 
     #[test]
+    fn admission_accounting_refuses_recovery_without_tombstoning_the_original() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+        let mut wire = fixture();
+        wire.public_surfaces[0].declaration_root = Some(Generation(1));
+        wire.seal().unwrap();
+        let graph = snapshot(&wire);
+        let operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 0,
+            ..InventoryDecodeLimits::default()
+        });
+        let cause = operation.decode_value(&[0x80], 1).unwrap_err();
+        let failure = artifact_error_loss(
+            home_artifact(&wire),
+            RecoveryArtifactError::InventoryAccounting(cause.clone()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.kind,
+            RecoveryErrorKind::InventoryAccounting(cause.clone())
+        );
+        assert!(matches!(
+            crate::session::recovery::graph_error(Path::new("declarations.json"), failure),
+            crate::session::SessionError::RecoveryInventoryRefused { cause: actual, .. }
+                if actual == cause
+        ));
+        assert!(matches!(
+            graph.projection(&owner("root"), &BTreeMap::new()).unwrap()[&identity("answer")],
+            RecoveryHead::Available { .. }
+        ));
+    }
+
+    #[test]
     fn producer_mismatch_tombstones_the_original_without_resurrection() {
         let mut wire = fixture();
         wire.public_surfaces[0].declaration_root = Some(Generation(1));
@@ -2507,7 +2565,8 @@ mod tests {
                 expected: [1; 32],
                 actual: [2; 32],
             },
-        );
+        )
+        .unwrap();
         assert_eq!(loss.component, RecoveryArtifactComponent::Product);
         assert!(matches!(
             &loss.kind,
@@ -3275,8 +3334,8 @@ mod tests {
             let error = read_v2(&manifest, dir.path()).err().unwrap();
 
             assert_eq!(
-                error.refusal,
-                Some(RecoveryRefusal::UnsupportedOldFormat { version })
+                error.kind,
+                RecoveryErrorKind::Format(RecoveryRefusal::UnsupportedOldFormat { version })
             );
             assert_eq!(fs::read(&manifest).unwrap(), bytes);
         }
@@ -3467,7 +3526,7 @@ mod tests {
                         RecoveryArtifactLossKind::Unreadable("denied".into()),
                     ),
                 ] {
-                    let loss = artifact_error_loss(artifact, error);
+                    let loss = artifact_error_loss(artifact, error).unwrap();
                     assert_eq!(loss.component, component);
                     assert_eq!(loss.path, relative);
                     assert_eq!(loss.kind, expected);
@@ -3483,7 +3542,8 @@ mod tests {
         let invalid = artifact_error_loss(
             &canonical,
             RecoveryArtifactError::InvalidModuleCertificate(dir.path().join(&certificate)),
-        );
+        )
+        .unwrap();
         assert_eq!(invalid.component, RecoveryArtifactComponent::Certificate);
         assert_eq!(invalid.path, certificate);
         let core = home
@@ -3498,7 +3558,8 @@ mod tests {
         let invalid = artifact_error_loss(
             &canonical,
             RecoveryArtifactError::InvalidCapturedPayload(dir.path().join(&core)),
-        );
+        )
+        .unwrap();
         assert_eq!(invalid.component, RecoveryArtifactComponent::Core);
         assert_eq!(invalid.path, core);
     }
@@ -3598,8 +3659,8 @@ mod tests {
         let error = read_v2(&manifest, dir.path()).err().unwrap();
 
         assert_eq!(
-            error.refusal,
-            Some(RecoveryRefusal::UnsupportedFutureFormat { version })
+            error.kind,
+            RecoveryErrorKind::Format(RecoveryRefusal::UnsupportedFutureFormat { version })
         );
         assert_eq!(fs::read(&manifest).unwrap(), bytes);
     }
