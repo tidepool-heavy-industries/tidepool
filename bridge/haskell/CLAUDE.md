@@ -376,11 +376,13 @@ process lifecycle. It either starts this worker for one typed request or keeps
 one worker alive with `--worker-loop-v2`. `Tidepool.WorkerServer` owns only the
 framed stdin/stdout loop; `Tidepool.GhcPipeline` owns the resident compiler
 state. `Main` decodes a typed request and dispatches compiler operations; it is
-not a second CLI or workflow engine. Compiler-valued caches and recovery graphs belong to one admitted transaction
-and are released when it closes. A synchronous failed compilation clears those
-graphs before a permitted retry; cancellation terminates the transaction.
-Transactions and their requests are serialized and carry their own CWD and
-compiler options.
+not a second CLI or workflow engine. Completed compiler products belong to the
+resident compiler universe. Each request validates the selected source, policy,
+dependency and interface versions before reusing them across scoped requests.
+An attempt publishes additions only after the whole compiler operation succeeds;
+a synchronous refusal discards partial additions while preserving previously
+completed versions. Cancellation terminates the transaction. Transactions and
+their requests are serialized and carry their own CWD and compiler options.
 
 The worker process environment is fixed at startup. Restart the daemon after
 changing extractor diagnostic variables, GHC configuration, or its watched

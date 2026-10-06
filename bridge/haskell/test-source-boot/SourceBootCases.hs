@@ -3724,6 +3724,31 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         [line | line <- lines diagnostics
         , "tidepool-reuse {" `isPrefixOf` line
         , "\"stage\":\"interface\"" `isInfixOf` line]
+      sourceVersion label decision reason diagnostics = case
+          [line | line <- lines diagnostics
+          , "tidepool-reuse {" `isPrefixOf` line
+          , "\"stage\":\"source_frontend\"" `isInfixOf` line
+          , "\"unit\":\"main\"" `isInfixOf` line
+          , "\"module\":\"MetadataOwner\"" `isInfixOf` line
+          , not ("\"decision\":\"work\"" `isInfixOf` line)] of
+        [event] | all (`isInfixOf` event)
+            [ "\"schema\":1,", "\"items\":1,"
+            , "\"version_kind\":\"source_fingerprint\""
+            , "\"decision\":\"" ++ decision ++ "\""
+            , "\"reason\":\"" ++ reason ++ "\""] ->
+          case T.stripPrefix ",\"version\":\"" (snd (T.breakOn ",\"version\":" (T.pack event)))
+              >>= T.stripSuffix "\"}" of
+            Just version | not (T.null version) -> pure version
+            _ -> fail (label ++ " omitted its actual source fingerprint: " ++ event)
+        events -> fail (label ++ " did not issue one matching source decision: " ++ show events)
+      ownerIdentity prepared = case Map.lookup (mkModuleName "MetadataOwner") (pprFinalizedModules prepared) of
+        Just finalized | mi_module (hm_iface (finalizedHomeModInfo finalized)) ==
+            mkModule (stringToUnit "main") (mkModuleName "MetadataOwner") ->
+          evaluate finalized >>= makeStableName
+        _ -> fail "native preparation omitted the exact main:MetadataOwner finalized product"
+      requireReuse label diagnostics = unless (frontends diagnostics == 0
+          && counterValues "transaction_reused_source_products" diagnostics == [1]) $
+        fail (label ++ " did not reuse its completed dependency: " ++ diagnostics)
       isComplete = isInfixOf "\"decision\":\"complete\""
       requireInterfaceComplete label diagnostics = case interfaceEvents diagnostics of
         [] -> fail (label ++ " omitted interface observation")
@@ -3742,18 +3767,21 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       relocated = scope {ssExactScope=Just relocatedPath}
   copyFile scopePath relocatedPath
   withResidentPipelineSelectedRequests [work] $ \runRequest -> do
-    runRequest (pure ()) $ \compile -> do
+    originalIdentity <- runRequest (pure ()) $ \compile -> do
       let check session = compile CheckedEnvironment Set.empty GeneralCompile
             (Just session) target [work] Nothing
       (cold,coldDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt cold && frontends coldDiagnostics == 1) $
         fail "cold exact transaction did not compile its real source dependency"
       requireInterfaceComplete "cold check" coldDiagnostics
+      versionA <- sourceVersion "cold A" "miss" "absent" coldDiagnostics
       (warm,warmDiagnostics) <- captureDiagnostics (check relocated)
       unless (isInt warm && frontends warmDiagnostics == 0
           && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
         fail "identical empty exact scopes repeated a dependency frontend"
       requireInterfaceComplete "warm check" warmDiagnostics
+      warmVersion <- sourceVersion "warm A" "hit" "matched" warmDiagnostics
+      unless (warmVersion == versionA) $ fail "warm check selected another source version"
       (native,nativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing
@@ -3763,30 +3791,61 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           && Map.member (mkModuleName "MetadataOwner") (pprFinalizedModules native)) $
         fail "check to native preparation replayed its dependency or lost original42"
       requireInterfaceComplete "native preparation" nativeDiagnostics
+      identityA <- ownerIdentity native
+      nativeVersion <- sourceVersion "native A" "hit" "matched" nativeDiagnostics
+      unless (nativeVersion == versionA) $ fail "native preparation selected another source version"
       copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
-      (changed,refusalDiagnostics) <- captureDiagnostics (sourceFailureDiagnostics (check scope))
-      case changed of
-        Left diagnostics | any (\diagnostic -> sourceDiagnosticAt target
-            "No instance for" diagnostic && "Available Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
-        Left diagnostics -> fail ("changed dependency failed for another reason: " ++ show diagnostics)
-        Right _ -> fail "warm exact transaction borrowed a removed instance"
-      unless (not (null (interfaceEvents refusalDiagnostics))
-          && not (any isComplete (interfaceEvents refusalDiagnostics))) $
-        fail "refused check fabricated an interface completion or omitted partial work"
+      let requireRefusal label = do
+            (changed,diagnostics) <- captureDiagnostics (sourceFailureDiagnostics (check scope))
+            case changed of
+              Left failures | any (\diagnostic -> sourceDiagnosticAt target
+                  "No instance for" diagnostic && "Available Int" `isInfixOf` dMessage diagnostic) failures -> pure ()
+              Left failures -> fail (label ++ " failed for another reason: " ++ show failures)
+              Right _ -> fail (label ++ " borrowed the removed instance")
+            unless (not (null (interfaceEvents diagnostics))
+                && not (any isComplete (interfaceEvents diagnostics))) $
+              fail (label ++ " fabricated an interface completion or omitted partial work")
+            sourceVersion label "miss" "changed_source" diagnostics
+      versionB <- requireRefusal "changed B"
+      repeatedB <- requireRefusal "repeated refused B"
+      unless (versionB /= versionA && repeatedB == versionB) $
+        fail "refusal retry did not select the same changed source version"
       installOwner
       (recovered,recoveryDiagnostics) <- captureDiagnostics (check scope)
-      unless (isInt recovered && frontends recoveryDiagnostics == 1) $
-        fail "synchronous refusal retained partial compiler products"
+      unless (isInt recovered) $ fail "restored A lost its Int result type"
+      requireReuse "restored A check" recoveryDiagnostics
       requireInterfaceComplete "recovered check" recoveryDiagnostics
+      recoveredVersion <- sourceVersion "restored A" "hit" "matched" recoveryDiagnostics
+      unless (recoveredVersion == versionA) $ fail "restored check selected another source version"
+      (restored,restoredDiagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+          target [work] Nothing
+      restoredIdentity <- ownerIdentity restored
+      unless (restoredIdentity == identityA
+          && hasIntResultLiteral 42 (prBinds (pprPipelineResult restored))) $
+        fail "refusal recovery lost the completed A object or native result42"
+      requireReuse "restored A native" restoredDiagnostics
+      requireInterfaceComplete "restored native preparation" restoredDiagnostics
+      pure (identityA,versionA)
     runRequest (pure ()) $ \compile -> do
       (next,nextDiagnostics) <- captureDiagnostics $
         compile CheckedEnvironment Set.empty GeneralCompile (Just relocated)
           target [work] Nothing
-      unless (isInt next && frontends nextDiagnostics == 1
-          && counterValues "transaction_reused_source_products" nextDiagnostics == [0]) $
-        fail "source compiler products survived their transaction"
+      unless (isInt next) $ fail "new request lost the restored Int result type"
+      requireReuse "new request A check" nextDiagnostics
       requireInterfaceComplete "new transaction check" nextDiagnostics
-  putStrLn "exact transaction reuse: check/check and check/native skip dependency work; instance drift, refusal recovery and transaction close passed"
+      nextVersion <- sourceVersion "new request A" "hit" "matched" nextDiagnostics
+      unless (nextVersion == snd originalIdentity) $ fail "new request selected another source version"
+      (nextNative,nextNativeDiagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just relocated)
+          target [work] Nothing
+      nextIdentity <- ownerIdentity nextNative
+      unless (nextIdentity == fst originalIdentity
+          && hasIntResultLiteral 42 (prBinds (pprPipelineResult nextNative))) $
+        fail "new request lost the completed A object or native result42"
+      requireReuse "new request A native" nextNativeDiagnostics
+      requireInterfaceComplete "new request native preparation" nextNativeDiagnostics
+  putStrLn "exact transaction reuse: completed A survives refused B and request close; repeated B refuses, exact A identity and native42 passed"
 
 -- Current candidate admission is dependency evidence for fresh importers;
 -- yesterday's HPT entries cannot rescue a changed source or missing product.
