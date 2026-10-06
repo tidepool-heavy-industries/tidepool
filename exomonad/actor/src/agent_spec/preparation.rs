@@ -83,7 +83,7 @@ fn nominal_artifacts(
         .collect()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum PreparationFailure {
     AbsentSelection { recipe: String },
     Admission(Arc<crate::ResidentActorWorkbenchError>),
