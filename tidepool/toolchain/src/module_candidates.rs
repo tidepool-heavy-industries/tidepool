@@ -1534,6 +1534,10 @@ fn operation_budget_error(error: &crate::certified_products::CertificationError)
     match error {
         CertificationError::Product(cause) => operation_parse_budget_error(cause),
         CertificationError::SizeLimit { .. }
+        | CertificationError::EvidenceRead {
+            failure: crate::certified_products::EvidenceReadFailure::SizeLimit { .. },
+            ..
+        }
         | CertificationError::CapturedModulePayload(
             crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_),
         ) => true,
