@@ -134,8 +134,8 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
     let slot = 0..SLOTS;
     let indices = proptest::collection::vec(0..(2 * OWNERS + 2), 0..5);
     let op = prop_oneof![
-        1 => (0..2, slot.clone()).prop_map(|(inventory, to)| Op::Empty { inventory, to }),
-        5 => (0..2, slot.clone(), indices.clone(), slot.clone())
+        1 => (0usize..2, slot.clone()).prop_map(|(inventory, to)| Op::Empty { inventory, to }),
+        5 => (0usize..2, slot.clone(), indices.clone(), slot.clone())
             .prop_map(|(inventory, parent, entries, to)| Op::Admit { inventory, parent, entries, to }),
         2 => (slot.clone(), slot.clone()).prop_map(|(from, to)| Op::Clone { from, to }),
         3 => slot.clone().prop_map(Op::Drop),
