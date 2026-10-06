@@ -337,7 +337,7 @@ dispatchSource compilerScope caches timing request args =
   let admittedScope = compilerScope
         { scopedCompile = \selection retained purpose session source includes products ->
             scopedCompile compilerScope selection retained
-              (maybe purpose (CellProgramCompile purpose) (admittedRequestScope request))
+              (maybe purpose (ExactScopeCompile purpose) (admittedRequestScope request))
               session source includes products
         }
       compiler :: Compiler
@@ -1311,7 +1311,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             , requestRetainedGenerations = programRetained state }
           scoped :: Compiler
           scoped selection retained purpose session path includes products =
-            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
+            compiler selection retained (ExactScopeCompile (programPurpose state purpose) scope) session path includes products
           directory = outDir </> "segment-" ++ show segmentIndex
       createDirectoryIfMissing True directory
       case cellPlanItems segment of
@@ -1396,7 +1396,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             , requestRetainedGenerations = programRetained state }
           scoped :: Compiler
           scoped selection retained purpose session path includes products =
-            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
+            compiler selection retained (ExactScopeCompile (programPurpose state purpose) scope) session path includes products
           directory = outDir </> "item-" ++ show index
       createDirectoryIfMissing True directory
       validateCheckedItemAdmission localArgs itemAdmission source verdict

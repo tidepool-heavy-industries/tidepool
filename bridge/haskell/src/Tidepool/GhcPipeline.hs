@@ -533,7 +533,7 @@ programSourceImports (CompletedProgramImports imports _) = Just imports
 programSourceImports (ParsedImportSelection _ inner) = programSourceImports inner
 programSourceImports (GeneratedInstanceCheck _ inner) = programSourceImports inner
 programSourceImports (GeneratedScaffoldCompile _ inner) = programSourceImports inner
-programSourceImports (CellProgramCompile inner _) = programSourceImports inner
+programSourceImports (ExactScopeCompile inner _) = programSourceImports inner
 programSourceImports _ = Nothing
 
 -- | Complete direct home imports of a fresh original, combining selected source
@@ -1162,7 +1162,7 @@ data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCo
   | HostActivationPreviewCompile CheckedSignature
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
-  | CellProgramCompile CompilePurpose ExactScope
+  | ExactScopeCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
   | GeneratedInstanceCheck GeneratedInstanceRecipe CompilePurpose
   | ParsedImportSelection [ImportIntent] CompilePurpose
@@ -1180,7 +1180,7 @@ sourceImportIntents (ParsedImportSelection intents inner) = intents ++ sourceImp
 sourceImportIntents (CompletedProgramImports _ inner) = sourceImportIntents inner
 sourceImportIntents (GeneratedInstanceCheck _ inner) = sourceImportIntents inner
 sourceImportIntents (GeneratedScaffoldCompile _ inner) = sourceImportIntents inner
-sourceImportIntents (CellProgramCompile inner _) = sourceImportIntents inner
+sourceImportIntents (ExactScopeCompile inner _) = sourceImportIntents inner
 sourceImportIntents _ = []
 
 generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
@@ -1188,7 +1188,7 @@ generatedInstanceRecipe (ParsedImportSelection _ inner) = generatedInstanceRecip
 generatedInstanceRecipe (CompletedProgramImports _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
 generatedInstanceRecipe (GeneratedScaffoldCompile _ inner) = generatedInstanceRecipe inner
-generatedInstanceRecipe (CellProgramCompile inner _) = generatedInstanceRecipe inner
+generatedInstanceRecipe (ExactScopeCompile inner _) = generatedInstanceRecipe inner
 generatedInstanceRecipe _ = Nothing
 
 -- A request supplies its admitted baseline; an inner ordered-cell stage may
@@ -1198,7 +1198,7 @@ purposeExactScope (ParsedImportSelection _ inner) = purposeExactScope inner
 purposeExactScope (CompletedProgramImports _ inner) = purposeExactScope inner
 purposeExactScope (GeneratedInstanceCheck _ inner) = purposeExactScope inner
 purposeExactScope (GeneratedScaffoldCompile _ inner) = purposeExactScope inner
-purposeExactScope (CellProgramCompile inner scope) = purposeExactScope inner <|> Just scope
+purposeExactScope (ExactScopeCompile inner scope) = purposeExactScope inner <|> Just scope
 purposeExactScope (PlannedDeclarationCheck _ scope) = Just scope
 purposeExactScope _ = Nothing
 
@@ -1206,7 +1206,7 @@ generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
 generatedRecipe (ParsedImportSelection _ inner) = generatedRecipe inner
 generatedRecipe (CompletedProgramImports _ inner) = generatedRecipe inner
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
-generatedRecipe (CellProgramCompile inner _) = generatedRecipe inner
+generatedRecipe (ExactScopeCompile inner _) = generatedRecipe inner
 generatedRecipe (GeneratedInstanceCheck _ inner) = generatedRecipe inner
 generatedRecipe _ = Nothing
 
@@ -1214,7 +1214,7 @@ originalPurpose :: CompilePurpose -> CompilePurpose
 originalPurpose (ParsedImportSelection _ inner) = originalPurpose inner
 originalPurpose (CompletedProgramImports _ inner) = originalPurpose inner
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
-originalPurpose (CellProgramCompile inner _) = originalPurpose inner
+originalPurpose (ExactScopeCompile inner _) = originalPurpose inner
 originalPurpose (GeneratedInstanceCheck _ inner) = originalPurpose inner
 originalPurpose purpose = purpose
 
@@ -1249,7 +1249,7 @@ transformFor (ProgramItemCompile original annotations originals _) target env su
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
   | otherwise = pure . unannotatedModule
-transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
+transformFor (ExactScopeCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
 transformFor (GeneratedInstanceCheck _ purpose) target env summary = transformFor purpose target env summary
 transformFor (ParsedImportSelection _ purpose) target env summary = transformFor purpose target env summary
@@ -1260,7 +1260,7 @@ transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose ->
 transformWithCompletedValues captured purpose target env summary = case purpose of
   ParsedImportSelection _ inner -> transformWithCompletedValues captured inner target env summary
   CompletedProgramImports _ inner -> transformWithCompletedValues captured inner target env summary
-  CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
+  ExactScopeCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
   GeneratedInstanceCheck _ inner -> transformWithCompletedValues captured inner target env summary
   CheckedItemCompile annotations original requested
@@ -3730,7 +3730,7 @@ compilePurposeLabel purpose = case purpose of
   HostActivationPreviewCompile{} -> "activation_preview"
   ProgramItemCompile{} -> "program_item"
   PlannedDeclarationCheck{} -> "planned_declaration"
-  CellProgramCompile inner _ -> compilePurposeLabel inner
+  ExactScopeCompile inner _ -> compilePurposeLabel inner
   GeneratedScaffoldCompile _ inner -> compilePurposeLabel inner
   GeneratedInstanceCheck _ inner -> compilePurposeLabel inner
   ParsedImportSelection _ inner -> compilePurposeLabel inner
