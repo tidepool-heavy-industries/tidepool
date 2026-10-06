@@ -5644,6 +5644,7 @@ mod tests {
             },
         }];
         wire.expressions.nodes = vec![
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(10)))]),
             ExprFrame::Let {
                 bindings: Group::Recursive(vec![HeapBinding {
                     id: ValueId(10),
@@ -5655,10 +5656,16 @@ mod tests {
                         ],
                     },
                 }]),
-                body: 1,
+                body: 0,
             },
-            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(10)))]),
         ];
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!()
+        };
+        *body = 1;
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
         CompiledProgram::compile(&linked).unwrap()
