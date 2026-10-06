@@ -208,7 +208,7 @@ impl CompilerWorkTicket {
         action: impl FnOnce() -> T,
     ) -> T {
         self.run_for_workload(
-            tidepool_extract_cmd::CompileWorkload::Foreground,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             cancellation,
             action,
         )
@@ -218,11 +218,11 @@ impl CompilerWorkTicket {
     /// Borrowed commands inside the action do not settle this ticket early.
     pub(crate) fn run_for_workload<T>(
         self,
-        workload: tidepool_extract_cmd::CompileWorkload,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
         cancellation: tidepool_runtime::CompilerTransactionCancellation,
         action: impl FnOnce() -> T,
     ) -> T {
-        tidepool_extract_cmd::with_compiler_transaction_cancellable_for_workload(
+        tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
             workload,
             cancellation,
             move |close| {
