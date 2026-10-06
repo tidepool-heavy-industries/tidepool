@@ -15089,9 +15089,30 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .unwrap()
             .replay_eligible_identity()
             .is_none());
+        std::fs::write(&input, "42").unwrap();
+        let successor = with_test_compiler_owner(source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            snapshot(crate::SourceEntryStorage::FreshCompilation {
+                directory: storage.path().to_owned(),
+                preparation: uuid::Uuid::new_v4(),
+            }),
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .unwrap();
+        assert_ne!(
+            fresh.completed_entry_selection().unwrap().1,
+            successor.completed_entry_selection().unwrap().1
+        );
+        assert_ne!(
+            fresh.prepared.entry.compiled().prepared,
+            successor.prepared.entry.compiled().prepared,
+            "a newly admitted source preparation executes the changed untracked input"
+        );
         let completed_executions =
             std::fs::read_to_string(input.with_extension("executions")).unwrap();
-        std::fs::write(&input, "42").unwrap();
         // Reacquire readiness and native images independently of the old ready
         // cache. Selection is the completed artifact, not a fresh TH request.
         source.toolset_preparation = Default::default();
@@ -15124,23 +15145,72 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
         let (recipe, original) = fresh.completed_entry_selection().unwrap();
-        let pointer = storage.path().join(recipe).join("selected");
-        std::fs::write(&pointer, uuid::Uuid::new_v4().to_string()).unwrap();
+        let retried_source = snapshot(crate::SourceEntryStorage::FreshCompilation {
+            directory: storage.path().to_owned(),
+            preparation: original,
+        });
+        let metadata = storage
+            .path()
+            .join(recipe)
+            .join(original.to_string())
+            .join("entry/raw/meta.cbor");
+        let original_metadata = std::fs::read(&metadata).unwrap();
+        std::fs::write(&metadata, b"post-publication fault").unwrap();
+        source.toolset_preparation = Default::default();
+        assert!(source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                retried_source.clone(),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await
+            .is_err());
+        std::fs::write(&metadata, original_metadata).unwrap();
+        let retried = source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                retried_source,
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retried.completed_entry_selection().unwrap(),
+            (recipe, original)
+        );
+        assert_eq!(
+            retried.prepared.entry.compiled().prepared,
+            fresh.prepared.entry.compiled().prepared
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        assert_eq!(
+            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+            completed_executions
+        );
+        let invalid = snapshot(crate::SourceEntryStorage::CompletedOriginal {
+            directory: storage.path().to_owned(),
+            selections: [(recipe.to_owned(), uuid::Uuid::new_v4())]
+                .into_iter()
+                .collect(),
+        });
         source.toolset_preparation = Default::default();
         assert!(
             source
                 .prepare_source_toolset(
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    selected.clone(),
+                    invalid,
                     &[],
                     &[],
                     Arc::new(tidepool_runtime::session::ImageRegistry::new()),
                 )
                 .await
                 .is_err(),
-            "changed pointer cannot select a different completed output"
+            "a missing owner-selected original cannot fall back to source"
         );
-        std::fs::write(pointer, original.to_string()).unwrap();
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
         assert_eq!(
             std::fs::read_to_string(input.with_extension("executions")).unwrap(),

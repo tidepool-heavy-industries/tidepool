@@ -156,10 +156,13 @@ impl ToolsetPreparation {
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let (task, launch) = self.lookup(&recipe);
         if launch {
-            let completed_original = matches!(
-                source.prepared_entries(),
-                Some(crate::SourceEntryStorage::CompletedOriginal { .. })
-            );
+            let completed_original = match selected_original_present(&recipe, &source) {
+                Ok(present) => present,
+                Err(error) => {
+                    self.settle(recipe, &task, Err(error));
+                    return task.wait().await;
+                }
+            };
             let compiler_work = if completed_original {
                 None
             } else {
@@ -360,6 +363,21 @@ pub(crate) mod tests {
         );
         waiter.await.unwrap();
     }
+
+    #[test]
+    fn only_an_absent_original_path_can_select_compilation() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("entry");
+        assert!(!entry_path_present(&output).unwrap());
+        std::os::unix::fs::symlink(root.path().join("missing"), &output).unwrap();
+        assert!(entry_path_present(&output).is_err());
+        std::fs::remove_file(&output).unwrap();
+        std::fs::write(&output, b"invalid original").unwrap();
+        assert!(entry_path_present(&output).is_err());
+        std::fs::remove_file(&output).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        assert!(entry_path_present(&output).unwrap());
+    }
 }
 
 fn compile_installer(
@@ -400,12 +418,6 @@ fn compile_installer(
     let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
     let entry = PreparedSourceEntry::prepare(compiled, registry)
         .map_err(|error| PreparationFailure::Native(error.to_string()))?;
-    if let Some(selection) = selection.as_ref() {
-        if let Some(path) = selection.publish.as_ref() {
-            tidepool_atomic_write::write_durable(path, selection.original.to_string().as_bytes())
-                .map_err(|error| PreparationFailure::Source(error.to_string()))?;
-        }
-    }
     Ok(Arc::new(PreparedToolset {
         entry,
         entry_name: recipe.entry,
@@ -415,6 +427,48 @@ fn compile_installer(
         _source: source,
         _nominal_artifacts: nominal_artifacts,
     }))
+}
+
+fn durable_recipe_key(recipe: &InstallerRecipe) -> Result<String, PreparationFailure> {
+    Ok(blake3::hash(
+        &serde_json::to_vec(recipe)
+            .map_err(|error| PreparationFailure::Source(error.to_string()))?,
+    )
+    .to_hex()
+    .to_string())
+}
+
+/// Presence only chooses whether a compiler ticket is needed. It never grants
+/// original custody: all present outputs still pass the complete loader.
+fn selected_original_present(
+    recipe: &InstallerRecipe,
+    source: &crate::CheckpointSourceLayer,
+) -> Result<bool, PreparationFailure> {
+    match source.prepared_entries() {
+        Some(crate::SourceEntryStorage::CompletedOriginal { .. }) => Ok(true),
+        Some(crate::SourceEntryStorage::FreshCompilation {
+            directory,
+            preparation,
+        }) => entry_path_present(
+            &directory
+                .join(durable_recipe_key(recipe)?)
+                .join(preparation.to_string())
+                .join("entry"),
+        ),
+        None => Ok(false),
+    }
+}
+
+fn entry_path_present(path: &std::path::Path) -> Result<bool, PreparationFailure> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(PreparationFailure::Source(format!(
+            "completed installer path is not an original directory: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(PreparationFailure::Source(error.to_string())),
+    }
 }
 
 /// This explicit developer/fixture path has no retained source storage.
@@ -485,24 +539,18 @@ fn retained_installer(
     use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
     let source_error =
         |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
-    let key = blake3::hash(&serde_json::to_vec(recipe).map_err(|error| source_error(&error))?)
-        .to_hex()
-        .to_string();
+    let key = durable_recipe_key(recipe)?;
     let directory = storage.directory().join(&key);
-    let (original, selected, publication) = match storage {
-        crate::SourceEntryStorage::FreshCompilation { .. } => {
+    let (original, selected) = match storage {
+        crate::SourceEntryStorage::FreshCompilation { preparation, .. } => {
             let root = tidepool_atomic_write::DirectoryAnchor::open_existing(storage.directory())
                 .map_err(|error| source_error(&error))?;
-            let selected = uuid::Uuid::new_v4();
+            let selected = *preparation;
             let original = root
                 .child(&key)
                 .and_then(|root| root.child(selected.to_string()))
                 .map_err(|error| source_error(&error))?;
-            (
-                original.path().to_owned(),
-                selected,
-                Some(directory.join("selected")),
-            )
+            (original.path().to_owned(), selected)
         }
         crate::SourceEntryStorage::CompletedOriginal { selections, .. } => {
             let selected =
@@ -511,39 +559,58 @@ fn retained_installer(
                     .ok_or_else(|| PreparationFailure::AbsentSelection {
                         recipe: key.clone(),
                     })?;
-            let bytes =
-                std::fs::read(directory.join("selected")).map_err(|error| source_error(&error))?;
-            if bytes != selected.to_string().as_bytes() {
-                return Err(PreparationFailure::Source(
-                    "completed installer pointer differs from owner-selected original".into(),
-                ));
-            }
             let original = directory.join(selected.to_string());
-            let canonical_root =
-                std::fs::canonicalize(storage.directory()).map_err(|error| source_error(&error))?;
-            if std::fs::canonicalize(&original).map_err(|error| source_error(&error))?
-                != canonical_root.join(&key).join(selected.to_string())
-            {
-                return Err(PreparationFailure::Source(
-                    "completed installer escapes its retained source owner".into(),
-                ));
-            }
-            (original, *selected, None)
+            (original, *selected)
         }
     };
+    let canonical_root =
+        std::fs::canonicalize(storage.directory()).map_err(|error| source_error(&error))?;
+    if std::fs::canonicalize(&original).map_err(|error| source_error(&error))?
+        != canonical_root.join(&key).join(selected.to_string())
+    {
+        return Err(PreparationFailure::Source(
+            "completed installer escapes its retained source owner".into(),
+        ));
+    }
     let module = tidepool_toolchain::extract_module_name(wrapper)
         .ok_or_else(|| PreparationFailure::Source("installer wrapper has no module".into()))?;
     let source_path = original.join(format!("{module}.hs"));
     let output = original.join("entry");
-    if matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
-        tidepool_atomic_write::write_durable(&source_path, wrapper.as_bytes())
-            .map_err(|error| source_error(&error))?;
-    } else if std::fs::read(&source_path).map_err(|error| source_error(&error))?
-        != wrapper.as_bytes()
-    {
-        return Err(PreparationFailure::Source(
-            "completed installer wrapper differs from selected source and row".into(),
-        ));
+    let completed = entry_path_present(&output)?;
+    if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
+        match std::fs::symlink_metadata(&source_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                if std::fs::read(&source_path).map_err(|error| source_error(&error))?
+                    != wrapper.as_bytes()
+                {
+                    return Err(PreparationFailure::Source(
+                        "retained installer wrapper changed before retry".into(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tidepool_atomic_write::write_durable(&source_path, wrapper.as_bytes())
+                    .map_err(|error| source_error(&error))?;
+            }
+            Ok(_) => {
+                return Err(PreparationFailure::Source(
+                    "retained installer wrapper is an alias or special file".into(),
+                ))
+            }
+            Err(error) => return Err(source_error(&error)),
+        }
+    } else {
+        let metadata =
+            std::fs::symlink_metadata(&source_path).map_err(|error| source_error(&error))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || std::fs::read(&source_path).map_err(|error| source_error(&error))?
+                != wrapper.as_bytes()
+        {
+            return Err(PreparationFailure::Source(
+                "completed installer wrapper differs from selected source and row".into(),
+            ));
+        }
     }
     let sources = FrozenEntrySources::capture(&recipe.roots, &source_path)
         .map_err(|error| source_error(&error))?;
@@ -556,7 +623,7 @@ fn retained_installer(
             "source owner snapshot changed before installer acquisition".into(),
         ));
     }
-    if matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
+    if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
         prepare_frozen_production_entry(&sources, &original, &output).map_err(|error| {
             PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
         })?;
@@ -574,6 +641,9 @@ fn retained_installer(
         &ProductionEntrySources::FrozenWorkspace(sources),
     )
     .map_err(|error| source_error(&error))?;
+    // A previous rename may have succeeded before parent fsync failed. This
+    // confirms publication of that exact validated original without source.
+    tidepool_atomic_write::sync_parent_directory(&output).map_err(|error| source_error(&error))?;
     let compiled =
         CompiledTurn::from_production_entry(&loaded).map_err(|error| source_error(&error))?;
     Ok((
@@ -581,7 +651,6 @@ fn retained_installer(
         Some(CompletedInstallerSelection {
             recipe: key,
             original: selected,
-            publish: publication,
         }),
     ))
 }
@@ -589,5 +658,4 @@ fn retained_installer(
 struct CompletedInstallerSelection {
     recipe: String,
     original: uuid::Uuid,
-    publish: Option<PathBuf>,
 }
