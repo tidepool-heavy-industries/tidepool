@@ -1776,6 +1776,16 @@ fn admit_job_observed(
         None
     };
     let Some(resource_permit) = resources.acquire_with_capacity(workload, capacity) else {
+        if let Job::Request(_, cwd, argv) = &job {
+            tracing::debug!(
+                compile_request = %compile_request_correlation(cwd, argv),
+                compiler_workload = match workload {
+                    CompileWorkload::Foreground => "foreground",
+                    CompileWorkload::Preparation => "preparation",
+                },
+                "compiler request waiting for capacity"
+            );
+        }
         write_busy(connection).ok();
         return Admission::Continue;
     };

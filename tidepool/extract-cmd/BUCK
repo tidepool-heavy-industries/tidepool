@@ -249,6 +249,7 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "tests/daemon_integration.rs": "tidepool/extract-cmd/tests/daemon_integration.rs",
+        "tests/daemon_integration/native_fairness.rs": "tidepool/extract-cmd/tests/daemon_integration/native_fairness.rs",
         "tests/daemon_integration/resident_bind.hs": "tidepool/extract-cmd/tests/daemon_integration/resident_bind.hs",
         "tests/daemon_integration/session_ref.hs": "tidepool/extract-cmd/tests/daemon_integration/session_ref.hs",
         "tests/daemon_integration/shim_ref_a.hs": "tidepool/extract-cmd/tests/daemon_integration/shim_ref_a.hs",
@@ -464,6 +465,7 @@ filegroup(
         "tidepool/extract-cmd/tests/build_products_frontend.rs": "tests/build_products_frontend.rs",
         "tidepool/extract-cmd/tests/build_products_ownership.rs": "tests/build_products_ownership.rs",
         "tidepool/extract-cmd/tests/daemon_integration.rs": "tests/daemon_integration.rs",
+        "tidepool/extract-cmd/tests/daemon_integration/native_fairness.rs": "tests/daemon_integration/native_fairness.rs",
         "tidepool/extract-cmd/tests/daemon_integration/resident_bind.hs": "tests/daemon_integration/resident_bind.hs",
         "tidepool/extract-cmd/tests/daemon_integration/session_ref.hs": "tests/daemon_integration/session_ref.hs",
         "tidepool/extract-cmd/tests/daemon_integration/shim_ref_a.hs": "tests/daemon_integration/shim_ref_a.hs",

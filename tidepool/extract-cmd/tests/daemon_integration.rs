@@ -19,6 +19,8 @@ use tidepool_extract_cmd::{
 };
 #[path = "support/compiler_inputs.rs"]
 mod compiler_inputs;
+#[path = "daemon_integration/native_fairness.rs"]
+mod native_fairness;
 
 /// Honor declared native source resources; Cargo uses this checkout's library.
 fn stdlib_lib_dir() -> PathBuf {
