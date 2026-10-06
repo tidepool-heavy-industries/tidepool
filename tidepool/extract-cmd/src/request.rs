@@ -1310,9 +1310,13 @@ mod tests {
             ProtocolError::InvalidExecutionGrant
         );
         assert_eq!(
-            ExtractRequest::from_cli(&["--workload".into(), "preparation".into()])
-                .unwrap()
-                .workload(),
+            ExtractRequest::from_cli(&[
+                "Source.hs".into(),
+                "--workload".into(),
+                "preparation".into()
+            ])
+            .unwrap()
+            .workload(),
             CompileWorkload::Preparation
         );
     }
