@@ -15571,6 +15571,240 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn prepared_source_instance_and_effect_order_execute_original_native_semantics() {
+        struct Snapshot {
+            _owner: Arc<tempfile::TempDir>,
+            identity: Vec<String>,
+            roots: Vec<PathBuf>,
+            manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
+        }
+        impl crate::RetainedSourceLayer for Snapshot {
+            fn identities(&self) -> &[String] {
+                &self.identity
+            }
+            fn include_paths(&self) -> &[PathBuf] {
+                &self.roots
+            }
+            fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+                Some(&self.manifests)
+            }
+        }
+        let (_, _, source, _session_root) = host_mount_fixture();
+        let source = source.with_spec("PreparedInstanceAgentSpec.agentSpec");
+        let authored = Arc::new(tempfile::tempdir().unwrap());
+        let issuer = crate::SourceLayerIssuer::default();
+        let snapshot = |value: &str| {
+            let root = authored.path().join(value);
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(
+                root.join("PreparedInstanceProvider.hs"),
+                include_str!("fixtures/prepared-instance-provider.hs")
+                    .replace("INSTANCE_RESULT", value),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("PreparedInstanceAgentSpec.hs"),
+                include_str!("fixtures/prepared-instance-agent-spec.hs"),
+            )
+            .unwrap();
+            let root = root.canonicalize().unwrap();
+            let manifests = vec![
+                tidepool_toolchain::cache::SourceRootManifest::from_file_digests(
+                    tidepool_toolchain::cache::source_root_manifest(&root).unwrap(),
+                )
+                .unwrap(),
+            ];
+            let revision = tidepool_toolchain::cache::source_manifests_identity(
+                b"test-prepared-instance-source-owner",
+                &manifests,
+            );
+            issuer.issue(Arc::new(Snapshot {
+                _owner: Arc::clone(&authored),
+                identity: vec![revision],
+                roots: vec![root],
+                manifests,
+            }))
+        };
+        let original_source = snapshot("41");
+        let changed_source = snapshot("42");
+        let forward = [
+            crate::ActorEffectKey::Sleep,
+            crate::ActorEffectKey::Notifications,
+        ];
+        let reverse = [
+            crate::ActorEffectKey::Notifications,
+            crate::ActorEffectKey::Sleep,
+        ];
+        let support = forward.map(exomonad_tool::ToolEffectKey::Actor);
+        let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+        let mut compiler_owner = crate::CompilerPreparationOwner::new();
+        let prepared = compiler_owner
+            .scope(async {
+                let original = source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        original_source.clone(),
+                        &forward,
+                        &support,
+                        Arc::clone(&registry),
+                    )
+                    .await
+                    .unwrap();
+                let reordered = source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        original_source.clone(),
+                        &reverse,
+                        &support,
+                        Arc::clone(&registry),
+                    )
+                    .await
+                    .unwrap();
+                let changed = source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        changed_source,
+                        &forward,
+                        &support,
+                        Arc::clone(&registry),
+                    )
+                    .await
+                    .unwrap();
+                (original, reordered, changed)
+            })
+            .await;
+        assert!(prepared.cleanup.observation().is_confirmed());
+        let (original, reordered, changed) = prepared.action;
+        assert_eq!(original.effects(), forward);
+        assert_eq!(reordered.effects(), reverse);
+        assert_eq!(original.source_revision(), reordered.source_revision());
+        assert_ne!(original.source_revision(), changed.source_revision());
+        assert!(!Arc::ptr_eq(&original.prepared, &reordered.prepared));
+        assert!(!Arc::ptr_eq(&original.prepared, &changed.prepared));
+        let before_execution = tidepool_extract_cmd::extract_spawn_count();
+        let warm_original = source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                original_source,
+                &forward,
+                &support,
+                Arc::clone(&registry),
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&original.prepared, &warm_original.prepared));
+        for (prepared, expected) in [
+            (&original, "41"),
+            (&reordered, "41"),
+            (&changed, "42"),
+            (&warm_original, "41"),
+        ] {
+            run_native_instance_effect_probe(source.clone(), prepared, &support, expected).await;
+        }
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before_execution,
+            "ready lookup, fresh native installations and tool effects must not compile source"
+        );
+    }
+
+    async fn run_native_instance_effect_probe(
+        source: ActorWorkbenchSource,
+        prepared: &PreparedSourceToolset,
+        support: &[exomonad_tool::ToolEffectKey],
+        expected: &str,
+    ) {
+        let (mut session, context, _, _session_root) = host_mount_fixture();
+        session.set_image_registry(Arc::clone(prepared.prepared.entry.image_registry()));
+        let entry = session
+            .prepare_startup_entry(prepared.prepared.entry.compiled().code())
+            .unwrap();
+        let ResidentOutcome::Suspended { hole, request, .. } =
+            session.run_startup_entry(entry).unwrap()
+        else {
+            panic!("source-owned installer must publish its native dispatcher");
+        };
+        let ResidentRequest::AgentTools(
+            crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(declarations, _),
+        ) = ResidentRequest::decode(&request, session.data_con_table()).unwrap()
+        else {
+            panic!("installer must suspend at the original AgentTools owner");
+        };
+        let SpecInstallation {
+            tools,
+            slots,
+            slot_effect_keys,
+        } = decode_installation(tidepool_runtime::value_to_json(
+            &declarations,
+            session.data_con_table(),
+            0,
+        ))
+        .unwrap();
+        crate::tool_contract::validate_installation(
+            &tools,
+            &slots,
+            &slot_effect_keys,
+            prepared.effects(),
+            support,
+        )
+        .unwrap();
+        let dispatch = session
+            .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+            .unwrap()
+            .expect("original native dispatcher");
+        assert!(matches!(
+            session.resume(hole, ()).unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let ResidentWorkbenchStep::Running { fragment, outcome } = workbench
+            .begin_tool(
+                context.clone(),
+                Arc::new(dispatch),
+                "probe".into(),
+                serde_json::json!({"topic": "source instance"}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("native tool must execute its authored Sleep effect");
+        };
+        let ResidentActorBoundary::Sleep {
+            continuation,
+            duration,
+        } = workbench
+            .capture_boundary(
+                context.clone(),
+                (*outcome).into(),
+                context.placement.resource_scope,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("effect-row order must preserve the actual nominal Sleep request");
+        };
+        assert_eq!(duration, Duration::from_millis(19));
+        let outcome = workbench
+            .resume_unit(context.clone(), continuation)
+            .await
+            .unwrap();
+        let result = workbench
+            .settle_item(context, *fragment, outcome)
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Committed { value, output, .. } = result else {
+            panic!(
+                "native instance tool did not complete: {}",
+                describe_step(&result)
+            );
+        };
+        assert_eq!(value, Some(serde_json::json!(expected)));
+        assert_eq!(output, expected);
+    }
+
     async fn run_native_quoted_probe(
         mut session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
         context: crate::ActorSessionContext,
