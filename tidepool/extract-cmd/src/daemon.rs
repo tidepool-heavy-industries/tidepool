@@ -327,8 +327,70 @@ pub(crate) fn trace_path(log_path: &Path) -> std::path::PathBuf {
     log_path.with_extension("jsonl")
 }
 
+/// The appender retries after backend IO failures. Retained evidence must be a
+/// prefix: a failed work row must never be followed by a successful completion.
+struct RetainedTraceWriter<W> {
+    writer: W,
+    failure: Option<io::ErrorKind>,
+}
+
+impl<W: Write> Write for RetainedTraceWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(kind) = self.failure {
+            return Err(io::Error::new(
+                kind,
+                "compiler trace writer previously failed",
+            ));
+        }
+        let result = match self.writer.write(bytes) {
+            Ok(0) if !bytes.is_empty() => Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "compiler trace writer made no progress",
+            )),
+            result => result,
+        };
+        if let Err(error) = &result {
+            self.failure = Some(error.kind());
+        }
+        result
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(kind) = self.failure {
+            return Err(io::Error::new(
+                kind,
+                "compiler trace writer previously failed",
+            ));
+        }
+        let result = self.writer.flush();
+        if let Err(error) = &result {
+            self.failure = Some(error.kind());
+        }
+        result
+    }
+}
+
+fn retained_trace_appender<W: Write + Send + 'static>(
+    writer: W,
+    buffered_lines_limit: usize,
+) -> (
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+) {
+    // The writer thread owns only its file, without application locks or tracing
+    // calls. Queue backpressure therefore has no application lock dependency.
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(buffered_lines_limit)
+        .lossy(false)
+        .finish(RetainedTraceWriter {
+            writer,
+            failure: None,
+        })
+}
+
 /// The returned guard owns the trace appender's flush thread; the daemon's
-/// entry point binds it for the process's life.
+/// entry point retains it through final logging. Its bounded shutdown wait is
+/// not a durability guarantee: interrupted shutdown leaves incomplete evidence.
 pub(crate) fn init_tracing(
     config: &DaemonConfig,
 ) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>, FrontendError> {
@@ -355,7 +417,10 @@ pub(crate) fn init_tracing(
                 .append(true)
                 .open(trace_path(path))
                 .map_err(FrontendError::Io)?;
-            let (writer, guard) = tracing_appender::non_blocking(file);
+            let (writer, guard) = retained_trace_appender(
+                file,
+                tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT,
+            );
             (Box::new(writer), Some(guard))
         }
         None => (Box::new(io::sink()), None),
@@ -3053,6 +3118,180 @@ fn path_from_bytes(bytes: Vec<u8>) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_trace_backpressure_preserves_every_row_and_flushes_on_shutdown() {
+        use std::sync::{atomic::AtomicUsize, mpsc, Arc};
+
+        struct GatedWriter {
+            bytes: Arc<Mutex<Vec<u8>>>,
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+            flushes: Arc<AtomicUsize>,
+        }
+
+        impl Write for GatedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+                }
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (mut writer, guard) = retained_trace_appender(
+            GatedWriter {
+                bytes: Arc::clone(&bytes),
+                entered: Some(entered_tx),
+                release: release_rx,
+                flushes: Arc::clone(&flushes),
+            },
+            1,
+        );
+        let errors = writer.error_counter();
+        writer.write_all(b"work:first\n").unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        // The worker is blocked in the first write and this fills its one slot.
+        writer.write_all(b"work:queued\n").unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            writer.write_all(b"complete\n").unwrap();
+            // A burst also exercises repeated saturation after the gate opens.
+            for _ in 0..256 {
+                writer.write_all(b"retained\n").unwrap();
+            }
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "the full queue must apply backpressure rather than discard rows"
+        );
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        producer.join().unwrap();
+        // Guard shutdown drains queued rows; NonBlocking::flush itself is a noop.
+        drop(guard);
+        let mut expected = b"work:first\nwork:queued\ncomplete\n".to_vec();
+        for _ in 0..256 {
+            expected.extend_from_slice(b"retained\n");
+        }
+        assert_eq!(*bytes.lock().unwrap(), expected);
+        assert!(flushes.load(Ordering::SeqCst) > 0);
+        assert_eq!(errors.dropped_lines(), 0);
+    }
+
+    #[test]
+    fn retained_trace_partial_failure_cannot_resume_with_a_completion() {
+        struct PartialFailure {
+            bytes: Vec<u8>,
+            calls: usize,
+        }
+
+        impl Write for PartialFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                match self.calls {
+                    1 => {
+                        self.bytes.extend_from_slice(&bytes[..2]);
+                        Ok(2)
+                    }
+                    2 => Err(io::Error::other("injected write failure")),
+                    _ => {
+                        self.bytes.extend_from_slice(bytes);
+                        Ok(bytes.len())
+                    }
+                }
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = RetainedTraceWriter {
+            writer: PartialFailure {
+                bytes: Vec::new(),
+                calls: 0,
+            },
+            failure: None,
+        };
+        assert!(writer.write_all(b"work\n").is_err());
+        assert!(writer.write_all(b"complete\n").is_err());
+        assert!(writer.flush().is_err());
+        assert_eq!(writer.writer.bytes, b"wo");
+        assert_eq!(writer.writer.calls, 2);
+    }
+
+    #[test]
+    fn retained_trace_zero_write_cannot_resume_with_a_completion() {
+        struct ZeroOnce(bool);
+
+        impl Write for ZeroOnce {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    Ok(0)
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = RetainedTraceWriter {
+            writer: ZeroOnce(true),
+            failure: None,
+        };
+        assert_eq!(
+            writer.write_all(b"work\n").unwrap_err().kind(),
+            io::ErrorKind::WriteZero
+        );
+        assert!(writer.write_all(b"complete\n").is_err());
+    }
+
+    #[test]
+    fn retained_trace_flush_failure_cannot_resume_with_a_completion() {
+        struct FlushFailure(Vec<u8>);
+
+        impl Write for FlushFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("injected flush failure"))
+            }
+        }
+
+        let mut writer = RetainedTraceWriter {
+            writer: FlushFailure(Vec::new()),
+            failure: None,
+        };
+        writer.write_all(b"work\n").unwrap();
+        assert!(writer.flush().is_err());
+        assert!(writer.write_all(b"complete\n").is_err());
+        assert_eq!(writer.writer.0, b"work\n");
+    }
 
     fn admission_capacity(cpus: usize, memory_mb: u64) -> crate::resources::ResourceCapacity {
         crate::resources::ResourceCapacity { cpus, memory_mb }
