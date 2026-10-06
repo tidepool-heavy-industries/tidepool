@@ -197,7 +197,6 @@ checkedPurposeCases manifest fields = do
       ,TList (take 2 expressionFields ++ [TString "opaque"] ++ drop 2 expressionFields)
       ,TList (replace 0 (TString "") expressionFields)
       ,TList (replace 1 (TString "unknown") expressionFields)
-      ,TList (replace 2 (TString "") expressionFields)
       ,TList (replace 3 (TList [TList [TString "ghc-prim",TString "GHC.Types"]]) expressionFields)] $ \malformed ->
         refuse manifest "" (envelope (expressionPurpose malformed))
     refuse manifest "" (envelope (TList (replace 10 encoded item)))

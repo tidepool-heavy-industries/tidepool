@@ -42,7 +42,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
         [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
         Nothing 7 "prefix" [] Nothing Nothing [] [] []
       verdict = StmtBinders KBind ["café"] []
-      observation = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "observation" Nothing
+      retainedInput = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "input" Nothing
   BS.writeFile first "first"
   BS.writeFile second "second"
   args <- request fields
@@ -85,7 +85,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
         , inspect { requestActivationPreview = True }, inspect { requestDeclarationJoin = Just "join" }
         , inspect { requestBindGen = Just 7 }, inspect { requestTarget = Just "run" }
         , inspect { requestInjectVals = ["sibling"] }, inspect { requestInspectOut = Nothing }
-        , inspect { requestRetainedGenerations = Map.singleton observation 6 }
+        , inspect { requestRetainedGenerations = Map.singleton retainedInput 6 }
         ] $ \wrong -> unless (not (matchesInspectionAdmission wrong ["Val7"]))
           (fail "inspection authority admitted another operation or input inventory")
   inspectionScopeChecks root
