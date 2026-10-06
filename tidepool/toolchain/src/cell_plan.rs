@@ -437,7 +437,7 @@ mod tests {
         ]);
         let observations = a(vec![
             t("TPCELLOBSERVATIONS"),
-            2.into(),
+            3.into(),
             a(vec![
                 a(vec![item]),
                 a(vec![]),

@@ -1,7 +1,7 @@
 //! Read-only reservations for a parser-certified ordered cell.
 //!
-//! The runtime producer will reserve every original declaration, native value,
-//! and expression display identity before authoritative whole-cell checking.
+//! The runtime producer reserves every original declaration and native capture
+//! identity before authoritative whole-cell checking.
 //! These projections have no public constructor and grant no installed-value
 //! authority. Original products remain compiler-owned; runtime settlement is
 //! required before a later item can use a preceding native value.
@@ -33,7 +33,6 @@ pub enum RuntimePlannedCellSlot {
     },
     Expression {
         capture: Generation,
-        display: Generation,
         observation_name: String,
     },
 }
@@ -41,8 +40,8 @@ pub enum RuntimePlannedCellSlot {
 /// One immutable row issued by the runtime reservation owner.
 ///
 /// Prologues and declarations consume original Lib identities. Binds consume
-/// native Val identities. Expressions reserve both capture and auxiliary
-/// display Val identities, together with their owning observation name.
+/// native Val identities. Expressions reserve one capture Val identity,
+/// together with its owning observation name.
 #[derive(Debug)]
 pub struct RuntimePlannedCellItem {
     pub(super) index: usize,
@@ -75,12 +74,6 @@ impl RuntimePlannedCellItem {
         match self.slot {
             RuntimePlannedCellSlot::Bind { value } => Some(value),
             RuntimePlannedCellSlot::Expression { capture, .. } => Some(capture),
-            _ => None,
-        }
-    }
-    pub fn display_generation(&self) -> Option<Generation> {
-        match self.slot {
-            RuntimePlannedCellSlot::Expression { display, .. } => Some(display),
             _ => None,
         }
     }
@@ -137,11 +130,9 @@ impl RuntimeCellPlanReservation {
                 RuntimePlannedCellSlot::Bind { value } => Checked::Bind { value: value.0 },
                 RuntimePlannedCellSlot::Expression {
                     capture,
-                    display,
                     observation_name,
                 } => Checked::Expression {
                     capture: capture.0,
-                    display: display.0,
                     observation_name: observation_name.clone(),
                 },
             })

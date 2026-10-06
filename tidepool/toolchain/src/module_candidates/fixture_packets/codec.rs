@@ -159,7 +159,6 @@ enum CodecOperation {
 enum PurposeCase {
     Cell,
     Item,
-    Display,
     Inspection,
 }
 #[derive(Deserialize)]
@@ -607,8 +606,7 @@ fn input_facts(root: &Path, proof: &Path, evidence_path: &Path) {
 fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {
     use crate::artifacts::checked_search_authorization;
     use crate::checked_cell::{
-        encode_display_authorization, encode_item_authorization, CheckedCellSpecification,
-        CheckedExpressionPresentation, CheckedItemKind, DisplayAuthorization, ItemAuthorization,
+        encode_item_authorization, CheckedCellSpecification, CheckedItemKind, ItemAuthorization,
     };
     let signature = signature.map(|bytes| {
         crate::checked_cell::fixture_checked_signature(&bytes.0).expect("owner signature decoder")
@@ -650,28 +648,6 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
                 runtime_prefix: [0xaa; 32],
                 imports: &[],
                 observation: None,
-                planned: Value::Null,
-                settled: vec![],
-                value_interfaces: Value::Array(vec![]),
-                template_interfaces: Value::Array(vec![]),
-            })
-        }
-        PurposeCase::Display => {
-            assert!(signature.is_none(), "display has no input signature");
-            encode_display_authorization(DisplayAuthorization {
-                item_admission: [0xaa; 32],
-                receipt: [0xaa; 32],
-                index: 0,
-                observation: "observation",
-                captured_generation: 1,
-                generation: 2,
-                admission: [0xaa; 32],
-                budget: 32,
-                presented: &[],
-                templates: &[],
-                injected: &[],
-                imports: &[],
-                presentation: CheckedExpressionPresentation::Rendered,
                 planned: Value::Null,
                 settled: vec![],
                 value_interfaces: Value::Array(vec![]),

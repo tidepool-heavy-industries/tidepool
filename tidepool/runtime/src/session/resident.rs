@@ -5376,11 +5376,6 @@ where
                 | TurnPurpose::HostPrototype(execution) => Some(
                     execution.original_interface_context(&code.prepared, &code.table, &code.sites),
                 ),
-                TurnPurpose::Display(display) => Some(display.original_interface_context(
-                    &code.prepared,
-                    &code.table,
-                    &code.sites,
-                )),
                 TurnPurpose::ActivationPreview(proof) => {
                     Some(proof.original_interface_context(&code.prepared, &code.table, &code.sites))
                 }
@@ -5407,11 +5402,6 @@ where
                 | TurnPurpose::HostPrototype(execution) => Some(
                     execution.original_execution_context(&code.prepared, &code.table, &code.sites),
                 ),
-                TurnPurpose::Display(display) => Some(display.original_execution_context(
-                    &code.prepared,
-                    &code.table,
-                    &code.sites,
-                )),
                 TurnPurpose::ActivationPreview(proof) => {
                     Some(proof.original_execution_context(&code.prepared, &code.table, &code.sites))
                 }

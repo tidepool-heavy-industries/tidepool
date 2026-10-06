@@ -2490,8 +2490,7 @@ impl PersistentSession {
                 use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
                 count.checked_add(match item.kind() {
                     Kind::Prologue | Kind::Declaration => 0,
-                    Kind::Bind => 1,
-                    Kind::Expression => 2,
+                    Kind::Bind | Kind::Expression => 1,
                 })
             }),
             None => Some(1),
@@ -2588,8 +2587,7 @@ impl PersistentSession {
                     }
                     Kind::Expression => {
                         let capture = Generation(next_value);
-                        let display = Generation(next_value + 1);
-                        next_value += 2;
+                        next_value += 1;
                         let mut observation_name = format!("observation{}", capture.0);
                         while names.contains(&observation_name) {
                             observation_name.push('_');
@@ -2597,7 +2595,6 @@ impl PersistentSession {
                         names.insert(observation_name.clone());
                         Slot::Expression {
                             capture,
-                            display,
                             observation_name,
                         }
                     }
@@ -2658,11 +2655,7 @@ impl PersistentSession {
             for item in planned.items() {
                 frame(&(item.index() as u64).to_le_bytes());
                 frame(&[item.kind() as u8]);
-                for generation in [
-                    item.declaration_generation(),
-                    item.value_generation(),
-                    item.display_generation(),
-                ] {
+                for generation in [item.declaration_generation(), item.value_generation()] {
                     match generation {
                         Some(generation) => {
                             frame(&[1]);

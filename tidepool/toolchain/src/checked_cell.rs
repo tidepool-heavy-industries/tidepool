@@ -484,7 +484,6 @@ pub enum CheckedPlannedCellSlot {
     },
     Expression {
         capture: u64,
-        display: u64,
         observation_name: String,
     },
 }
@@ -559,20 +558,16 @@ impl CheckedPlannedCellSpecification {
                     ParsedCellPlanKind::Expression,
                     CheckedPlannedCellSlot::Expression {
                         capture,
-                        display,
                         observation_name,
                     },
                 ) if *capture > 0
-                    && *display > 0
                     && values.insert(*capture)
-                    && values.insert(*display)
                     && valid_observation_name(observation_name)
                     && observations.insert(observation_name.as_str()) =>
                 {
                     vec![
                         text("expr"),
                         Value::Integer((*capture).into()),
-                        Value::Integer((*display).into()),
                         text(observation_name),
                     ]
                 }
@@ -635,9 +630,7 @@ pub struct CellProgram {
 pub struct CellProgramItem {
     pub(crate) checked: ExactCheckedItem,
     pub(crate) native: Option<Arc<ExactCompiledItem>>,
-    pub(crate) display: Option<Arc<ExactCompiledDisplay>>,
     pub(crate) native_observations: Option<CellProgramObservations>,
-    pub(crate) display_observations: Option<CellProgramObservations>,
 }
 
 #[derive(Debug)]
@@ -672,9 +665,6 @@ impl CellProgramItem {
     pub fn native(&self) -> Option<&Arc<ExactCompiledItem>> {
         self.native.as_ref()
     }
-    pub fn display(&self) -> Option<&Arc<ExactCompiledDisplay>> {
-        self.display.as_ref()
-    }
     pub fn native_turn_bytes(&self) -> Option<&[u8]> {
         self.native_observations
             .as_ref()
@@ -687,21 +677,6 @@ impl CellProgramItem {
     }
     pub fn native_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
         self.native_observations
-            .as_ref()
-            .map(|value| value.products.as_ref())
-    }
-    pub fn display_turn_bytes(&self) -> Option<&[u8]> {
-        self.display_observations
-            .as_ref()
-            .map(|value| value.turn.as_ref())
-    }
-    pub fn display_metadata_bytes(&self) -> Option<&[u8]> {
-        self.display_observations
-            .as_ref()
-            .map(|value| value.metadata.as_ref())
-    }
-    pub fn display_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
-        self.display_observations
             .as_ref()
             .map(|value| value.products.as_ref())
     }
@@ -1659,11 +1634,6 @@ pub enum CheckedExpressionLift {
     Pure,
     Effectful,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CheckedExpressionPresentation {
-    Rendered,
-    Opaque,
-}
 
 /// Compiler proofs for an ordered prefix. Runtime completion retains this
 /// value only after the corresponding native installation and execution.
@@ -1671,7 +1641,6 @@ pub enum CheckedExpressionPresentation {
 pub struct ExactCompiledPrefix {
     cell: Arc<ExactCheckedCell>,
     completed: CheckedPrefixSequence<CompletedCheckedItem>,
-    displays: CheckedPrefixSequence<Arc<ExactCompiledDisplay>>,
     declaration_projection: PrefixDeclarationProjection,
 }
 
@@ -1921,283 +1890,6 @@ pub struct ExactCompiledItem {
     settled_values: CheckedSettledValues,
 }
 
-#[derive(Debug)]
-pub struct ExactCompiledDisplay {
-    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
-    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
-    capture: Arc<ExactCompiledItem>,
-    target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
-    table: tidepool_repr::DataConTable,
-    yield_sites_digest: [u8; 32],
-    generation: u64,
-    admission_digest: [u8; 32],
-    program_admission: bool,
-    bound_binders: Vec<Value>,
-    value_interface: Arc<CheckedValueArtifact>,
-    settled_values: CheckedSettledValues,
-}
-
-impl ExactCompiledDisplay {
-    /// Admit original type-interface custody only after validating the target,
-    /// constructor table and complete compiler-authenticated site metadata.
-    pub fn original_execution_context(
-        &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
-        table: &tidepool_repr::DataConTable,
-        sites: &[crate::YieldSite],
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        self.original_interface_context(target, table, sites)?;
-        Ok(self.original_execution.clone())
-    }
-    pub fn original_interface_context(
-        &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
-        table: &tidepool_repr::DataConTable,
-        sites: &[crate::YieldSite],
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        if !self.matches_target(target) {
-            return Err(failure(
-                "original interface context belongs to another prepared target",
-            ));
-        }
-        self.validate_table(table)?;
-        self.validate_yield_sites(sites)?;
-        Ok(self.original_interfaces.clone())
-    }
-    pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
-        if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
-            return Err(failure(
-                "compiled typed-site metadata was edited before installation",
-            ));
-        }
-        Ok(())
-    }
-    pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
-        self.target.clone()
-    }
-    pub fn validate_runtime_admission(
-        &self,
-        display_digest: [u8; 32],
-        cell_digest: [u8; 32],
-    ) -> Result<(), CompileError> {
-        if self.admission_digest != display_digest
-            && !(self.program_admission && self.admission_digest == cell_digest)
-        {
-            return Err(failure("display belongs to another runtime admission"));
-        }
-        Ok(())
-    }
-    pub fn validate_settled_native_bindings<'a>(
-        &self,
-        actual: impl IntoIterator<
-            Item = (
-                &'a str,
-                &'a tidepool_repr::execution_schema::SymbolIdentity,
-                u64,
-                u64,
-            ),
-        >,
-    ) -> Result<(), CompileError> {
-        if self.program_admission {
-            self.settled_values.validate_required(&self.target, actual)
-        } else {
-            self.settled_values.validate(actual)
-        }
-    }
-    pub fn target_definition_identities(
-        &self,
-    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::SymbolIdentity> {
-        target_definition_identities(&self.target)
-    }
-    pub fn bound_binder_identities(&self) -> impl Iterator<Item = (&str, u64)> {
-        bound_binder_identities(&self.bound_binders)
-    }
-    pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
-        if table != &self.table {
-            return Err(failure("compiled display constructor metadata was edited"));
-        }
-        Ok(())
-    }
-    pub fn value_interface_owned(&self) -> (&str, &Arc<[u8]>) {
-        (
-            &self.value_interface.interface.module,
-            &self.value_interface.interface.bytes,
-        )
-    }
-    pub fn value_interface_certificate(&self) -> Arc<CheckedValueArtifact> {
-        self.value_interface.clone()
-    }
-    pub fn capture(&self) -> &Arc<ExactCompiledItem> {
-        &self.capture
-    }
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-    pub fn admission_digest(&self) -> [u8; 32] {
-        self.admission_digest
-    }
-    pub fn validate_bound_binders(&self, bound: &[Value]) -> Result<(), CompileError> {
-        if bound != self.bound_binders {
-            return Err(failure("compiled display binder metadata was edited"));
-        }
-        Ok(())
-    }
-    pub fn matches_target(
-        &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
-    ) -> bool {
-        std::ptr::eq(self.target.as_ref(), target) || self.target.as_ref() == target
-    }
-}
-
-pub(crate) struct CheckedDisplayOffer {
-    pub(crate) capture: Arc<ExactCompiledItem>,
-    pub(crate) prefix: ExactCompiledPrefix,
-    pub(crate) generation: u64,
-    pub(crate) admission_digest: [u8; 32],
-    pub(crate) budget: u64,
-    pub(crate) presented: Vec<String>,
-    pub(crate) settled_values: CheckedSettledValues,
-    pub(crate) is_program: bool,
-}
-
-impl CheckedDisplayOffer {
-    pub(crate) fn authorization(
-        &self,
-        producer: &[u8],
-        context: [u8; 32],
-    ) -> Result<Value, CompileError> {
-        self.prefix.revalidate_context(producer, &context)?;
-        if self.admission_digest == [0; 32]
-            || self
-                .prefix
-                .completed_item(self.capture.item.index())
-                .is_none_or(|completed| !Arc::ptr_eq(completed, &self.capture))
-        {
-            return Err(failure(
-                "display has no protected same-cell completed capture",
-            ));
-        }
-        let observation = self
-            .capture
-            .observation_name()
-            .ok_or_else(|| failure("display item is not an observation capture"))?;
-        let presentation = self
-            .capture
-            .item
-            .expression_presentation()?
-            .ok_or_else(|| failure("display has no checked presentation"))?;
-        Ok(encode_display_authorization(DisplayAuthorization {
-            item_admission: self.capture.item.admission_digest(),
-            receipt: self.capture.item.cell.receipt_digest,
-            index: self.capture.item.index,
-            observation,
-            captured_generation: self.capture.generation,
-            generation: self.generation,
-            admission: self.admission_digest,
-            budget: self.budget,
-            presented: &self.presented,
-            templates: self.capture.item.turn_templates(),
-            injected: &self.prefix.injected_modules(),
-            imports: &self.settled_values.imports,
-            presentation,
-            planned: self.prefix.planned_authorization(),
-            settled: self.settled_values.authorization.clone(),
-            value_interfaces: self.prefix.value_interface_authorization()?,
-            template_interfaces: self.capture.item.template_interface_authorization()?,
-        }))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn seal(
-        &self,
-        root: &Path,
-        request: &str,
-        source: &str,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
-        source_lexical: &[crate::declaration_join::ExactLexicalNode],
-        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
-    ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
-        let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
-        let fields = row(&receipt, 8)?;
-        if string(&fields[0])? != "TPEXACTDISPLAY"
-            || string(&fields[1])? != "1"
-            || string(&fields[2])? != request
-            || string(&fields[3])?
-                != hex(&if self.is_program {
-                    self.capture.item.admission_digest()
-                } else {
-                    self.capture.item.cell.receipt_digest
-                })
-            || fields[4] != Value::Integer((self.capture.item.index as u64).into())
-            || string(&fields[5])? != hex(&self.admission_digest)
-            || string(&fields[6])? != hash(source.as_bytes())
-            || string(&fields[7])? != "tidepool-display-recipe-1"
-        {
-            return Err(failure(
-                "display recipe differs from its completed capture offer",
-            ));
-        }
-        let turn = decode(&read(root.join("turn.cbor"), 32 * 1024 * 1024)?)?;
-        let turn = row(&turn, 2)?;
-        if string(&turn[0])? != "Bind" {
-            return Err(failure("display recipe is not its binding bundle"));
-        }
-        let fields = row(&turn[1], 5)?;
-        let names = [
-            format!("__tidepoolPage{}", self.generation),
-            format!("__tidepoolMetadata{}", self.generation),
-            "cellDisplay".into(),
-        ];
-        if fields[0] != Value::Array(names.iter().map(text).collect())
-            || string(&fields[4])? != source
-        {
-            return Err(failure("display bundle names or wrapper changed"));
-        }
-        let yield_sites_digest = crate::artifacts::yield_sites_metadata_digest(
-            &crate::turn_observations::decode_turn_yield_sites(&fields[3])?,
-        )?;
-        let bound = list(&fields[2], 3)?.to_vec();
-        let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation))
-            .module_name();
-        if bound.len() != 3 {
-            return Err(failure("display binder inventory differs"));
-        }
-        for (binder, name) in bound.iter().zip(&names) {
-            let fields = row(binder, 7)?;
-            if string(&fields[0])? != name || string(&fields[2])? != module {
-                return Err(failure("display binder has another reserved native owner"));
-            }
-        }
-        let interface = self.capture.item.cell.value_inputs.capture_output(
-            self.generation,
-            &self.capture.item.cell,
-            artifact_context,
-            source_lexical,
-        )?;
-        Ok(Arc::new(ExactCompiledDisplay {
-            original_interfaces: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                    self.capture.item.cell.producer,
-                    original_execution.artifact_view(),
-                )?,
-            ),
-            original_execution,
-            capture: self.capture.clone(),
-            target: target.clone(),
-            table: read_table(root)?,
-            yield_sites_digest,
-            generation: self.generation,
-            admission_digest: self.admission_digest,
-            program_admission: self.is_program,
-            bound_binders: bound,
-            value_interface: interface,
-            settled_values: self.settled_values.clone(),
-        }))
-    }
-}
-
 impl ExactCompiledItem {
     /// Admit original type-interface custody only after validating the target,
     /// constructor table and complete compiler-authenticated site metadata.
@@ -2367,11 +2059,6 @@ impl ExactCompiledPrefix {
                     .filter_map(CompletedCheckedItem::native)
                     .filter_map(|item| item.value_interface_certificate()),
             )
-            .chain(
-                self.displays
-                    .iter()
-                    .map(|display| display.value_interface_certificate()),
-            )
             .collect()
     }
 
@@ -2435,23 +2122,6 @@ impl ExactCompiledPrefix {
         Ok(next)
     }
 
-    pub fn append_display(&self, display: Arc<ExactCompiledDisplay>) -> Result<Self, CompileError> {
-        if self
-            .completed_item(display.capture.item.index())
-            .is_none_or(|capture| !Arc::ptr_eq(capture, &display.capture))
-            || self
-                .displays
-                .iter()
-                .any(|prior| prior.generation == display.generation)
-        {
-            return Err(failure(
-                "display is not a new bundle of its same completed capture",
-            ));
-        }
-        let mut next = self.clone();
-        next.displays.push(display);
-        Ok(next)
-    }
     pub fn completed_item(&self, index: usize) -> Option<&Arc<ExactCompiledItem>> {
         self.completed
             .get(index)
@@ -2595,11 +2265,6 @@ impl ExactCompiledPrefix {
                             .map(|artifact| artifact.interface.module.clone())
                     }),
             )
-            .chain(
-                self.displays
-                    .iter()
-                    .map(|display| display.value_interface.interface.module.clone()),
-            )
             .collect()
     }
     pub fn completed_interfaces(&self) -> impl Iterator<Item = (&str, &[u8])> {
@@ -2607,12 +2272,6 @@ impl ExactCompiledPrefix {
             .iter()
             .filter_map(CompletedCheckedItem::native)
             .filter_map(|completed| completed.value_interface())
-            .chain(self.displays.iter().map(|display| {
-                (
-                    display.value_interface.interface.module.as_str(),
-                    display.value_interface.interface.bytes.as_ref(),
-                )
-            }))
     }
     fn value_artifacts(&self) -> Result<BTreeMap<&str, &ValueInterfaceBytes>, CompileError> {
         let mut inputs = self
@@ -2634,15 +2293,6 @@ impl ExactCompiledPrefix {
                 {
                     return Err(failure("duplicate checked value interface"));
                 }
-            }
-        }
-        for display in &self.displays {
-            let artifact = &display.value_interface;
-            if inputs
-                .insert(&artifact.interface.module, &artifact.interface)
-                .is_some()
-            {
-                return Err(failure("duplicate checked display interface"));
             }
         }
         Ok(inputs)
@@ -2696,34 +2346,6 @@ impl ExactCompiledPrefix {
                 }
             }
         }
-        for display in &self.displays {
-            for (index, binder) in display.bound_binders.iter().enumerate() {
-                if index == 1 {
-                    continue;
-                }
-                let fields = row(binder, 7)?;
-                let name = string(&fields[0])?.to_owned();
-                let identity = tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "main".into(),
-                    module: string(&fields[2])?.to_owned(),
-                    namespace: "value".into(),
-                    occurrence: name.clone(),
-                    record_parent: None,
-                };
-                let Value::Integer(identifier) = fields[1] else {
-                    return Err(failure("binder id is not integer"));
-                };
-                winners.insert(
-                    (identity.module.clone(), name.clone()),
-                    (
-                        name,
-                        identity,
-                        display.generation,
-                        u64::try_from(identifier).map_err(failure)?,
-                    ),
-                );
-            }
-        }
         self.select_settled_values(winners.into_values().collect())
     }
 
@@ -2737,29 +2359,12 @@ impl ExactCompiledPrefix {
             .iter()
             .filter_map(CompletedCheckedItem::native)
             .filter_map(|item| {
-                item.value_interface.as_ref().map(|artifact| {
-                    (
-                        item.generation,
-                        artifact,
-                        item.bound_binders.as_slice(),
-                        false,
-                    )
-                })
+                item.value_interface
+                    .as_ref()
+                    .map(|artifact| (item.generation, artifact, item.bound_binders.as_slice()))
             });
-        let displays = self.displays.iter().map(|display| {
-            (
-                display.generation,
-                &display.value_interface,
-                display.bound_binders.as_slice(),
-                true,
-            )
-        });
-        for (generation, artifact, binders, display) in native.chain(displays) {
-            for (index, binder) in binders.iter().enumerate() {
-                // The display metadata row is consumed by rendering, never a lexical binding.
-                if display && index == 1 {
-                    continue;
-                }
+        for (generation, artifact, binders) in native {
+            for binder in binders {
                 let fields = row(binder, 7)?;
                 let name = string(&fields[0])?;
                 let id = match &fields[1] {
@@ -2978,14 +2583,6 @@ impl ExactCheckedItem {
         };
         Ok(Some(decode_expression_lift(expression)?))
     }
-    pub fn expression_presentation(
-        &self,
-    ) -> Result<Option<CheckedExpressionPresentation>, CompileError> {
-        let Some(expression) = &self.cell.items[self.index].expression else {
-            return Ok(None);
-        };
-        Ok(Some(decode_expression_presentation(expression)?))
-    }
     pub fn same_cell(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.cell, &other.cell)
     }
@@ -2996,7 +2593,6 @@ impl ExactCheckedItem {
         Ok(ExactCompiledPrefix {
             cell: self.cell.clone(),
             completed: CheckedPrefixSequence::new(),
-            displays: CheckedPrefixSequence::new(),
             declaration_projection: PrefixDeclarationProjection::Initial,
         })
     }
@@ -3342,7 +2938,7 @@ pub(crate) fn admit_checked_cell(
         } else {
             "TPEXACTCHECK"
         }
-        || string(&header[1])? != "2"
+        || string(&header[1])? != "3"
         || string(&header[2])? != request_digest
         || string(&header[3])? != hex(&specification.admission_digest)
         || string(&header[4])? != hash(specification.cell_source.as_bytes())
@@ -3449,7 +3045,7 @@ pub(crate) fn admit_checked_cell(
                 Some(unique_key(
                     expressions,
                     &format!("__tidepool_cell_expr_{index}"),
-                    5,
+                    4,
                 )?)
             } else {
                 None
@@ -3459,7 +3055,7 @@ pub(crate) fn admit_checked_cell(
                 .map(|value| row(value, 3).and_then(|row| string(&row[0])))
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(expression) = &expression {
-                keys.push(string(&row(expression, 5)?[0])?);
+                keys.push(string(&row(expression, 4)?[0])?);
             }
             let item_signatures = keys
                 .iter()
@@ -3671,7 +3267,7 @@ pub(crate) fn cell_observations(value: &Value) -> Result<&[Value], CompileError>
         || envelope[1]
             .as_integer()
             .and_then(|value| u64::try_from(value).ok())
-            != Some(2)
+            != Some(3)
     {
         return Err(failure("unsupported cell observations version"));
     }
@@ -3680,7 +3276,7 @@ pub(crate) fn cell_observations(value: &Value) -> Result<&[Value], CompileError>
         row(pin, 3)?;
     }
     for expression in list(&payload[4], 65536)? {
-        row(expression, 5)?;
+        row(expression, 4)?;
     }
     Ok(payload)
 }
@@ -3732,13 +3328,13 @@ mod tests {
             Value::Array(vec![Value::Array(vec![]), Value::Array(vec![])]),
             Value::Array(vec![]),
         ]);
-        let envelope = Value::Array(vec![text("TPCELLOBSERVATIONS"), 2.into(), payload.clone()]);
+        let envelope = Value::Array(vec![text("TPCELLOBSERVATIONS"), 3.into(), payload.clone()]);
         assert!(cell_observations(&envelope).is_ok());
         assert!(cell_observations(&payload).is_err());
         let mut old_version = envelope.clone();
-        old_version.as_array_mut().unwrap()[1] = 1.into();
+        old_version.as_array_mut().unwrap()[1] = 2.into();
         assert!(cell_observations(&old_version).is_err());
-        for (section, count) in [(1, 4), (4, 6)] {
+        for (section, count) in [(1, 4), (4, 5)] {
             let mut old_row = envelope.clone();
             old_row.as_array_mut().unwrap()[2].as_array_mut().unwrap()[section] =
                 Value::Array(vec![Value::Array(vec![Value::Null; count])]);
@@ -4230,7 +3826,6 @@ mod tests {
         let prefix = ExactCompiledPrefix {
             cell,
             completed,
-            displays: CheckedPrefixSequence::new(),
             declaration_projection: PrefixDeclarationProjection::Certified(Arc::new(
                 expected_publication.clone(),
             )),
@@ -4750,65 +4345,6 @@ pub(crate) fn encode_item_authorization(fields: ItemAuthorization<'_>) -> Value 
         fields.template_interfaces,
     ])
 }
-pub(crate) struct DisplayAuthorization<'a> {
-    pub(crate) item_admission: [u8; 32],
-    pub(crate) receipt: [u8; 32],
-    pub(crate) index: usize,
-    pub(crate) observation: &'a str,
-    pub(crate) captured_generation: u64,
-    pub(crate) generation: u64,
-    pub(crate) admission: [u8; 32],
-    pub(crate) budget: u64,
-    pub(crate) presented: &'a [String],
-    pub(crate) templates: &'a [(String, String)],
-    pub(crate) injected: &'a [String],
-    pub(crate) imports: &'a [(String, Vec<String>)],
-    pub(crate) presentation: CheckedExpressionPresentation,
-    pub(crate) planned: Value,
-    pub(crate) settled: Vec<Value>,
-    pub(crate) value_interfaces: Value,
-    pub(crate) template_interfaces: Value,
-}
-pub(crate) fn encode_display_authorization(fields: DisplayAuthorization<'_>) -> Value {
-    array([
-        text(crate::artifacts::CheckedPurpose::Display.wire_tag()),
-        text(hex(&fields.item_admission)),
-        text(hex(&fields.receipt)),
-        Value::Integer((fields.index as u64).into()),
-        text(fields.observation),
-        Value::Integer(fields.captured_generation.into()),
-        Value::Integer(fields.generation.into()),
-        text(hex(&fields.admission)),
-        Value::Integer(fields.budget.into()),
-        Value::Array(fields.presented.iter().map(text).collect()),
-        Value::Array(
-            fields
-                .templates
-                .iter()
-                .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
-                .collect(),
-        ),
-        Value::Array(fields.injected.iter().map(text).collect()),
-        Value::Array(
-            fields
-                .imports
-                .iter()
-                .map(|(module, names)| {
-                    array([text(module), Value::Array(names.iter().map(text).collect())])
-                })
-                .collect(),
-        ),
-        text(match fields.presentation {
-            CheckedExpressionPresentation::Rendered => "rendered",
-            CheckedExpressionPresentation::Opaque => "opaque",
-        }),
-        fields.planned,
-        Value::Array(fields.settled),
-        fields.value_interfaces,
-        fields.template_interfaces,
-    ])
-}
-
 #[cfg(test)]
 pub(crate) fn fixture_checked_signature(
     bytes: &[u8],
@@ -4817,26 +4353,15 @@ pub(crate) fn fixture_checked_signature(
 }
 
 fn decode_expression_lift(expression: &Value) -> Result<CheckedExpressionLift, CompileError> {
-    Ok(match string(&row(expression, 5)?[1])? {
+    Ok(match string(&row(expression, 4)?[1])? {
         "pure" => CheckedExpressionLift::Pure,
         "effectful" => CheckedExpressionLift::Effectful,
         _ => return Err(failure("sealed expression has an unknown lift")),
     })
 }
-fn decode_expression_presentation(
-    expression: &Value,
-) -> Result<CheckedExpressionPresentation, CompileError> {
-    Ok(match string(&row(expression, 5)?[2])? {
-        "rendered" => CheckedExpressionPresentation::Rendered,
-        "opaque" => CheckedExpressionPresentation::Opaque,
-        _ => return Err(failure("sealed expression has an unknown presentation")),
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn fixture_expression_plan(bytes: &[u8]) -> Result<Value, CompileError> {
-    let expression = unique_key(&[decode(bytes)?], "__tidepool_cell_expr_0", 5)?;
+    let expression = unique_key(&[decode(bytes)?], "__tidepool_cell_expr_0", 4)?;
     decode_expression_lift(&expression)?;
-    decode_expression_presentation(&expression)?;
     Ok(expression)
 }
