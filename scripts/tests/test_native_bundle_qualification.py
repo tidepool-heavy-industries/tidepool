@@ -30,6 +30,22 @@ def runtime_tools_fixture(root):
     return tools
 
 
+def root_entry_source_fixture(root, modules):
+    """Generated source declaration fixture, without compilation authority."""
+    path = root / qualification.ROOT_ENTRY_SOURCE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('module TidepoolPreparedDriver where\n')
+    for relative in qualification.CATALOG_SOURCE_ROOTS.values():
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    (root / 'TidepoolCatalog.hs').write_text(qualification.catalog_probe(modules))
+    generated = qualification.root_entry_source_record(root)
+    qualification.write_json(root / qualification.CATALOG_SOURCE_METADATA, {
+        'schema': 1, 'kind': 'native-catalog-source-snapshot', 'components': ['fixture'],
+        'modules': modules, 'roots': qualification.CATALOG_SOURCE_ROOTS,
+        'probe': 'TidepoolCatalog.hs', 'targets': ['catalogSentinel'], 'root_entry': generated})
+    return generated
+
+
 class NativeQualificationTests(unittest.TestCase):
     def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
         with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):
@@ -257,7 +273,7 @@ class NativeQualificationTests(unittest.TestCase):
                       '-c', 'user.email=qualification@example.invalid', 'commit', '-qm']
             subprocess.run([*commit, 'first revision'], check=True)
             inputs = {'native.rs': qualification.sha256(source / 'native.rs')}
-            contract = {'profile': 'fast-dev', 'source_inputs': inputs,
+            contract = {'profile': 'fast-dev', 'startup_mode': 'unprepared', 'source_inputs': inputs,
                         'source_inputs_sha256': qualification.digest_inventory(inputs), 'artifacts': {}}
             for relative, target in qualification.ARTIFACT_TARGETS.items():
                 path = bundle / relative
@@ -325,12 +341,41 @@ class NativeQualificationTests(unittest.TestCase):
                 tracked.write_text('source ' + relative)
                 retained.write_bytes(tracked.read_bytes())
             subprocess.run(['git', '-C', str(source), 'add', 'bridge'], check=True)
-            evidence = qualification.declared_haskell_sources(source, bundle, original)
+            generated = root_entry_source_fixture(original, {'Library': 'lib/Library.hs', 'Actor': 'actors/Actor.hs'})
+            evidence = qualification.declared_haskell_sources(source, bundle, original, generated)
             self.assertEqual(set(evidence), {'stdlib', 'actors'})
             self.assertFalse((bundle / 'share/exomonad/stdlib').exists())
             (original / 'actors/Actor.hs').write_text('changed actor')
             with self.assertRaisesRegex(ValueError, 'tracked declared Haskell source bytes'):
-                qualification.declared_haskell_sources(source, bundle, original)
+                qualification.declared_haskell_sources(source, bundle, original, generated)
+
+    def test_generated_driver_requires_declared_bytes_and_rejects_missing_contract_or_extra_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, original = root / 'source', root / 'original'
+            source.mkdir()
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            for relative in ('lib/Library.hs', 'actors/Actor.hs'):
+                tracked = source / 'bridge/haskell' / relative
+                retained = original / relative
+                tracked.parent.mkdir(parents=True, exist_ok=True)
+                retained.parent.mkdir(parents=True, exist_ok=True)
+                tracked.write_text('source ' + relative)
+                retained.write_bytes(tracked.read_bytes())
+            subprocess.run(['git', '-C', str(source), 'add', 'bridge'], check=True)
+            generated = root_entry_source_fixture(original, {'Library': 'lib/Library.hs', 'Actor': 'actors/Actor.hs'})
+            evidence = qualification.declared_haskell_sources(source, root, original, generated)
+            self.assertEqual(evidence['actors']['TidepoolPreparedDriver.hs'], generated['sha256'])
+            with self.assertRaisesRegex(ValueError, 'absent from the owning native build contract'):
+                qualification.declared_haskell_sources(source, root, original)
+            extra = original / 'actors/Unexpected.hs'
+            extra.write_text('module Unexpected where\n')
+            with self.assertRaisesRegex(ValueError, 'tracked declared Haskell source bytes'):
+                qualification.declared_haskell_sources(source, root, original, generated)
+            extra.unlink()
+            (original / qualification.ROOT_ENTRY_SOURCE).write_text('module DifferentDriver where\n')
+            with self.assertRaisesRegex(ValueError, 'declared generated source bytes'):
+                qualification.declared_haskell_sources(source, root, original, generated)
 
     def test_runtime_environment_rejects_ambient_catalog_and_daemon_selection(self):
         with patch.dict(os.environ, {
@@ -453,8 +498,11 @@ class CatalogSourceTests(unittest.TestCase):
             path.write_text('generated ' + relative)
         self.cohort = self.root / 'cohort.json'
         qualification.write_json(self.cohort, {'components': ['native-helper-contract'], 'modules': self.modules})
+        self.root_entry_source = self.root / 'TidepoolPreparedDriver.hs'
+        self.root_entry_source.write_text('module TidepoolPreparedDriver where\n')
         self.args = SimpleNamespace(sources=self.sources, effects=self.effects,
-                                    cohort=self.cohort, output=self.snapshot, jev_sources=self.jev_sources)
+                                    cohort=self.cohort, output=self.snapshot, jev_sources=self.jev_sources,
+                                    root_entry_source=self.root_entry_source)
 
     def test_snapshot_keeps_library_roles_and_uses_declared_generated_bytes(self):
         source = self.sources / 'lib/Library.hs'
@@ -592,7 +640,24 @@ class CatalogSourceTests(unittest.TestCase):
             'producer_target': '//tidepool/toolchain:tidepool-module-package',
             'retention_record_origin': str(record),
             'product_inventory': qualification.native_catalog_products(catalog.parent), **selected})
-        contract = {'stdlib_mode': 'catalog-backed', 'native_catalog': selected}
+        entry = shared / 'root-entry'
+        qualification.write_json(entry / 'entry.json', {
+            'schema': 1, 'purpose': 'original_source', 'target': '__prepared',
+            'source': str(original / qualification.ROOT_ENTRY_SOURCE),
+            'sources': self.selection(original), 'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
+        shutil.copy2(record, entry / 'source-retention.json')
+        entry_products = qualification.native_catalog_products(entry, qualification.NATIVE_ROOT_ENTRY_BUILD)
+        selected_entry = {'manifest_sha256': qualification.sha256(entry / 'entry.json'),
+                          'source_selection': self.selection(original),
+                          'source_inventory_sha256': selected['source_inventory_sha256'],
+                          'product_inventory_sha256': qualification.digest_inventory(entry_products)}
+        qualification.write_json(entry / qualification.NATIVE_ROOT_ENTRY_BUILD, {
+            'schema': 1, 'kind': 'native-root-entry-build',
+            'producer_target': '//tidepool/toolchain:tidepool-module-package',
+            'product_inventory': entry_products, **selected_entry})
+        contract = {'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared', 'native_catalog': selected,
+                    'native_root_entry': selected_entry,
+                    'generated_root_source': qualification.catalog_source_metadata(original)['root_entry']}
         qualification.write_json(shared / 'native-build-contract.json', contract)
         (shared / 'runtime-tools').symlink_to(tools)
         (shared / 'ghc-libdir.txt').write_text(str(tools) + '\n')
