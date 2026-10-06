@@ -254,7 +254,11 @@ fn build_fixture_obeys_ordered_source_roots_and_refuses_partial_target_sets() {
         std::fs::read(second_output.join("result.prepared.cbor")).unwrap()
     );
     let refused_output = root.path().join("refused-prepared");
+    let action_scratch = root.path().join("action-scratch");
+    std::fs::create_dir(&action_scratch).unwrap();
     let refusal = compiler(&source, &refused_output, &["result", "missing"], &[first])
+        .current_dir(root.path())
+        .env("BUCK_SCRATCH_PATH", "action-scratch")
         .output()
         .unwrap();
     assert!(
@@ -271,6 +275,7 @@ fn build_fixture_obeys_ordered_source_roots_and_refuses_partial_target_sets() {
         .find_map(|line| line.strip_prefix("fixture action scratch retained at "))
         .map(PathBuf::from)
         .expect("failed CLI action names its retained diagnostic owner");
+    assert!(retained.starts_with(&action_scratch));
     let failures = std::fs::read_dir(retained.join("compiler-failures"))
         .unwrap()
         .map(|entry| entry.unwrap().path())

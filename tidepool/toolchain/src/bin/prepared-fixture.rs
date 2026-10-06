@@ -57,6 +57,7 @@ fn required(path: Option<PathBuf>, name: &str) -> Result<PathBuf, String> {
 
 fn run() -> Result<(), String> {
     let args = arguments()?;
+    let original_directory = std::env::current_dir().map_err(|error| error.to_string())?;
     let source = required(args.source, "--source")?;
     let frontend = required(args.frontend, "--frontend")?;
     let worker = required(args.worker, "--worker")?;
@@ -70,17 +71,17 @@ fn run() -> Result<(), String> {
     let output = if output.is_absolute() {
         output
     } else {
-        std::env::current_dir()
-            .map_err(|error| error.to_string())?
-            .join(output)
+        original_directory.join(output)
     };
     let include = args
         .include
         .into_iter()
         .map(|path| required(Some(path), "--include"))
         .collect::<Result<Vec<_>, _>>()?;
-    let scratch = tempfile::tempdir_in(std::env::current_dir().map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
+    let scratch_parent = std::env::var_os("BUCK_SCRATCH_PATH")
+        .map(|path| original_directory.join(path))
+        .unwrap_or(original_directory);
+    let scratch = tempfile::tempdir_in(scratch_parent).map_err(|error| error.to_string())?;
     // This process owns no concurrent work. Discard inherited runtime input
     // selection and contain compiler/package caches inside its action scratch.
     unsafe {
