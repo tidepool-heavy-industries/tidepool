@@ -22,6 +22,11 @@ pub struct CheckedCellSpecification {
     pub reserved_declaration_modules: Vec<String>,
 }
 
+pub(crate) enum CheckedCellManifestPurpose {
+    Authored,
+    Program,
+}
+
 impl CheckedCellSpecification {
     /// Actor admission binds the exact source and compiler recipe inputs.
     /// Runtime view/native identities enter the separate admission digest.
@@ -42,7 +47,10 @@ impl CheckedCellSpecification {
         ciborium::ser::into_writer(&value, &mut bytes).expect("specification encodes to memory");
         Sha256::digest(bytes).into()
     }
-    pub(crate) fn manifest_value(&self) -> Result<Value, CompileError> {
+    pub(crate) fn manifest_value(
+        &self,
+        purpose: CheckedCellManifestPurpose,
+    ) -> Result<Value, CompileError> {
         if self.admission_digest == [0; 32] {
             return Err(failure("runtime admission digest is absent"));
         }
@@ -54,7 +62,14 @@ impl CheckedCellSpecification {
             return Err(failure("duplicate planned or injected module"));
         }
         Ok(array([
-            text("cell-check"),
+            text(match purpose {
+                CheckedCellManifestPurpose::Authored => {
+                    crate::artifacts::CheckedPurpose::Cell.wire_tag()
+                }
+                CheckedCellManifestPurpose::Program => {
+                    crate::artifacts::CheckedPurpose::Program.wire_tag()
+                }
+            }),
             text(hex(&self.admission_digest)),
             text(hash(self.cell_source.as_bytes())),
             text(hash(self.template_source.as_bytes())),
@@ -4696,7 +4711,7 @@ pub(crate) struct ItemAuthorization<'a> {
 }
 pub(crate) fn encode_item_authorization(fields: ItemAuthorization<'_>) -> Value {
     array([
-        text("checked-item"),
+        text(crate::artifacts::CheckedPurpose::Item.wire_tag()),
         text(hex(&fields.admission)),
         text(hex(&fields.receipt)),
         Value::Integer((fields.index as u64).into()),
@@ -4756,7 +4771,7 @@ pub(crate) struct DisplayAuthorization<'a> {
 }
 pub(crate) fn encode_display_authorization(fields: DisplayAuthorization<'_>) -> Value {
     array([
-        text("checked-display"),
+        text(crate::artifacts::CheckedPurpose::Display.wire_tag()),
         text(hex(&fields.item_admission)),
         text(hex(&fields.receipt)),
         Value::Integer((fields.index as u64).into()),

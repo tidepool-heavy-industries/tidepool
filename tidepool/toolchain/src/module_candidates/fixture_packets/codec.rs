@@ -605,7 +605,7 @@ fn input_facts(root: &Path, proof: &Path, evidence_path: &Path) {
 }
 
 fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {
-    use crate::artifacts::{checked_search_authorization, CheckedPurpose};
+    use crate::artifacts::checked_search_authorization;
     use crate::checked_cell::{
         encode_display_authorization, encode_item_authorization, CheckedCellSpecification,
         CheckedExpressionPresentation, CheckedItemKind, DisplayAuthorization, ItemAuthorization,
@@ -613,89 +613,77 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
     let signature = signature.map(|bytes| {
         crate::checked_cell::fixture_checked_signature(&bytes.0).expect("owner signature decoder")
     });
-    let (stage, body) = match case {
+    let body = match case {
         PurposeCase::Cell => {
             assert!(
                 signature.is_none(),
                 "cell checking cannot carry an input signature"
             );
-            (
-                CheckedPurpose::Cell,
-                crate::artifacts::encode_cell_authorization(
-                    &CheckedCellSpecification {
-                        admission_digest: [0xaa; 32],
-                        cell_source: "codec cell".into(),
-                        template_source: "codec template".into(),
-                        turn_templates: vec![],
-                        injected_modules: vec![],
-                        reserved_declaration_modules: vec![],
-                    },
-                    Value::Array(vec![]),
-                )
-                .unwrap(),
+            crate::artifacts::encode_cell_authorization(
+                crate::checked_cell::CheckedCellManifestPurpose::Authored,
+                &CheckedCellSpecification {
+                    admission_digest: [0xaa; 32],
+                    cell_source: "codec cell".into(),
+                    template_source: "codec template".into(),
+                    turn_templates: vec![],
+                    injected_modules: vec![],
+                    reserved_declaration_modules: vec![],
+                },
+                Value::Array(vec![]),
             )
+            .unwrap()
         }
         PurposeCase::Item => {
             assert!(signature.is_none(), "item purpose has no input signature");
-            (
-                CheckedPurpose::Item,
-                encode_item_authorization(ItemAuthorization {
-                    admission: [0xaa; 32],
-                    receipt: [0xaa; 32],
-                    index: 0,
-                    source: "codec item",
-                    kind: CheckedItemKind::Bind,
-                    binders: &[],
-                    templates: &[],
-                    injected: &[],
-                    signatures: &[],
-                    expression: None,
-                    generation: 1,
-                    runtime_prefix: [0xaa; 32],
-                    imports: &[],
-                    observation: None,
-                    planned: Value::Null,
-                    settled: vec![],
-                    value_interfaces: Value::Array(vec![]),
-                    template_interfaces: Value::Array(vec![]),
-                }),
-            )
+            encode_item_authorization(ItemAuthorization {
+                admission: [0xaa; 32],
+                receipt: [0xaa; 32],
+                index: 0,
+                source: "codec item",
+                kind: CheckedItemKind::Bind,
+                binders: &[],
+                templates: &[],
+                injected: &[],
+                signatures: &[],
+                expression: None,
+                generation: 1,
+                runtime_prefix: [0xaa; 32],
+                imports: &[],
+                observation: None,
+                planned: Value::Null,
+                settled: vec![],
+                value_interfaces: Value::Array(vec![]),
+                template_interfaces: Value::Array(vec![]),
+            })
         }
         PurposeCase::Display => {
             assert!(signature.is_none(), "display has no input signature");
-            (
-                CheckedPurpose::Display,
-                encode_display_authorization(DisplayAuthorization {
-                    item_admission: [0xaa; 32],
-                    receipt: [0xaa; 32],
-                    index: 0,
-                    observation: "observation",
-                    captured_generation: 1,
-                    generation: 2,
-                    admission: [0xaa; 32],
-                    budget: 32,
-                    presented: &[],
-                    templates: &[],
-                    injected: &[],
-                    imports: &[],
-                    presentation: CheckedExpressionPresentation::Rendered,
-                    planned: Value::Null,
-                    settled: vec![],
-                    value_interfaces: Value::Array(vec![]),
-                    template_interfaces: Value::Array(vec![]),
-                }),
-            )
+            encode_display_authorization(DisplayAuthorization {
+                item_admission: [0xaa; 32],
+                receipt: [0xaa; 32],
+                index: 0,
+                observation: "observation",
+                captured_generation: 1,
+                generation: 2,
+                admission: [0xaa; 32],
+                budget: 32,
+                presented: &[],
+                templates: &[],
+                injected: &[],
+                imports: &[],
+                presentation: CheckedExpressionPresentation::Rendered,
+                planned: Value::Null,
+                settled: vec![],
+                value_interfaces: Value::Array(vec![]),
+                template_interfaces: Value::Array(vec![]),
+            })
         }
         PurposeCase::Inspection => {
             assert!(signature.is_none(), "inspection has no input signature");
-            (
-                CheckedPurpose::Inspection,
-                crate::artifacts::fixture_inspection_authorization(),
-            )
+            crate::artifacts::fixture_inspection_authorization()
         }
     };
-    let value =
-        checked_search_authorization(stage, body, includes).expect("purpose search encoder");
+    let value = checked_search_authorization(body, includes).expect("purpose search encoder");
     let mut bytes = vec![];
     ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
@@ -736,7 +724,7 @@ fn request_types(
 }
 
 fn expression_purpose(root: &Path, includes: &[PathBuf], plan: NativeBytes) {
-    use crate::artifacts::{checked_search_authorization, CheckedPurpose};
+    use crate::artifacts::checked_search_authorization;
     use crate::checked_cell::{encode_item_authorization, CheckedItemKind, ItemAuthorization};
     let expression = crate::checked_cell::fixture_expression_plan(&plan.0)
         .expect("owner reserved expression plan reader");
@@ -760,7 +748,7 @@ fn expression_purpose(root: &Path, includes: &[PathBuf], plan: NativeBytes) {
         value_interfaces: Value::Array(vec![]),
         template_interfaces: Value::Array(vec![]),
     });
-    let value = checked_search_authorization(CheckedPurpose::Item, body, includes).unwrap();
+    let value = checked_search_authorization(body, includes).unwrap();
     let mut bytes = vec![];
     ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();

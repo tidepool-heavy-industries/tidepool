@@ -518,6 +518,21 @@ pub(crate) enum CheckedPurpose {
     Item,
     ActivationPreview,
     Display,
+    Program,
+}
+
+impl CheckedPurpose {
+    /// Every owning encoder emits its complete wire purpose directly.
+    pub(crate) const fn wire_tag(self) -> &'static str {
+        match self {
+            Self::Inspection => "inspection1",
+            Self::Cell => "cell-check2",
+            Self::Item => "checked-item3",
+            Self::Display => "checked-display3",
+            Self::ActivationPreview => "host-activation-preview3",
+            Self::Program => "cell-program1",
+        }
+    }
 }
 
 /// Authored whole-cell checking is independent of live-input binding and preview.
@@ -525,8 +540,9 @@ pub enum CheckedCellPurpose {
     Authored,
 }
 
+/// Attach search roots to an already tagged, owner-issued authorization.
+/// This boundary never selects or rewrites the payload's purpose.
 pub(crate) fn checked_search_authorization(
-    purpose: CheckedPurpose,
     mut authorization: Value,
     include: &[PathBuf],
 ) -> Result<Value, CompileError> {
@@ -552,18 +568,6 @@ pub(crate) fn checked_search_authorization(
     let Value::Array(fields) = &mut authorization else {
         unreachable!("closed checked authorization")
     };
-    fields[0] = Value::Text(
-        match purpose {
-            CheckedPurpose::Inspection => "inspection1",
-            CheckedPurpose::Cell => "cell-check2",
-            CheckedPurpose::Item => "checked-item3",
-            CheckedPurpose::Display => "checked-display3",
-            CheckedPurpose::ActivationPreview => {
-                crate::activation_preview::ACTIVATION_PREVIEW_PURPOSE
-            }
-        }
-        .into(),
-    );
     fields.push(Value::Array(paths));
     Ok(authorization)
 }
@@ -575,19 +579,25 @@ fn checked_cell_authorization(
     include: &[PathBuf],
 ) -> Result<Value, CompileError> {
     checked_search_authorization(
-        match purpose {
-            CheckedCellPurpose::Authored => CheckedPurpose::Cell,
-        },
-        encode_cell_authorization(specification, values.baseline_authorization())?,
+        encode_cell_authorization(
+            match purpose {
+                CheckedCellPurpose::Authored => {
+                    crate::checked_cell::CheckedCellManifestPurpose::Authored
+                }
+            },
+            specification,
+            values.baseline_authorization(),
+        )?,
         include,
     )
 }
 
 pub(crate) fn encode_cell_authorization(
+    purpose: crate::checked_cell::CheckedCellManifestPurpose,
     specification: &crate::checked_cell::CheckedCellSpecification,
     baseline: Value,
 ) -> Result<Value, CompileError> {
-    let mut authorization = specification.manifest_value()?;
+    let mut authorization = specification.manifest_value(purpose)?;
     let Value::Array(fields) = &mut authorization else {
         unreachable!("closed cell authorization")
     };
@@ -597,7 +607,7 @@ pub(crate) fn encode_cell_authorization(
 
 fn encode_inspection_authorization(owners: &BTreeSet<String>, baseline: Value) -> Value {
     Value::Array(vec![
-        Value::Text("inspection1".into()),
+        Value::Text(CheckedPurpose::Inspection.wire_tag().into()),
         Value::Array(owners.iter().cloned().map(Value::Text).collect()),
         baseline,
     ])
@@ -919,7 +929,6 @@ impl ModuleCandidateOffer {
         let inputs = crate::checked_cell::CheckedValueInputs::capture_checked(values, retained)?;
         let context = checked_value_context(context, &inputs)?;
         let authorization = checked_search_authorization(
-            CheckedPurpose::Inspection,
             encode_inspection_authorization(&owners, inputs.baseline_authorization()),
             include,
         )?;
@@ -1051,7 +1060,8 @@ impl ModuleCandidateOffer {
             ));
         }
         let extension = planned.authorization(&specification, producer, include, scratch)?;
-        let mut authorization = specification.manifest_value()?;
+        let mut authorization = specification
+            .manifest_value(crate::checked_cell::CheckedCellManifestPurpose::Program)?;
         let compile_context = context;
         let publication_context = checked_offer_context(
             compile_context
@@ -1066,7 +1076,6 @@ impl ModuleCandidateOffer {
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed authorization")
         };
-        fields[0] = Value::Text("cell-program1".into());
         fields.push(inputs.baseline_authorization());
         fields.extend(extension);
         fields.push(Value::Array(
@@ -1154,7 +1163,6 @@ impl ModuleCandidateOffer {
                 producer,
                 |semantic_sha256| {
                     let authorization = checked_search_authorization(
-                        CheckedPurpose::Item,
                         checked_item.authorization(producer, semantic_sha256)?,
                         include,
                     )?;
@@ -1301,11 +1309,8 @@ impl ModuleCandidateOffer {
                 })
                 .collect(),
         );
-        let authorization = checked_search_authorization(
-            CheckedPurpose::ActivationPreview,
-            offer.authorization(original_interfaces)?,
-            include,
-        )?;
+        let authorization =
+            checked_search_authorization(offer.authorization(original_interfaces)?, include)?;
         let exact = (*context)
             .clone()
             .with_declarations(declarations)
@@ -1377,7 +1382,6 @@ impl ModuleCandidateOffer {
                 producer,
                 |semantic_sha256| {
                     let authorization = checked_search_authorization(
-                        CheckedPurpose::Display,
                         display.authorization(producer, semantic_sha256)?,
                         include,
                     )?;
@@ -4662,18 +4666,15 @@ mod typed_site_tests {
     #[test]
     fn protected_search_authorization_refuses_lossy_path_encoding() {
         use std::os::unix::ffi::OsStringExt;
-        let authorization = || Value::Array(vec![Value::Text("cell-check".into())]);
+        let authorization =
+            || Value::Array(vec![Value::Text(CheckedPurpose::Cell.wire_tag().into())]);
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xff]));
-        assert!(
-            checked_search_authorization(CheckedPurpose::Cell, authorization(), &[invalid])
-                .is_err()
-        );
+        assert!(checked_search_authorization(authorization(), &[invalid]).is_err());
         let paths = [
             PathBuf::from("/exact//first"),
             PathBuf::from("/exact/../second"),
         ];
-        let encoded =
-            checked_search_authorization(CheckedPurpose::Cell, authorization(), &paths).unwrap();
+        let encoded = checked_search_authorization(authorization(), &paths).unwrap();
         let Value::Array(fields) = encoded else {
             panic!("authorization must be an array")
         };
