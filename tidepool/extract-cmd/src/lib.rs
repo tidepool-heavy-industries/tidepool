@@ -338,6 +338,16 @@ impl SpawnError {
         matches!(self.settlement, Settlement::NotSubmitted)
     }
 
+    /// This failed submission is proven not to have executed source. Capacity
+    /// refusal has that proof but still cannot rebind. This observation cannot
+    /// erase a prior accepted or uncertain submission in the same operation.
+    pub fn definitely_unsubmitted(&self) -> bool {
+        matches!(
+            self.settlement,
+            Settlement::NotSubmitted | Settlement::Capacity
+        )
+    }
+
     fn not_submitted(bin: impl AsRef<OsStr>, source: std::io::Error) -> Self {
         Self {
             bin: bin.as_ref().to_owned(),

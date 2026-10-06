@@ -274,6 +274,13 @@ pub(super) struct EntryPreparation {
     staging: PathBuf,
     raw: PathBuf,
     output: PathBuf,
+    submission: EntrySubmission,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntrySubmission {
+    DefinitelyUnsubmitted,
+    MayHaveExecuted,
 }
 
 impl EntryPreparation {
@@ -291,6 +298,11 @@ impl EntryPreparation {
         let mut name = output_name;
         name.push(".preparing");
         let staging = parent.join(name);
+        // Confirm any previous known-unsubmitted removal before reusing its
+        // absent identity. A failed barrier cannot fall through to execution.
+        checkpoint(EntryCheckpoint::AbsenceConfirmation)?;
+        tidepool_atomic_write::sync_parent_directory(&staging)
+            .map_err(|error| CompileError::Io(error.into()))?;
         match std::fs::create_dir(&staging) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -311,11 +323,52 @@ impl EntryPreparation {
             staging,
             raw,
             output,
+            submission: EntrySubmission::DefinitelyUnsubmitted,
         })
     }
 
     pub(super) fn raw(&self) -> &Path {
         &self.raw
+    }
+
+    pub(super) fn begin_execution(&mut self) -> EntrySubmission {
+        let previous = self.submission;
+        self.submission = EntrySubmission::MayHaveExecuted;
+        previous
+    }
+
+    pub(super) fn confirm_unsubmitted_attempt(&mut self, previous: EntrySubmission) {
+        // A later unsubmitted attempt cannot erase an earlier ambiguous or
+        // completed submission. Only this attempt's conservative arm is undone.
+        self.submission = previous;
+    }
+
+    pub(super) fn mark_uncertain_submission(&mut self) {
+        self.submission = EntrySubmission::MayHaveExecuted;
+    }
+
+    pub(super) fn release_if_unsubmitted(self) -> Result<(), CompileError> {
+        if self.submission == EntrySubmission::MayHaveExecuted {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(&self.staging)
+            .map_err(|source| tidepool_atomic_write::WriteError {
+                path: self.staging.clone(),
+                source,
+            })
+            .and_then(|()| {
+                checkpoint(EntryCheckpoint::ReleaseSync).map_err(|source| {
+                    tidepool_atomic_write::WriteError {
+                        path: self.staging.clone(),
+                        source,
+                    }
+                })?;
+                tidepool_atomic_write::sync_parent_directory(&self.staging)
+            })
+            .map_err(|source| CompileError::EntryReservationReleaseUnconfirmed {
+                path: self.staging.clone(),
+                source,
+            })
     }
 
     pub(super) fn seal(
@@ -382,7 +435,9 @@ fn require_absent_output(output: &Path) -> Result<(), CompileError> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EntryCheckpoint {
+    AbsenceConfirmation,
     ReservationSync,
+    ReleaseSync,
     ManifestWrite,
     ReadyRename,
     PublicationSync,

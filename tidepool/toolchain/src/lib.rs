@@ -61,6 +61,14 @@ pub enum CompileError {
     /// retained output must never be mistaken for permission to execute again.
     #[error("entry preparation {} is unfinished; retain its original output and select a fresh preparation identity to compile again", path.display())]
     EntryPreparationUnfinished { path: PathBuf },
+    /// No source was submitted, but removing its reservation did not complete
+    /// durably. A fresh reservation must first confirm the parent directory.
+    #[error("entry reservation {} release is unconfirmed: {source}", path.display())]
+    EntryReservationReleaseUnconfirmed {
+        path: PathBuf,
+        #[source]
+        source: tidepool_atomic_write::WriteError,
+    },
     /// Complete retained output became visible; source must not be re-executed
     /// to retry its parent-directory durability confirmation.
     #[error("entry {} is visible but durability is unconfirmed: {source}", path.display())]

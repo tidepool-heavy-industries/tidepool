@@ -88,11 +88,14 @@ at the original compilation paths and are discarded with action scratch.
 
 Production entries reserve an exclusive `<entry>.preparing` container beneath
 the caller's durable output parent before compiler execution. Raw outputs,
-stdout, stderr and status remain there after preparation or sealing failure.
+stdout, stderr and status remain there after uncertain submission or sealing failure.
 Sealing validates the complete original through the shared loader, syncs it,
 and renames that same container to the ready path without copying artifacts.
-An unfinished identity refuses recompilation; another preparation requires a
-fresh identity. Runtime source owners retain the UUID parent. Build-action
+An unfinished identity with uncertain or completed submission refuses
+recompilation; another preparation requires a fresh identity. A typed proven
+zero-submission refusal may release only its own unused reservation, syncing
+the parent. A retry confirms the absent name before reserving it again.
+Runtime source owners retain the UUID parent. Build-action
 owners control their output-tree cleanup, so a fresh Buck action tree has fresh
 preparation custody rather than recovering a removed original.
 

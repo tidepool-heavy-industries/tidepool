@@ -2451,6 +2451,7 @@ mod tests {
         assert!(TRANSACTION_SCOPE.with(|scope| scope.borrow().is_none()));
         let error = SpawnError::capacity_refusal("daemon.sock", "no background capacity".into());
         assert!(!error.permits_rebind());
+        assert!(error.definitely_unsubmitted());
         assert_eq!(error.source.kind(), io::ErrorKind::WouldBlock);
     }
 

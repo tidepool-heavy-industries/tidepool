@@ -293,6 +293,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         // Spawn/IO failure reaching the extractor.
         CompileError::Io(_)
         | CompileError::EntryPreparationUnfinished { .. }
+        | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => {
             FailureEnvelope::new(FailureClass::Infra, Phase::Compile, err.to_string())
         }
@@ -326,6 +327,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
     envelope.cause = Some(match err {
         CompileError::Io(_)
         | CompileError::EntryPreparationUnfinished { .. }
+        | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => CompileFailureCause::Io,
         CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
         CompileError::ArtifactInventory(error) => CompileFailureCause::ArtifactInventory {

@@ -2838,6 +2838,29 @@ impl CompilationOutputOwner {
             Self::Original(preparation) => preparation.raw(),
         }
     }
+
+    fn begin_execution(&mut self) -> Option<production_entry::EntrySubmission> {
+        match self {
+            Self::Original(preparation) => Some(preparation.begin_execution()),
+            Self::Scratch(_) => None,
+        }
+    }
+
+    fn endpoint_failure(
+        &mut self,
+        error: &tidepool_extract_cmd::SpawnError,
+        previous: Option<production_entry::EntrySubmission>,
+    ) {
+        if let Self::Original(preparation) = self {
+            if error.definitely_unsubmitted() {
+                if let Some(previous) = previous {
+                    preparation.confirm_unsubmitted_attempt(previous);
+                }
+            } else {
+                preparation.mark_uncertain_submission();
+            }
+        }
+    }
 }
 
 /// Compile one declared module and target set for an immutable build action.
@@ -3174,7 +3197,10 @@ fn compile_invocation_inner(
                 CompilationPolicy::BuildAction { .. } => cmd.bind_direct(),
                 _ => cmd.bind(),
             }
-            .map_err(CompileAttemptError::Endpoint)?;
+            .map_err(|error| {
+                output_owner.endpoint_failure(&error, None);
+                CompileAttemptError::Endpoint(error)
+            })?;
             if let Some((output, _)) = inventory_export {
                 catalog_inventory::endpoint(
                     output,
@@ -3275,29 +3301,30 @@ fn compile_invocation_inner(
                 .map_err(CompileAttemptError::Diagnostic)?;
             }
             let diagnostics = CompilerDiagnosticCapture::start(output_owner.path(), &cmd);
-            endpoint
-                .execute(&cmd)
-                .map(|run| {
-                    diagnostics.completed(
-                        output_owner.path(),
-                        &cmd,
-                        run.success(),
-                        &run.output.stderr,
-                    );
-                    CompileAttempt::Executed((
-                        cmd,
-                        run,
-                        inv_key,
-                        producer,
-                        candidate_set,
-                        deployment,
-                    ))
-                })
-                .map_err(CompileAttemptError::Endpoint)
+            let previous_submission = output_owner.begin_execution();
+            let execution = endpoint.execute(&cmd).map_err(|error| {
+                output_owner.endpoint_failure(&error, previous_submission);
+                CompileAttemptError::Endpoint(error)
+            });
+            execution.map(|run| {
+                diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
+                CompileAttempt::Executed((cmd, run, inv_key, producer, candidate_set, deployment))
+            })
         },
         |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
-    )
-    .map_err(CompileAttemptError::into_compile_error)?;
+    );
+    let attempt = match attempt {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            if matches!(&error, CompileAttemptError::Endpoint(error) if error.definitely_unsubmitted())
+            {
+                if let CompilationOutputOwner::Original(preparation) = output_owner {
+                    preparation.release_if_unsubmitted()?;
+                }
+            }
+            return Err(error.into_compile_error());
+        }
+    };
     let (cmd, run, inv_key, producer, candidate_set, deployment) = match attempt {
         CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
         CompileAttempt::Executed(executed) => executed,
@@ -5552,6 +5579,97 @@ mod module_product_tests {
             cohort.len(),
             cached.len()
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn production_entry_ambiguous_submission_cannot_be_released_by_later_refusal() {
+        use production_entry::{EntryPreparation, EntrySubmission};
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("entry");
+        let mut preparation = EntryPreparation::reserve(&output).unwrap();
+        preparation.mark_uncertain_submission();
+        let previous = preparation.begin_execution();
+        assert_eq!(previous, EntrySubmission::MayHaveExecuted);
+        preparation.confirm_unsubmitted_attempt(previous);
+        let original = preparation.raw().join("original-partial-output");
+        std::fs::write(&original, b"original bytes").unwrap();
+        preparation.release_if_unsubmitted().unwrap();
+        assert_eq!(std::fs::read(&original).unwrap(), b"original bytes");
+        assert!(matches!(
+            EntryPreparation::reserve(&output),
+            Err(CompileError::EntryPreparationUnfinished { .. })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn production_entry_unsubmitted_release_requires_confirmed_absence_before_retry() {
+        use production_entry::{EntryCheckpoint, EntryPreparation};
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("entry");
+        let preparation = EntryPreparation::reserve(&output).unwrap();
+        let error = production_entry::with_failure(EntryCheckpoint::ReleaseSync, || {
+            preparation.release_if_unsubmitted()
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::EntryReservationReleaseUnconfirmed { .. }
+        ));
+        let error = production_entry::with_failure(EntryCheckpoint::AbsenceConfirmation, || {
+            EntryPreparation::reserve(&output)
+        })
+        .err()
+        .unwrap();
+        assert!(matches!(error, CompileError::Io(_)));
+        assert!(!root.path().join("entry.preparing").exists());
+        EntryPreparation::reserve(&output)
+            .unwrap()
+            .release_if_unsubmitted()
+            .unwrap();
+        assert!(!root.path().join("entry.preparing").exists());
+    }
+
+    /// The counted runner's owned-resident mode owns one real daemon worker.
+    /// Its foreground reservation must reject Preparation before any request.
+    #[test]
+    #[serial_test::serial]
+    fn retained_entry_known_preparation_refusal_allows_same_original_foreground() {
+        use tidepool_extract_cmd::{extract_spawn_count, CompilerTransactionClose};
+        assert!(
+            std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
+            "this admission control requires --compiler-mode owned-resident"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (37 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        let output = root.path().join("entry");
+        let before = extract_spawn_count();
+        let refusal = with_compiler_transaction_for_workload(
+            CompileWorkload::Preparation,
+            |_| {},
+            || prepare_frozen_production_entry(&sources, root.path(), &output),
+        );
+        assert!(matches!(refusal.action,
+            Err(CompileError::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock));
+        assert_eq!(refusal.close, CompilerTransactionClose::NotStarted);
+        assert_eq!(extract_spawn_count(), before);
+        assert!(!output.exists());
+        assert!(!root.path().join("entry.preparing").exists());
+        let foreground = with_compiler_transaction_for_workload(
+            CompileWorkload::Foreground,
+            |_| {},
+            || prepare_frozen_production_entry(&sources, root.path(), &output),
+        );
+        foreground.action.unwrap();
+        assert_eq!(foreground.close, CompilerTransactionClose::Clean);
+        assert_eq!(extract_spawn_count(), before + 1);
+        assert!(output.join("raw/certified-products.cbor").is_file());
+        assert!(!root.path().join("entry.preparing").exists());
     }
 
     #[test]
