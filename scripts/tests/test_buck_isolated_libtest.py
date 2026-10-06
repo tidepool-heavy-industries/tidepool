@@ -839,6 +839,57 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertNotIn('manager_wait_success', record)
         self.assertFalse(record['cleanup_confirmed'])
 
+    def test_fast_failed_service_stays_observable_until_exact_cleanup(self):
+        admitted = runner.threading.Event()
+        state_queries = 0
+        calls = []
+
+        class Process:
+            pid = 781238
+            stdout = None
+            stderr = None
+            returncode = 101
+
+            def communicate(self, timeout=None):
+                if not admitted.wait(2):
+                    raise AssertionError('failed unit was collected before admission observation')
+                return 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', ''
+
+        def control(args, **_kwargs):
+            nonlocal state_queries
+            calls.append(args)
+            if '--property=InvocationID' in args:
+                unit = args[-1]
+                admitted.set()
+                return completed_process(args, 0,
+                    f'Id={unit}\nLoadState=loaded\nTransient=yes\nInvocationID={"ab" * 16}\n', '')
+            if 'stop' in args:
+                return completed_process(args, 0, '', '')
+            if 'reset-failed' in args:
+                return completed_process(args, 0, '', '')
+            state_queries += 1
+            state = ('LoadState=loaded\nActiveState=failed\n' if state_queries == 1
+                     else 'LoadState=not-found\nActiveState=inactive\n')
+            return completed_process(args, 0, state, '')
+
+        record = {}
+        with patch.object(runner.subprocess, 'Popen', return_value=Process()) as spawn, \
+             patch.object(runner.subprocess, 'run', side_effect=control):
+            result = runner.execute(['fake-libtest'], 2, 'app.slice', record)
+
+        command = spawn.call_args.args[0]
+        self.assertIn('--wait', command)
+        self.assertNotIn('--collect', command)
+        self.assertEqual(result.returncode, 101)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertFalse(record['manager_wait_success'])
+        self.assertEqual(record['launcher_wait_exit_code'], 101)
+        self.assertEqual(record['manager_admission']['InvocationID'], 'ab' * 16)
+        self.assertEqual(record['reset_failed_exit_code'], 0)
+        self.assertEqual(record['state'], {'LoadState': 'not-found', 'ActiveState': 'inactive'})
+        unit = record['unit']
+        self.assertTrue(all(args[-1] == unit for args in calls))
+
     def test_interrupted_launched_future_retains_unconfirmed_service_receipt(self):
         retained = Path(self.tmp.name) / 'interrupted'
         starts = []

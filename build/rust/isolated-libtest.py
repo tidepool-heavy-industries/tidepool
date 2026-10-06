@@ -165,8 +165,10 @@ def delegated_command(args, timeout, service_slice, record, environment=None, de
     child_environment = os.environ if environment is None else environment
     tools = delegated_tools(child_environment)
     environment_names = sorted(set(DELEGATED_ENVIRONMENT).union(declared_resources).intersection(child_environment))
+    # Keep failed units loaded until the observer captures their invocation;
+    # successful units are fenced by --wait before systemd unloads them.
     command = [
-        tools['systemd-run'], '--user', '--pipe', '--wait', '--collect',
+        tools['systemd-run'], '--user', '--pipe', '--wait',
         '--service-type=exec', '--property=Delegate=yes',
         '--property=KillMode=control-group', '--property=TimeoutStopSec=5s',
         f'--property=RuntimeMaxSec={timeout:g}s', '--slice=' + service_slice,
@@ -217,14 +219,31 @@ def stop_delegated_service(unit, record):
             *base, 'show', '--property=LoadState', '--property=ActiveState', unit,
         ], capture_output=True, text=True, timeout=5, check=False)
         state = dict(line.split('=', 1) for line in observed.stdout.splitlines() if '=' in line)
+        reset_failed_exit_code = None
+        if (observed.returncode == 0 and state.get('LoadState') == 'loaded'
+                and state.get('ActiveState') == 'failed'):
+            reset = subprocess.run([*base, 'reset-failed', unit], capture_output=True,
+                                   text=True, timeout=5, check=False)
+            reset_failed_exit_code = reset.returncode
+            if reset.returncode == 0:
+                observed = subprocess.run([
+                    *base, 'show', '--property=LoadState', '--property=ActiveState', unit,
+                ], capture_output=True, text=True, timeout=5, check=False)
+                state = dict(line.split('=', 1) for line in observed.stdout.splitlines() if '=' in line)
+        wait_fenced = record.get('manager_wait_success') is True
+        service_stopped = (
+            observed.returncode == 0 and state.get('LoadState') == 'not-found'
+            and (wait_fenced or (stopped.returncode == 0 and reset_failed_exit_code == 0))
+        ) or (
+            stopped.returncode == 0 and observed.returncode == 0
+            and state.get('LoadState') == 'loaded' and state.get('ActiveState') == 'inactive'
+        )
         record.update(stop_exit_code=stopped.returncode,
                       observation_exit_code=observed.returncode, state=state,
-                      cleanup_confirmed=((bool(record.get('manager_admission'))
-                                          or record.get('manager_wait_success') is True)
-                          and record.get('admission_observer_stopped', True)
-                          and ((observed.returncode == 0 and state.get('LoadState') == 'not-found')
-                              or (stopped.returncode == 0 and observed.returncode == 0
-                                  and state.get('ActiveState') == 'inactive'))))
+                      reset_failed_exit_code=reset_failed_exit_code,
+                      cleanup_confirmed=((bool(record.get('manager_admission')) or wait_fenced)
+                                         and record.get('admission_observer_stopped', True)
+                                         and service_stopped))
         if not record['cleanup_confirmed']:
             record['cleanup_error'] = ('delegated launch admission is unknown; absent unit does not fence a queued start'
                 if not (record.get('manager_admission') or record.get('manager_wait_success') is True)
@@ -258,10 +277,10 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
             observer.start()
         stdout, stderr = process.communicate(timeout=timeout)
         if unit is not None:
-            # Successful --wait returns only after the start job and service
-            # termination have settled. It fences a queued start even when
-            # --collect removed a fast unit before InvocationID polling saw it.
-            # Interrupted/failed communication never supplies this fence.
+            # A successful --wait fences a queued start even when a fast
+            # successful unit unloaded before InvocationID polling saw it.
+            # Failed units remain loaded without --collect until exact cleanup
+            # resets their failure; nonzero service status is not a wait fence.
             service_record.update(launcher_wait_exit_code=process.returncode,
                                   manager_wait_success=process.returncode == 0)
     except subprocess.TimeoutExpired as error:
