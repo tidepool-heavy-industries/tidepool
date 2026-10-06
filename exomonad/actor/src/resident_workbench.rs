@@ -7181,7 +7181,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         input: &PreparedActivationInput,
-        requests: Arc<crate::RequestRegistry>,
+        requests: Arc<crate::request::RequestRegistry>,
         request: crate::RequestId,
         retirement: crate::RetainedActorExit,
         #[cfg(test)] observer: Option<ActivationPublicationObserver>,
@@ -18217,7 +18217,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .await
                 .unwrap();
             let binding = prepared.binding;
-            let requests = Arc::new(crate::RequestRegistry::default());
+            let requests = Arc::new(crate::request::RequestRegistry::default());
             let requester = crate::ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
             let request = requests.reserve(requester, context.actor);
             requests

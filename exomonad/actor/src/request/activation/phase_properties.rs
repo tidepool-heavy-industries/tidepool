@@ -1155,15 +1155,11 @@ fn run_history(
                     }
                 }
                 coverage.shared_target_retirements += usize::from(retired > 1);
-                prop_assert!(registry
-                    .actor_stopped(
-                        actor,
-                        &ActorTerminal {
-                            kind: ActorExitKind::Completed,
-                            summary: "retired".into()
-                        }
-                    )
-                    .is_empty());
+                let terminal = ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "retired".into(),
+                };
+                prop_assert!(registry.actor_stopped(actor, &terminal).is_empty());
             }
             Action::Forget => {
                 let model = &mut facts[key];

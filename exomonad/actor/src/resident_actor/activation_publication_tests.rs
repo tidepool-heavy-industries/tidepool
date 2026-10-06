@@ -1,4 +1,7 @@
 use super::*;
+use std::path::PathBuf;
+use tidepool_codegen::scope::ScopeId;
+use tidepool_runtime::session::ResidentError;
 
 #[tokio::test]
 async fn cancellation_during_original_preview_refuses_initial_provider_installation() {
