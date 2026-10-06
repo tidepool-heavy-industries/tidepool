@@ -1838,7 +1838,9 @@ impl ExactCompilationRequest {
             Some((&self.request_sha256, self.semantic_sha256)),
         )?;
         let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
-            evidence, &source_path, &source,
+            evidence,
+            &source_path,
+            &source,
         )
         .ok_or_else(|| failure("fresh compilation consumed source evidence is invalid"))?;
         let interfaces = context.interface_owners();
@@ -4149,9 +4151,9 @@ mod tests {
             modules: nodes,
         };
         let evidence_bytes = serde_json::to_vec(&evidence).unwrap();
-        let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
-            evidence, &target, source,
-        ).unwrap();
+        let evidence =
+            crate::cache::CompletedSourceEvidence::from_worker_evidence(evidence, &target, source)
+                .unwrap();
         ExactSourceAdmission {
             witness: ExactSourceWitness {
                 source_path: target,
@@ -4692,12 +4694,18 @@ mod tests {
         let admitted = request.validate_receipt(&receipt, None, &context).unwrap();
         assert!(!admitted.evidence.cache_safe && !admitted.evidence.selection_complete);
         assert!(!admitted.evidence.valid("module Consumer where\n"));
-        assert!(admitted.evidence.revalidate("module Consumer where\n").is_ok());
+        assert!(admitted
+            .evidence
+            .revalidate("module Consumer where\n")
+            .is_ok());
 
         // Completed source observations do not authorize a retained import.
         let modules = value.as_array_mut().unwrap()[8].as_array_mut().unwrap();
         modules[0].as_array_mut().unwrap()[3] = Value::Array(vec![Value::Array(vec![
-            text("none"), text("Unadmitted"), Value::Bool(false), text("fixture"),
+            text("none"),
+            text("Unadmitted"),
+            Value::Bool(false),
+            text("fixture"),
         ])]);
         write_receipt(&receipt, &value);
         assert!(matches!(request.validate_receipt(&receipt, None, &context),
@@ -5345,8 +5353,10 @@ mod tests {
         let mut forged = original.evidence.into_evidence();
         forged.modules[0].source = directory.path().join("AnotherOwner.hs");
         assert!(crate::cache::CompletedSourceEvidence::from_normalized(
-            forged, "module Target where\n",
-        ).is_err());
+            forged,
+            "module Target where\n",
+        )
+        .is_err());
     }
 
     #[test]
@@ -5359,8 +5369,10 @@ mod tests {
         let mut evidence = changed.evidence.into_evidence();
         evidence.modules[1].imports.clear();
         changed.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
-            evidence, "module Target where\n",
-        ).unwrap();
+            evidence,
+            "module Target where\n",
+        )
+        .unwrap();
         assert!(request
             .admit_program_support(
                 empty,
@@ -5605,8 +5617,11 @@ mod tests {
         };
         later.evidence_bytes = serde_json::to_vec(&evidence).unwrap();
         later.evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
-            evidence, &path, "module Additional where\n",
-        ).unwrap();
+            evidence,
+            &path,
+            "module Additional where\n",
+        )
+        .unwrap();
         later.exact_imports.insert(
             identity("fixture", "Additional"),
             vec![identity("fixture", "InstanceRelay")],
@@ -5662,8 +5677,10 @@ mod tests {
         source.module = "Tidepool.Internal.Resume".into();
         source.imports.clear();
         admission.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
-            evidence, "module Target where\n",
-        ).unwrap();
+            evidence,
+            "module Target where\n",
+        )
+        .unwrap();
         let context = request
             .admit_program_support(
                 baseline,
@@ -5699,8 +5716,10 @@ mod tests {
         evidence.modules.push(evidence.modules[0].clone());
         assert!(consumed_source_home_imports(&evidence, &admission.exact_imports).is_err());
         assert!(crate::cache::CompletedSourceEvidence::from_normalized(
-            evidence, "module Target where\n",
-        ).is_err());
+            evidence,
+            "module Target where\n",
+        )
+        .is_err());
     }
 
     #[test]

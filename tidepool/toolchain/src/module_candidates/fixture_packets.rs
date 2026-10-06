@@ -302,9 +302,11 @@ fn source_boot_candidate_packet_producer() {
         let source = fs::read_to_string(capture.join("original-source.hs")).unwrap();
         let evidence_bytes = fs::read(capture.join("dependencies.json")).unwrap();
         let evidence = crate::cache::CompletedSourceEvidence::from_worker(
-            &evidence_bytes, &source_path, &source,
+            &evidence_bytes,
+            &source_path,
+            &source,
         )
-            .expect("actual consumed source and resolution evidence");
+        .expect("actual consumed source and resolution evidence");
         let receipt_bytes = fs::read(capture.join("certified-products.cbor")).unwrap();
         let receipt = decode_receipt_in(&receipt_bytes, Some(&capture)).unwrap();
         assert!(
@@ -335,9 +337,13 @@ fn source_boot_candidate_packet_producer() {
         )
         .unwrap();
         if !evidence.cache_safe || !evidence.selection_complete {
-            assert!(certified.recovery_products.iter().all(|product| {
-                product.execution_source().is_none()
-            }), "completed originals cannot acquire an ordinary source replay recipe");
+            assert!(
+                certified
+                    .recovery_products
+                    .iter()
+                    .all(|product| { product.execution_source().is_none() }),
+                "completed originals cannot acquire an ordinary source replay recipe"
+            );
         }
         let context = admit_fixture_scope(
             producer_sha,
