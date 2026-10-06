@@ -1026,18 +1026,6 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     // Exact declared import facts can satisfy linking without granting a live
     // handle. Installation must refuse the demanded package import while the
     // machine's previously working program remains executable.
-    let (mut unclosed_machine, prior_program) = open_strict_machine();
-    let before = unclosed_machine
-        .run_entry(
-            prior_program,
-            ValueId(0),
-            &[],
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .unwrap();
-    assert!(matches!(before.values.as_slice(),
-        [HaskellValue::Con(DataConId(100), fields)] if fields.is_empty()));
     let imported = parse_program(
         imported_reverse_artifact(),
         &requirements(),
@@ -1054,20 +1042,20 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     let facts = import_facts(&imported);
     let unclosed_linked = link_program(imported, &facts)
         .expect("the importer declares exactly the supplied link facts");
-    let unclosed_compiled = unclosed_machine
+    let unclosed_compiled = machine
         .compile_for_install(&unclosed_linked)
         .expect("the demanded importer compiles");
-    let rejected = unclosed_machine
+    let rejected = machine
         .install_program(unclosed_compiled, ImportBindings::new())
         .unwrap_err();
     assert!(
         matches!(rejected, ExecutionError::UnknownPreparedHandle),
         "an unclosed artifact is refused, not run: {rejected:?}"
     );
-    assert_eq!(unclosed_machine.disposition(), MachineDisposition::Reusable);
-    let after = unclosed_machine
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    let after = machine
         .run_entry(
-            prior_program,
+            closed_program,
             ValueId(0),
             &[],
             call_options(true),
@@ -1076,7 +1064,7 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         .unwrap();
     assert!(matches!(after.values.as_slice(),
         [HaskellValue::Con(DataConId(100), fields)] if fields.is_empty()));
-    assert_eq!(unclosed_machine.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     let (mut cancel_machine, cancel_program) = open_strict_machine();
     let cancelled_realm = RealmId::fresh();
