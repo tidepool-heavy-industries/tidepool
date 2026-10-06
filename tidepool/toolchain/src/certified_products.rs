@@ -4111,6 +4111,8 @@ pub(crate) fn certify_products(
             );
             digests
         });
+    let mut candidate_evidence_validation =
+        crate::module_candidates::shared_evidence::ValidationStage::publication();
     for accepted in &receipt.modules {
         let key = (accepted.unit.clone(), accepted.module.clone());
         if !seen_modules.insert(key.clone()) {
@@ -4189,9 +4191,8 @@ pub(crate) fn certify_products(
                 {
                     return Err(CertificationError::Mismatch("candidate owner/evidence"));
                 }
-                bundle
-                    .evidence
-                    .validate(&bundle.target_source)
+                candidate_evidence_validation
+                    .validate(&bundle.evidence, &bundle.target_source)
                     .map_err(|failure| CertificationError::CandidateEvidence {
                         unit: key.0.clone(),
                         module: key.1.clone(),
@@ -4256,9 +4257,10 @@ pub(crate) fn certify_products(
                     bundle.product.bytes(),
                     bundle.product.bytes(),
                     bundle.package_imports_bytes.as_slice(),
-                    sha(&serde_json::to_vec(&*bundle.evidence).map_err(|_| {
-                        CertificationError::Mismatch("dependency witness encoding")
-                    })?),
+                    bundle
+                        .evidence
+                        .json_sha256()
+                        .ok_or(CertificationError::Mismatch("dependency witness encoding"))?,
                     ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
                     bundle.owner.module_version.clone(),
                 )

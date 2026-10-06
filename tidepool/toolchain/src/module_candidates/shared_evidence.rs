@@ -11,6 +11,7 @@ pub(crate) struct SharedEvidence(Arc<SharedProof>);
 struct SharedProof {
     evidence: DependencyEvidence,
     reference: std::sync::OnceLock<Option<EvidenceRef>>,
+    json_sha256: std::sync::OnceLock<Option<[u8; 32]>>,
 }
 
 impl From<DependencyEvidence> for SharedEvidence {
@@ -18,6 +19,7 @@ impl From<DependencyEvidence> for SharedEvidence {
         Self(Arc::new(SharedProof {
             evidence,
             reference: std::sync::OnceLock::new(),
+            json_sha256: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -42,6 +44,16 @@ impl<'de> Deserialize<'de> for SharedEvidence {
 }
 
 impl SharedEvidence {
+    /// The receipt hashes the original JSON representation. This immutable
+    /// digest is reusable independently of current source freshness.
+    pub(crate) fn json_sha256(&self) -> Option<[u8; 32]> {
+        *self.0.json_sha256.get_or_init(|| {
+            serde_json::to_vec(&self.0.evidence)
+                .ok()
+                .map(|bytes| Sha256::digest(&bytes).into())
+        })
+    }
+
     pub(super) fn reference(&self) -> Option<&EvidenceRef> {
         self.0
             .reference
@@ -55,7 +67,80 @@ impl SharedEvidence {
     pub(crate) fn make_mut(&mut self) -> &mut DependencyEvidence {
         let proof = Arc::make_mut(&mut self.0);
         proof.reference.take();
+        proof.json_sha256.take();
         &mut proof.evidence
+    }
+}
+
+/// One observation of mutable source contents and negative import witnesses.
+/// Acquisition and post-worker publication each construct a fresh stage; only
+/// owners sharing the exact immutable proof and generated input share its walk.
+pub(crate) struct ValidationStage {
+    kind: ValidationStageKind,
+    proofs: BTreeMap<usize, ValidatedSharedProof>,
+    walks: u64,
+    hits: u64,
+}
+
+#[derive(Debug)]
+enum ValidationStageKind {
+    Acquisition,
+    Publication,
+}
+
+struct ValidatedSharedProof {
+    // Retaining the Arc prevents reuse of a pointer key after its proof is freed.
+    _proof: SharedEvidence,
+    sources: BTreeMap<String, Result<(), crate::cache::DependencyEvidenceFailure>>,
+}
+
+impl ValidationStage {
+    pub(crate) fn acquisition() -> Self {
+        Self::new(ValidationStageKind::Acquisition)
+    }
+    pub(crate) fn publication() -> Self {
+        Self::new(ValidationStageKind::Publication)
+    }
+    fn new(kind: ValidationStageKind) -> Self {
+        Self {
+            kind,
+            proofs: BTreeMap::new(),
+            walks: 0,
+            hits: 0,
+        }
+    }
+
+    pub(crate) fn validate(
+        &mut self,
+        proof: &SharedEvidence,
+        target_source: &str,
+    ) -> Result<(), crate::cache::DependencyEvidenceFailure> {
+        let key = Arc::as_ptr(&proof.0) as usize;
+        let retained = self
+            .proofs
+            .entry(key)
+            .or_insert_with(|| ValidatedSharedProof {
+                _proof: proof.clone(),
+                sources: BTreeMap::new(),
+            });
+        if let Some(result) = retained.sources.get(target_source) {
+            self.hits += 1;
+            return result.clone();
+        }
+        self.walks += 1;
+        let result = proof.0.evidence.validate(target_source);
+        retained
+            .sources
+            .insert(target_source.to_owned(), result.clone());
+        result
+    }
+}
+
+impl Drop for ValidationStage {
+    fn drop(&mut self) {
+        tracing::info!(target: "tidepool_toolchain::module_candidates", phase = "shared_evidence_validation",
+            stage = ?self.kind, shared_proofs = self.proofs.len(), proof_walks = self.walks,
+            proof_reuses = self.hits, "source evidence stage completed");
     }
 }
 
@@ -239,6 +324,91 @@ mod tests {
             root,
             budget,
         )
+    }
+
+    #[test]
+    fn validation_stage_shares_walk_but_publication_observes_changed_sources() {
+        let (root, record, _) = fixture();
+        let shared = record.evidence.clone();
+        let mut acquisition = ValidationStage::acquisition();
+        acquisition
+            .validate(&record.evidence, &record.target_source)
+            .unwrap();
+        acquisition
+            .validate(&shared, &record.target_source)
+            .unwrap();
+        assert_eq!((acquisition.walks, acquisition.hits), (1, 1));
+        fs::write(&record.source, b"module Library where\nchanged = ()\n").unwrap();
+        let mut publication = ValidationStage::publication();
+        assert!(matches!(
+            publication.validate(&shared, &record.target_source),
+            Err(crate::cache::DependencyEvidenceFailure::Source { .. })
+        ));
+        assert_eq!((publication.walks, publication.hits), (1, 0));
+        assert!(root.path().is_dir());
+    }
+
+    #[test]
+    fn validation_stage_keys_exact_proof_and_generated_input() {
+        let (_root, record, _) = fixture();
+        let mut stage = ValidationStage::acquisition();
+        stage
+            .validate(&record.evidence, &record.target_source)
+            .unwrap();
+        assert!(stage
+            .validate(&record.evidence, "different generated source")
+            .is_err());
+        assert_eq!((stage.walks, stage.hits), (2, 0));
+        stage
+            .validate(&record.evidence, &record.target_source)
+            .unwrap();
+        let distinct: SharedEvidence = (*record.evidence).clone().into();
+        stage.validate(&distinct, &record.target_source).unwrap();
+        assert_eq!((stage.walks, stage.hits), (3, 1));
+        assert_eq!(stage.proofs.len(), 2);
+    }
+
+    #[test]
+    fn publication_stage_rechecks_negative_shadow_witnesses() {
+        let (root, mut record, _) = fixture();
+        let shadow = root.path().join("higher-priority-Library.hs");
+        record
+            .evidence
+            .make_mut()
+            .resolutions
+            .push(crate::cache::ResolutionEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: record.module.clone(),
+                boot: false,
+                selected: Some(record.source.clone()),
+                candidates: vec![shadow.clone(), record.source.clone()],
+            });
+        let mut acquisition = ValidationStage::acquisition();
+        acquisition
+            .validate(&record.evidence, &record.target_source)
+            .unwrap();
+        acquisition
+            .validate(&record.evidence.clone(), &record.target_source)
+            .unwrap();
+        assert_eq!((acquisition.walks, acquisition.hits), (1, 1));
+        fs::write(shadow, b"module Library where\nshadow = ()\n").unwrap();
+        let mut publication = ValidationStage::publication();
+        assert!(matches!(
+            publication.validate(&record.evidence, &record.target_source),
+            Err(crate::cache::DependencyEvidenceFailure::Resolution { .. })
+        ));
+    }
+
+    #[test]
+    fn immutable_receipt_digest_matches_original_encoding_and_tracks_new_proof() {
+        let (_, record, _) = fixture();
+        let expected: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&*record.evidence).unwrap()).into();
+        assert_eq!(record.evidence.json_sha256(), Some(expected));
+        let mut replacement = record.evidence.clone();
+        replacement.make_mut().sources[0].sha256 = sha(b"different original input");
+        assert_ne!(replacement.json_sha256(), Some(expected));
+        assert_eq!(record.evidence.json_sha256(), Some(expected));
     }
 
     #[test]
