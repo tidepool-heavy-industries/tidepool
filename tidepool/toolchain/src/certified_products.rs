@@ -5684,7 +5684,30 @@ pub(crate) mod tests {
             &mut admission,
         )
         .unwrap();
-        assert_eq!(view.descriptors().len(), names.len());
+        use crate::artifact_inventory::ArtifactKind;
+        let expected_roles = names
+            .iter()
+            .flat_map(|name| {
+                [
+                    ArtifactKind::OriginalModule,
+                    ArtifactKind::CanonicalModuleInterface,
+                ]
+                .map(|kind| ("home-unit".to_owned(), name.clone(), kind))
+            })
+            .collect::<BTreeSet<_>>();
+        let descriptors = view.descriptors();
+        let actual_roles = descriptors
+            .iter()
+            .map(|entry| {
+                (
+                    entry.owner.unit.clone(),
+                    entry.owner.module.clone(),
+                    entry.kind,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_roles, expected_roles);
+        assert_eq!(descriptors.len(), expected_roles.len());
         assert!(target_interfaces.matches_target(&target));
         let after = observed();
         assert_eq!(after.0 - before.0, 1);
