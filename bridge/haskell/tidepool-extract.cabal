@@ -499,6 +499,7 @@ test-suite fat-iface-exact-test
   hs-source-dirs:   test-prepared-stg
   build-depends:
     base         >= 4.20 && < 5,
+    containers,
     directory,
     filepath,
     process,
