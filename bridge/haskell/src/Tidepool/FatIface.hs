@@ -48,7 +48,7 @@ import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 import Control.Concurrent.MVar
   (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
-  ( displayException )
+  ( displayException, evaluate )
 import Tidepool.FatIface.Internal qualified as Shared
 import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
@@ -217,7 +217,7 @@ lookupModuleOutcome env (FatIfaceCache cache) owner =
 -- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
 loadModuleExtraDecls :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDecls hscEnv modl = do
-  result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl)
+  result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl >>= evaluate)
   case result of
     Right outcome -> return outcome
     Left e -> do

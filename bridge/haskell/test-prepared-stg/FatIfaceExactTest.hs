@@ -78,7 +78,7 @@ verifyPrivateComponents :: IO ()
 verifyPrivateComponents = forM_ [0 .. 4] $ \size -> do
   let vertices = [0 .. size - 1]
       possibleEdges = [(source, target) | source <- vertices, target <- vertices]
-      graphCount = 1 `shiftL` length possibleEdges
+      graphCount = (1 :: Int) `shiftL` length possibleEdges
   forM_ [0 .. graphCount - 1] $ \mask -> do
     let edges = [edge | (index, edge) <- zip [0..] possibleEdges, testBit mask index]
         rows = [(source, [target | (from, target) <- edges, from == source]) | source <- vertices]
