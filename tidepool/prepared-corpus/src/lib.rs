@@ -362,7 +362,7 @@ pub enum Outcome {
     Failed {
         reason: String,
     },
-    /// Typed evidence that this stage has no first-order result to produce.
+    /// Typed evidence that this stage did not produce a complete first-order result.
     /// Counted separately from both passes and failures.
     Classified {
         class: Classification,
@@ -386,6 +386,9 @@ pub enum Classification {
     /// Native execution returned, but the result graph reaches a function or
     /// partial application, which has no first-order observation.
     FunctionValued,
+    /// Observation stopped at its declared limit. Completeness is unknown;
+    /// this proves neither an infinite value nor a cyclic result graph.
+    ObservationLimit { limit: usize },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -627,7 +630,7 @@ where
     ) {
         Ok(run) => run,
         Err(error) => {
-            let outcome = match classify_execution_error(&error, expected) {
+            let outcome = match classify_execution_error(&error, expected, scope) {
                 Some((class, reason)) => Outcome::Classified { class, reason },
                 None => Outcome::Failed {
                     reason: error.to_string(),
@@ -713,6 +716,7 @@ fn comparison_for_execution_error(
 fn classify_execution_error(
     error: &tidepool_codegen::prepared_program::ExecutionError,
     expected: Option<&Expectation>,
+    scope: OracleScope,
 ) -> Option<(Classification, String)> {
     use tidepool_codegen::prepared_program::{ExecutionError, ObservationFailure};
     use tidepool_heap::execution_descriptor::ObjectKind;
@@ -743,6 +747,14 @@ fn classify_execution_error(
             Classification::NoFiniteObservation,
             format!("declared cyclic observation: {error}"),
         )),
+        (ExecutionError::Observation(ObservationFailure::BudgetExceeded { limit }), None)
+            if scope == OracleScope::CompilerIntroduced =>
+        {
+            Some((
+                Classification::ObservationLimit { limit: *limit },
+                format!("observation completeness unknown: {error}"),
+            ))
+        }
         _ => None,
     }
 }
@@ -1457,45 +1469,106 @@ mod tests {
             expected: 1,
         };
         assert!(matches!(
-            classify_execution_error(&arguments, None),
+            classify_execution_error(&arguments, None, OracleScope::Unscoped),
             Some((Classification::NotClosed, _))
         ));
-        assert!(classify_execution_error(&arguments, Some(&Expectation::Int(1))).is_none());
+        assert!(classify_execution_error(
+            &arguments,
+            Some(&Expectation::Int(1)),
+            OracleScope::Unscoped
+        )
+        .is_none());
         assert!(classify_execution_error(
             &ExecutionError::Arguments {
                 actual: 1,
                 expected: 2
             },
-            None
+            None,
+            OracleScope::Unscoped
         )
         .is_none());
 
         let function =
             ExecutionError::Observation(ObservationFailure::Unobservable(ObjectKind::Function));
         assert!(matches!(
-            classify_execution_error(&function, None),
+            classify_execution_error(&function, None, OracleScope::Unscoped),
             Some((Classification::FunctionValued, _))
         ));
-        assert!(classify_execution_error(&function, Some(&Expectation::Int(1))).is_none());
-        assert!(
-            classify_execution_error(&function, Some(&Expectation::CyclicObservation)).is_none()
-        );
+        assert!(classify_execution_error(
+            &function,
+            Some(&Expectation::Int(1)),
+            OracleScope::Unscoped
+        )
+        .is_none());
+        assert!(classify_execution_error(
+            &function,
+            Some(&Expectation::CyclicObservation),
+            OracleScope::Unscoped
+        )
+        .is_none());
         let thunk =
             ExecutionError::Observation(ObservationFailure::Unobservable(ObjectKind::Thunk));
-        assert!(classify_execution_error(&thunk, None).is_none());
+        assert!(classify_execution_error(&thunk, None, OracleScope::Unscoped).is_none());
 
         let budget = ExecutionError::Observation(ObservationFailure::BudgetExceeded { limit: 1 });
         assert!(matches!(
-            classify_execution_error(&budget, Some(&Expectation::CyclicObservation)),
+            classify_execution_error(
+                &budget,
+                Some(&Expectation::CyclicObservation),
+                OracleScope::Unscoped
+            ),
             Some((Classification::NoFiniteObservation, _))
         ));
-        assert!(classify_execution_error(&budget, None).is_none());
+        assert!(classify_execution_error(&budget, None, OracleScope::Unscoped).is_none());
         assert!(compare_values(
             &[HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))],
             &Expectation::CyclicObservation,
             &DataConTable::default()
         )
         .is_err());
+    }
+
+    #[test]
+    fn observation_limit_is_unknown_only_outside_the_source_oracle_domain() {
+        use tidepool_codegen::prepared_program::{ExecutionError, ObservationFailure};
+        let budget =
+            ExecutionError::Observation(ObservationFailure::BudgetExceeded { limit: 100_000 });
+        let (class, reason) =
+            classify_execution_error(&budget, None, OracleScope::CompilerIntroduced).unwrap();
+        assert_eq!(class, Classification::ObservationLimit { limit: 100_000 });
+        assert!(reason.contains("completeness unknown"));
+        // The structured report retains the limit independently of rendered text.
+        let outcome = Outcome::Classified { class, reason };
+        let encoded = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(encoded["class"]["observation_limit"]["limit"], 100_000);
+        assert!(matches!(
+            serde_json::from_value::<Outcome>(encoded).unwrap(),
+            Outcome::Classified {
+                class: Classification::ObservationLimit { limit: 100_000 },
+                ..
+            }
+        ));
+        for scope in [OracleScope::Unscoped, OracleScope::SourceTop] {
+            assert!(classify_execution_error(&budget, None, scope).is_none());
+        }
+        for expected in [
+            Expectation::Int(1),
+            Expectation::Error(ExpectedFailure::Blackhole),
+        ] {
+            assert!(classify_execution_error(
+                &budget,
+                Some(&expected),
+                OracleScope::CompilerIntroduced
+            )
+            .is_none());
+        }
+        assert!(classify_execution_error(
+            &ExecutionError::Observation(ObservationFailure::AllocationFailed),
+            None,
+            OracleScope::CompilerIntroduced,
+        )
+        .is_none());
+        assert!(comparison_for_execution_error(&budget, None).is_none());
     }
 
     #[test]

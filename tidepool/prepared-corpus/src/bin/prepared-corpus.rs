@@ -15,7 +15,8 @@ use tidepool_prepared_corpus::{
 };
 use tidepool_repr::serial::read_metadata;
 
-const REPORT_VERSION: u32 = 2;
+const MANIFEST_VERSION: u32 = 2;
+const REPORT_VERSION: u32 = 3;
 
 /// Arguments are paths owned by the corpus verification recipe. The child
 /// receives a manifest index, never a command string derived from a program.
@@ -82,6 +83,7 @@ struct StageTotal {
     failed: usize,
     not_closed: usize,
     no_finite_observation: usize,
+    observation_limit: usize,
     function_valued: usize,
     missing_expectation: usize,
     no_oracle: usize,
@@ -465,7 +467,19 @@ fn cohort_execution_accepted(
             }
             // Compiler-introduced tops have no source oracle, but every
             // emitted row still has to pass projection through compilation.
-            Outcome::Classified { .. } => {
+            Outcome::Classified {
+                class: Classification::ObservationLimit { .. },
+                ..
+            } => {
+                expected_for(row, oracle).is_none()
+                    && OracleScope::of(row.expectation_key.as_deref(), oracle)
+                        == OracleScope::CompilerIntroduced
+                    && matches!(comparison, Outcome::NotReached)
+            }
+            Outcome::Classified {
+                class: Classification::FunctionValued,
+                ..
+            } => {
                 OracleScope::of(row.expectation_key.as_deref(), oracle)
                     == OracleScope::CompilerIntroduced
                     && matches!(comparison, Outcome::NotReached)
@@ -758,7 +772,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Box<dyn E
 }
 
 fn validate_manifest(manifest: &ProjectionManifest) -> Result<ManifestSummary, Box<dyn Error>> {
-    if manifest.version != REPORT_VERSION {
+    if manifest.version != MANIFEST_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -1066,6 +1080,7 @@ fn stage_totals(programs: &[ProgramRecord]) -> Vec<StageTotal> {
                 failed: 0,
                 not_closed: 0,
                 no_finite_observation: 0,
+                observation_limit: 0,
                 function_valued: 0,
                 missing_expectation: 0,
                 no_oracle: 0,
@@ -1081,6 +1096,7 @@ fn stage_totals(programs: &[ProgramRecord]) -> Vec<StageTotal> {
                         Classification::NotClosed => total.not_closed += 1,
                         Classification::NoFiniteObservation => total.no_finite_observation += 1,
                         Classification::FunctionValued => total.function_valued += 1,
+                        Classification::ObservationLimit { .. } => total.observation_limit += 1,
                     },
                     Outcome::MissingExpectation => total.missing_expectation += 1,
                     Outcome::NoOracle => total.no_oracle += 1,
@@ -1377,6 +1393,130 @@ mod tests {
             &Outcome::Passed,
             &Outcome::Passed
         ));
+    }
+
+    #[test]
+    fn observation_limit_acceptance_requires_unoracled_compiler_scope() {
+        let mut row: tidepool_prepared_corpus::ProjectionRecord = serde_json::from_str(
+            r#"{"name":"u:M:value:helper","expectation_key":"helper","status":"rejected","reason":"not run"}"#,
+        ).unwrap();
+        let mut oracle = Expectations {
+            refusals: Default::default(),
+            source_revision: "test".into(),
+            source_tops: Some(["source".into()].into_iter().collect()),
+            expectations: Default::default(),
+        };
+        let limited = Outcome::Classified {
+            class: Classification::ObservationLimit { limit: 100_000 },
+            reason: "completeness unknown".into(),
+        };
+        // An external expectation key is not source-oracle membership.
+        assert!(cohort_execution_accepted(
+            &row,
+            &oracle,
+            &limited,
+            &Outcome::NotReached
+        ));
+        for comparison in [
+            Outcome::Passed,
+            Outcome::NoOracle,
+            Outcome::MissingExpectation,
+        ] {
+            assert!(!cohort_execution_accepted(
+                &row,
+                &oracle,
+                &limited,
+                &comparison
+            ));
+        }
+        oracle
+            .expectations
+            .insert("helper".into(), Expectation::CyclicObservation);
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &limited,
+            &Outcome::NotReached
+        ));
+        oracle.expectations.clear();
+        row.expectation_key = None;
+        assert!(cohort_execution_accepted(
+            &row,
+            &oracle,
+            &limited,
+            &Outcome::NotReached
+        ));
+        row.expectation_key = Some("source".into());
+        // Missing source oracle data never grants compiler-helper treatment.
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &limited,
+            &Outcome::NotReached
+        ));
+        oracle
+            .expectations
+            .insert("source".into(), Expectation::Int(1));
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &limited,
+            &Outcome::NotReached
+        ));
+        oracle.expectations.clear();
+        for class in [
+            tidepool_prepared_corpus::SourceRefusal::NotClosed,
+            tidepool_prepared_corpus::SourceRefusal::Unrepresentable,
+        ] {
+            oracle.refusals.insert(
+                "source".into(),
+                tidepool_prepared_corpus::OracleRefusal {
+                    class,
+                    reason: "source refusal".into(),
+                },
+            );
+            assert!(!cohort_execution_accepted(
+                &row,
+                &oracle,
+                &limited,
+                &Outcome::NotReached
+            ));
+        }
+        row.expectation_key = Some("helper".into());
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &Outcome::Failed {
+                reason: "observation budget 100000 exhausted".into()
+            },
+            &Outcome::NotReached
+        ));
+        oracle.source_tops = None;
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &limited,
+            &Outcome::NotReached
+        ));
+    }
+
+    #[test]
+    fn observation_limit_counts_separately_from_semantic_outcomes() {
+        let mut record = ProgramRecord::new("helper".into());
+        record.record(
+            Stage::Execution,
+            Outcome::Classified {
+                class: Classification::ObservationLimit { limit: 100_000 },
+                reason: "completeness unknown".into(),
+            },
+        );
+        let totals = stage_totals(&[record]);
+        let execution = &totals[Stage::Execution as usize];
+        assert_eq!(execution.observation_limit, 1);
+        assert_eq!(execution.passed, 0);
+        assert_eq!(execution.failed, 0);
+        assert_eq!(execution.no_finite_observation, 0);
+        assert_eq!(totals[Stage::Comparison as usize].not_reached, 1);
     }
 
     #[test]
@@ -1717,6 +1857,7 @@ mod tests {
             Classification::NotClosed,
             Classification::NoFiniteObservation,
             Classification::FunctionValued,
+            Classification::ObservationLimit { limit: 100_000 },
         ] {
             let mut record = ProgramRecord::new("classified".into());
             record.record(
