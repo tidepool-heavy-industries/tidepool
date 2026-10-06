@@ -16,6 +16,7 @@ mod publication_tests;
 /// recipe observations are added by the workbench's original snapshot owner.
 pub(crate) struct WorkbenchCompilationAuthority {
     source: crate::CheckpointSourceLayer,
+    source_layers: Option<crate::ActorSourceLayerResolver>,
     // Keep the admitted implementation alive until this execution releases it.
     _installed_tools: Option<crate::InstalledToolLease>,
     authority_digest: [u8; 32],
@@ -95,6 +96,7 @@ impl WorkbenchCompilationAuthority {
             context,
             Arc::new(Self {
                 source,
+                source_layers: source_layers.cloned(),
                 _installed_tools: installed_tools,
                 authority_digest: *digest.finalize().as_bytes(),
             }),
@@ -103,6 +105,14 @@ impl WorkbenchCompilationAuthority {
 
     pub(crate) fn source(&self) -> &crate::CheckpointSourceLayer {
         &self.source
+    }
+
+    pub(crate) fn toolset_source(&self) -> Result<crate::CheckpointSourceLayer, String> {
+        match &self.source_layers {
+            Some(layers) => layers.toolset_layer_from(&self.source),
+            None if !self.source.is_owned() => Ok(crate::CheckpointSourceLayer::default()),
+            None => Err("toolset preparation has no source owner".into()),
+        }
     }
 
     #[cfg(test)]

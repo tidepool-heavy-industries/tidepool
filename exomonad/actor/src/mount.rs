@@ -296,11 +296,21 @@ impl ActorSourceImports {
 pub trait ActorSourceLayers: Send + Sync {
     /// Freeze the published toolset source graph independently of notebook helpers.
     /// The source owner must return direct immutable revision paths.
-    fn freeze_toolset_layer(
-        &self,
-        _actor: PrincipalId,
-    ) -> Result<CheckpointSourceLayer, String> {
+    fn freeze_toolset_layer(&self, _actor: PrincipalId) -> Result<CheckpointSourceLayer, String> {
         Ok(CheckpointSourceLayer::default())
+    }
+
+    /// Select the run toolset from an already admitted immutable source graph.
+    fn toolset_layer_from(
+        &self,
+        source: &CheckpointSourceLayer,
+    ) -> Result<CheckpointSourceLayer, String> {
+        self.validate_source_authority(source)?;
+        if source.is_owned() {
+            Err("source owner does not expose its published toolset graph".into())
+        } else {
+            Ok(CheckpointSourceLayer::default())
+        }
     }
 
     /// Validate opaque source ownership at cell/checkpoint admission. A host

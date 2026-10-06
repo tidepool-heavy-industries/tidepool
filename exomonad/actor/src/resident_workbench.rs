@@ -380,6 +380,8 @@ pub struct ActorWorkbenchSource {
     installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
     request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
     request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+    toolset_support: Arc<[PathBuf]>,
+    toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -410,6 +412,7 @@ impl ActorWorkbenchSource {
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
             preamble: preamble.into(),
+            toolset_support: base_include.clone().into(),
             base_include: base_include.into(),
             workbench_imports: SourceImports::from_specs([
                 "qualified Data.Set as Set",
@@ -422,7 +425,16 @@ impl ActorWorkbenchSource {
             installed_effect_support: Arc::from([]),
             request_evidence: None,
             request_helper_recipe: Default::default(),
+            toolset_preparation: Default::default(),
         }
+    }
+
+    /// Deployment-owned support roots, ahead of the source owner's published
+    /// toolset graph. Notebook/helper roots do not enter installer construction.
+    #[must_use]
+    pub fn with_toolset_support_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.toolset_support = roots.into();
+        self
     }
 
     /// Capture support from the actual assembled interpreter instances and
@@ -520,6 +532,7 @@ pub(crate) struct ResidentWorkbenchTools {
     /// Installer source roots belong to the installed implementation, not the
     /// actor's published declaration and value surface.
     _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    _prepared: Arc<crate::agent_spec::preparation::PreparedToolset>,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
@@ -4147,11 +4160,26 @@ where
                 })
                 .await?;
             let admitted_base: Vec<_> = granted_effects
-                .into_iter()
+                .iter().copied()
                 .filter(|key| admitted_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
                 .collect();
-            let resolved = self.resolve_spec(&context);
-            let revision = resolved.source_revision();
+            let authority = self.compilation_authority.as_ref().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "tool installation requires its admitted source authority".into(),
+                )
+            })?;
+            let toolset_source = authority.toolset_source()
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            let mut roots = self.access.source.toolset_support.to_vec();
+            roots.extend(toolset_source.include_paths().iter().cloned());
+            // Canonical paths bind this request to one immutable publication.
+            // Source installation never follows active/* while compilation runs.
+            let roots = roots.into_iter().map(std::fs::canonicalize)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+            let resolved = crate::agent_spec::resolve(roots.clone(), self.access.source.spec.as_deref());
+            let revision = resolved.source_closure_revision()
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             let entry = resolved.entry.clone().unwrap_or_else(|| {
                 if admitted_support.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
                     "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
@@ -4160,40 +4188,52 @@ where
                 }
             });
             let installation = crate::agent_spec::installation_expression(&entry, &admitted_base);
-            let authored_effects = installation.effect_row;
-            let dispatcher_effects = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
-            let mut source = self.access.source.clone();
-            // A spec found by convention is named by no configured key, so its
-            // module is not in the shared workbench vocabulary; the fragment that
-            // installs it brings its own qualified import.
+            let dispatcher_effects = format!(
+                "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
+                installation.effect_row,
+            );
+            let mut imports = self.access.source.workbench_imports.clone();
             if let Some((module, _)) = entry.rsplit_once('.') {
-                source
-                    .workbench_imports
-                    .extend_text(&format!("qualified {module}"));
+                imports.extend_text(&format!("qualified {module}"));
             }
-            source
-                .workbench_imports
-                .extend_text("qualified Tidepool.Agent.Contract");
-            source.preamble =
-                insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
+            imports.extend_text("qualified Tidepool.Agent.Contract");
+            imports.extend_text("qualified Tidepool.Effects.Core");
+            imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
+            imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+            let registry = self.access.image_registry.clone()
+                .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
+            let prepared = self.access.source.toolset_preparation.prepare(
+                crate::agent_spec::preparation::InstallerRecipe {
+                    source_revision: revision,
+                    roots,
+                    preamble: self.access.source.preamble.to_string(),
+                    imports: imports.template_text(),
+                    entry,
+                    effects: admitted_base.clone(),
+                },
+                resolved,
+                toolset_source,
+                registry,
+            ).await.map_err(|failure| match failure {
+                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) =>
+                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic),
+                crate::agent_spec::preparation::PreparationFailure::Source(detail)
+                | crate::agent_spec::preparation::PreparationFailure::Native(detail) =>
+                    ResidentActorWorkbenchError::ActorProtocol(detail),
+            })?;
+            let revision = Some(prepared.source_revision.clone());
+            let publication_resolved = prepared.resolved.clone();
             let mut compile_context = context.clone();
             compile_context.haskell_effects_alias = dispatcher_effects.clone();
             let installation_scope = self
                 .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    if let Some(captured) = context.source_imports.inherited_scope()? {
-                        if install == 1 {
-                            session.validate_initial_lexical_scope(
-                                &captured,
-                                context.placement.lexical_scope,
-                            )?;
-                        } else {
-                            session.validate_lexical_scope_lease(captured.scope(), &captured)?;
-                        }
-                    }
-                    session
-                        .retain_lexical_scope(context.placement.lexical_scope)
-                        .map_err(Into::into)
+                .with_machine(context.clone(), move |session, _, _| {
+                    // Each installation has an independent CAF/source domain even
+                    // when actors share the surrounding machine and native images.
+                    let isolated = session.mint_isolated_scope();
+                    let retained = session.retain_lexical_scope(isolated)?;
+                    session.retire_scope(isolated);
+                    Ok(retained)
                 })
                 .await?;
             compile_context.placement.lexical_scope = installation_scope.scope();
@@ -4205,76 +4245,21 @@ where
                 Some(installation_scope.clone()),
             );
             let registration = abort_guard.registration();
-            let block = ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: installation.expression,
-            };
-            let authority = self.compilation_authority.clone().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installation requires its admitted source authority".into(),
-                )
-            })?;
-            let mut installer = ResidentActorWorkbench {
-                access: self.access.sharing(),
-                request_scope: None,
-                json_input: None,
-                compilation_authority: Some(authority.clone()),
-                private_execution: None,
-                #[cfg(test)]
-                activation_preview_observer: None,
-            };
-            installer.access.source = source;
-            let publication_resolved = resolved;
-            let installed_effect_support =
-                installer.access.source.installed_effect_support().to_vec();
+            let installed_effect_support = self.access.source.installed_effect_support().to_vec();
             let handler_effect_support = self.access.handler_effect_support.clone();
-            // Setup uses the existing public scope while the bootstrap owner
-            // retains publication authority. The checked program seals its
-            // captured interfaces and protected templates before native execution.
-            // Box compiler state separately from the tool-preparation future.
-            let (checked, prepared) = Box::pin(installer.prepare_checked_cell(
-                compile_context.clone(),
-                block.source,
-                authority,
-                None,
-                None,
-            ))
-            .await
-            .map_err(|error| {
-                tracing::error!(?error, "agent spec installation check failed");
-                error
-            })?;
-            if checked.items.len() != 1
-                || checked.items[0].verdict.kind != TurnKind::Bind
-                || !checked.items[0].verdict.binders.is_empty()
-            {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installer must be one checked bind without public binders".into(),
-                ));
-            }
-            let PreparedCell {
-                mut items,
-                dependencies,
-            } = prepared;
-            let item = items.pop().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installer checked program has no executable item".into(),
-                )
-            })?;
-            let block = ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: checked.items[0].source.clone(),
-            };
-            // Execution stays inside the registration while its state is boxed.
-            let step = registration
-                .scope(Box::pin(installer.begin_prepared_cell_item(
-                    compile_context.clone(),
-                    block,
-                    item,
-                )))
-                .await?;
+            let prepared_entry = Arc::clone(&prepared);
+            let installer_source = installation.expression;
+            let step = registration.scope(self.access.with_machine(
+                compile_context.clone(), move |session, context, _| {
+                    session.set_image_registry(Arc::clone(prepared_entry.entry.image_registry()));
+                    let entry = session.prepare_startup_entry(prepared_entry.entry.compiled().code())?;
+                    let outcome = session.run_startup_entry(entry);
+                    start_fragment_settlement(
+                        session, context, 1, installer_source, WorkbenchDisplay::Discard,
+                        prepared_entry.entry.compiled().warnings.warnings.clone(), outcome,
+                    )
+                },
+            )).await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {
                     ResidentWorkbenchStep::Rejected(detail) => detail.output,
@@ -4322,6 +4307,14 @@ where
                             if !installed_effect_support.contains(&key) {
                                 installed_effect_support.push(key);
                             }
+                        }
+                        let current_base = granted_effects.iter().copied()
+                            .filter(|key| installed_effect_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
+                            .collect::<Vec<_>>();
+                        if current_base != admitted_base {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "tool interpreter support changed during source preparation".into(),
+                            ));
                         }
                         crate::tool_contract::validate_installation(
                             &tools,
@@ -4373,6 +4366,7 @@ where
                         declarations,
                         dispatch: Arc::new(dispatch),
                         _installation_scope: installation_scope,
+                        _prepared: prepared,
                         dispatcher_effects,
                         slots,
                         resolved: publication_resolved,
@@ -4384,7 +4378,6 @@ where
             if publication.is_ok() {
                 abort_guard.disarm();
             }
-            drop(dependencies);
             publication
         }.instrument(span))
     }

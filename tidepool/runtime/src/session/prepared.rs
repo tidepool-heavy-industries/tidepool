@@ -693,9 +693,13 @@ impl PreparedSourceEntry {
         compiled: Arc<super::turn::CompiledTurn>,
         registry: Arc<ImageRegistry>,
     ) -> Result<Self, super::resident::ResidentError> {
-        let certification = compiled.certification.as_ref()
+        let certification = compiled
+            .certification
+            .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
-        let proof = certification.compile_input_identity.as_ref()
+        let proof = certification
+            .compile_input_identity
+            .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
         if !matches!(certification.purpose(), super::turn::TurnPurpose::Ordinary)
             || !proof.matches_bundle(
@@ -725,7 +729,11 @@ impl PreparedSourceEntry {
         let mut images = Vec::with_capacity(demanded.len() + 1);
         images.push(target.image);
         images.extend(demanded.iter().map(|image| Arc::clone(image.image())));
-        Ok(Self { compiled, registry, _images: images })
+        Ok(Self {
+            compiled,
+            registry,
+            _images: images,
+        })
     }
 
     pub fn compiled(&self) -> &Arc<super::turn::CompiledTurn> {

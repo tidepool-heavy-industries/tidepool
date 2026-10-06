@@ -1878,6 +1878,17 @@ pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
 }
 
 impl CompiledTurn {
+    /// Exact original artifact identities retained by this compiler output.
+    pub fn source_artifacts(
+        &self,
+    ) -> Vec<tidepool_toolchain::artifact_inventory::ArtifactDescriptor> {
+        self.certification
+            .as_ref()
+            .map_or_else(Vec::new, |certification| {
+                certification.artifact_view.descriptors()
+            })
+    }
+
     /// Borrow immutable inputs when the caller will reuse this artifact.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {

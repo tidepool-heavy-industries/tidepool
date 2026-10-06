@@ -2711,6 +2711,7 @@ fn runtime_namespace(run_root: &Path) -> String {
 struct CompiledExomonadDriver {
     preamble: String,
     include: Vec<PathBuf>,
+    toolset_support: Vec<PathBuf>,
     compiled: tidepool_runtime::session::CompiledTurn,
 }
 
@@ -2785,6 +2786,8 @@ pub(crate) fn spec_effect_preflight(
     )?;
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core");
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Contract");
+    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Reply.Internal");
+    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch.Internal");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
     for (label, role) in LAUNCHABLE_ROLES {
@@ -2955,6 +2958,7 @@ struct DriverSources {
     bootstrap_preamble: String,
     workbench_preamble: String,
     include: Vec<PathBuf>,
+    toolset_support: Vec<PathBuf>,
 }
 
 enum DriverCompilePurpose {
@@ -3004,6 +3008,7 @@ fn driver_sources(
         DRIVER_MODULE,
     );
     let bootstrap_preamble = preamble.clone();
+    let toolset_support = include.clone();
     if let Some(inputs) = inputs {
         // The live source layer goes AHEAD of the run's frozen capture, so a
         // reloaded module shadows the copy the run started from. The frozen
@@ -3051,6 +3056,7 @@ fn driver_sources(
         bootstrap_preamble,
         workbench_preamble: preamble,
         include,
+        toolset_support,
     })
 }
 
@@ -3070,6 +3076,7 @@ fn compile_driver(
         bootstrap_preamble,
         workbench_preamble,
         include,
+        toolset_support,
     } = driver_sources(haskell_root, inputs, run_root, candidate)?;
     let preamble = match purpose {
         DriverCompilePurpose::Bootstrap => &bootstrap_preamble,
@@ -3107,6 +3114,7 @@ fn compile_driver(
     Ok(CompiledExomonadDriver {
         preamble: workbench_preamble,
         include,
+        toolset_support,
         compiled,
     })
 }
@@ -3143,6 +3151,7 @@ fn compile_root(
     let CompiledExomonadDriver {
         preamble,
         include,
+        toolset_support,
         compiled,
     } = compile_driver(
         &config.haskell_root,
@@ -3339,6 +3348,7 @@ fn compile_root(
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let context_support = vec![exomonad_tool::ToolEffectKey::ContextReadWrite];
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
+        .with_toolset_support_roots(toolset_support)
         .with_installed_effect_support(context_support)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
