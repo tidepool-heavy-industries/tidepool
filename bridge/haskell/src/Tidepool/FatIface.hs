@@ -7,10 +7,17 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
+  , FatOriginalVersion, fatOriginalOwner
+  , FatIfaceComponent, fatComponentVersion, fatComponentOrdinals
+  , fatComponentBindings, fatComponentAllBinders, fatComponentOrdinal
+  , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
+  , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
+  , FatIfaceComponentLookup(..), lookupFatIfaceComponents
   , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
+  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
+  , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
@@ -19,17 +26,20 @@ import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
-import GHC.Types.Var (Id, isId)
+import GHC.Types.Var (Id, isId, isLocalId)
 import GHC.Types.Var (varName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Types.Var.Env (emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
-import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls)
+import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls, mi_iface_hash, mi_final_exts)
+import GHC.Utils.Fingerprint (Fingerprint)
 import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
 
 import GHC.Iface.Load (findAndReadIface, readIface)
 import GHC.Iface.Errors.Types
   ( MissingInterfaceError(..), ReadInterfaceError(..) )
 import GHC.IfaceToCore (tcTopIfaceBindings)
+import GHC.Iface.Recomp.Binary (computeFingerprint, putNameLiterally)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
 import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Data.Maybe (MaybeErr(..))
@@ -37,14 +47,16 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 
 import Control.Concurrent.MVar
-  (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+  (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
-  ( displayException )
+  ( displayException, evaluate )
+import Tidepool.FatIface.Internal qualified as Shared
 import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
+import qualified Data.IntSet as IntSet
 import qualified Data.Set as Set
 import System.IO (hPutStrLn, stderr)
 import System.Environment (lookupEnv)
@@ -64,9 +76,51 @@ data FatIfaceLookup
 -- become indistinguishable from a successfully loaded interface with no
 -- matching binding.
 data FatIfaceModule
-  = FatIfaceBindings (IntMap.IntMap CoreBind) (Map.Map Name Int)
+  = FatIfaceBindings
+      !FatOriginalVersion
+      !(IntMap.IntMap CoreBind)
+      !(Map.Map Name Int)
+      !(IntMap.IntMap [Int])
+      !(IntMap.IntMap [Int])
+      !(IntMap.IntMap Int)
+      !(IntMap.IntMap FatIfaceComponent)
   | FatIfaceNoExtraDeclarations
   | FatIfaceLoadFailureOutcome String
+
+-- | Exact identity of one decoded original interface and its stored Core.
+-- The interface fingerprint alone does not directly hash extra declarations.
+data FatOriginalVersion = FatOriginalVersion !Module !Fingerprint !Fingerprint
+  deriving (Eq, Ord)
+
+fatOriginalOwner :: FatOriginalVersion -> Module
+fatOriginalOwner (FatOriginalVersion owner _ _) = owner
+
+-- | One canonical undirected connected component of private references in an
+-- original fat interface. Bindings retain their authoritative original group
+-- ordinals; allBinders is the complete original binder census for scope checks.
+data FatIfaceComponent = FatIfaceComponent
+  { fatComponentVersion :: !FatOriginalVersion
+  , fatComponentOrdinals :: ![Int]
+  , fatComponentBindings :: !(IntMap.IntMap CoreBind)
+  , fatComponentAllBinders :: ![Id]
+  }
+
+fatComponentOrdinal :: FatIfaceComponent -> Int
+fatComponentOrdinal component = case fatComponentOrdinals component of
+  ordinal : _ -> ordinal
+  [] -> error "FatIfaceComponent invariant: empty ordinal roster"
+
+data FatIfaceSelection = FatIfaceSelection
+  { fatSelectionVersion :: !FatOriginalVersion
+  , fatSelectionComponents :: ![FatIfaceComponent]
+  , fatSelectionDemandedGroupCount :: !Int
+  , fatSelectionPreparedGroupCount :: !Int
+  }
+
+data FatIfaceComponentLookup
+  = FatIfaceComponents FatIfaceSelection
+  | FatIfaceComponentsMissing FatIfaceMissing
+  | FatIfaceComponentsLoadFailure Module String
 
 data ExactInterfaceFailure
   = ExactInterfaceFinderFailure String
@@ -86,7 +140,7 @@ lookupFatIfaceBodies :: HscEnv -> FatIfaceCache -> Module -> [Name] -> IO FatIfa
 lookupFatIfaceBodies hscEnv cache owner requested = do
   outcome <- lookupModuleOutcome hscEnv cache owner
   pure $ case outcome of
-    FatIfaceBindings groups names -> case traverse (`Map.lookup` names) requested of
+    FatIfaceBindings _ groups names dependencies _ _ _ -> case traverse (`Map.lookup` names) requested of
       Nothing -> FatIfaceMissing BindingAbsent
       Just roots ->
         let selected = close Set.empty roots
@@ -94,56 +148,77 @@ lookupFatIfaceBodies hscEnv cache owner requested = do
             close seen (ordinal : pending)
               | ordinal `Set.member` seen = close seen pending
               | otherwise = close (Set.insert ordinal seen)
-                  (privateDependencies (groups IntMap.! ordinal) ++ pending)
-            -- Every pending ordinal comes from this immutable index, which
-            -- is constructed alongside the complete original group table.
-            privateDependencies binding =
-              [ dependency
-              | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-              , identifier <- nonDetEltsUniqSet (exprSomeFreeVars privateId rhs)
-              , Just dependency <- [Map.lookup (varName identifier) names] ]
-            privateId identifier = isId identifier && not (isExternalName (varName identifier))
+                  (IntMap.findWithDefault [] ordinal dependencies ++ pending)
         in FatIfaceFound [binding | (ordinal, binding) <- IntMap.toAscList groups
              , ordinal `Set.member` selected]
     FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
     FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
 
--- | Cache of deserialized fat interface Core, keyed by Module.
--- Each module's extra-decls are deserialized at most once.
--- Exact Names index original group ordinals. This preserves both Rec group
--- identity and the defining order of private top scope.
-newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceModule))
+-- | Resolve requested roots and retain each root's full canonical private
+-- dependency component. The demand count follows actual local Id references;
+-- the preparation count includes the full selected weak components.
+lookupFatIfaceComponents
+  :: HscEnv -> FatIfaceCache -> Module -> [Name] -> IO FatIfaceComponentLookup
+lookupFatIfaceComponents hscEnv cache owner requested = do
+  outcome <- lookupModuleOutcome hscEnv cache owner
+  pure $ case outcome of
+    FatIfaceBindings version _groups names _dependencies privateDependencies componentOf components ->
+      case traverse (`Map.lookup` names) requested of
+        Nothing -> FatIfaceComponentsMissing BindingAbsent
+        Just roots ->
+          let demanded = close Set.empty roots
+              close seen [] = seen
+              close seen (ordinal : pending)
+                | ordinal `Set.member` seen = close seen pending
+                | otherwise = close (Set.insert ordinal seen)
+                    (IntMap.findWithDefault [] ordinal privateDependencies ++ pending)
+              selectedComponentOrdinals = Set.fromList
+                [ componentOrdinal
+                | ordinal <- roots
+                , Just componentOrdinal <- [IntMap.lookup ordinal componentOf] ]
+              selectedComponents =
+                [ component
+                | componentOrdinal <- Set.toAscList selectedComponentOrdinals
+                , Just component <- [IntMap.lookup componentOrdinal components] ]
+              preparedCount = sum (map (length . fatComponentOrdinals) selectedComponents)
+          in FatIfaceComponents (FatIfaceSelection version selectedComponents
+               (Set.size demanded) preparedCount)
+    FatIfaceNoExtraDeclarations -> FatIfaceComponentsMissing NoExtraDeclarations
+    FatIfaceLoadFailureOutcome reason -> FatIfaceComponentsLoadFailure owner reason
 
--- | Create an empty cache.
+-- | Each stable resolution context owns its decoded Core cache. Sharing
+-- completion is an internal loading mechanism; callers cannot supply bodies.
+newtype FatIfaceCache = FatIfaceCache (Shared.LoadCache Module FatIfaceModule)
+
 newFatIfaceCache :: IO FatIfaceCache
-newFatIfaceCache = FatIfaceCache <$> newMVar Map.empty
+newFatIfaceCache = FatIfaceCache <$> Shared.newLoadCache
 
--- | Drop every cached module outcome whose 'Module' key matches the given
--- predicate. Used by the resident daemon to invalidate a request's own
--- target module and every @Tidepool.Session.*@ module between requests,
--- whose @.hi@ files can change underneath an otherwise daemon-lifetime
--- cache; library modules are stable while the daemon lives.
+copyFatIfaceCache :: FatIfaceCache -> IO FatIfaceCache
+copyFatIfaceCache (FatIfaceCache cache) = FatIfaceCache <$> Shared.copyLoadCache cache
+
+mergeFatIfaceCaches :: [(FatIfaceCache, Module -> Bool)] -> IO FatIfaceCache
+mergeFatIfaceCaches sources = FatIfaceCache <$> Shared.mergeLoadCaches
+  [(cache, keep) | (FatIfaceCache cache, keep) <- sources]
+
+selectFatIfaceCaches :: [(FatIfaceCache, Set.Set Module)] -> IO FatIfaceCache
+selectFatIfaceCaches sources = FatIfaceCache <$> Shared.selectLoadCaches
+  [(cache, owners) | (FatIfaceCache cache, owners) <- sources]
+
+-- | Request-owned targets and changed private contexts can evict acceleration
+-- without replacing another in-flight generation's eventual publication.
 evictFatIfaceMatching :: FatIfaceCache -> (Module -> Bool) -> IO ()
-evictFatIfaceMatching (FatIfaceCache cacheRef) stale =
-  modifyMVar_ cacheRef (pure . Map.filterWithKey (\modl _ -> not (stale modl)))
+evictFatIfaceMatching (FatIfaceCache cache) = Shared.evictLoadCache cache
 
--- | Load one module once and retain whether it loaded, lacked extra
--- declarations, or failed.  Holding the MVar across the miss path also keeps
--- the "at most once" cache invariant true when resolution is concurrent.
 lookupModuleOutcome :: HscEnv -> FatIfaceCache -> Module -> IO FatIfaceModule
-lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl =
-  modifyMVar cacheRef $ \cache -> case Map.lookup modl cache of
-    Just outcome -> pure (cache, outcome)
-    Nothing -> do
-      outcome <- loadModuleExtraDecls hscEnv modl
-      pure (Map.insert modl outcome cache, outcome)
+lookupModuleOutcome env (FatIfaceCache cache) owner =
+  Shared.lookupLoadCache cache owner (loadModuleExtraDecls env owner)
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
 -- exact outcome for all selected-body callers.
 -- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
 loadModuleExtraDecls :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDecls hscEnv modl = do
-  result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl)
+  result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl >>= evaluate)
   case result of
     Right outcome -> return outcome
     Left e -> do
@@ -208,6 +283,9 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Nothing -> pure ()
           return FatIfaceNoExtraDeclarations
         Just ifaceBinds -> do
+          coreHash <- computeFingerprint putNameLiterally ifaceBinds
+          let version = FatOriginalVersion modl (mi_iface_hash (mi_final_exts iface)) coreHash
+          version `seq` pure ()
           coreBinds <- initIfaceCheck doc hscEnv $ do
             typeEnvRef <- liftIO $ newIORef emptyTypeEnv
             initIfaceLcl modl doc NotBoot $
@@ -216,7 +294,9 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Just _ -> hPutStrLn stderr $
               "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
             Nothing -> pure ()
-          return (FatIfaceBindings (IntMap.fromList (zip [0..] coreBinds)) (bindingsToMap coreBinds))
+          let (groups, names, dependencies, privateDependencies, componentOf, components) =
+                indexOriginalBindings version coreBinds
+          return (FatIfaceBindings version groups names dependencies privateDependencies componentOf components)
 
 renderExactInterfaceFailure :: ExactInterfaceFailure -> String
 renderExactInterfaceFailure failure = case failure of
@@ -229,6 +309,76 @@ bindingsToMap = foldl' addBind Map.empty . zip [0..]
   where
     addBind m (ordinal, NonRec binder _) = Map.insert (varName binder) ordinal m
     addBind m (ordinal, Rec pairs) = foldl' (\m' (binder, _) -> Map.insert (varName binder) ordinal m') m pairs
+
+-- | Build all immutable ownership and graph indexes once, while the original
+-- decoded binding table is first admitted to the cache.
+indexOriginalBindings
+  :: FatOriginalVersion -> [CoreBind]
+  -> ( IntMap.IntMap CoreBind
+     , Map.Map Name Int
+     , IntMap.IntMap [Int]
+     , IntMap.IntMap [Int]
+     , IntMap.IntMap Int
+     , IntMap.IntMap FatIfaceComponent
+     )
+indexOriginalBindings version coreBinds =
+  (groups, names, dependencies, privateDependencies, componentOf, components)
+  where
+    groups = IntMap.fromList (zip [0..] coreBinds)
+    names = bindingsToMap coreBinds
+    allBinders = concatMap groupBinders coreBinds
+    ordinalByIdentifier = foldl' addBinder emptyVarEnv
+      [ (identifier, ordinal)
+      | (ordinal, binding) <- IntMap.toAscList groups
+      , identifier <- groupBinders binding ]
+    addBinder env (identifier, ordinal) = extendVarEnv env identifier ordinal
+    legacyDependencySets = IntMap.mapWithKey legacyPrivateDependencies groups
+    legacyPrivateDependencies _ binding = Set.fromList
+      [ dependency
+      | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars privateId rhs)
+      , Just dependency <- [Map.lookup (varName identifier) names] ]
+    privateId identifier = isId identifier && not (isExternalName (varName identifier))
+    dependencies = IntMap.map Set.toAscList legacyDependencySets
+    localDependencySets = IntMap.mapWithKey localDependencies groups
+    localDependencies _ binding = Set.fromList
+      [ dependency
+      | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isLocalId rhs)
+      , Just dependency <- [localBinderOrdinal identifier] ]
+    localBinderOrdinal identifier = case lookupVarEnv ordinalByIdentifier identifier of
+      Just ordinal -> Just ordinal
+      Nothing -> error "fat interface contains an actual-local free Id outside its original binder census"
+    privateDependencies = IntMap.map Set.toAscList localDependencySets
+    rosters = map Set.toAscList $ Shared.privateComponents
+      (Map.fromList (IntMap.toAscList localDependencySets))
+    componentOrdinals = IntMap.fromList
+      [ (ordinal, componentOrdinal)
+      | roster <- rosters
+      , let componentOrdinal = head roster
+      , ordinal <- roster ]
+    componentOf = validateCrossComponentEdges localDependencySets componentOrdinals `seq` componentOrdinals
+    components = IntMap.fromList
+      [ (head roster, FatIfaceComponent version roster
+          (IntMap.restrictKeys groups (IntSet.fromList roster)) allBinders)
+      | roster <- rosters ]
+
+validateCrossComponentEdges
+  :: IntMap.IntMap (Set.Set Int) -> IntMap.IntMap Int -> ()
+validateCrossComponentEdges dependencies componentOf =
+  IntMap.foldlWithKey' validateGroup () dependencies
+  where
+    validateGroup () ordinal targets = Set.foldl' (validateEdge ordinal) () targets
+    validateEdge source () target =
+      case (IntMap.lookup source componentOf, IntMap.lookup target componentOf) of
+        (Just sourceComponent, Just targetComponent)
+          | sourceComponent == targetComponent -> ()
+          | otherwise -> error "fat interface private graph split an actual-local top reference"
+        _ -> error "fat interface private graph omitted an original binder ordinal"
+
+groupBinders :: CoreBind -> [Id]
+groupBinders (NonRec identifier _) = [identifier]
+groupBinders (Rec pairs) = map fst pairs
 
 -- GHC exposes interface-read failures as a closed diagnostic type without an
 -- Outputable instance. Keep the reason typed at the lookup boundary while
@@ -274,6 +424,27 @@ newtype OwnerInterfaceCache =
 
 newOwnerInterfaceCache :: IO OwnerInterfaceCache
 newOwnerInterfaceCache = OwnerInterfaceCache <$> newMVar Map.empty
+
+-- | Copy the already-read owner contexts into an independent cache.
+copyOwnerInterfaceCache :: OwnerInterfaceCache -> IO OwnerInterfaceCache
+copyOwnerInterfaceCache (OwnerInterfaceCache cacheRef) =
+  OwnerInterfaceCache <$> (readMVar cacheRef >>= newMVar)
+
+-- | Completed defining contexts are selected before their maps are combined.
+-- Earlier sources win a selected duplicate owner.
+mergeOwnerInterfaceCaches :: [(OwnerInterfaceCache, Module -> Bool)] -> IO OwnerInterfaceCache
+mergeOwnerInterfaceCaches sources = do
+  selected <- mapM (\(OwnerInterfaceCache ref, keep) ->
+    Map.filterWithKey (\owner _ -> keep owner) <$> readMVar ref) sources
+  OwnerInterfaceCache <$> newMVar (Map.unions selected)
+
+selectOwnerInterfaceCaches :: [(OwnerInterfaceCache, Set.Set Module)] -> IO OwnerInterfaceCache
+selectOwnerInterfaceCaches sources = do
+  selected <- mapM (\(OwnerInterfaceCache ref, owners) -> do
+    entries <- readMVar ref
+    pure (Map.fromAscList [(owner, value) | owner <- Set.toAscList owners
+      , Just value <- [Map.lookup owner entries]])) sources
+  OwnerInterfaceCache <$> newMVar (Map.unions selected)
 
 lookupOwnerInterface :: OwnerInterfaceCache -> Module
   -> IO (Maybe OwnerInterfaceContext)

@@ -7,6 +7,8 @@ module Tidepool.ExecutionEncode
   ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
   , ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory
+  , ProjectedGroupEncoding, prepareProjectedGroupEncoding, prepareModuleProductEncodingFromGroups
+  , projectedGroupEncodingBytes
   ) where
 
 import Codec.CBOR.Encoding
@@ -96,11 +98,29 @@ data ModuleProductEncoding = ModuleProductEncoding
   , moduleProductBytes :: ByteString
   }
 
+-- Encoded payload and semantic group are issued together by this encoder.
+-- Retained raw projection can share these leaves without callers pairing an
+-- unrelated byte string with a group's certification evidence.
+data ProjectedGroupEncoding = ProjectedGroupEncoding ProjectedGroup ByteString
+
+prepareProjectedGroupEncoding :: ProjectedGroup -> ProjectedGroupEncoding
+prepareProjectedGroupEncoding group = ProjectedGroupEncoding group (encodeProjectedGroup group)
+
+projectedGroupEncodingBytes :: ProjectedGroupEncoding -> ByteString
+projectedGroupEncodingBytes (ProjectedGroupEncoding _ bytes) = bytes
+
+prepareModuleProductEncodingFromGroups
+  :: Text -> Text -> ByteString -> [ProjectedGroupEncoding] -> ModuleProductEncoding
+prepareModuleProductEncodingFromGroups unit owner interface groups = encoded
+  where
+    encoded = ModuleProductEncoding
+      (unit,owner,interface,[group | ProjectedGroupEncoding group _ <- groups])
+      [bytes | ProjectedGroupEncoding _ bytes <- groups]
+      (encodeModuleProductInventory [encoded])
+
 prepareModuleProductEncoding :: (Text, Text, ByteString, [ProjectedGroup]) -> ModuleProductEncoding
-prepareModuleProductEncoding originalProduct@(_, _, _, groups) = encoded
- where
-  encoded = ModuleProductEncoding originalProduct (map encodeProjectedGroup groups)
-    (encodeModuleProductInventory [encoded])
+prepareModuleProductEncoding (unit,owner,interface,groups) =
+  prepareModuleProductEncodingFromGroups unit owner interface (map prepareProjectedGroupEncoding groups)
 
 -- | Aggregate and singleton TPMOD documents share group payloads, while each
 -- preserves its own module-list framing and exact interface bytes.

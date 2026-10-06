@@ -453,8 +453,11 @@ the model provider and parses its JSON response.
   rows; no implicit `M` alias is generated. Authors may define explicit aliases.
   Persisted contracts expand effect-row aliases, and GHC enforces compatibility
   at use sites.
-- The resident worker is single-threaded and changes process CWD per request;
-  parallel request execution would require a different isolation model.
+- Each resident worker serves one request at a time and changes process CWD
+  under that request owner. An admitted job grant bounds GHC module make and
+  independent prepared lowering, projection and recovery within the request;
+  module tasks consume acquired typed inputs and do not mutate its live Session.
+  Concurrent requests in one process still require a different CWD model.
 
 Add a limit here only when it is present, user-visible, and not already made
 unrepresentable by the current API.

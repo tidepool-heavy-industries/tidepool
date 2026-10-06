@@ -3,6 +3,7 @@
 
 module Main (main, tests) where
 
+import CompilerExecutionTest (compilerExecutionTests)
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
@@ -39,7 +40,7 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities
+  ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
   , prepareProjection, prepareProjectionWithReachability, projectSelected
   , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
   , admitReachFacts, emptyPreparedReachability, reachedUniques
@@ -68,7 +69,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-prepared-stg"
-  [ testCase "overlapping structural groups retain every sibling" assertOverlapMerge
+  [ compilerExecutionTests
+  , testCase "overlapping structural groups retain every sibling" assertOverlapMerge
   , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
   , testCase "compiled original recovery and reachability closure" scenario
   ]
@@ -338,13 +340,16 @@ scenario = do
           subset = home { preparedCoverage = ExactBodySubset
             , preparedBindings = filter (any ((== "homeOther") . occNameString . nameOccName . varName)
                 . topBinders . fst) (pmBindings home) }
-          fixtureContext = context { projectionEntry = entry }
+          fixtureContext = context
+            { projectionEntry = entry
+            , projectionCurrentOriginals = Map.union
+                (Map.filter (== sourceRoot) (preparedTopIdentityBindings [home]))
+                (preparedTopIdentityBindings [showPrepared]) }
           owner prepared = (unitString (moduleUnit (pmModule prepared)),
             moduleNameString (moduleName (pmModule prepared)))
           (showUnit, showName) = owner showPrepared
           (homeUnit, homeName) = owner home
           showBinders = either (error . show) id (preparedTopIdentities [showPrepared])
-          certified = Set.fromList [owner home, owner showPrepared]
           -- Original outlines deliberately retain one package dependency per
           -- group. The second original owner becomes demanded only after the
           -- Text dictionary has been recovered and projected.
@@ -365,7 +370,7 @@ scenario = do
       ownerCache <- newOwnerInterfaceCache
       bodyCache <- newPreparedBodyCache
       setEnv "TIDEPOOL_TIMING" "1"
-      factory <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache certified fixtureContext [subset] []
+      factory <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache fixtureContext [subset] []
       (initial, initialCount) <- measurePreparations (factory entry)
       initialProgram <- project [] (preparedRecoveryClosure initial)
       firstRoots <- required initialProgram
@@ -384,7 +389,7 @@ scenario = do
       oldResults <- forM [[], firstRoots, allRoots] $ \roots -> do
         binders <- resolve roots
         restart <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
-          certified fixtureContext [subset] binders
+          fixtureContext [subset] binders
         measurePreparations (fmap preparedRecoveryClosure (restart entry))
       let oldClosures = map fst oldResults
       oldPrograms <- sequence (zipWith project [[], firstRoots, allRoots] oldClosures)
@@ -408,7 +413,7 @@ scenario = do
       let retainedContext = fixtureContext
             { projectionRetainedGenerations = Map.singleton sourceRoot 11 }
       retainedFactory <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
-        certified retainedContext [subset] []
+        retainedContext [subset] []
       retained <- retainedFactory entry >>= (\state -> growPreparedRecovery state [fstRoot])
       let retainedClosure = preparedRecoveryClosure retained
       retainedProgram <- either (fail . show) (pure . fst) $
@@ -429,7 +434,7 @@ scenario = do
       expandedProgram <- project sameOwnerRoots (preparedRecoveryClosure expanded)
       sameOwnerBinders <- resolve sameOwnerRoots
       restartSameOwner <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
-        certified fixtureContext [subset] sameOwnerBinders
+        fixtureContext [subset] sameOwnerBinders
       restartedSameOwner <- preparedRecoveryClosure <$> restartSameOwner entry
       restartedProgram <- project sameOwnerRoots restartedSameOwner
       assert (expandedCount > 0) "larger exact body set did not reprepare its owner"

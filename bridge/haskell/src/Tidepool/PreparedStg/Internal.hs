@@ -4,6 +4,7 @@ module Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..)) 
 
 import Data.Map.Strict (Map)
 import Data.Set (Set)
+import Data.Text (Text)
 import GHC.Core.TyCon (TyCon)
 import GHC.Stg.Pipeline (StgCgInfos)
 import GHC.Stg.Syntax (CgStgTopBinding)
@@ -12,7 +13,7 @@ import GHC.Types.Var (Id)
 import GHC.Types.Var.Set (IdSet)
 import GHC.Unit.Types (Module)
 import Tidepool.EffectSchema (YieldSite)
-import Tidepool.PreparedSites (PreparedSite, SiteRejection)
+import Tidepool.PreparedSites (PreparedSite, SiteRejection, PreparedSiteDependencies)
 import Tidepool.TypePolicy (TypeGraph)
 
 -- | A missing top in a complete source module is a producer defect. A package
@@ -26,6 +27,9 @@ data PreparedModule = PreparedModule
   { preparedModule :: Module
   , preparedCoverage :: PreparedCoverage
   , preparedBindings :: [(CgStgTopBinding, IdSet)]
+  -- | Canonical package-unit spellings issued before subset selection. Source
+  -- modules retain their normal compiler identity allocation.
+  , preparedStableTopSpellings :: Map Name Text
   , preparedTagSigs :: StgCgInfos
   -- | Defining-module sibling Ids only, replayed after memo validity checks.
   , preparedSitedSiblings :: Map String Id
@@ -37,9 +41,9 @@ data PreparedModule = PreparedModule
   , preparedSiteRejections :: [SiteRejection]
   , preparedRequestSiteTyCon :: Maybe TyCon
   , preparedAuthorityDependent :: Bool
+  , preparedSiteDependencies :: Maybe PreparedSiteDependencies
   , preparedIntrinsicNames :: Set Name
   -- | Exact package declaring Ids, separate from provisional STG shapes.
   -- Recovery uses the latter to discover dependencies before final emission.
   , preparedExpectedEntries :: Map Name Id
   }
-

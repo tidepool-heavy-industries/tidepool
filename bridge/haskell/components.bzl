@@ -118,6 +118,7 @@ def declare_haskell_components():
         "Tidepool/ExtractUtil.hs": "src/Tidepool/ExtractUtil.hs",
         "Tidepool/ExtractRequest.hs": "src/Tidepool/ExtractRequest.hs",
         "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
+        "Tidepool/FatIface/Internal.hs": "src/Tidepool/FatIface/Internal.hs",
         "Tidepool/FinalizedModule.hs": "src/Tidepool/FinalizedModule.hs",
         "Tidepool/FinalizedModuleArtifacts.hs": "src/Tidepool/FinalizedModuleArtifacts.hs",
         "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
@@ -139,6 +140,7 @@ def declare_haskell_components():
         "Tidepool/CompilerProducts.hs": "src/Tidepool/CompilerProducts.hs",
         "Tidepool/CompileInput.hs": "src/Tidepool/CompileInput.hs",
         "Tidepool/PrimOps.hs": "src/Tidepool/PrimOps.hs",
+        "Tidepool/CompilerExecution.hs": "src/Tidepool/CompilerExecution.hs",
         "Tidepool/PreparedStg.hs": "src/Tidepool/PreparedStg.hs",
         "Tidepool/PreparedStg/Internal.hs": "src/Tidepool/PreparedStg/Internal.hs",
         "Tidepool/PreparedRecovery.hs": "src/Tidepool/PreparedRecovery.hs",
@@ -241,6 +243,7 @@ def declare_haskell_components():
         "Tidepool/ExtractUtil.hs": "src/Tidepool/ExtractUtil.hs",
         "Tidepool/ExtractRequest.hs": "src/Tidepool/ExtractRequest.hs",
         "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
+        "Tidepool/FatIface/Internal.hs": "src/Tidepool/FatIface/Internal.hs",
         "Tidepool/FinalizedModule.hs": "src/Tidepool/FinalizedModule.hs",
         "Tidepool/FinalizedModuleArtifacts.hs": "src/Tidepool/FinalizedModuleArtifacts.hs",
         "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
@@ -262,6 +265,7 @@ def declare_haskell_components():
         "Tidepool/CompilerProducts.hs": "src/Tidepool/CompilerProducts.hs",
         "Tidepool/CompileInput.hs": "src/Tidepool/CompileInput.hs",
         "Tidepool/PrimOps.hs": "src/Tidepool/PrimOps.hs",
+        "Tidepool/CompilerExecution.hs": "src/Tidepool/CompilerExecution.hs",
         "Tidepool/PreparedStg.hs": "src/Tidepool/PreparedStg.hs",
         "Tidepool/PreparedStg/Internal.hs": "src/Tidepool/PreparedStg/Internal.hs",
         "Tidepool/PreparedRecovery.hs": "src/Tidepool/PreparedRecovery.hs",
@@ -4598,6 +4602,7 @@ def declare_haskell_components():
         name = "prepared_recovery_test_bin",
         srcs = {
         "Main.hs": "test-prepared-stg/PreparedRecoveryTest.hs",
+        "CompilerExecutionTest.hs": "test-prepared-stg/CompilerExecutionTest.hs",
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
         deps = [

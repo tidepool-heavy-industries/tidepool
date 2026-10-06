@@ -19,6 +19,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (decodeListLen, decodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
+import Data.Bits (testBit)
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Data.IntMap.Strict qualified as IntMap
@@ -55,9 +56,10 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
 import GHC.Utils.Logger (Logger, popLogHook)
-import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
-import GHC.Unit.Finder.Types (FinderCache(..))
-import GHC.Unit.Module.Location (ml_hi_file)
+import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
+import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
+import GHC.Unit.Module.Location (ml_hi_file, ml_hs_file)
+import GHC.Types.PkgQual (PkgQual(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
@@ -65,7 +67,7 @@ import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (importPaths, targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Driver.Session (importPaths, ghcMode, GhcMode(CompManager), targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.SourceError (SourceError)
@@ -80,7 +82,7 @@ import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (cg_binds)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, removeDirectoryRecursive
@@ -95,17 +97,31 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
-  , requireOriginalExecutableGlobals, certifiedExecutionSource )
+  , requireOriginalExecutableGlobals, certifiedExecutionSource
+  , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
+  , prepareOriginalProductsWithCache, newOriginalProjectionCollector
+  , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
+  , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , preparedProductInventory
+  , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts)
+import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
-import Tidepool.ExecutionProjection (resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
+import Tidepool.PreparedStg
+  ( newPreparedBodyCache, PreparedBodyReuse(..), pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
+  , runPreparedModuleTask, copyPreparedBodyCache, selectPreparedBodyCaches
+  , preparedSiteDependenciesEquivalent )
+import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
+import Tidepool.Timing (ReuseContext(..))
+import Tidepool.CompilerExecution (withCompilerExecutor, serialCompilerExecutionGrant)
+import System.Mem.StableName (makeStableName)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
@@ -133,6 +149,7 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , generatedActivationPreviewRecipe )
+import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
@@ -2062,7 +2079,7 @@ originalPackageProjection = withScratch $ \work -> do
   let env = prHscEnv (pprPipelineResult original)
       modules = pprModules original
       context = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "PackageOriginalSupport" "value" "packageFunction" Nothing)
         [] Nothing Nothing Nothing Nothing
       imported = [referenceBinder reference | prepared <- modules
@@ -2168,7 +2185,7 @@ originalPackageCohort coreRoot output = do
   json <- resolveJsonAuthority env
   text <- resolveTextPackageUnit env
   let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "Tidepool.Effects.Core" "value" "__result" Nothing)
         [] formatting time json text
       imported = [referenceBinder reference | prepared <- modules
@@ -2344,8 +2361,56 @@ structuralCandidate work = do
     Left reason -> fail ("production structural candidate codec refused: " ++ reason)
     _ -> fail "structural producer-group candidate did not decode"
 
+-- Exhaust the three-group reference graphs and every failed-binder subset.
+-- The list-based oracle recomputes all facts until no owner changes; it shares
+-- neither the production reverse index nor its worklist traversal.
+originalGraphClosureProperties :: IO ()
+originalGraphClosureProperties = do
+  let binder name = SymbolIdentity "main" "GraphModel" "value" (T.pack name) Nothing
+      owned = [(binder "a",(0 :: Int,0 :: Int)),(binder "sibling",(0,1)),(binder "b",(1,0))]
+      missing = binder "missing"
+      groupKeys = map snd owned
+      symbols = map fst owned
+      recomputeGroups dependencies unavailable = close []
+        where
+          close blocked =
+            let unavailable' = unavailable ++ [symbol | (symbol,key) <- owned, key `elem` blocked]
+                expanded = [key | key <- groupKeys
+                  , key `elem` blocked
+                    || any (\(symbol,owner) -> owner == key && symbol `elem` unavailable') owned
+                    || any (`elem` unavailable') (maybe [] id (lookup key dependencies))]
+            in if expanded == blocked then blocked else close expanded
+      recomputeModules dependencies blocked = close [owner | (owner,_) <- blocked]
+        where
+          close modules =
+            let unavailable = [symbol | (symbol,(owner,_)) <- owned, owner `elem` modules]
+                expanded = Set.toAscList (Set.fromList (modules ++ [owner
+                  | ((owner,_),references) <- dependencies, any (`elem` unavailable) references]))
+            in if expanded == Set.toAscList (Set.fromList modules) then expanded else close expanded
+  forM_ [0 .. 511 :: Int] $ \edges ->
+    forM_ [0 .. 7 :: Int] $ \failures ->
+      forM_ [False,True] $ \externalMissing -> do
+        let dependencies = [(key,[symbol | (column,symbol) <- zip [0..] symbols
+                  , testBit edges (row * 3 + column)]
+                  ++ [missing | externalMissing && row == 0])
+              | (row,key) <- zip [0..] groupKeys]
+            unavailable = [symbol | (index,symbol) <- zip [0..] symbols, testBit failures index]
+              ++ [missing | externalMissing]
+            expectedGroups = Set.fromList (recomputeGroups dependencies unavailable)
+            expectedModules = Set.fromList (recomputeModules dependencies (Set.toList expectedGroups))
+            indexed = Map.fromList [(key,Set.fromList references) | (key,references) <- dependencies]
+            owners = Map.fromList owned
+            actualGroups = closeUnavailableOriginalGroups indexed owners (Set.fromList unavailable)
+            actualModules = closeUnavailableOriginalModules indexed owners actualGroups
+        unless (actualGroups == expectedGroups && actualModules == expectedModules) $
+          fail ("original graph closure differs from full recomputation: edges=" ++ show edges
+            ++ ", failures=" ++ show failures ++ ", external=" ++ show externalMissing
+            ++ ", expected=" ++ show (expectedGroups,expectedModules)
+            ++ ", actual=" ++ show (actualGroups,actualModules))
+
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
+  originalGraphClosureProperties
   let identity :: String -> String -> String -> SymbolIdentity
       identity unit moduleName' occurrence =
         SymbolIdentity (T.pack unit) (T.pack moduleName') (T.pack "value") (T.pack occurrence) Nothing
@@ -2422,7 +2487,7 @@ originalProjectionProducts = withScratch $ \work -> do
   let pairedEnv = prHscEnv (pprPipelineResult paired)
       pairedInterfaces = pprProductInterfaces paired
       pairedContext = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         known [] Nothing Nothing Nothing Nothing
       consumerOutcome externalBinders = lookup (pmModule consumer)
         (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts pairedEnv
@@ -2440,6 +2505,10 @@ originalProjectionProducts = withScratch $ \work -> do
       incompleteProductContext =
         projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules
       incompleteProducts = preparedModuleProductOutcomes incompleteProductContext
+      availableOf productContext = Set.fromList
+        [binder | (_,Right groups) <- preparedModuleProductOutcomes productContext
+          , group <- groups, binder <- projectedBinders group]
+      incompleteBinders = availableOf incompleteProductContext
       moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
       rejectedByMissing prepared = case moduleOutcome prepared of
         Just (Left (UnavailableOriginalHomeDependencies identities)) -> any (`Set.member` providerBinders) identities
@@ -2450,7 +2519,7 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "unavailable module sibling did not reject its consumers while preserving an independent owner"
   let safeContext = pairedContext { projectionEntry = safe }
   safeProgram <- either (fail . show) pure (projectPrepared safeContext [independent])
-  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+  unless (requireOriginalExecutableGlobals pairedEnv incompleteBinders
       (programGlobals safeProgram) == Right ()) $
     fail "unselected unavailable home owner rejected an independent executable"
   bad <- findBinder ownerModule "bad"
@@ -2461,21 +2530,163 @@ originalProjectionProducts = withScratch $ \work -> do
           , globalIdentity global `Set.member` providerBinders]
   unless (not (Set.null demanded)) $
     fail "final executable availability control lost its genuine missing-provider demand"
-  case requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+  case requireOriginalExecutableGlobals pairedEnv incompleteBinders
       (programGlobals badProgram) of
     Left (UnavailableOriginalHomeDependencies missing)
       | Set.fromList missing == demanded -> pure ()
     other -> fail ("final emitted home demand lost its typed unavailable outcome: " ++ show other)
-  unless (requireOriginalExecutableGlobals pairedEnv providerBinders incompleteProductContext
+  unless (requireOriginalExecutableGlobals pairedEnv (Set.union providerBinders incompleteBinders)
       (programGlobals badProgram) == Right ()) $
     fail "native original binding census did not satisfy the emitted home demand"
   let completeProducts = projectOriginalHomeModuleProducts pairedEnv pairedInterfaces
         pairedContext mempty (pprModules paired)
-  unless (requireOriginalExecutableGlobals pairedEnv mempty completeProducts
+  unless (requireOriginalExecutableGlobals pairedEnv (availableOf completeProducts)
       (programGlobals badProgram) == Right ()) $
     fail "successfully projected original did not satisfy the emitted home demand"
+  -- The compiler issuer supplies the same native originals to projection and
+  -- publication. A current support owner becomes a source import, while the
+  -- actual entry's whole recursive group remains inline.
+  let captureDirectory = work </> "current-original-products"
+      entry = SymbolIdentity "main" "ProjectionConsumer" "value" "usesGood" Nothing
+  createDirectory captureDirectory
+  currentInterfaces <- newOriginalInterfaceArtifacts pairedEnv (pprFinalizedModules paired)
+    (retainedOriginalInterfaces paired) captureDirectory
+  currentContext <- prepareCompilerProjectionContext paired Map.empty (pmModule consumer)
+    "usesGood" [] Nothing
+  (currentModules,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
+    currentContext Set.empty (pprModules paired)
+  issuedContext <- admitCurrentOriginalProducts currentInterfaces captureDirectory paired rawContext
+  issued <- maybe (fail "genuine original issuer did not return its inventory") pure
+    (preparedCurrentOriginalInventory issuedContext)
+  let importedNames = currentOriginalBindingsExcept issued (Set.singleton entry)
+      importedSymbols = Set.fromList (Map.elems importedNames)
+      currentProjection = currentContext {projectionCurrentOriginals = importedNames}
+  unless (known `Set.member` importedSymbols && entry `Set.notMember` importedSymbols
+      && importedSymbols `Set.isSubsetOf` currentOriginalBinders issued) $
+    fail "current original boundary lost supported names or imported its own entry"
+  currentProgram <- either (fail . show) pure (projectPrepared currentProjection currentModules)
+  let currentGlobals = [global | global <- programGlobals currentProgram
+        , globalIdentity global `Set.member` importedSymbols]
+      currentDefinitions = Set.fromList [identity' | group <- programBindings currentProgram
+        , TopBinding identity' _ <- case group of
+            NonRecursive binding -> [binding]
+            Recursive bindings -> bindings]
+  unless (any ((== known) . globalIdentity) currentGlobals
+      && all ((== Nothing) . globalRequiredGeneration) currentGlobals
+      && Set.null (currentDefinitions `Set.intersection` importedSymbols)
+      && entry `Set.member` currentDefinitions) $
+    fail "target duplicated a current support group or assigned a retained generation"
+  currentCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    captureDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
+        , let (_,_,_,groups) = moduleProductInput product'
+        , group <- groups, binder <- projectedBinders group]
+  unless (emittedBinders == currentOriginalBinders issued) $
+    fail "writer changed the compiler-issued original availability boundary"
+  emittedInventory <- BS.readFile (captureDirectory </> "module-products.cbor")
+  unless (emittedInventory == encodeModuleProducts
+      (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
+    fail "retained original group encodings changed the emitted native inventory"
+  pendingBodyCache <- newPreparedBodyCache
+  pendingRawCache <- newOriginalProjectionCollector
+  withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
+    let inputs = PreparedModuleCompletionInputs
+          (Set.fromList (map pmModule (pprModules paired)))
+          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty (ReuseContext 0 "fixture")
+        completionOrder = [consumer,ownerModule,provider,independent]
+    (observer,pendingWorklist) <- observeOriginalProjectionWithRecovery pendingRawCache
+      pendingBodyCache executor Map.empty [] Nothing pairedEnv pairedInterfaces
+      (pmModule consumer) Nothing inputs
+    -- The consumer completes before both owners it references. Their queued
+    -- native tasks provide definitions; no original recovery capability exists.
+    forM_ completionOrder $ \value -> do
+      observePreparedModule observer value
+      completedPreparedModule observer value
+    (_,pendingProducts) <- prepareOriginalProductsWithWorklist pendingWorklist pairedEnv
+      Nothing pairedInterfaces currentContext Set.empty (pprModules paired)
+    unless (preparedModuleProductOutcomes (preparedProductInventory pendingProducts)
+        == preparedModuleProductOutcomes (preparedProductInventory rawContext)) $
+      fail "queued source owners became missing originals during native completion order"
+  -- Repeated native/display demand consumes the same completed canonical
+  -- bodies, not just a projection of the original frontend result.
+  capturedFixture <- capturePreparedFixture work paired
+  capturedScopePath <- writeGenuineCandidateLexicalScope []
+    ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"] work capturedFixture
+  capturedScope <- readExactScope capturedScopePath >>= either fail pure
+  let sourceFreeScope = emptySessionScope {ssRoot=work,ssExactScope=Just capturedScopePath}
+  captured <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
+    (Just sourceFreeScope) (work </> "ProjectionConsumer.hs") [work] Nothing
+  unless (preparedNames captured == ["ProjectionConsumer"]) $
+    fail "original cache fixture unexpectedly supplied recovered source bodies"
+  bodyCache <- newPreparedBodyCache
+  rawCache <- newOriginalProjectionCollector
+  capturedContext <- prepareCompilerProjectionContext captured Map.empty (pmModule consumer)
+    "usesGood" [] Nothing
+  let capturedEnv = prHscEnv (pprPipelineResult captured)
+      demand executor = prepareOriginalProductsWithCache bodyCache (Just rawCache) executor
+        capturedEnv (Just capturedScope) (pprProductInterfaces captured) capturedContext
+        Set.empty (pprModules captured)
+      recoveredIdentities originals = fmap Map.fromList $ forM
+        [value | value <- originals, pmModule value /= pmModule consumer] $ \value -> do
+          stable <- makeStableName value
+          pure (pmModule value,stable)
+  withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
+    (firstDemand,_) <- demand executor
+    (secondDemand,_) <- demand executor
+    firstBodies <- recoveredIdentities firstDemand
+    secondBodies <- recoveredIdentities secondDemand
+    unless (Map.keysSet firstBodies == Set.fromList [pmModule ownerModule,pmModule provider]
+        && firstBodies == secondBodies) $
+      fail "repeat original demand rebuilt a completed canonical owner or lost its transitive group"
+    capturedConsumer <- case pprModules captured of
+      [value] -> pure value
+      _ -> fail "raw cache control requires its actual source target"
+    let unrelated = SymbolIdentity "main" "UnrelatedNewCell" "value" "fresh" Nothing
+        projectRaw chosen = projectCachedOriginalHomeModuleProducts rawCache capturedEnv
+          (pprProductInterfaces captured) chosen capturedConsumer
+    (unrelatedHit,_) <- projectRaw (capturedContext
+      {projectionRetainedGenerations=Map.singleton unrelated 1})
+    (relevantHit,_) <- projectRaw (capturedContext
+      {projectionRetainedGenerations=Map.singleton known 1})
+    unless (unrelatedHit && not relevantHit) $
+      fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
+    let inputs = PreparedModuleCompletionInputs
+          (Set.fromList (map pmModule (pprModules captured)))
+          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty (ReuseContext 0 "fixture")
+    (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
+      Map.empty [] Nothing capturedEnv (pprProductInterfaces captured) (pmModule consumer)
+      (Just capturedScope) inputs
+    forM_ (pprModules captured) (observePreparedModule observer)
+    forM_ (pprModules captured) (completedPreparedModule observer)
+    (earlyDemand,_) <- prepareOriginalProductsWithWorklist earlyWorklist capturedEnv
+      (Just capturedScope) (pprProductInterfaces captured) capturedContext Set.empty (pprModules captured)
+    earlyBodies <- recoveredIdentities earlyDemand
+    unless (earlyBodies == firstBodies) $
+      fail "completion-driven original demand rebuilt or changed its completed native owners"
+    -- A generation used only by a recovered owner must invalidate adoption,
+    -- even when the target's own raw inputs still match the earlier worklist.
+    (_,changedProducts) <- prepareOriginalProductsWithWorklist earlyWorklist capturedEnv
+      (Just capturedScope) (pprProductInterfaces captured)
+      (capturedContext {projectionRetainedGenerations=Map.singleton bad 1})
+      Set.empty (pprModules captured)
+    let changedOwner = lookup (pmModule ownerModule)
+          (preparedModuleProductOutcomes (preparedProductInventory changedProducts))
+    case changedOwner of
+      Just (Right groups) | bad `notElem` concatMap projectedBinders groups -> pure ()
+      other -> fail ("recovered-only generation change adopted stale original groups: " ++ show other)
+    -- A completed cached body is not authority to use changed artifacts.
+    ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
+      (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))
+    core <- maybe (fail "cache fixture lacks original Core") pure (canonicalCoreArtifact ownerProof)
+    originalCore <- BS.readFile (canonicalCorePath core)
+    changed <- (BS.appendFile (canonicalCorePath core) "changed" >>
+      try (demand executor)) `finally` BS.writeFile (canonicalCorePath core) originalCore
+    case changed of
+      Left CandidateCoreBytesMismatch -> pure ()
+      Left failure -> fail ("cached original Core change returned another refusal: " ++ show failure)
+      Right _ -> fail "cached original preparation bypassed current Core artifact validation"
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
-  case requireOriginalExecutableGlobals pairedEnv wrongUnitBinders incompleteProductContext
+  case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
       (programGlobals badProgram) of
     Left (UnavailableOriginalHomeDependencies missing)
       | Set.fromList missing == demanded -> pure ()
@@ -2484,7 +2695,7 @@ originalProjectionProducts = withScratch $ \work -> do
         [if globalIdentity global `Set.member` demanded
           then global {globalRequiredGeneration = Just 7} else global
         | global <- programGlobals badProgram]
-  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext retainedGlobals
+  unless (requireOriginalExecutableGlobals pairedEnv incompleteBinders retainedGlobals
       == Right ()) $
     fail "retained generation reopened its original native implementation"
   _ <- certifyProjectedProducts work "independent-after-product-rejection" paired incompleteProducts
@@ -2500,7 +2711,7 @@ originalProjectionProducts = withScratch $ \work -> do
     value : _ -> pure value
     [] -> fail "projection fixture lacks an original binder"
   let context = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "MetadataQuoteSupport" "value" "answerValue" Nothing)
         [] Nothing Nothing Nothing Nothing
       rejected = prepared { preparedSiteRejections = [SiteRejection binder "projection fixture refusal"] }
@@ -2532,7 +2743,7 @@ candidateSitedSiblingsAt work = do
   createDirectoryIfMissing True replyDir
   createDirectoryIfMissing True (work </> "Tidepool/Internal")
   copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
-  copyFile "test-source-boot/fixtures/HydratedChildOwner.hs" owner
+  copyFile "test-source-boot/fixtures/HydratedChildOwnerWithAlternative.hs" owner
   copyFile "test-source-boot/fixtures/HydratedReplyOwner.hs" (replyDir </> "Internal.hs")
   copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
@@ -2566,6 +2777,79 @@ candidateSitedSiblingsAt work = do
   case filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused) of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
+  -- Full original recovery consumes the genuine canonical Core certificate,
+  -- independently of the source memo and exact-subset preparation caches.
+  fullFixture <- capturePreparedFixture work reused
+  fullScopePath <- writeGenuineCandidateLexicalScope []
+    (owners ++ ["HydratedChildTarget"]) work fullFixture
+  fullScope <- readExactScope fullScopePath >>= either fail pure
+  fullBodies <- newPreparedBodyCache
+  let fullOwner = mkModule (stringToUnit "main") (mkModuleName "HydratedChildTarget")
+      fullEnv = prHscEnv (pprPipelineResult reused)
+      siblingsA = Map.unions (map pmSitedSiblings (pprModules reused))
+      acquireFull cache siblings = do
+        prepare <- newPreparedOriginalModuleTaskPreparer fullEnv cache fullScope
+        prepare siblings fullOwner >>= \case
+          Nothing -> fail "authenticated full original site owner became unavailable"
+          Just (_,observation,task) -> do
+            prepared <- runPreparedModuleTask task
+            unless (length (pmYieldSites prepared) == 1 && null (pmSiteRejections prepared)) $
+              fail "full original cache control lost its genuine typed suspension site"
+            stable <- makeStableName prepared
+            pure (observation == PreparedBodyReused,stable,prepared)
+  alternative <- case [binder | prepared <- pprModules reused
+      , moduleNameString (moduleName (pmModule prepared)) == "Tidepool.Actors.Unfold"
+      , (binding,_) <- pmBindings prepared, binder <- topBinders binding
+      , getOccString binder == "childAlternativeSited"] of
+    [binder] -> pure binder
+    _ -> fail "full original cache control lacks its compiled alternate typed helper"
+  let siblingsB = Map.insert "child" alternative siblingsA
+  (coldHit,coldIdentity,cold) <- acquireFull fullBodies siblingsA
+  (warmHit,warmIdentity,_) <- acquireFull fullBodies siblingsA
+  (changedHit,changedIdentity,changed) <- acquireFull fullBodies siblingsB
+  (changedAgainHit,changedAgainIdentity,_) <- acquireFull fullBodies siblingsB
+  (restoredHit,restoredIdentity,_) <- acquireFull fullBodies siblingsA
+  unless (not coldHit && warmHit && coldIdentity == warmIdentity
+      && not changedHit && changedAgainHit && changedIdentity == changedAgainIdentity
+      && coldIdentity /= changedIdentity && restoredHit && coldIdentity == restoredIdentity
+      && not (preparedSiteDependenciesEquivalent cold changed)) $
+    fail "canonical original site cache rebuilt a retained A/B/A view or reused a changed helper"
+  bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
+    (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
+      setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
+      prepare <- newPreparedOriginalModuleTaskPreparer fullEnv fullBodies fullScope
+      prepare siblingsA fullOwner >>= \case
+        Just (_,PreparedBodyDisabled,task) -> do
+          forced <- runPreparedModuleTask task
+          forcedIdentity <- evaluate forced >>= makeStableName
+          unless (forcedIdentity /= coldIdentity
+              && preparedSiteDependenciesEquivalent forced cold) $
+            fail "body-disable control skipped real lowering or changed admitted site facts"
+        _ -> fail "body-disable control did not identify its normally eligible original"
+      freshBodies <- newPreparedBodyCache
+      prepareCold <- newPreparedOriginalModuleTaskPreparer fullEnv freshBodies fullScope
+      prepareCold siblingsA fullOwner >>= \case
+        Just (_,PreparedBodyMiss,task) -> do
+          _ <- runPreparedModuleTask task
+          pure ()
+        _ -> fail "body-disable control mislabeled a cold miss as disabled"
+  (reenabledHit,reenabledIdentity,_) <- acquireFull fullBodies siblingsA
+  unless (reenabledHit && reenabledIdentity == coldIdentity) $
+    fail "body-disable calibration displaced the normal completed original"
+  fullRaw <- newOriginalProjectionCollector
+  fullContext <- prepareCompilerProjectionContext reused Map.empty fullOwner "result" [] Nothing
+  let rawFor prepared = projectCachedOriginalHomeModuleProducts fullRaw fullEnv
+        (pprProductInterfaces reused) fullContext prepared
+  (coldRawHit,_) <- rawFor cold
+  (changedRawHit,_) <- rawFor changed
+  (restoredRawHit,_) <- rawFor cold
+  unless (not coldRawHit && not changedRawHit && restoredRawHit) $
+    fail "canonical original A/B/A views lost their completed raw projection handles"
+  copiedBodies <- copyPreparedBodyCache fullBodies
+  selectedBodies <- selectPreparedBodyCaches [(copiedBodies,Set.singleton fullOwner)]
+  (selectedHit,selectedIdentity,_) <- acquireFull selectedBodies siblingsA
+  unless (selectedHit && selectedIdentity == coldIdentity) $
+    fail "completed original owner selection discarded its older matching site view"
   retainedScope <- readExactScope capturedPath >>= either fail pure
   unless (Set.fromList (map (snd . fst) (scopeLexical retainedScope)) == Set.fromList owners
       && null (scopeProducts retainedScope) && null (scopeExecutionOwners retainedScope)) $
@@ -3808,7 +4092,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
         let root = SymbolIdentity "main" "HydratedSiteExpr" "value" "__result" Nothing
             sibling = SymbolIdentity "main" "Tidepool.Actors.Unfold" "value" "childSited" Nothing
             context = ProjectionContext "test" "matched"
-              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
               root [] Nothing Nothing Nothing Nothing
             tops (NonRecursive binding) = [binding]
             tops (Recursive bindings) = bindings
@@ -4886,3 +5170,69 @@ verifyHydration work cold = do
     case restored of
       Left reason -> liftIO (fail ("fresh SOURCE hydration refused: " ++ reason))
       Right _ -> pure ()
+
+-- Observe actual GHC finder operations, without timing thresholds or compiler
+-- authority fixtures. A missing package key must never consult an ancestor
+-- attempt; package results survive while source choices and file hashes do not.
+packageFinderHistoryIsolation :: IO ()
+packageFinderHistoryIsolation = withScratch $ \work -> do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    initial <- getSession
+    liftIO $ do
+      packages <- newPackageFinderFacts initial
+      ancestorLookups <- newIORef (0 :: Int)
+      let packageOwnerUnit = toUnitId (moduleUnit gHC_PRIM)
+          missing = GWIB (mkModule packageOwnerUnit (mkModuleName "MissingPackageFinderModule")) NotBoot
+          known = GWIB (mkModule packageOwnerUnit (mkModuleName "KnownPackageFinderModule")) NotBoot
+          observe env = env {hsc_FC = (hsc_FC env)
+            {lookupFinderCache = \key -> do
+              modifyIORef' ancestorLookups (+1)
+              lookupFinderCache (hsc_FC env) key}}
+      completed <- foldM (\previous _ -> do
+          attempt <- forkExactContextWithPackageFacts packages (observe previous)
+          result <- lookupFinderCache (hsc_FC attempt) missing
+          unless (isNothing result) (fail "absent package key gained a finder result")
+          pure attempt) initial [1 .. 64 :: Int]
+      consulted <- readIORef ancestorLookups
+      unless (consulted == 0) $
+        fail ("negative package lookup walked completed attempts: " ++ show consulted)
+      addToFinderCache (hsc_FC completed) known (InstalledNotFound [] (Just packageOwnerUnit))
+      next <- forkExactContextWithPackageFacts packages completed
+      lookupFinderCache (hsc_FC next) known >>= \case
+        Just (InstalledNotFound [] (Just owner)) | owner == packageOwnerUnit -> pure ()
+        _ -> fail "fixed-universe package result was lost between attempts"
+      let firstRoot = work </> "first"
+          secondRoot = work </> "second"
+          name = mkModuleName "FinderHomeChoice"
+          source root = root </> "FinderHomeChoice.hs"
+          choose root env = env {hsc_dflags = (hsc_dflags env)
+            {importPaths = [root], ghcMode = CompManager}}
+          requireSource env expected = findImportedModule env name NoPkgQual >>= \case
+            Found location _ | ml_hs_file location == Just expected -> pure ()
+            _ -> fail ("home finder did not select current source root " ++ expected)
+      createDirectory firstRoot
+      createDirectory secondRoot
+      writeFile (source firstRoot) "module FinderHomeChoice where\nvalue = (41 :: Int)\n"
+      writeFile (source secondRoot) "module FinderHomeChoice where\nvalue = (42 :: Int)\n"
+      first <- choose firstRoot <$> forkExactContextWithPackageFacts packages next
+      requireSource first (source firstRoot)
+      firstHash <- lookupFileCache (hsc_FC first) (source firstRoot)
+      second <- choose secondRoot <$> forkExactContextWithPackageFacts packages first
+      requireSource second (source secondRoot)
+      requireSource first (source firstRoot)
+      writeFile (source firstRoot) "module FinderHomeChoice where\nvalue = (43 :: Int)\n"
+      changedHash <- lookupFileCache (hsc_FC second) (source firstRoot)
+      retainedHash <- lookupFileCache (hsc_FC first) (source firstRoot)
+      unless (changedHash /= firstHash && retainedHash == firstHash) $
+        fail "attempt file hashes shared mutable state or inherited stale bytes"
+      flushFinderCaches (hsc_FC second) (hsc_unit_env second)
+      requireSource first (source firstRoot)
+      lookupFinderCache (hsc_FC second) known >>= \case
+        Just (InstalledNotFound [] (Just owner)) | owner == packageOwnerUnit -> pure ()
+        _ -> fail "flushing an attempt discarded fixed-universe package facts"
+      rollback <- choose firstRoot <$> forkExactContextWithPackageFacts packages first
+      requireSource rollback (source firstRoot)
+      rollbackHash <- lookupFileCache (hsc_FC rollback) (source firstRoot)
+      unless (rollbackHash == changedHash) $
+        fail "rollback attempt inherited the completed environment's old file hash"

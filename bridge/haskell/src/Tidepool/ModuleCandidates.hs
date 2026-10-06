@@ -7,6 +7,7 @@ module Tidepool.ModuleCandidates
   , candidateCoreDescriptor
   , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
   , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
+  , CandidateContextIdentity, candidateContextIdentity
   , readCapturedModuleCandidatesWithGraphs
   , readModuleCandidates, readModuleCandidatesWithGraphs ) where
 
@@ -19,6 +20,7 @@ import Control.Monad (forM_, replicateM, unless, when)
 import Data.Char (isHexDigit)
 import Data.List (stripPrefix)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as Set
@@ -121,6 +123,28 @@ data CapturedCandidateManifest = CapturedCandidateManifest FilePath BS.ByteStrin
 
 candidateManifestSha256 :: CapturedCandidateManifest -> BS.ByteString
 candidateManifestSha256 (CapturedCandidateManifest _ bytes) = SHA256.hash bytes
+
+-- This is a selection key, never candidate admission. Current source,
+-- products and canonical evidence still pass the normal admission path.
+newtype CandidateContextIdentity = CandidateContextIdentity BS.ByteString
+  deriving (Eq)
+
+candidateContextIdentity :: CapturedCandidateManifest -> Either String CandidateContextIdentity
+candidateContextIdentity (CapturedCandidateManifest _ bytes) =
+  case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+    Left failure -> Left (show failure)
+    Right (remaining,(candidates,_,_,producer))
+      | BL.null remaining -> Right (CandidateContextIdentity (SHA256.hash (BS8.pack
+          (show (producer,map identity candidates)))))
+      | otherwise -> Left "candidate manifest has trailing bytes"
+  where
+    identity candidate =
+      (candidateUnit candidate,candidateModule candidate,candidateSourceSha256 candidate,
+       candidateInterfaceSha256 candidate,candidateModuleVersion candidate,
+       candidateProductSha256 candidate,candidateProducerSha256 candidate,
+       candidateInterfaceRequirements candidate,
+       candidateCertificateSha256 (candidateModuleInterface candidate),
+       snd (candidateCoreDescriptor (candidateModuleInterface candidate)))
 
 captureCandidateManifest :: FilePath -> IO (Either String CapturedCandidateManifest)
 captureCandidateManifest path = do

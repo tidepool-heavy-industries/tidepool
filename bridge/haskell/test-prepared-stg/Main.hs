@@ -8,15 +8,22 @@ import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.IntMap.Strict qualified as IntMap
+import Data.IORef (modifyIORef')
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import GHC (moduleNameString, mkModuleName, ModSummary(ms_location), ms_mod_name)
-import GHC.Driver.Env (hsc_mod_graph)
+import GHC.Driver.Env (HscEnv(..), hsc_mod_graph, hscUpdateHPT)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Unit.Module.ModGuts (CgGuts(..))
-import GHC.Unit.Home.ModInfo (HomeModInfo(hm_iface))
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), addToHpt)
+import GHC.Unit.Env (UnitEnv(..))
+import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(..))
+import GHC.Unit.Module.ModDetails (ModDetails(..))
+import GHC.Unit.Module.Env (extendModuleEnv)
+import GHC.Types.TypeEnv (emptyTypeEnv, plusTypeEnv)
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, bindersOfBinds, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
@@ -53,8 +60,10 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections
   , RecoveredModuleInput(..), prepareRecoveredModule, newPreparedBodyCache, newPreparedBodyPreparer
-  , preparedUsesSiteAuthority, filterPreparedBindings, preparedRejectsIntrinsic )
+  , preparedUsesSiteAuthority, filterPreparedBindings, preparedRejectsIntrinsic
+  , resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent )
 import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.FatIface
   ( OwnerInterfaceContext(..), newOwnerInterfaceCache, cacheOwnerInterface )
 import qualified Data.Map.Strict as Map
@@ -841,8 +850,10 @@ tests = testGroup "prepared-stg-pipeline"
       withCaseScratch "constructor-reply-identity" runTypeEvidenceChecks
   , testCase "recovered typed sites and intrinsic refusal" $
       withCaseScratch "recovered-typed-sites" verifyRecoveredTypedPreparation
-  , testCase "intrinsic-free memo reuse and site request invalidation" $
+  , testCase "prepared products reuse unchanged site dependencies across cells" $
       withCaseScratch "prepared-cache-lifetime" verifyTypedPreparationCacheLifetime
+  , testCase "site dependency histories refuse changed and newly available authority" $
+      withCaseScratch "prepared-site-dependencies" verifySiteDependencyHistories
   , testCase "original prepared pipeline and compiler authority" fullMain
   , testCase "projection interning and constructor conflicts" $
       withCaseScratch "projection-interning" verifyProjectionInterning
@@ -952,8 +963,15 @@ verifyTypedPreparationCacheLifetime dir = do
     coldCore <- identity (finalized cold)
     warmCore <- identity (finalized warm)
     assert (coldPlain == warmPlain) "intrinsic-free prepared memo was rebuilt"
-    assert (coldSite /= warmSite) "site-bearing prepared memo crossed a request boundary"
-    assert (coldCore == warmCore) "site request invalidation replayed stable finalization"
+    assert (coldSite == warmSite) "unchanged site authority rebuilt its prepared memo"
+    assert (coldCore == warmCore) "unchanged authority replayed stable finalization"
+    nextCell <- writeTypedPreparationNextCell dir
+    next <- compile PreparedStg mempty GeneralCompile Nothing nextCell [] Nothing
+    nextSite <- identity (sited next)
+    assert (coldSite == nextSite) "an unrelated new cell invalidated original site authority"
+    assert (pmYieldSites (sited cold) == pmYieldSites (sited next)
+        && preparedSiteDependenciesEquivalent (sited cold) (sited next))
+      "new-cell reuse changed compiler-issued site identities or consumed facts"
     owners <- newOwnerInterfaceCache
     bodies <- newPreparedBodyCache
     let env = prHscEnv (pprPipelineResult cold)
@@ -972,8 +990,105 @@ verifyTypedPreparationCacheLifetime dir = do
     scopedAgain <- prepare request "TypedPreparationOwner" >>= identity
     nextScoped <- prepare nextRequest "TypedPreparationOwner" >>= identity
     assert (stable == stableAgain) "intrinsic-free recovered body lost stable reuse"
-    assert (scoped == scopedAgain && scoped /= nextScoped)
-      "recovered typed-site cache did not retain exactly one request lifetime"
+    assert (scoped == scopedAgain && scoped == nextScoped)
+      "recovered original with unchanged site authority lost cross-request reuse"
+
+writeTypedPreparationNextCell :: FilePath -> IO FilePath
+writeTypedPreparationNextCell dir = do
+  let path = dir </> "TypedPreparationNextCell.hs"
+  readFile "test-prepared-stg/site-fixtures/TypedPreparationNextCell.hs" >>= writeFile path
+  pure path
+
+-- The resolver sees real defining interfaces in each history. A prior product
+-- remains held while later compilation publishes a changed authority context.
+-- No interface fingerprint, declaring Id, or dependency observation is forged.
+verifySiteDependencyHistories :: FilePath -> IO ()
+verifySiteDependencyHistories dir = do
+  let presentDir = dir </> "present"
+      absentDir = dir </> "absent"
+  createDirectory presentDir
+  createDirectory absentDir
+  source <- writeTypedPreparationFixture presentDir
+  withResidentPipelineSelected [presentDir] $ \compile -> do
+    first <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    let original = preparedFixtureOwner "TypedPreparationOwner" first
+    assert (length (pmYieldSites original) == 1 && null (pmSiteRejections original))
+      "dependency history lacks its genuine typed-site positive control"
+    assertMatch "original resolved authority" first original True
+    nextCell <- writeTypedPreparationNextCell presentDir
+    -- This interface is visible but contributes no authority query to answer.
+    appendFile (presentDir </> "TypedPreparationPlain.hs")
+      "\nunrelatedVersion :: Int\nunrelatedVersion = 23\n"
+    unrelated <- compile PreparedStg mempty GeneralCompile Nothing nextCell [] Nothing
+    assertMatch "unqueried sibling module growth" unrelated original True
+    let actorPath = presentDir </> "Tidepool" </> "Actor.hs"
+    originalActor <- BS.readFile actorPath
+    appendFile actorPath "\nsiblingVersion :: Int\nsiblingVersion = 29\n"
+    changedSibling <- compile PreparedStg mempty GeneralCompile Nothing nextCell [] Nothing
+    assertMatch "selected sibling original interface replacement" changedSibling original False
+    assert (not (preparedSiteDependenciesEquivalent original
+        (preparedFixtureOwner "TypedPreparationOwner" changedSibling)))
+      "changed authority collapsed distinct retained alternatives"
+    BS.writeFile actorPath originalActor
+    restored <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    assertMatch "restored original sibling authority" restored original True
+    let carrierPath = presentDir </> "Tidepool" </> "Internal" </> "RequestSite.hs"
+    carrier <- TextIO.readFile carrierPath
+    let replacedCarrier = Text.replace "(RequestSite, requestSiteIdentity)"
+          "(RequestSite, requestSiteIdentity, replacementVersion)" carrier
+    assert (replacedCarrier /= carrier) "carrier replacement control did not alter the authentic export"
+    writeFile carrierPath (Text.unpack replacedCarrier
+      ++ "\nreplacementVersion :: Int\nreplacementVersion = 31\n")
+    changedCarrier <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    assertMatch "globally queried nominal owner replacement" changedCarrier original False
+    assert (length (pmYieldSites (preparedFixtureOwner "TypedPreparationOwner" changedCarrier)) == 1)
+      "changed nominal owner was refused instead of being freshly prepared"
+    -- Keep authentic old EPS declarations beside the authentic new home
+    -- interface, but withhold that home's typed details. This is missing load
+    -- evidence, not evidence of absence and not authority for the old object.
+    fork <- forkExactContext (prHscEnv (pprPipelineResult changedCarrier))
+    let originalHome = finalizedHomeModInfo (finalizedFixtureOwner "Tidepool.Internal.RequestSite" first)
+        currentHome = finalizedHomeModInfo (finalizedFixtureOwner "Tidepool.Internal.RequestSite" changedCarrier)
+        carrierOwner = pmModule (preparedFixtureOwner "Tidepool.Internal.RequestSite" first)
+        ExternalUnitCache externalCell = ue_eps (hsc_unit_env fork)
+        partialHome = currentHome
+          { hm_details = (hm_details currentHome) { md_types = emptyTypeEnv } }
+    modifyIORef' externalCell $ \external -> external
+      { eps_PTE = plusTypeEnv (md_types (hm_details originalHome)) (eps_PTE external)
+      , eps_PIT = extendModuleEnv (eps_PIT external) carrierOwner (hm_iface originalHome) }
+    let partial = hscUpdateHPT (\homes -> addToHpt homes (moduleName carrierOwner) partialHome) fork
+    unavailable <- prepareRecoveredModule partial (recoveredFixtureInput "TypedPreparationOwner" changedCarrier)
+    environment <- resolvePreparedSiteEnvironment partial
+    assert (null (pmYieldSites unavailable)
+        && any (isInfixOf "missing RequestSite type authority" . srMessage) (pmSiteRejections unavailable)
+        && not (preparedSiteDependenciesMatch environment Map.empty unavailable)
+        && not (preparedSiteDependenciesEquivalent unavailable unavailable))
+      "partial current home details authorized an older imported declaration"
+  absentSource <- writeTypedPreparationFixture absentDir
+  readFile "test-prepared-stg/site-fixtures/TypedPreparationActorWithoutSibling.hs" >>=
+    writeFile (absentDir </> "Tidepool" </> "Actor.hs")
+  withResidentPipelineSelected [absentDir] $ \compile -> do
+    missing <- compile PreparedStg mempty GeneralCompile Nothing absentSource [] Nothing
+    let rejected = preparedFixtureOwner "TypedPreparationOwner" missing
+    assert (null (pmYieldSites rejected)
+        && any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections rejected))
+      "absent sibling control did not retain the typed preparation rejection"
+    assertMatch "proven absent original sibling" missing rejected True
+    readFile "test-prepared-stg/site-fixtures/TypedPreparationActor.hs" >>=
+      writeFile (absentDir </> "Tidepool" </> "Actor.hs")
+    available <- compile PreparedStg mempty GeneralCompile Nothing absentSource [] Nothing
+    assertMatch "absent sibling becomes present" available rejected False
+    let issued = preparedFixtureOwner "TypedPreparationOwner" available
+    assert (length (pmYieldSites issued) == 1 && null (pmSiteRejections issued))
+      "newly available original sibling did not receive fresh typed preparation"
+  where
+    assertMatch label result prepared expected = do
+      environment <- resolvePreparedSiteEnvironment (prHscEnv (pprPipelineResult result))
+      let siblings = Map.unions
+            [resolvePreparedSiblings (cg_binds (finalizedTidyGuts finalized))
+            | finalized <- Map.elems (pprFinalizedModules result)]
+      assert (preparedSiteDependenciesMatch environment siblings prepared == expected)
+        (label ++ ": wrong preparation dependency match")
 
 withCaseScratch :: String -> (FilePath -> IO a) -> IO a
 withCaseScratch name action = bracket temporary removePathForcibly action

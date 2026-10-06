@@ -8,7 +8,7 @@
 -- GHC-sourced names and verdicts are the only source.
 module Tidepool.Binders
   ( ExportItem(..)
-  , extractBindersNamed
+  , extractBindersNamed, extractBindersNamedGhc
   , exportItemName
   , declItems
     -- * Statement binders (session-eval bind-vs-expr classification)
@@ -131,21 +131,26 @@ data ExportItem
 extractBindersNamed :: FilePath -> [FilePath] -> String -> IO [ExportItem]
 extractBindersNamed path includes expectedModuleName = do
   libdir <- getLibdir
-  runGhc (Just libdir) $ do
-    dflags <- getSessionDynFlags
-    _ <- setSessionDynFlags dflags { importPaths = importPaths dflags ++ includes }
-    target <- guessTarget path Nothing Nothing
-    setTargets [target]
-    _ <- depanal [] False
-    graph <- getModuleGraph
-    case filter isExpected (mgModSummaries graph) of
-      (chosen : _) -> do
-        pm <- parseModule chosen
-        let decls = hsmodDecls (unLoc (pm_parsed_source pm))
-        pure (concatMap declItems decls)
-      [] -> liftIO (ioError (userError
-              ("extractBindersNamed: no module named " ++ expectedModuleName
-                ++ " in the parsed module graph")))
+  runGhc (Just libdir) (extractBindersNamedGhc path includes expectedModuleName)
+
+-- | Parse through an existing compiler capability. The operation owner keeps
+-- targets and finder additions local to this attempt.
+extractBindersNamedGhc :: FilePath -> [FilePath] -> String -> Ghc [ExportItem]
+extractBindersNamedGhc path includes expectedModuleName = do
+  dflags <- getSessionDynFlags
+  _ <- setSessionDynFlags dflags { importPaths = includes }
+  target <- guessTarget path Nothing Nothing
+  setTargets [target]
+  _ <- depanal [] False
+  graph <- getModuleGraph
+  case filter isExpected (mgModSummaries graph) of
+    (chosen : _) -> do
+      pm <- parseModule chosen
+      let decls = hsmodDecls (unLoc (pm_parsed_source pm))
+      pure (concatMap declItems decls)
+    [] -> liftIO (ioError (userError
+            ("extractBindersNamed: no module named " ++ expectedModuleName
+              ++ " in the parsed module graph")))
   where
     isExpected ms = moduleNameString (moduleName (ms_mod ms)) == expectedModuleName
 

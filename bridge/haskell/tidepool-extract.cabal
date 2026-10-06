@@ -67,6 +67,7 @@ library tidepool-extract-internal
     Tidepool.ExtractUtil
     Tidepool.ExtractRequest
     Tidepool.FatIface
+    Tidepool.FatIface.Internal
     Tidepool.FinalizedModule
     Tidepool.FinalizedModuleArtifacts
     Tidepool.FinalizedCore
@@ -88,6 +89,7 @@ library tidepool-extract-internal
     Tidepool.CompilerProducts
     Tidepool.CompileInput
     Tidepool.PrimOps
+    Tidepool.CompilerExecution
     Tidepool.PreparedStg
     Tidepool.PreparedStg.Internal
     Tidepool.PreparedRecovery
@@ -115,6 +117,7 @@ library tidepool-extract-internal
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
+    ghci         >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,
     bytestring,
     containers,
@@ -496,6 +499,7 @@ test-suite fat-iface-exact-test
   hs-source-dirs:   test-prepared-stg
   build-depends:
     base         >= 4.20 && < 5,
+    containers,
     directory,
     filepath,
     process,
@@ -528,6 +532,7 @@ test-suite prepared-recovery-test
   type:             exitcode-stdio-1.0
   main-is:          PreparedRecoveryTest.hs
   hs-source-dirs:   test-prepared-stg
+  other-modules:    CompilerExecutionTest
   build-depends:
     base >= 4.20 && < 5,
     containers,

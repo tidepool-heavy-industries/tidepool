@@ -1,4 +1,4 @@
-module FatFixture (fatIdentity, recA, recB, privateCaller) where
+module FatFixture (fatIdentity, recA, recB, privateCaller, privateSecond, privateDiamond) where
 
 fatIdentity :: Int -> Int
 fatIdentity value = value
@@ -19,3 +19,11 @@ privateHelper value = value + 1
 privateCaller :: Int -> Int
 privateCaller value = privateHelper value
 {-# NOINLINE privateCaller #-}
+
+privateSecond :: Int -> Int
+privateSecond value = privateHelper (value + 1)
+{-# NOINLINE privateSecond #-}
+
+privateDiamond :: Int -> Int
+privateDiamond value = privateCaller value + privateSecond value
+{-# NOINLINE privateDiamond #-}

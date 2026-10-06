@@ -2,20 +2,25 @@
 -- Boot declarations are source inputs, not executable products. A boot SCC
 -- receives fresh GHC load validation before its original prepared bodies reuse.
 module Tidepool.HomeProducts
-  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals
+  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals, hydrateCandidateHomeProductsWithOriginalsUsing
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
   , materializeCandidateCompilerView, materializeAdmittedCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
-  , admittedOriginalLocation ) where
+  , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionLookup, originalVersionSeal
+  , OriginalRecoveryScope, admitOriginalRecoveryScope, originalVersionInRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
+  , revalidateAdmittedCore ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
+import Tidepool.ExtractUtil (shaHex)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -65,7 +70,7 @@ import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, withExactHomeInstances
+  ( ExactIfaceArtifact(..), forkExactContext, hydrateExactScope, withExactHomeInstances
   , exactInterfaceSummary )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
@@ -75,7 +80,7 @@ import Tidepool.ExactScope
   ( ExactScope(..), CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalRequirements, revalidateExactScope )
+  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, revalidateExactScope )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore)
 import Tidepool.FinalizedModule (FinalizedModule)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
@@ -110,28 +115,106 @@ admittedOriginalInterface (AdmittedFinalizedOriginal _ _ row _) = row
 admittedOriginalLocation :: AdmittedFinalizedOriginal -> ModLocation
 admittedOriginalLocation (AdmittedFinalizedOriginal _ _ _ location) = location
 
+-- Content identity includes the compiler producer, complete original Core,
+-- interface and package witness. Paths and request purposes do not identify a
+-- body. The certificate seals its source census and imported requirements.
+data OriginalVersion = OriginalVersion Module String String String String String
+  deriving (Eq, Ord)
+
+originalVersionOwner :: OriginalVersion -> Module
+originalVersionOwner (OriginalVersion owner _ _ _ _ _) = owner
+
+-- Diagnostic rendering of the same complete canonical cache identity. The
+-- length-delimited representation excludes paths and request-local identity.
+originalVersionSeal :: OriginalVersion -> String
+originalVersionSeal (OriginalVersion owner producer certificate core interface packages) =
+  shaHex (TextEncoding.encodeUtf8 (Text.pack (show
+    [unitString (moduleUnit owner),moduleNameString (moduleName owner)
+    ,producer,certificate,core,interface,packages])))
+
+originalVersionInScope :: ExactScope -> Module -> Maybe OriginalVersion
+originalVersionInScope scope owner = originalVersionFromRows scope owner
+  [row | row@(artifact,_,_) <- scopeInterfaces scope
+    , (exactUnit artifact,exactModule artifact) == originalOwnerKey owner]
+
+-- A descriptor-only view for callers comparing several owners. Acquiring
+-- this function once shares the scope index; it does not admit any body.
+originalVersionLookup :: ExactScope -> (Module -> Maybe OriginalVersion)
+originalVersionLookup scope =
+  let interfaces = originalInterfaceRows scope
+  in \owner -> originalVersionFromRows scope owner
+       (Map.findWithDefault [] (originalOwnerKey owner) interfaces)
+
+originalInterfaceRows :: ExactScope -> Map.Map (String,String) [(ExactIfaceArtifact,FilePath,String)]
+originalInterfaceRows scope = Map.fromListWith (++)
+  [((exactUnit artifact,exactModule artifact),[row])
+    | row@(artifact,_,_) <- scopeInterfaces scope]
+
+originalOwnerKey :: Module -> (String,String)
+originalOwnerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+
+originalVersionFromRows :: ExactScope -> Module -> [(ExactIfaceArtifact,FilePath,String)]
+  -> Maybe OriginalVersion
+originalVersionFromRows scope owner rows = do
+  proof <- Map.lookup (originalOwnerKey owner) (scopeModuleInterfaceProofs scope)
+  unless (isSourceOriginal (canonicalOrigin proof)) Nothing
+  core <- canonicalCoreArtifact proof
+  case rows of
+    [(artifact,_,packages)] -> Just (OriginalVersion owner (scopeProducerSha256 scope)
+      (canonicalCertificateSha256 proof) (canonicalCoreSha256 core)
+      (exactSha256 artifact) packages)
+    _ -> Nothing
+
 -- Absence of a defining capability remains unavailable. Advertised invalid
 -- artifacts are refusals; source lookup and frontend compilation never occur.
 recoverAdmittedFinalizedOriginal
   :: HscEnv -> ExactScope -> Module -> IO (Maybe AdmittedFinalizedOriginal)
-recoverAdmittedFinalizedOriginal env scope owner = case Map.lookup key (scopeModuleInterfaceProofs scope) of
+recoverAdmittedFinalizedOriginal env scope owner =
+  admitOriginalRecoveryScope env scope >>= \admitted ->
+    fmap (fmap snd) (recoverAdmittedFinalizedOriginalWithPrevious admitted owner Nothing)
+
+-- Whole-scope certificate/interface validation is shared by one immutable
+-- acquisition stage. Defining Core bytes are still checked on every lookup,
+-- including hits; only their decoding and native lowering can be retained.
+data OriginalRecoveryScope = OriginalRecoveryScope HscEnv ExactScope
+  (Map.Map (String,String) [(ExactIfaceArtifact,FilePath,String)])
+  (Map.Map (String,String) String)
+
+admitOriginalRecoveryScope :: HscEnv -> ExactScope -> IO OriginalRecoveryScope
+admitOriginalRecoveryScope env scope = do
+  either (ioError . userError) pure =<< revalidateExactScope env scope
+  let interfaces = originalInterfaceRows scope
+      seals = Map.fromList [((exactUnit artifact,exactModule artifact),exactSha256 artifact)
+        | (artifact,_,_) <- scopeInterfaces scope]
+  pure (OriginalRecoveryScope env scope interfaces seals)
+
+originalVersionInRecoveryScope :: OriginalRecoveryScope -> Module -> Maybe OriginalVersion
+originalVersionInRecoveryScope (OriginalRecoveryScope _ scope interfaces _) owner =
+  originalVersionFromRows scope owner (Map.findWithDefault [] (originalOwnerKey owner) interfaces)
+
+-- A retained body never suppresses current artifact validation. On a hit only
+-- immutable decoded Core is reused; proof, interface row and location belong
+-- to the current consuming scope, including relocated identical artifacts.
+recoverAdmittedFinalizedOriginalWithPrevious
+  :: OriginalRecoveryScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
+  -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
+recoverAdmittedFinalizedOriginalWithPrevious admittedScope@(OriginalRecoveryScope env scope interfaces seals) owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
   Just proof | isSourceOriginal (canonicalOrigin proof), Just _ <- canonicalCoreArtifact proof -> do
-    either (ioError . userError) pure =<< revalidateExactScope env scope
-    row@(artifact,_,_) <- case [row | row@(selected,_,_) <- scopeInterfaces scope
-        , (exactUnit selected,exactModule selected) == key] of
+    row@(artifact,_,_) <- case Map.findWithDefault [] key interfaces of
       [row] -> pure row
       _ -> throwIO CandidateCoreHomeMissing
-    let seals = Map.fromList [((exactUnit selected,exactModule selected),exactSha256 selected)
-          | (selected,_,_) <- scopeInterfaces scope]
     unless (all (\(required,seal) -> Map.lookup required seals == Just seal)
         (Map.toAscList (canonicalRequirements proof)))
       (throwIO CandidateInterfaceRequirementsMismatch)
     let admission = ModuleInterfaceAdmission proof
         location = ms_location (exactInterfaceSummary env artifact)
     home <- admittedHomeInterface env admission owner
+    version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInRecoveryScope admittedScope owner)
     bytes <- readAdmittedCore admission
-    original <- decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
-    pure (Just (AdmittedFinalizedOriginal original proof row location))
+    original <- case previous of
+      Just (oldVersion,old) | oldVersion == version -> pure (admittedOriginalModule old)
+      _ -> decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
+    pure (Just (version,AdmittedFinalizedOriginal original proof row location))
   _ -> pure Nothing
   where
     key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
@@ -216,6 +299,9 @@ materializeInterfaceView directory index interface summary = do
     , ms_iface_date = Just modified
     }
 
+revalidateAdmittedCore :: CanonicalInterfaceAdmission -> IO ()
+revalidateAdmittedCore = void . readAdmittedCore
+
 readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
 readAdmittedCore proof = do
   (path, sha) <- maybe (throwIO CandidateCoreMissing) pure (admittedInterfaceCore proof)
@@ -248,16 +334,23 @@ hydrateCandidateHomeProductsWithOriginals
   -> [(ExactIfaceArtifact, ModIface)]
   -> (ModuleGraph -> HscEnv -> IO (Either String HscEnv))
   -> [ModSummary] -> [ModSummary] -> Ghc (Either String HscEnv)
-hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals installLexical
+hydrateCandidateHomeProductsWithOriginals = hydrateCandidateHomeProductsWithOriginalsUsing forkExactContext
+
+hydrateCandidateHomeProductsWithOriginalsUsing
+  :: (HscEnv -> IO HscEnv) -> HscEnv -> ModuleGraph -> [(ExactIfaceArtifact, ModIface)]
+  -> [(ExactIfaceArtifact, ModIface)]
+  -> (ModuleGraph -> HscEnv -> IO (Either String HscEnv))
+  -> [ModSummary] -> [ModSummary] -> Ghc (Either String HscEnv)
+hydrateCandidateHomeProductsWithOriginalsUsing forkContext initial loadGraph interfaces originals installLexical
     summaries boots = reifyGhc $ \session -> do
+  rollback <- forkContext initial
   result <- try (reflectGhc hydrate session)
   case result of
     Left failure | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
     Left (failure :: SomeException) -> do
-      -- Typechecking may have populated mutable EPS/finder state before the
-      -- refusal. Ordinary source fallback starts from empty mutable tables.
-      fresh <- freshExactState initial
-      reflectGhc (setSession fresh) session
+      -- Typechecking may have mutated the attempt's EPS/finder cells. The
+      -- private pre-attempt fork retains package facts and admitted homes.
+      reflectGhc (setSession rollback) session
       pure (Left (displayException failure))
     Right environment -> pure (Right environment)
   where

@@ -141,6 +141,7 @@ verifyModuleEvidenceProjection = do
     , preparedBindings = [(StgTopStringLit binder_ "fixture", emptyVarSet)
                    | binder_ <- [alpha, beta, gamma]]
     , preparedTagSigs = emptyNameEnv
+    , preparedStableTopSpellings = Map.empty
     , preparedSitedSiblings = Map.empty
     , preparedYieldSites = []
     , preparedPreparedSites = [site beta 11 "beta" 1 (raw thirdRoot) [],
@@ -150,6 +151,7 @@ verifyModuleEvidenceProjection = do
     , preparedSiteRejections = []
     , preparedRequestSiteTyCon = Nothing
     , preparedAuthorityDependent = False
+    , preparedSiteDependencies = Nothing
     , preparedIntrinsicNames = Set.empty
     , preparedExpectedEntries = Map.empty
     }
