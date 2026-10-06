@@ -48,6 +48,7 @@ library tidepool-extract-internal
   hs-source-dirs:   src
   exposed-modules:
     Tidepool.Binders
+    Tidepool.BoundedRead
     Tidepool.CborEncode
     Tidepool.CellProgramState
     Tidepool.CheckedCell
@@ -391,6 +392,7 @@ test-suite source-boot-product-reuse-test
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
   other-modules:    SourceBootCases
+                    BoundedReadTest
                     ExecutionSourceDecodeTest
                     Tidepool.Test.GenuineCandidate
                     ProgressBoundaryTest

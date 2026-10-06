@@ -25,7 +25,7 @@ import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
 import Numeric (showHex)
-import System.IO (IOMode(ReadMode), withBinaryFile)
+import Tidepool.BoundedRead (readFileAtMost)
 import GHC
   ( Ghc, ModSummary(..), getSession, parseModule, setSession, typecheckModule
   , tm_internals_, ms_mod_name, LoadHowMuch(LoadAllTargets), SuccessFlag(..)
@@ -305,8 +305,7 @@ revalidateAdmittedCore = void . readAdmittedCore
 readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
 readAdmittedCore proof = do
   (path, sha) <- maybe (throwIO CandidateCoreMissing) pure (admittedInterfaceCore proof)
-  bytes <- withBinaryFile path ReadMode $ \handle ->
-    BS.hGet handle (32 * 1024 * 1024 + 1)
+  bytes <- readFileAtMost path (32 * 1024 * 1024 + 1)
   unless (BS.length bytes <= 32 * 1024 * 1024) (throwIO CandidateCoreTooLarge)
   unless (digest bytes == sha) (throwIO CandidateCoreBytesMismatch)
   pure bytes

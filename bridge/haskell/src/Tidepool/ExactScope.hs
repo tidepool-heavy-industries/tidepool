@@ -48,7 +48,7 @@ import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
 import System.FilePath (isAbsolute, takeDirectory, (</>))
-import System.IO (IOMode(ReadMode), withBinaryFile)
+import Tidepool.BoundedRead (readFileAtMost)
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateInterface(..))
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
@@ -582,8 +582,8 @@ validatePreviewOriginalTarget scope evidence = forM_ (scopeActivationPreview sco
 -- A bounded read also closes the stat/read growth race without allocating an
 -- unbounded input.
 readBoundedFile :: FilePath -> Int -> IO BS.ByteString
-readBoundedFile path limit = withBinaryFile path ReadMode $ \handle -> do
-  bytes <- BS.hGet handle (limit + 1)
+readBoundedFile path limit = do
+  bytes <- readFileAtMost path (limit + 1)
   when (BS.length bytes > limit) (fail "exact scope artifact exceeds its byte bound")
   pure bytes
 

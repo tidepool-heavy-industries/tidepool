@@ -168,7 +168,8 @@ import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
 import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getCurrentDirectory, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Posix.Temp (mkdtemp)
-import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile, hClose)
+import System.IO (hPutStrLn, stderr, readFile', hClose)
+import Tidepool.BoundedRead (readFileAtMost)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless, filterM, foldM, (>=>))
 import Data.Data (Data, cast, gmapQ)
@@ -4171,8 +4172,8 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\admission ->
     :: IO (Either IOException Bool)
   pure (either (const False) id readBack))
   where
-    bounded path' limit = withBinaryFile path' ReadMode $ \handle -> do
-      bytes <- BS.hGet handle (limit + 1)
+    bounded path' limit = do
+      bytes <- readFileAtMost path' (limit + 1)
       unless (BS.length bytes <= limit) (ioError (userError "candidate artifact exceeds byte bound"))
       pure bytes
 

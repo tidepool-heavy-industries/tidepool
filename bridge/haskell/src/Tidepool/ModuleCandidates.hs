@@ -28,7 +28,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
-import System.IO (IOMode(ReadMode), withBinaryFile)
+import Tidepool.BoundedRead (readFileAtMost)
 import System.FilePath (isAbsolute)
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
@@ -148,8 +148,7 @@ candidateContextIdentity (CapturedCandidateManifest _ bytes) =
 
 captureCandidateManifest :: FilePath -> IO (Either String CapturedCandidateManifest)
 captureCandidateManifest path = do
-  captured <- try (withBinaryFile path ReadMode $ \handle ->
-    BS.hGet handle (fromInteger maxManifestBytes + 1))
+  captured <- try (readFileAtMost path (fromInteger maxManifestBytes + 1))
     :: IO (Either IOException BS.ByteString)
   pure $ case captured of
     Left failure -> Left (show failure)

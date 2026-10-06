@@ -3,6 +3,7 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
+import BoundedReadTest (boundedReadChecks)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -14,7 +15,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "finalized Core" $ finalizedCoreChecks
+  [ testCase "bounded artifact reads" boundedReadChecks
+  , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
   , testCase "execution source decode" $ executionSourceDecodeChecks
   , testCase "execution source resolution budget" $ executionSourceResolutionBudgetChecks
