@@ -86,12 +86,13 @@ def analyze(events):
             continue
         if key in requests:
             problems.append(f'row {index}: duplicate physical request start')
+            requests[key]['parse_problems'].append('duplicate physical request start')
             continue
         requests[key] = {'identity': dict(zip(KEY_FIELDS, key)), 'compile_request': row['compile_request'],
                          'transaction': row.get('transaction'), 'start_row': index,
                          'terminal_rows': [], 'service_ms': None, 'phases_ms': {},
                          'legacy_counts': {}, 'legacy_compile_summaries': [],
-                         'events': [], 'stages': {}}
+                         'events': [], 'stages': {}, 'parse_problems': []}
     for index, row in enumerate(normalized):
         key = identity(row)
         request = requests.get(key)
@@ -107,6 +108,7 @@ def analyze(events):
         if row.get('compile_request') != request['compile_request']:
             if is_reuse or row.get('message', '').startswith('compiler request '):
                 problems.append(f'row {index}: request digest conflicts with physical invocation')
+                request['parse_problems'].append(f'row {index}: request digest conflicts with physical invocation')
             continue
         if row.get('message') in ('compiler request finished', 'compiler request failed',
                                   'compiler request abandoned by client'):
@@ -133,13 +135,21 @@ def analyze(events):
                 request['events'].append({'row': index, **event})
             except (ValueError, TypeError) as error:
                 problems.append(f'row {index}: {error}')
+                request['parse_problems'].append(f'row {index}: {error}')
+    cycle_purposes = {}
     for key, request in requests.items():
+        for event in request['events']:
+            cycle_purposes.setdefault((key[0], key[1], event['cycle']), set()).add(event['purpose'])
+    for key, request in requests.items():
+        request_problems = list(request.pop('parse_problems'))
         terminals = request['terminal_rows']
         if len(terminals) != 1:
-            problems.append(f'{key}: expected one request terminal')
+            request_problems.append('expected one request terminal')
         for event in request['events']:
             if event['row'] <= request['start_row'] or (terminals and event['row'] >= terminals[0]):
-                problems.append(f"row {event['row']}: reuse event outside request boundaries")
+                request_problems.append(f"row {event['row']}: reuse event outside request boundaries")
+            if len(cycle_purposes[(key[0], key[1], event['cycle'])]) != 1:
+                request_problems.append(f"cycle {event['cycle']}: conflicting purposes within worker")
         request['admission_queue_ms'] = admissions.get((key[0], key[2]), [])
         cycles = sorted({(event['cycle'], event['purpose']) for event in request['events']})
         request['cycles'] = [{'cycle': cycle, 'purpose': purpose} for cycle, purpose in cycles]
@@ -147,7 +157,14 @@ def analyze(events):
             selected = [event for event in request['events'] if event['stage'] == stage]
             complete = {(event['cycle'], event['purpose']) for event in selected if event['decision'] == 'complete'}
             touched = {(event['cycle'], event['purpose']) for event in selected}
-            status = 'observed' if complete and complete == touched and complete == set(cycles) else 'UNKNOWN'
+            final = True
+            for cycle in touched:
+                ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
+                closures = [event for event in ordered if event['decision'] == 'complete']
+                if len(closures) != 1 or ordered[-1]['decision'] != 'complete':
+                    final = False
+                    request_problems.append(f'{stage} cycle {cycle[0]}: expected exactly one final stage completion')
+            status = 'observed' if final and complete and complete == touched and complete == set(cycles) else 'UNKNOWN'
             counts, byte_counts, reasons, accounted = Counter(), Counter(), Counter(), 0
             for event in selected:
                 if event['decision'] == 'complete':
@@ -161,11 +178,15 @@ def analyze(events):
                                         'bytes': dict(byte_counts) if status == 'observed' and accounted else None,
                                         'byte_accounted_events': accounted,
                                         'reasons': dict(reasons), 'completion_cycles': len(complete)}
-        request['status'] = 'observed' if request['events'] and len(terminals) == 1 else 'UNKNOWN'
+        request['problems'] = sorted(set(request_problems))
+        problems.extend(f'{key}: {problem}' for problem in request['problems'])
+        request['status'] = 'observed' if request['events'] and len(terminals) == 1 and not request_problems else 'UNKNOWN'
     incomplete = problems or not requests or any(request['status'] == 'UNKNOWN' or any(
         value['status'] == 'UNKNOWN' and value['reasons'] for value in request['stages'].values()) for request in requests.values())
     return {'schema': 1, 'status': 'incomplete' if incomplete else 'observed',
             'problems': problems, 'requests': list(requests.values()), 'unlinked_events': unlinked,
+            'phase_meanings': {'lowering': 'GHC hscDesugar and hscSimplify; excludes prepared STG',
+                               'prepared_stg': 'GHC CorePrep, coreToStg and stg2stg'},
             'interpretation': 'Hits name one stage only. Missing stage completion is UNKNOWN. Admission queue times are shared by the transaction, not additive per request. Phase totals without interval boundaries remain nonexclusive; do not sum overlapping timers.'}
 
 
@@ -175,47 +196,69 @@ def compare_control(normal, disabled, stage):
     if stage not in ('source_frontend', 'prepared_body'):
         return {'status': 'incomplete', 'problems': ['unsupported disable control stage']}
     for label, request in (('normal', normal), ('disabled', disabled)):
-        if request.get('exit_code') != 0 or request['stages'][stage]['status'] != 'observed':
+        if request.get('status') != 'observed' or request.get('exit_code') != 0 or request['stages'][stage]['status'] != 'observed':
             problems.append(f'{label}: successful completed stage evidence required')
-    def roster(request):
-        return {(event['unit'], event['module'], event['version_kind'], event['version'])
-                for event in request['events'] if event['stage'] == stage
-                and event['decision'] in ('hit', 'work') and event['unit'] is not None}
-    if not roster(normal) or roster(normal) != roster(disabled):
+    def owners(request, decision):
+        result = Counter()
+        for event in request['events']:
+            if event['stage'] == stage and event['decision'] == decision and event['items'] > 0 and event['unit'] is not None:
+                result[(event['unit'], event['module'], event['version_kind'], event['version'])] += event['items']
+        return result
+    normal_hits, normal_work_by_owner = owners(normal, 'hit'), owners(normal, 'work')
+    disabled_hits, disabled_work_by_owner = owners(disabled, 'hit'), owners(disabled, 'work')
+    markers = owners(disabled, 'disabled')
+    normal_roster = normal_hits.keys() | normal_work_by_owner.keys()
+    disabled_roster = disabled_hits.keys() | disabled_work_by_owner.keys()
+    if not normal_roster or normal_roster != disabled_roster:
         problems.append('controls do not describe the same exact module/version roster')
-    marker = any(event['stage'] == stage and event['decision'] == 'disabled'
-                 and event['reason'] == 'cache_disabled' and event['items'] > 0 for event in disabled['events'])
-    if not marker:
-        problems.append('disabled control has no actual disable decision')
+    if not normal_hits or not normal_hits.keys() <= markers.keys() <= normal_roster:
+        problems.append('disable markers must cover actual normal-hit owners within the matched roster')
+    for owner, hits in normal_hits.items():
+        if disabled_hits[owner] > 0:
+            problems.append(f'{owner}: disabled owner still reports a cache hit')
+        if markers[owner] < hits or disabled_work_by_owner[owner] - normal_work_by_owner[owner] < hits:
+            problems.append(f'{owner}: disabled hit was not replaced by actual owner work')
     normal_work = sum(event['items'] for event in normal['events'] if event['stage'] == stage and event['decision'] == 'work')
     disabled_work = sum(event['items'] for event in disabled['events'] if event['stage'] == stage and event['decision'] == 'work')
-    normal_hits = sum(event['items'] for event in normal['events'] if event['stage'] == stage and event['decision'] == 'hit')
-    if normal_hits <= 0 or disabled_work <= normal_work or disabled_work <= 0:
+    if sum(normal_hits.values()) <= 0 or disabled_work <= normal_work or disabled_work <= 0:
         problems.append('control lacks a normal hit and nonzero increased actual work')
     return {'status': 'observed' if not problems else 'incomplete', 'stage': stage,
             'normal_work': normal_work, 'disabled_work': disabled_work,
-            'work_delta': disabled_work - normal_work, 'problems': problems}
+            'work_delta': disabled_work - normal_work, 'problems': problems,
+            'owner_work_deltas': [{'unit': owner[0], 'module': owner[1], 'version_kind': owner[2], 'version': owner[3],
+                                  'normal_hits': hits, 'normal_work': normal_work_by_owner[owner],
+                                  'disabled_work': disabled_work_by_owner[owner], 'disabled_hits': disabled_hits[owner]}
+                                 for owner, hits in sorted(normal_hits.items())]}
 
 
-def load_events(path):
+def load_retained_events(path):
+    """Parse one bounded immutable byte snapshot and retain its exact hash."""
     if path.stat().st_size > 64 * 1024 * 1024:
         raise ValueError('trace exceeds 64 MiB; retain a bounded exact-request trace')
+    with path.open('rb') as stream:
+        snapshot = stream.read(64 * 1024 * 1024 + 1)
+    if len(snapshot) > 64 * 1024 * 1024:
+        raise ValueError('trace exceeds 64 MiB; retain a bounded exact-request trace')
+    digest = hashlib.sha256(snapshot).hexdigest()
     rows = []
-    with path.open() as stream:
-        for line in stream:
-            if len(line) > 1024 * 1024:
-                raise ValueError('trace row exceeds one MiB')
-            if line.strip():
-                row = json.loads(line)
-                if not isinstance(row, dict):
-                    raise ValueError('trace row is not an object')
-                rows.append(row)
-    return rows
+    for line in snapshot.splitlines():
+        if len(line) > 1024 * 1024:
+            raise ValueError('trace row exceeds one MiB')
+        if line.strip():
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError('trace row is not an object')
+            rows.append(row)
+    with path.open('rb') as stream:
+        after = stream.read(64 * 1024 * 1024 + 1)
+    if hashlib.sha256(after).hexdigest() != digest:
+        raise ValueError('trace changed during reporting; retain an immutable request trace')
+    return rows, {'path': str(path.resolve()), 'sha256': digest}
 
 
 def analyze_workload(manifest, report):
     """Link retained authored inputs and controls to physical requests."""
-    problems, cases, groups = [], {}, {}
+    problems, cases, groups, used_invocations = [], {}, {}, set()
     requests = {tuple(row['identity'][key] for key in KEY_FIELDS): row for row in report['requests']}
     if manifest.get('schema') != 1 or not isinstance(manifest.get('cases'), list):
         raise ValueError('workload requires schema 1 and cases')
@@ -233,6 +276,10 @@ def analyze_workload(manifest, report):
         if request is None or request.get('exit_code') != 0:
             problems.append(f'{name}: no successful exact physical request')
             continue
+        physical = tuple(request['identity'][key] for key in KEY_FIELDS)
+        if physical in used_invocations:
+            problems.append(f'{name}: physical request reused across workload cases')
+        used_invocations.add(physical)
         cases[name] = request
         groups.setdefault(scenario, []).append((case, request))
     for scenario in ('distinct', 'repeat', 'binding_growth', 'aba'):
@@ -245,6 +292,9 @@ def analyze_workload(manifest, report):
         steps = [case.get('step') for case, _ in ordered]
         if any(not natural(step) for step in steps) or len(set(steps)) != len(steps):
             problems.append(f'{scenario}: steps missing or duplicated')
+        starts = [request['start_row'] for _, request in ordered]
+        if starts != sorted(starts) or len(set(starts)) != len(starts):
+            problems.append(f'{scenario}: authored step order differs from actual request order')
         hashes = [case['source']['sha256'] for case, _ in ordered]
         if scenario in ('distinct', 'binding_growth') and len(set(hashes)) < 2:
             problems.append(f'{scenario}: authored inputs do not change')
@@ -285,14 +335,9 @@ def main():
     parser.add_argument('--require-stage', choices=STAGES, action='append', default=[])
     parser.add_argument('--workload', type=Path, help='retained physical-request/source mapping and disable controls')
     args = parser.parse_args()
-    if args.trace.stat().st_size > 64 * 1024 * 1024:
-        raise ValueError('trace exceeds 64 MiB; retain a bounded exact-request trace')
-    before = hashlib.sha256(args.trace.read_bytes()).hexdigest()
-    report = analyze(load_events(args.trace))
-    after = hashlib.sha256(args.trace.read_bytes()).hexdigest()
-    if before != after:
-        raise ValueError('trace changed during reporting; retain an immutable request trace')
-    report['input'] = {'path': str(args.trace.resolve()), 'sha256': after}
+    events, reference = load_retained_events(args.trace)
+    report = analyze(events)
+    report['input'] = reference
     if args.workload:
         if args.workload.stat().st_size > 4 * 1024 * 1024:
             raise ValueError('workload manifest exceeds four MiB')

@@ -36,8 +36,10 @@ or null when unaccounted.
 Reference reuse and retransferred bytes remain separate stages; required validation
 reads must not be labeled transfer avoidance.
 
-Call `emitReuseComplete` after each instrumented stage for every worker cycle,
-including zero work. It emits `complete`/`stage_complete`, zero items, null bytes
+Call `emitReuseComplete` exactly once after the final event of each instrumented
+stage for every worker cycle. Each physical worker cycle has one purpose;
+conflicting purposes, duplicate completion, or later stage work are refused.
+Emit completion including zero work. It emits `complete`/`stage_complete`, zero items, null bytes
 and null module fields. A stage without that completion is **UNKNOWN**, not zero.
 Completion does not manufacture hit/work events or qualify a whole compile.
 Counters should be cheap; per-owner detail remains opt-in through the existing
@@ -64,6 +66,9 @@ counts and compile summaries remain diagnostic data, never substitutes for a
 completed stage. Timers lacking interval boundaries (including legacy lowering)
 are preserved as nonexclusive totals; do not sum overlapping phases. Queue time
 belongs to admission and is not additive across requests sharing a transaction.
+The current `lowering` owner times `hscDesugar` plus `hscSimplify`; it is not
+aggregate native lowering. `prepared_stg` separately owns CorePrep, coreToStg and
+stg2stg. Raw phase names remain intact and parent/child totals are not added.
 
 `resident-performance-report.py` also includes `compile_reuse`; repeat
 `--require-reuse-stage STAGE` to make missing stage evidence fail its gate. No
@@ -79,14 +84,19 @@ results. Preserve the actual authored inputs. Its workload map uses schema 1:
 
 The example shows shape, not passing evidence. At least two distinct/repeat/growth
 cases and exactly A, B, A are required. Each case links a different actual physical
-request; source references are checked. This validates input relationships, not
-binding semantics or proof that a retained file was submitted: the owning runner
+request; source references are checked. Authored step order must follow actual
+request-start order, and no physical request may serve as different cases across
+scenarios. This validates input relationships, not binding semantics or proof
+that a retained file was submitted: the owning runner
 must capture inputs at submission and retain its semantic assertions.
 
 Use actual owner-provided source/body disable controls, matched producer and
 workload, with retained startup configuration. Each control must show a normal
 stage hit, an actual disable decision, matching module/version roster and authored
-input, and **nonzero increased actual work**. Lower latency, a changed miss count,
+input, and **nonzero increased actual work**. The disable decision must name each
+actual normal-hit owner. Its disabled run must replace those hits with increased
+work for that same owner/version, with no surviving hit. Increased work in an
+unrelated owner cannot calibrate reuse. Lower latency, a changed miss count,
 or an absent work event cannot pass. This reporter checks observation controls,
 not native execution qualification; Python regression fixtures are synthetic
 parser controls and are never reported as successful live compiles.

@@ -891,19 +891,23 @@ def main():
         resolved = path.resolve(strict=True)
         if resolved not in trace_paths:
             trace_paths.append(resolved)
-    events = [event for path in trace_paths for event in read_jsonl(path)]
+    events, trace_references = [], []
+    for path in trace_paths:
+        retained_events, reference = REUSE_REPORT.load_retained_events(path)
+        events.extend(retained_events)
+        trace_references.append(reference)
     if args.package_cold_report:
         expected_trace_hashes = {
             str(Path(row["daemon_trace"]).resolve(strict=True)): row["daemon_trace_sha256"]
             for row in samples if row.get("kind") == "cold_start"
         }
         for path in cold_trace_paths:
-            if file_sha256(path) != expected_trace_hashes.get(str(path)):
+            retained = next(reference for reference in trace_references if reference['path'] == str(path.resolve()))
+            if retained['sha256'] != expected_trace_hashes.get(str(path)):
                 raise ValueError(f"cold compiler trace changed during reporting: {path}")
     report = analyze(samples, events, manifest)
     report["compile_reuse"] = REUSE_REPORT.analyze(events)
-    report["compile_reuse"]["inputs"] = [
-        {"path": str(path), "sha256": file_sha256(path)} for path in trace_paths]
+    report["compile_reuse"]["inputs"] = trace_references
     if args.require_reuse_stage:
         reuse = report["compile_reuse"]
         if reuse["status"] != "observed" or any(

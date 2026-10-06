@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 import tempfile
 import hashlib
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('compiler_reuse', Path(__file__).parents[1] / 'compiler-reuse-report.py')
 REPORT = importlib.util.module_from_spec(SPEC)
@@ -51,6 +52,23 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(result['status'], 'incomplete')
         self.assertEqual(stage['status'], 'UNKNOWN')
         self.assertIsNone(stage['counts'])
+
+    def test_completion_must_be_unique_and_final(self):
+        for events in ([packet('complete', items=0), packet('work')],
+                       [packet(), packet('complete', items=0), packet('complete', items=0)]):
+            with self.subTest(events=events):
+                report = REPORT.analyze(trace(events))
+                self.assertEqual(report['status'], 'incomplete')
+                self.assertEqual(report['requests'][0]['stages']['source_frontend']['status'], 'UNKNOWN')
+
+    def test_cycle_purpose_conflicts_are_refused_within_worker(self):
+        end = packet('complete', items=0)
+        end['purpose'] = 'lookup_type'
+        report = REPORT.analyze(trace(completed([packet()]) + [end]))
+        self.assertEqual(report['status'], 'incomplete')
+        rows = trace(completed([packet()])) + trace([end], ordinal=2)
+        report = REPORT.analyze(rows)
+        self.assertTrue(all(request['status'] == 'UNKNOWN' for request in report['requests']))
 
     def test_completed_zero_stage_is_explicit(self):
         request = REPORT.analyze(trace([packet('complete', items=0)]))['requests'][0]
@@ -122,6 +140,40 @@ class ReuseEvidenceControls(unittest.TestCase):
                 self.assertEqual(self.control(stage, version='changed')['status'], 'incomplete')
                 self.assertEqual(self.control(stage, complete=False)['status'], 'incomplete')
 
+    def test_unrelated_extra_work_cannot_calibrate_surviving_hit(self):
+        def owner(decision, name, items=1):
+            event = packet(decision, items=items)
+            event['module'] = name
+            return event
+        normal = REPORT.analyze(trace(completed([owner('hit', 'Support'), owner('work', 'UnrelatedWork')])))['requests'][0]
+        for marker in ('NeverHit', 'Support'):
+            disabled = REPORT.analyze(trace(completed([owner('hit', 'Support'), owner('disabled', marker),
+                                                       owner('work', 'UnrelatedWork', 2)]), ordinal=2))['requests'][0]
+            self.assertEqual(REPORT.compare_control(normal, disabled, 'source_frontend')['status'], 'incomplete')
+
+    def test_missing_one_disabled_hit_owner_cannot_pass(self):
+        other = packet()
+        other['module'] = 'Other'
+        normal = REPORT.analyze(trace(completed([packet(), other])))['requests'][0]
+        disabled = REPORT.analyze(trace(completed([packet('disabled'), packet('work', items=2), other]), ordinal=2))['requests'][0]
+        self.assertEqual(REPORT.compare_control(normal, disabled, 'source_frontend')['status'], 'incomplete')
+
+    def test_retained_trace_reader_refuses_mutation_and_hashes_parsed_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace.jsonl'
+            original = b'{"message":"original"}\n'
+            path.write_bytes(original)
+            rows, reference = REPORT.load_retained_events(path)
+            self.assertEqual(rows, [{'message': 'original'}])
+            self.assertEqual(reference['sha256'], hashlib.sha256(original).hexdigest())
+            decoder = json.loads
+            def change(line):
+                path.write_text('{"message":"changed"}\n')
+                return decoder(line)
+            with patch.object(REPORT.json, 'loads', side_effect=change):
+                with self.assertRaisesRegex(ValueError, 'trace changed during reporting'):
+                    REPORT.load_retained_events(path)
+
     def test_multiple_cycles_require_completion_for_each(self):
         other = packet(stage='prepared_body')
         other['cycle'] = 8
@@ -167,6 +219,17 @@ class ReuseEvidenceControls(unittest.TestCase):
                 {'stage': 'prepared_body', 'normal': 'control2', 'disabled': 'control3'}]}
             report = REPORT.analyze(rows)
             self.assertEqual(REPORT.analyze_workload(manifest, report)['status'], 'observed')
+            growth_identities = [dict(cases[index]['identity']) for index in (4, 5)]
+            cases[4]['identity'] = dict(cases[0]['identity'])
+            cases[5]['identity'] = dict(cases[1]['identity'])
+            result = REPORT.analyze_workload(manifest, report)
+            self.assertTrue(any('reused across workload cases' in problem for problem in result['problems']))
+            cases[4]['identity'], cases[5]['identity'] = growth_identities
+            first, second = cases[7]['identity'], cases[8]['identity']
+            cases[7]['identity'], cases[8]['identity'] = second, first
+            result = REPORT.analyze_workload(manifest, report)
+            self.assertTrue(any('authored step order differs' in problem for problem in result['problems']))
+            cases[7]['identity'], cases[8]['identity'] = first, second
             manifest['cases'][8]['source'] = sources[1]
             self.assertEqual(REPORT.analyze_workload(manifest, report)['status'], 'incomplete')
             sources[0]['sha256'] = 'wrong'

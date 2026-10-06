@@ -575,6 +575,33 @@ class ResidentPerformanceReport(unittest.TestCase):
             self.assertEqual(report["package_cold_report"]["sha256"],
                              hashlib.sha256(package_report.read_bytes()).hexdigest())
 
+    def test_report_cli_refuses_warm_trace_mutation_during_shared_snapshot_read(self):
+        samples, events, manifest = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            samples_path = root / 'samples.jsonl'
+            samples_path.write_text(''.join('resident-performance ' + json.dumps(row) + '\n'
+                                          for row in samples if row['kind'] != 'cold_start'))
+            manifest_path = root / 'manifest.json'
+            manifest_path.write_text(json.dumps(manifest))
+            trace_path = root / 'warm-compiler.jsonl'
+            trace_path.write_text(''.join(json.dumps(event) + '\n' for event in events))
+            reader = REPORT.REUSE_REPORT.load_retained_events
+            decoder = json.loads
+            def mutating_read(path):
+                def change(line):
+                    path.write_text('{"message":"replaced"}\n')
+                    return decoder(line)
+                with patch.object(REPORT.REUSE_REPORT.json, 'loads', side_effect=change):
+                    return reader(path)
+            with patch.object(REPORT.REUSE_REPORT, 'load_retained_events', side_effect=mutating_read), patch.object(REPORT.sys, 'argv', [
+                    'resident-performance-report.py', '--samples', str(samples_path),
+                    '--compiler-trace', str(trace_path), '--manifest', str(manifest_path),
+                    '--output', str(root / 'report.json')]):
+                with self.assertRaisesRegex(ValueError, 'trace changed during reporting'):
+                    REPORT.main()
+            self.assertFalse((root / 'report.json').exists())
+
     def test_actual_binary_bytes_and_source_variation_are_required(self):
         samples, events, manifest = self.fixture()
         manifest["frontend_sha256"] = "0" * 64
