@@ -596,9 +596,6 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
           , binder <- originalBinders group]
          ++ [binder | candidate <- candidates, group <- candidateGroups candidate
           , binder <- candidateGroupBinders group])
-      certifiedHomes = Set.fromList
-        ([(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
-         ++ [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- exactProducts])
       exactOriginals =
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
@@ -621,7 +618,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
   recover <- newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) certifiedHomes (withOriginals (contextFor firstTarget)) originalModules []
+    (rcPreparedBodies caches) (withOriginals (contextFor firstTarget)) originalModules []
   artifacts <- forM targets $ \target -> do
     let context = withOriginals (contextFor target)
     -- Package roots grow only from the finite exact original-group inventory.
