@@ -22,6 +22,8 @@ module Tidepool.Timing
   , newTimingRequestIdentity
   , monotonicTime
   , elapsedMs
+  , ReuseStage(..), ReuseDecision(..), ReuseReason(..), ReuseVersionKind(..)
+  , ReuseModule(..), ReuseContext(..), emitReuse, emitReuseComplete
     -- * Opt-in memo trace (TIDEPOOL_MEMO_TRACE=1)
   , readMemoTraceEnabled
   , emitMemoCycleGraph
@@ -37,6 +39,71 @@ import qualified GHC.Stats as RTS
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
 import System.CPUTime (getCPUTime)
+import Tidepool.Json (jsonString)
+
+-- These events describe one owner's decision, never a whole-compile hit.
+-- Transport identity belongs to the enclosing daemon trace; cycle identifies
+-- the worker operation within that request. Versions are opaque owner seals.
+data ReuseStage = SourceFrontend | Interface | FinalizedCore | PreparedBody
+  | SiteWitness | OriginalRecovery | RawProjection | ArtifactReference
+  | ArtifactTransfer | NativeImage deriving (Eq, Show)
+data ReuseDecision = ReuseHit | ReuseMiss | ReuseWork | ReuseDisabled
+  | ReuseEvicted | ReuseEpochRotated | ReuseComplete deriving (Eq, Show)
+data ReuseReason = Matched | Absent | ChangedSource | ChangedDependency
+  | ChangedAuthority | ThFresh | Epoch | Recovery | CacheDisabled | Evicted
+  | StageComplete deriving (Eq, Show)
+data ReuseVersionKind = SourceFingerprint | CanonicalSeal | PreparedIdentity
+  | ImageIdentity deriving (Eq, Show)
+data ReuseModule = ReuseModule String String ReuseVersionKind String
+data ReuseContext = ReuseContext Word64 String
+
+reuseStageName :: ReuseStage -> String
+reuseStageName stage = case stage of
+  SourceFrontend -> "source_frontend"; Interface -> "interface"
+  FinalizedCore -> "finalized_core"; PreparedBody -> "prepared_body"
+  SiteWitness -> "site_witness"; OriginalRecovery -> "original_recovery"
+  RawProjection -> "raw_projection"; ArtifactReference -> "artifact_reference"
+  ArtifactTransfer -> "artifact_transfer"; NativeImage -> "native_image"
+
+reuseDecisionName :: ReuseDecision -> String
+reuseDecisionName decision = case decision of
+  ReuseHit -> "hit"; ReuseMiss -> "miss"; ReuseWork -> "work"
+  ReuseDisabled -> "disabled"; ReuseEvicted -> "evicted"
+  ReuseEpochRotated -> "epoch_rotated"; ReuseComplete -> "complete"
+
+reuseReasonName :: ReuseReason -> String
+reuseReasonName reason = case reason of
+  Matched -> "matched"; Absent -> "absent"; ChangedSource -> "changed_source"
+  ChangedDependency -> "changed_dependency"; ChangedAuthority -> "changed_authority"
+  ThFresh -> "th_fresh"; Epoch -> "epoch"; Recovery -> "recovery"
+  CacheDisabled -> "cache_disabled"; Evicted -> "evicted"; StageComplete -> "stage_complete"
+
+reuseVersionName :: ReuseVersionKind -> String
+reuseVersionName kind = case kind of
+  SourceFingerprint -> "source_fingerprint"; CanonicalSeal -> "canonical_seal"
+  PreparedIdentity -> "prepared_identity"; ImageIdentity -> "image_identity"
+
+emitReuse :: Bool -> ReuseContext -> ReuseStage -> ReuseDecision -> ReuseReason
+  -> Maybe ReuseModule -> Word64 -> Maybe Word64 -> IO ()
+emitReuse False _ _ _ _ _ _ _ = pure ()
+emitReuse True (ReuseContext cycleId purpose) stage decision reason owner items bytes = do
+  observed <- getMonotonicTimeNSec
+  let moduleFields = case owner of
+        Nothing -> [("unit","null"),("module","null"),("version_kind","null"),("version","null")]
+        Just (ReuseModule unit modul kind version) ->
+          [("unit",jsonString unit),("module",jsonString modul)
+          ,("version_kind",jsonString (reuseVersionName kind)),("version",jsonString version)]
+      fields = [("schema","1"),("cycle",show cycleId),("purpose",jsonString purpose)
+        ,("stage",jsonString (reuseStageName stage)),("decision",jsonString (reuseDecisionName decision))
+        ,("reason",jsonString (reuseReasonName reason)),("items",show items)
+        ,("bytes",maybe "null" show bytes),("observed_ns",show observed)] ++ moduleFields
+  hPutStrLn stderr ("tidepool-reuse {" ++ intercalate ","
+    [jsonString key ++ ":" ++ value | (key,value) <- fields] ++ "}")
+
+-- Required even for zero work. Missing completion means unobserved, not zero.
+emitReuseComplete :: Bool -> ReuseContext -> ReuseStage -> IO ()
+emitReuseComplete enabled context stage =
+  emitReuse enabled context stage ReuseComplete StageComplete Nothing 0 Nothing
 
 -- | Read the @TIDEPOOL_TIMING@ env var. On iff exactly @"1"@; unset or any
 -- other value is off.
