@@ -4225,6 +4225,7 @@ mod tests {
 
     fn store_fixture(root: &Path, record: &Record, name: &str) {
         let producer = root.join(RECORD_DIR).join(sha(b"endpoint"));
+        fs::create_dir_all(&producer).unwrap();
         let dir = root_shard(&producer, &selected_record_root(record).unwrap());
         let mut record = record.clone();
         if let Some(canonical) = &record.module_interface_proof {
