@@ -5780,6 +5780,13 @@ mod module_product_tests {
             load_selected_production_entry(&moved, &authority, &selected).is_ok(),
             "complete output container can move while original snapshot paths remain retained"
         );
+        let manifest_path = moved.join("entry.json");
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+        let mut obsolete: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+        obsolete["schema"] = 1.into();
+        std::fs::write(&manifest_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        assert!(load_selected_production_entry(&moved, &authority, &selected).is_err());
+        std::fs::write(manifest_path, original_manifest).unwrap();
         let metadata = moved.join("raw/meta.cbor");
         let original = std::fs::read(&metadata).unwrap();
         std::fs::write(&metadata, b"changed").unwrap();

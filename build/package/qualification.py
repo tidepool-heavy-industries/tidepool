@@ -515,7 +515,7 @@ def build_native_catalog(args) -> None:
 
 def root_entry_selection(entry: Path, original: Path) -> dict:
     manifest = json.loads(entry.read_text())
-    if (manifest.get("schema") != 1 or manifest.get("purpose") != "original_source"
+    if (manifest.get("schema") != 2 or manifest.get("purpose") != "original_source"
             or manifest.get("target") != "__prepared"
             or manifest.get("source") != str(original / "actors/TidepoolPreparedDriver.hs")):
         raise ValueError("root entry does not retain the declared original settled driver")

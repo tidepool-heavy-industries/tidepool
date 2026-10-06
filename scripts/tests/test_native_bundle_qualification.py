@@ -642,7 +642,7 @@ class CatalogSourceTests(unittest.TestCase):
             'product_inventory': qualification.native_catalog_products(catalog.parent), **selected})
         entry = shared / 'root-entry'
         qualification.write_json(entry / 'entry.json', {
-            'schema': 1, 'purpose': 'original_source', 'target': '__prepared',
+            'schema': 2, 'purpose': 'original_source', 'target': '__prepared',
             'source': str(original / qualification.ROOT_ENTRY_SOURCE),
             'sources': {'kind': 'native_catalog', 'selection': self.selection(original)},
             'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
@@ -715,6 +715,17 @@ class CatalogSourceTests(unittest.TestCase):
             catalog.write_bytes(before)
             self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
             self.assertEqual(catalog.read_bytes(), before)
+
+    def test_root_entry_requires_schema_two_typed_source_selection(self):
+        original, tools, record, _, _ = self.retained_fixture()
+        bundle, _, _ = self.catalog_fixture(original, tools, record)
+        path = bundle / 'share/exomonad/root-entry/entry.json'
+        self.assertEqual(qualification.root_entry_selection(path, original), self.selection(original))
+        manifest = json.loads(path.read_text())
+        manifest['schema'] = 1
+        qualification.write_json(path, manifest)
+        with self.assertRaisesRegex(ValueError, 'declared original settled driver'):
+            qualification.root_entry_selection(path, original)
 
     def test_frozen_bundle_transfers_real_source_root_and_survives_old_pin_removal(self):
         original, tools, record, pin, nar = self.retained_fixture()

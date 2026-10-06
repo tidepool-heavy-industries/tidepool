@@ -57,6 +57,14 @@ pub enum CompileError {
     /// I/O error during file operations or process execution.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    /// Complete retained output became visible; source must not be re-executed
+    /// to retry its parent-directory durability confirmation.
+    #[error("entry {} is visible but durability is unconfirmed: {source}", path.display())]
+    EntryPublicationUnconfirmed {
+        path: PathBuf,
+        #[source]
+        source: tidepool_atomic_write::WriteError,
+    },
     /// The extractor's typed output or an internal compile request violated
     /// its expected shape. Real GHC source rejections use `Diagnostics`; this
     /// variant therefore denotes an extractor/runtime contract mismatch.

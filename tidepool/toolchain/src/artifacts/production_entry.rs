@@ -160,6 +160,7 @@ enum EntryPurpose {
 }
 
 const MANIFEST: &str = "entry.json";
+const ENTRY_SCHEMA: u32 = 2;
 const MAX_FILES: usize = 32_768;
 const MAX_FILE_BYTES: u64 = 256 << 20;
 const MAX_CONTAINER_BYTES: u64 = 2 << 30;
@@ -180,6 +181,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 /// Execute fresh source into one complete retained entry through the runtime
 /// compiler endpoint. Source replay and module candidate caches are unavailable.
+/// The caller durably establishes the output parent before requesting publication.
 pub fn prepare_frozen_production_entry(
     sources: &FrozenEntrySources,
     scratch: &Path,
@@ -265,6 +267,8 @@ pub(super) fn export(
         ));
     }
     let parent = output.parent().ok_or_else(|| invalid("output parent"))?;
+    let _parent = tidepool_atomic_write::DirectoryAnchor::open_existing(parent)
+        .map_err(|error| CompileError::Io(error.into()))?;
     let staging = tempfile::tempdir_in(parent)?;
     let raw = staging.path().join("raw");
     std::fs::create_dir(&raw)?;
@@ -282,7 +286,7 @@ pub(super) fn export(
         return Err(invalid("original container changed while copying"));
     }
     let manifest = EntryManifest {
-        schema: 1,
+        schema: ENTRY_SCHEMA,
         purpose: EntryPurpose::OriginalSource,
         producer: deployment.producer_identity,
         worker: deployment.consumed_worker_identity,
@@ -301,7 +305,29 @@ pub(super) fn export(
         return Err(invalid("configured compiler deployment unavailable"));
     };
     load_selected_production_entry(staging.path(), &authority, sources)?;
+    sync_entry_tree(staging.path())?;
     std::fs::rename(staging.path(), output)?;
+    // A failure here means the entry is visible. Callers must inspect that
+    // completed output and retry its durability confirmation, never source.
+    tidepool_atomic_write::sync_parent_directory(output).map_err(|source| {
+        CompileError::EntryPublicationUnconfirmed {
+            path: output.to_owned(),
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+fn sync_entry_tree(directory: &Path) -> Result<(), CompileError> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_entry_tree(&entry.path())?;
+        } else {
+            std::fs::File::open(entry.path())?.sync_all()?;
+        }
+    }
+    std::fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
 
@@ -329,7 +355,7 @@ pub fn load_selected_production_entry(
 ) -> Result<ProductionEntryOutput, CompileError> {
     let bytes = crate::checked_cell::read(directory.join(MANIFEST), 16 << 20)?;
     let manifest: EntryManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
-    if manifest.schema != 1
+    if manifest.schema != ENTRY_SCHEMA
         || manifest.purpose != EntryPurpose::OriginalSource
         || manifest.target != "__prepared"
         || &manifest.sources != sources

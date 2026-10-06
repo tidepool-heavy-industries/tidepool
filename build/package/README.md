@@ -88,6 +88,13 @@ and source selection through the existing original-output owner. Portable
 prepared fixtures carry no production authority. Loading the root entry does
 not execute source or require a live compiler.
 
+Production entries use schema 2, with an explicit native-catalog or frozen
+workspace source selection. Schema 1 entries must be rebuilt. Publication syncs
+the complete staged tree before rename and the established output parent after
+rename. `EntryPublicationUnconfirmed` names an already visible output: validate
+and load that original, then retry parent durability confirmation without
+executing source again.
+
 The prepared bundle's qualification contract retains the root entry inventory
 and selects `TIDEPOOL_PREPARED_ROOT_ENTRY`; root and child machines install fresh
 mutable state from the retained decoded entry and native images. General
