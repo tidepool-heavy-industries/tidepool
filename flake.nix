@@ -54,6 +54,46 @@
         # -fexpose-all-unfoldings + high threshold retained as secondary defense.
         # ghc-internal owns most stdlib implementation, but base also defines
         # executable functions. Every selected boot implementation needs Core.
+        # Hadrian package names, not source directories: CompileHs includes
+        # generated Haskell modules and hsc2hs outputs in these libraries.
+        nativeBootPackages = [
+          "ghc-internal"
+          "ghc-bignum"
+          "ghc-prim"
+          "base"
+          "containers"
+          "bytestring"
+          "array"
+          "deepseq"
+          "directory"
+          "filepath"
+          "process"
+          "unix"
+          "parsec"
+          "mtl"
+          "transformers"
+          "stm"
+          "template-haskell"
+          "binary"
+          "exceptions"
+          "time"
+          "hpc"
+          "Cabal"
+          "Cabal-syntax"
+          "text"
+        ];
+        nativeBootOptions = [
+          "-fexpose-all-unfoldings"
+          "-funfolding-creation-threshold=100000"
+          "-fwrite-if-simplified-core"
+        ];
+        nativeBootSettings = map (
+          package: "*.${package}.ghc.hs.opts+=${builtins.concatStringsSep " " nativeBootOptions}"
+        ) nativeBootPackages;
+        nativeBootPlan = builtins.toJSON {
+          packages = nativeBootPackages;
+          options = nativeBootOptions;
+        };
         ghcInternalOverlay =
           final: prev:
           let
@@ -66,34 +106,14 @@
               }).overrideAttrs
                 (old: {
                   patches = (old.patches or [ ]) ++ [ ./nix/ghc-make-cache-filter.patch ];
-                  postPatch = (old.postPatch or "") + ''
-                    TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
-
-                    # Inject fat interface flags into Haskell and hsc2hs boot inputs.
-                    # hsc2hs preserves OPTIONS_GHC in the generated Haskell source.
-                    # ghc-internal, ghc-bignum, ghc-prim: safe to prepend (no exotic extensions).
-                    for dir in libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim; do
-                      if [ -d "$dir" ]; then
-                        find "$dir" \( -name '*.hs' -o -name '*.hsc' \) -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
-                        echo "tidepool: injected OPTIONS_GHC into $dir"
-                      fi
-                    done
-
-                    # For the remaining selected boot libraries, inject OPTIONS_GHC
-                    # after existing pragmas by appending before the module line.
-                    # This avoids breaking files that start with {-# LANGUAGE MagicHash #-} etc.
-                    for lib in libraries/base libraries/containers libraries/bytestring libraries/array \
-                               libraries/deepseq libraries/directory libraries/filepath \
-                               libraries/process libraries/unix libraries/parsec \
-                               libraries/mtl libraries/transformers libraries/stm \
-                               libraries/template-haskell libraries/binary \
-                               libraries/exceptions libraries/time libraries/hpc \
-                               libraries/Cabal libraries/Cabal-syntax libraries/text; do
-                      if [ -d "$lib" ]; then
-                        find "$lib" \( -name '*.hs' -o -name '*.hsc' \) -exec sed -i '/^module /i {-# OPTIONS_GHC '"$TIDEPOOL_GHC_OPTS"' #-}' {} +
-                        echo "tidepool: injected OPTIONS_GHC before module decl in $lib"
-                      fi
-                    done
+                  # Append complete settings as individual argv elements. Nixpkgs
+                  # initializes this array in preConfigure and quotes it at Hadrian
+                  # invocation. Source OPTIONS_GHC still supplies module-specific flags.
+                  preConfigure = (old.preConfigure or "") + ''
+                    hadrianFlagsArray+=( ${prev.lib.escapeShellArgs nativeBootSettings} )
+                    ${prev.python3}/bin/python3 ${./scripts/ghc_native_boot_settings.py} \
+                      --source "$PWD" --plan ${prev.lib.escapeShellArg nativeBootPlan} \
+                      -- "''${hadrianFlagsArray[@]}"
                   '';
                 });
           in
@@ -396,84 +416,16 @@
         formatter = pkgs.nixfmt;
 
         checks = {
-          # Fail-loud replacement for the ghcInternalOverlay postPatch's silent
-          # `if [ -d "$dir" ]` / `if [ -d "$lib" ]` guards (flake.nix, above):
-          # if GHC ever renames/moves one of these boot-library directories,
-          # the patch would otherwise skip injecting the fat-interface flags
-          # for it with no error. This check lives OUTSIDE the patchedGhc
-          # derivation on purpose — it builds over the plain GHC *source*
-          # tarball (cheap fetch, no compile), so it can assert loudly without
-          # touching postPatch/mkDerivation and changing their derivation
-          # hashes (that would trigger a from-source GHC rebuild).
-          #
-          # The directory list is duplicated rather than shared with
-          # postPatch's `for dir in ...` / `for lib in ...` lines: sharing it
-          # would mean editing that string, which is exactly the hash-changing
-          # edit this check exists to avoid. Keep both lists in sync by hand;
-          # each side comments at the other.
-          #
-          # `knownMissing`: the patch's second loop names `libraries/Cabal-syntax`,
-          # but in the GHC 9.12.2 tree that directory lives at
-          # `libraries/Cabal/Cabal-syntax` (nested under Cabal, not a sibling
-          # under libraries/), so the postPatch `-d` guard silently skips it —
-          # Cabal-syntax never gets the fat-interface OPTIONS_GHC. Correcting
-          # the path in postPatch changes the patched-GHC derivation hash, so
-          # it isn't done here; it rides the next deliberate lock bump (which
-          # rebuilds GHC anyway) instead of costing a from-source rebuild today.
-          # One-line fix for that future bump:
-          #   for lib in ... libraries/Cabal libraries/Cabal/Cabal-syntax libraries/text
-          # (replace the bare `libraries/Cabal-syntax` entry with the nested path).
-          #
-          # The assertion below is self-retiring: it fails if Cabal-syntax ever
-          # starts existing at the top-level name the patch actually uses — that
-          # would mean the patch entry has gone live again and this exception
-          # (and the one-line fix above) should be deleted.
-          ghc-boot-library-dirs = pkgs.runCommand "ghc-boot-library-dirs-check" { } ''
-            src=${pkgs.haskell.compiler.ghc912.src}
-
-            # Mirrors the two `for` loops in ghcInternalOverlay's postPatch above,
-            # minus the one entry tracked in knownMissing below.
-            expected="libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim \
-                  libraries/base libraries/containers libraries/bytestring libraries/array \
-                  libraries/deepseq libraries/directory libraries/filepath \
-                  libraries/process libraries/unix libraries/parsec \
-                  libraries/mtl libraries/transformers libraries/stm \
-                  libraries/template-haskell libraries/binary \
-                  libraries/exceptions libraries/time libraries/hpc \
-                  libraries/Cabal libraries/text"
-
-            missing=""
-            for d in $expected; do
-              if [ ! -d "$src/$d" ]; then
-                missing="$missing $d"
-              fi
-            done
-
-            if [ -n "$missing" ]; then
-              echo "ghcInternalOverlay's postPatch loops over these boot-library" >&2
-              echo "directories, but they no longer exist in $src:" >&2
-              echo "$missing" >&2
-              exit 1
-            fi
-
-            # knownMissing: libraries/Cabal-syntax (patch's path) -> real path
-            # libraries/Cabal/Cabal-syntax. Assert the real path still exists
-            # (the gap is real, not stale) and the patch's path still does NOT
-            # exist (if it now does, the exception above is out of date).
-            if [ ! -d "$src/libraries/Cabal/Cabal-syntax" ]; then
-              echo "knownMissing entry libraries/Cabal-syntax (real path" >&2
-              echo "libraries/Cabal/Cabal-syntax) is stale: the real path no" >&2
-              echo "longer exists either. Update the known-gap entry." >&2
-              exit 1
-            fi
-            if [ -d "$src/libraries/Cabal-syntax" ]; then
-              echo "libraries/Cabal-syntax now exists at the top level -" >&2
-              echo "the postPatch loop's entry for it is live again. Delete" >&2
-              echo "the knownMissing exception for it in this check." >&2
-              exit 1
-            fi
-
-            touch $out
+          # Check the same package-name/argv contract against pinned Hadrian
+          # source without realizing the compiler. preConfigure also checks the
+          # actual inherited array before the expensive build can start.
+          ghc-native-boot-settings = pkgs.runCommand "ghc-native-boot-settings-check" { } ''
+            ${pkgs.python3}/bin/python3 ${./scripts/ghc_native_boot_settings.py} --self-test
+            ${pkgs.python3}/bin/python3 ${./scripts/ghc_native_boot_settings.py} \
+              --source ${pkgs.haskell.compiler.ghc912.src} \
+              --plan ${pkgs.lib.escapeShellArg nativeBootPlan} \
+              -- ${pkgs.lib.escapeShellArgs nativeBootSettings}
+            touch "$out"
           '';
 
           embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
