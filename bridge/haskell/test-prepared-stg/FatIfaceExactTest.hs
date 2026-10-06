@@ -8,7 +8,11 @@ import Control.Concurrent.MVar
 import Control.Exception (SomeException, bracket, finally, throwIO)
 import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
+import Data.Bits (shiftL, testBit)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
+import qualified Data.IntMap.Strict as IntMap
+import Data.List (sortOn)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
@@ -34,13 +38,21 @@ import System.Timeout (timeout)
 import Tidepool.FatIface
   ( FatIfaceLookup(..)
   , FatIfaceMissing(..)
+  , FatIfaceComponentLookup(..)
+  , fatOriginalOwner, fatComponentBindings, fatComponentAllBinders, fatComponentOrdinals
+  , fatSelectionVersion, fatSelectionComponents
+  , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , lookupFatIfaceExact, lookupFatIfaceBodies
+  , lookupFatIfaceComponents
   , newFatIfaceCache
   , OwnerInterfaceContext(..), newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
 import Tidepool.FatIface.Internal
-  (newLoadCache, lookupLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches, evictLoadCache)
+  ( newLoadCache, lookupLoadCache, lookupCompletedLoadCache
+  , copyLoadCache, mergeLoadCaches, selectLoadCaches, evictLoadCache
+  , privateComponents
+  )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies, pmBindings)
@@ -56,7 +68,52 @@ tests :: TestTree
 tests = testGroup "test-prepared-stg"
   [ testCase "exact interface cache lifecycle" scenario
   , testCase "selected completed cache merge" verifyCacheMerges
+  , testCase "canonical private component graphs" verifyPrivateComponents
   ]
+
+-- Exhaust all directed graphs through four vertices and compare weak
+-- connectivity with a separate edge-walking oracle. Reversing edge and row
+-- construction order must preserve the canonical roster.
+verifyPrivateComponents :: IO ()
+verifyPrivateComponents = forM_ [0 .. 4] $ \size -> do
+  let vertices = [0 .. size - 1]
+      possibleEdges = [(source, target) | source <- vertices, target <- vertices]
+      graphCount = 1 `shiftL` length possibleEdges
+  forM_ [0 .. graphCount - 1] $ \mask -> do
+    let edges = [edge | (index, edge) <- zip [0..] possibleEdges, testBit mask index]
+        rows = [(source, [target | (from, target) <- edges, from == source]) | source <- vertices]
+        graph = Map.fromList [(source, Set.fromList targets) | (source, targets) <- rows]
+        reversedGraph = Map.fromList
+          [(source, Set.fromList (reverse targets)) | (source, targets) <- reverse rows]
+        permute vertex = size - 1 - vertex
+        permutedEdges = [(permute source, permute target) | (source, target) <- edges]
+        permutedRows =
+          [(permute source, [permute target | target <- targets]) | (source, targets) <- rows]
+        permutedGraph = Map.fromList
+          [(source, Set.fromList targets) | (source, targets) <- permutedRows]
+        actual = privateComponents graph
+        expected = oracleComponents vertices edges
+        relabeled = sortOn Set.findMin (map (Set.map permute) actual)
+    assert (actual == expected) ("weak component oracle mismatch: " ++ show (size, mask, actual, expected))
+    assert (actual == privateComponents reversedGraph)
+      ("component roster depended on graph construction order: " ++ show (size, mask))
+    assert (privateComponents permutedGraph == relabeled)
+      ("component roster did not follow a vertex permutation: " ++ show (size, mask, permutedEdges))
+  where
+    oracleComponents vertices edges = visit (Set.fromList vertices) []
+      where
+        visit remaining components = case Set.minView remaining of
+          Nothing -> reverse components
+          Just (seed, _) ->
+            let component = reach Set.empty [seed]
+            in visit (remaining `Set.difference` component) (component : components)
+        reach seen [] = seen
+        reach seen (vertex : pending)
+          | vertex `Set.member` seen = reach seen pending
+          | otherwise =
+              let adjacent = [right | (left, right) <- edges, left == vertex]
+                    ++ [left | (left, right) <- edges, right == vertex]
+              in reach (Set.insert vertex seen) (adjacent ++ pending)
 
 scenario :: IO ()
 scenario = do
@@ -121,6 +178,33 @@ scenario = do
       privateGroups <- case privateResult of
         FatIfaceFound groups -> pure groups
         _ -> fail "private defining closure disappeared"
+      componentResult <- liftIO (lookupFatIfaceComponents hsc cache privateOwner [privateCallerName])
+      liftIO $ case componentResult of
+        FatIfaceComponents selection -> do
+          let components = fatSelectionComponents selection
+              census = case components of
+                component : _ -> fatComponentAllBinders component
+                [] -> []
+              componentBinders = concatMap
+                (concatMap groupBinders . IntMap.elems . fatComponentBindings) components
+              censusNames = map varName census
+              componentNames = map varName componentBinders
+              selectedGroupCount = sum
+                (map (length . fatComponentOrdinals) components)
+          assert (fatOriginalOwner (fatSelectionVersion selection) == privateOwner)
+            "component selection changed its full defining owner"
+          assert (fatSelectionDemandedGroupCount selection == length privateGroups)
+            "component selection changed the previous directed demand closure"
+          assert (fatSelectionPreparedGroupCount selection == selectedGroupCount)
+            "prepared group count disagreed with the canonical component roster"
+          assert (privateCallerName `elem` censusNames && privateCallerName `elem` componentNames)
+            "component selection lost its original actual binder"
+          assert (any ((== "privateHelper") . occNameString . nameOccName) censusNames
+              && any ((== "privateHelper") . occNameString . nameOccName) componentNames)
+            "component selection lost the original private helper binder"
+        FatIfaceComponentsMissing reason -> fail ("component selection refused fixture root: " ++ show reason)
+        FatIfaceComponentsLoadFailure owner reason -> fail
+          ("component selection could not load " ++ moduleNameString (moduleName owner) ++ ": " ++ reason)
       privateOwners <- liftIO newOwnerInterfaceCache
       privateBodies <- liftIO newPreparedBodyCache
       privatePrepared <- liftIO $ prepareRecoveredBodies hsc privateOwners privateBodies
@@ -338,6 +422,9 @@ verifyCacheMerges = guardTime $ do
     cache <- newLoadCache
     forM_ keys $ \key -> do
       _ <- lookupLoadCache cache key (pure (outcome source key))
+      completed <- lookupCompletedLoadCache cache key
+      assert (completed == Just (outcome source key))
+        "completed-cache lookup omitted a settled value"
       pure ()
     pure cache
   forM_ (subsets keys) $ \firstSelection -> forM_ (subsets keys) $ \secondSelection -> do
@@ -358,6 +445,8 @@ verifyCacheMerges = guardTime $ do
   empty <- mergeLoadCaches []
   absent <- lookupLoadCache empty (0 :: Int) (pure NoExtra)
   assert (absent == NoExtra) "empty selection unexpectedly issued an entry"
+  emptyCompleted <- lookupCompletedLoadCache empty 0
+  assert (emptyCompleted == Nothing) "completed-cache lookup issued a missing value"
 
   pending <- newLoadCache
   complete <- newLoadCache
@@ -366,6 +455,11 @@ verifyCacheMerges = guardTime $ do
   _ <- lookupLoadCache complete (0 :: Int) (pure (LoadFailure "later completed"))
   withLoad (lookupLoadCache pending 0 (putMVar entered () >> readMVar release >> pure NoExtra)) $ \running -> do
     takeMVar entered
+    pendingCompleted <- lookupCompletedLoadCache pending 0
+    completeValue <- lookupCompletedLoadCache complete 0
+    assert (pendingCompleted == Nothing) "completed-cache lookup waited on an in-flight value"
+    assert (completeValue == Just (LoadFailure "later completed"))
+      "completed-cache lookup lost a settled outcome"
     snapshot <- mergeLoadCaches [(pending,const True),(complete,const True)]
     indexedSnapshot <- selectLoadCaches
       [(pending,Set.singleton 0),(complete,Set.singleton 0)]

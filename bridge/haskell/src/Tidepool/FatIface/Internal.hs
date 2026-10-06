@@ -1,10 +1,13 @@
 -- | Per-key loading shared by a defining interface's immutable outcomes.
 -- This module owns completion only; it cannot issue executable Core authority.
 module Tidepool.FatIface.Internal
-  ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches, evictLoadCache, lookupLoadCache ) where
+  ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches
+  , evictLoadCache, lookupLoadCache, lookupCompletedLoadCache
+  , privateComponents
+  ) where
 
 import Control.Concurrent.MVar
-  (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
+  (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
 import Control.Exception (SomeException, mask, throwIO, try, uninterruptibleMask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -12,6 +15,38 @@ import qualified Data.Set as Set
 data Entry value = Cached value | Loading (MVar (Maybe value))
 data Selection value = UseCached value | AwaitLoad (MVar (Maybe value)) | StartLoad (MVar (Maybe value))
 newtype LoadCache key value = LoadCache (MVar (Map.Map key (Entry value)))
+
+-- | A read-only completed lookup. In-flight entries are deliberately absent;
+-- this never waits for or assumes ownership of another loader's completion.
+lookupCompletedLoadCache :: Ord key => LoadCache key value -> key -> IO (Maybe value)
+lookupCompletedLoadCache (LoadCache ref) key = withMVar ref $ \entries ->
+  pure $ case Map.lookup key entries of
+    Just (Cached value) -> Just value
+    _ -> Nothing
+
+-- | Canonical weakly connected components for a directed adjacency map.
+-- Vertices are the map keys; references outside that census are ignored here
+-- and must be rejected by the caller that owns the source graph.
+privateComponents :: Map.Map Int (Set.Set Int) -> [Set.Set Int]
+privateComponents adjacency = collect (Map.keysSet adjacency) []
+  where
+    undirected = Map.foldlWithKey' addOutgoing
+      (Map.map (const Set.empty) adjacency) adjacency
+    addOutgoing graph source targets = Set.foldl' (addEdge source) graph targets
+    addEdge source graph target
+      | Map.member target adjacency = Map.adjust (Set.insert target) source
+          (Map.adjust (Set.insert source) target graph)
+      | otherwise = graph
+    collect remaining components = case Set.minView remaining of
+      Nothing -> reverse components
+      Just (seed, _) ->
+        let component = flood Set.empty [seed]
+        in collect (remaining `Set.difference` component) (component : components)
+    flood seen [] = seen
+    flood seen (vertex : pending)
+      | vertex `Set.member` seen = flood seen pending
+      | otherwise = flood (Set.insert vertex seen)
+          (Set.toAscList (Map.findWithDefault Set.empty vertex undirected) ++ pending)
 
 newLoadCache :: IO (LoadCache key value)
 newLoadCache = LoadCache <$> newMVar Map.empty
