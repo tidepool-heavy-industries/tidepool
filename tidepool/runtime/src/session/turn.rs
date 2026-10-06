@@ -5156,8 +5156,10 @@ mod tests {
             let mut artifacts = Vec::new();
             for (index, observed) in cell.checked.items.iter().enumerate() {
                 let item = cell.checked.checked_item(index).unwrap();
+                let kind = item.kind();
+                let expression_lift = item.expression_lift().unwrap();
                 let declaration =
-                    item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration;
+                    kind == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration;
                 let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
                 if declaration {
                     resident.adopt_checked_declaration(reservation).unwrap();
@@ -5207,14 +5209,14 @@ mod tests {
                 );
                 let outcome = match bound.as_slice() {
                     [binder]
-                        if item.kind()
+                        if kind
                             == tidepool_toolchain::checked_cell::CheckedItemKind::Expression =>
                     {
                         resident.run_observation_with_sites(
                             compiled.code(),
                             binder,
                             reservation.generation(),
-                            item.expression_lift().unwrap()
+                            expression_lift
                                 == Some(
                                     tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
                                 ),
