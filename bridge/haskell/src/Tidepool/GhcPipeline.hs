@@ -81,7 +81,7 @@ import GHC.Driver.Session
       )
   , wopt_set
   , PackageFlag(..), PackageArg(..), ModRenaming(..)
-  , PackageDBFlag(..), PkgDbRef(..) )
+  , PackageDBFlag(..), PkgDbRef(..), ParMakeCount(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
@@ -197,7 +197,7 @@ import Tidepool.Timing
 import Tidepool.PreparedStg (PreparedModule, pmSitedSiblings, preparedUsesSiteAuthority, prepareModule, acquirePreparedModule, runPreparedModuleTask)
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
-  , CompilerExecutor, withCompilerExecutor, runCompilerTasks )
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, dependencyClosedReuse )
 import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -2798,12 +2798,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                               && interfaceReady interfaceUse summary entry
                             Nothing -> False
                         LoadedObservation{} -> False ]
-                  reusableOwners = closeReusable locallyReusable
-                  closeReusable owners =
-                    let next = Set.filter (\owner -> case Map.lookup owner referencesByMod of
-                          Nothing -> False
-                          Just referenced -> Set.delete owner referenced `Set.isSubsetOf` owners) owners
-                    in if next == owners then owners else closeReusable next
+                  reusableOwners = dependencyClosedReuse referencesByMod locallyReusable
                   executableDepsValid modSum = pure $ case
                       Map.lookup (ms_mod_name modSum) referencesByMod of
                     Nothing -> False

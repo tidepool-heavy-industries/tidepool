@@ -13,7 +13,7 @@ module Tidepool.PreparedStg
   , prepareRecoveredModule
   , prepareRecoveredBodies
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, evictPreparedBodyMatching
-  , newPreparedBodyPreparer
+  , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   ) where
 
 import Control.Exception
@@ -189,13 +189,19 @@ instance Show RecoveredModuleFailure where
       renderModule = showSDocUnsafe . ppr
 
 prepareRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModule
-prepareRecoveredModule hscEnv input = do
+prepareRecoveredModule hscEnv input =
+  acquireRecoveredModule hscEnv input >>= runPreparedModuleTask
+
+acquireRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
+acquireRecoveredModule hscEnv input = do
   let entries = Map.fromList [(varName identifier, identifier) | identifier <- recoveredEntries input]
   bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
-  prepared <- prepareTypedBindings ExactBodySubset
+  task <- acquireTypedBindings ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) Map.empty bindings
-  pure prepared { preparedExpectedEntries = entries }
+  pure $ PreparedModuleTask $ do
+    prepared <- runPreparedModuleTask task
+    pure prepared { preparedExpectedEntries = entries }
 
 -- Fat Core's local IdInfo is not the executable interface contract. Restore
 -- only entry-relevant fields; occurrence analyses and unfoldings still belong
@@ -218,12 +224,6 @@ restoreRecoveredEntries entries binding = case binding of
         pure (metadata, etaExpand arity body)
 
 -- Both complete modules and recovered subsets elaborate before CorePrep erases types.
-prepareTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
-  -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModule
-prepareTypedBindings coverage env owner location tycons imported bindings =
-  acquireTypedBindings coverage env owner location tycons imported bindings
-    >>= runPreparedModuleTask
-
 acquireTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
   -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
 acquireTypedBindings coverage env owner location tycons imported bindings = do
@@ -302,27 +302,37 @@ prepareRecoveredBodies hscEnv ownerCache bodyCache owner bindings = do
 newPreparedBodyPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModule))
 newPreparedBodyPreparer env owners stable = do
-  scoped <- newMVar Map.empty
-  pure (prepareRecoveredBodiesWithSites env owners stable scoped)
+  acquire <- newPreparedBodyTaskPreparer env owners stable
+  pure $ \owner bindings -> acquire owner bindings >>= either (pure . Left) runPreparedBodyTask
 
-prepareRecoveredBodiesWithSites :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
-  -> MVar (Map (Module, [[Word64]]) PreparedModule) -> Module -> [CoreBind]
-  -> IO (Either RecoveredModuleFailure PreparedModule)
-prepareRecoveredBodiesWithSites hscEnv ownerCache bodyCache scoped owner bindings = do
-  let PreparedBodyCache stable = bodyCache
-      key = preparedBodyKey owner bindings
-  stableHit <- Map.lookup key <$> readMVar stable
-  scopedHit <- Map.lookup key <$> readMVar scoped
-  case stableHit `orElse` scopedHit of
-    Just hit -> pure (Right hit)
-    Nothing -> do
-      outcome <- prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings
-      case outcome of
-        Right prepared -> do
-          let cache = if preparedAuthorityDependent prepared then scoped else stable
-          modifyMVar_ cache (pure . Map.insert key prepared)
-        Left _ -> pure ()
-      pure outcome
+newtype PreparedBodyTask = PreparedBodyTask (IO (Either RecoveredModuleFailure PreparedModule))
+
+runPreparedBodyTask :: PreparedBodyTask -> IO (Either RecoveredModuleFailure PreparedModule)
+runPreparedBodyTask (PreparedBodyTask action) = action
+
+-- | Exact defining/site context acquisition stays on the coordinator. Tasks
+-- contain only immutable inputs, lowering and short exact-body cache commits.
+newPreparedBodyTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
+newPreparedBodyTaskPreparer env owners bodyCache = do
+  scoped <- newMVar Map.empty
+  pure $ \owner bindings -> do
+    let PreparedBodyCache stable = bodyCache
+        key = preparedBodyKey owner bindings
+    stableHit <- Map.lookup key <$> readMVar stable
+    scopedHit <- Map.lookup key <$> readMVar scoped
+    case stableHit `orElse` scopedHit of
+      Just hit -> pure (Right (PreparedBodyTask (pure (Right hit))))
+      Nothing -> do
+        acquired <- acquireRecoveredBodiesUncached env owners owner bindings
+        pure $ fmap (\task -> PreparedBodyTask $ do
+          outcome <- trySynchronous (runPreparedModuleTask task)
+          case outcome of
+            Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
+            Right prepared -> do
+              let cache = if preparedAuthorityDependent prepared then scoped else stable
+              modifyMVar_ cache (pure . Map.insert key prepared)
+              pure (Right prepared)) acquired
   where
     orElse (Just hit) _ = Just hit
     orElse Nothing other = other
@@ -338,9 +348,9 @@ prepareRecoveredBodiesWithSites hscEnv ownerCache bodyCache scoped owner binding
 -- re-preparation of the same owner (a later recovery round finds more of its
 -- bindings) skip straight to 'prepareRecoveredModule'. Only a successful
 -- read+typecheck is cached; see 'OwnerInterfaceCache'.
-prepareRecoveredBodiesUncached :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
-  -> IO (Either RecoveredModuleFailure PreparedModule)
-prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
+acquireRecoveredBodiesUncached :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
+  -> IO (Either RecoveredModuleFailure PreparedModuleTask)
+acquireRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
   cached <- lookupOwnerInterface ownerCache owner
   resolved <- case cached of
     Just hit -> pure (Right hit)
@@ -362,7 +372,7 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
   case resolved of
     Left failure -> pure (Left failure)
     Right context -> do
-      prepared <- trySynchronous (prepareRecoveredModule hscEnv
+      prepared <- trySynchronous (acquireRecoveredModule hscEnv
         (RecoveredModuleInput owner (ownerInterfaceLocation context)
           (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
       pure $ case prepared of
@@ -378,14 +388,14 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
       details <- initIfaceCheck doc definingEnv (typecheckIface iface)
       pure (typeEnvTyCons (md_types details), typeEnvIds (md_types details))
 
-    trySynchronous :: IO a -> IO (Either String a)
-    trySynchronous action = do
-      outcome <- try action
-      case outcome of
-        Left exception -> case (fromException exception :: Maybe SomeAsyncException) of
-          Just async -> throwIO async
-          Nothing -> pure (Left (displayException (exception :: SomeException)))
-        Right value -> pure (Right value)
+trySynchronous :: IO a -> IO (Either String a)
+trySynchronous action = do
+  outcome <- try action
+  case outcome of
+    Left exception -> case (fromException exception :: Maybe SomeAsyncException) of
+      Just async -> throwIO async
+      Nothing -> pure (Left (displayException (exception :: SomeException)))
+    Right value -> pure (Right value)
 
 acquireBindingsWithScope :: Bool -> [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
