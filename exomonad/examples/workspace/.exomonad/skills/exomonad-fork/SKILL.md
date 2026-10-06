@@ -13,6 +13,24 @@ contents. A child using `withContext (selected taskContext)` reads relevant skil
 itself or receives the needed facts in its assignment. Its request-local bindings
 come from its own assignment, not the parent's history.
 
+Choose the coordination shape from the dependency. Establish the shared contract
+and source revision, then admit the obligations that can start from them in one
+ready batch. If a branch needs another's result, construct it in the next monadic
+stage. Use `waitFor` when the continuation is already known and this invocation
+can remain suspended. Use persistent responses and a watch/collector when later
+model decisions participate; use a record actor when arrivals must update retained
+state and trigger continuations without a model turn for each event.
+
+Put the contract revision, owned paths, required evidence and allowed decisions
+in each assignment. Capture a useful common scaffold when children need its
+reasoning; choose selected Task context when the assignment should stand alone,
+including for independent review. Conversation context, source revision, captured
+Haskell values and resource authority are separate inputs. Return typed findings
+and check evidence alongside exact candidate commits; the parent verifies their
+incorporation at the shared boundary. Read `exomonad-unfold` for primitive joins,
+`exomonad-coordinate` for ready batches, or `exomonad-define-actors` for custom
+stateful routing.
+
 Every `unfold`/`child` needs a `ForkGroupPath`. `ForkGroupPath` is a type, not a
 term: it has no exported constructor, so `ForkGroupPath "..."` does not
 type-check. Reuse `taskGroup work` (or `specialistGroup slot`) when the group
@@ -59,8 +77,9 @@ implement the same scaffold/delegate/integrate cycle.
 
 `task label objective ownedPaths acceptance source` builds a `Task` with the
 group, plan path and empty decisions defaulted; update any field with record
-syntax. Fork a wave from `base :: GitOid`: every disjoint obligation plus an
-independent review or test child, admitted in one `unfold`:
+syntax. Fork a wave from `base :: GitOid`: disjoint implementations and independent
+contract tests can start together from a shared seam. Review of the resulting
+candidate starts after that candidate exists. This ready wave uses one `unfold`:
 
 ```haskell
 let parserTask = task [label|parser|] "Parse the wire format into Item values" ["src/parse.rs"] "Round-trip tests for every item kind pass" base

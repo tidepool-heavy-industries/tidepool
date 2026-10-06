@@ -48,8 +48,10 @@ Most changes touch one of three layers, and it helps to know which:
   `tidepool-handlers`). Most feature work lands here.
 - **The model-facing surface**: the Haskell library in `bridge/haskell/lib`, the
   shipped prompts in `exomonad/prompts/`, and the skills. Text here is read by a
-  model on every turn, so it is held to the glossary and kept short. A Haskell
-  snippet in a prompt or skill must be one that has been compiled.
+  model on every turn: use the glossary, retain concepts that change recognition
+  or decisions, and remove duplication. Judge wording through resulting decisions
+  and artifacts; prompt size alone is not a quality criterion. A Haskell snippet
+  in a prompt or skill must be one that has been compiled.
 
 ## How to work here
 
@@ -76,6 +78,41 @@ Most changes touch one of three layers, and it helps to know which:
 - Keep imports and warnings clean. When a test needs a substantial Haskell
   program, put it in an adjacent fixture file and use `include_str!` instead
   of maintaining an escaped Rust string.
+
+## Choose the investigation and evidence
+
+Recover the intended outcome, constraints, available tools, and unresolved
+decisions from the task. Preserve user corrections as distinctions the result
+must maintain. Define acceptance through something a recipient can inspect,
+reproduce, or decide from: an integrated change, a minimal counterexample, a
+measured comparison, or a recommendation with discriminating evidence. A broad
+investigation can have a small independently verifiable handoff.
+
+Recognize targets by relationships, not just names. Use the relevant lenses;
+they are starting points for extrapolation, not a checklist for every change:
+
+| Relationship | Useful methods and evidence |
+|---|---|
+| Derived state maintained from primary facts | Full recomputation as an independent oracle; stateful histories for invalidation, aliasing, replacement and retirement |
+| Several representations of one contract | Differential testing, refinement and metamorphic relations; check common-mode failures when producer and verifier share assumptions |
+| Ownership or authority crossing a boundary | Trace issuance, transfer, use and release; test refusal, partial effects, cancellation and stale settlement through the real consumer |
+| Many symptoms sharing a dependency | Trace the dependency graph and critical path; compare deleting work, moving responsibility and improving the mechanism |
+| A claimed improvement visible only through measurement | Controlled comparisons, sensitivity checks and cost decomposition; separate workload outcomes from failures of the measurement |
+
+Use value of information: choose observations likely to change a consequential
+decision relative to their cost. Inspect a consumer or minimize a reproducer
+before building a large abstraction. Amortize repeated exploration with generators,
+reference models and analyzers when actual reuse justifies them. A known local
+defect may need only a direct repair and a focused regression.
+
+On an anomaly, retain its inputs, source and construction history; distinguish
+competing explanations with a controlled change. Search for analogous consumers
+once the mechanism is established, and name the missing relationship when an
+analogy does not apply. A quiet search establishes only what its inputs and
+observations could reveal. Separate a product finding, a broken investigative
+procedure and unresolved uncertainty. Follow [property testing](docs/property-testing.md),
+[compiler profiling](docs/compiler-profiling.md), or [workflow audits](docs/rsi-loop.md)
+for the evidence needed by that method.
 
 ## Planning improvements
 
@@ -160,6 +197,12 @@ Keep detailed design references out of always-loaded instructions.
   baseline, its acknowledgment, incorporation, and checks are distinct evidence.
   Review concrete commits and failure paths; integrate and verify the resulting
   revision. Retain specialists for repairs without importing all their history.
+- Assign independently inspectable results with source identity, owned paths,
+  shared contracts, dependencies, local acceptance and escalation conditions.
+  Give the recipient the relevant failure mechanism and method cues, then leave
+  routine implementation choices to them. Keep shared hypotheses, findings and
+  accepted decisions distinguishable; reallocate work when new evidence changes
+  the critical path. Local acceptance does not replace combined acceptance.
 - Exomonad owns continuation: native Codex goals are disabled on every node,
   including root. Do not restore role-dependent goal-tool exposure.
 - Judge cache preservation using actual normalized provider requests and usage,

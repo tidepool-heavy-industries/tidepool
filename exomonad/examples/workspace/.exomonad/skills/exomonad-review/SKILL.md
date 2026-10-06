@@ -9,6 +9,16 @@ For a separate implementer's candidate, `startReviewFlow` handles the counted
 check/review/bounded-repair sequence. Use the direct requests below for an owner’s
 own candidate or an independent exact-commit question; preserve the same evidence
 and integration boundaries.
+
+Choose evidence that could overturn the proposed acceptance. Contract tests,
+candidate review and integration checks answer different questions; examine
+whether they share assumptions or fixtures that could hide the same defect.
+Trace invariants through the changed boundary, vary construction histories when
+state matters, and exercise a refusal or cleanup path when it distinguishes the
+intended behavior. A quiet check is useful only if its selection and observations
+could reveal the suspected failure. Return the exact candidate, findings, executed
+checks and their scope; acceptance and incorporation remain the parent's work.
+
 The reviewer is seeded at the exact candidate commit, so it can run the
 candidate's own tests. From any actor, root included, with the cumulative base, candidate commit, its
 acceptance and its owned paths, pass a label naming this review's own

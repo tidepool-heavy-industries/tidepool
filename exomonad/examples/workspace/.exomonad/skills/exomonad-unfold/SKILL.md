@@ -13,6 +13,22 @@ context. `unfoldDeferred` publishes after the enclosing call's real result;
 its branches require explicit persistent lifetime. Keep shared contracts and
 integration with the parent.
 
+Think in typed dependency graphs. `<$>` projects a branch result; `<*>` combines
+independently constructible branches into a product, including different result
+types. Applicative admission does not make one branch's output available while
+constructing another. Use a later `do` stage for that data dependency. Construct
+the shared interface first so a consumer can start from it without waiting for
+the implementation.
+
+Keep three representations distinct: a `Response` is a typed request and
+settlement handle, an `Await` describes which retained results a continuation
+needs, and a `Watch`
+registers observation for later delivery. Composing or observing handles does
+not change the lifetime of the work. Use `waitFor` for an ordinary suspended
+continuation, a named watch for finite later observation, and a collector/record
+actor for retained progress, questions or stateful joins. Inspect the settlement
+and worktree evidence for the exact candidate.
+
 `batch campaign group` builds the `ForkGroupPath`; it has no exported constructor.
 Use `subgroup group` under your own existing path, passing only the new segment.
 

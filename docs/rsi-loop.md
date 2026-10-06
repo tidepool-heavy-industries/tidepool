@@ -6,6 +6,23 @@ capabilities that make better outcomes possible. Building `exomonad-harness` is
 the current product workload. A wave is a local work cycle, not a release of the
 whole vision.
 
+## Outcome and evidence
+
+Begin with the product decision this iteration must support and the artifact
+that makes it inspectable: an integrated revision with executed checks, a
+replayable failure, or a comparison that distinguishes proposed workflows. Keep
+exploration broader than the handoff when useful. Separate product acceptance,
+the experiment's hypothesis, and the quality of its measurement; failure to
+observe a mechanism is not evidence that the mechanism works or never occurs.
+
+Use value of information to order work. Prefer a source inspection, trace replay
+or bounded intervention that could reverse an expensive design choice. Invest
+in reusable analyzers and replay drivers when repeated evaluation dominates;
+improve their inputs and observations as the investigation develops. Reallocate
+independent investigations when the critical path or uncertainty changes. Explicit
+iteration commitments still apply, but a confirmed local defect need not acquire
+an elaborate experiment before repair.
+
 ## The harness destination
 
 The product workload builds a custom home for Exomonad agents, ultimately replacing
@@ -113,6 +130,15 @@ owner, retaining a continuation, or replacing repeated model work with authored
 machinery. Compare these alternatives with tuning the existing mechanism. Use
 evidence from earlier waves to test whether the same structural problem recurs.
 Keep causal hypotheses separate from observations and seek valid counterexamples.
+
+Match the lens to the suspected relationship. A dependency graph exposes blocked
+work and critical paths; a state machine exposes missing transitions or ownership
+transfer; queueing and backpressure suggest comparing arrival, admission and
+service times under measured load. Information-flow analysis asks whether the
+recipient had the evidence needed at its decision point. Counterfactual removal
+asks which useful outcome would disappear with a step. Combine these lenses
+when one mechanism explains several symptoms; transfer the mechanism to analogous
+workflows rather than searching only for repeated wording in traces.
 
 For example, repeated reminders to a worker awaiting a parent's interface decision
 require tracing preparation, admission, the question, ownership of the answer,
@@ -249,6 +275,19 @@ focused preflight results. A failed preflight is evidence; distinguish a test
 assertion from a compiler, launch or environment failure. Preserve the existing
 shared services and use the repository's matched build/check entry points.
 
+Before interpreting a quiet run, check opportunity coverage and sensitivity:
+could this workload reach the behavior, did the relevant prompt or helper reach
+the actor, and would the trace or evaluator detect the consequence? Use retained
+known failures or controlled private replays to test the observation path. A
+missed positive control calls the procedure into question, not the product.
+
+For behavioral trials of prompt and skill changes, inspect decisions and
+artifacts. Compare a representative task, an analogous task with different vocabulary, and a task
+where the proposed method does not fit. Where useful, ablate a cue while holding
+the task, capabilities and evidence comparable. Word counts and expected phrases
+do not establish better behavior. An editorial walkthrough generates hypotheses
+for these trials; it does not substitute for execution.
+
 ## Threshold audits for every run
 
 Choose explicit operation/threshold pairs before the run and refine them when
@@ -368,6 +407,14 @@ rule. Use deterministic code for facts and semantic judgment for meaning.
 Report product completion separately from each hypothesis. Different tasks,
 incomplete traces and simultaneous changes limit causal claims. Keep surprising
 successes and failed experiments: both can expand or correct the capability map.
+
+Use matched before/after workloads and repeated observations when variability
+could change the decision. Distinguish a mechanism supported by an intervention
+from correlation with host load, task difficulty, or model variation. Preserve
+failed and incomplete attempts in the comparison. Continue only investigations
+that could change an open decision; close an experiment with an unresolved
+verdict when its evidence cannot discriminate, while keeping unmet product
+obligations visible and owned.
 
 ## 5. Carry forward
 

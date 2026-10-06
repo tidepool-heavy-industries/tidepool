@@ -12,6 +12,21 @@ service with actor lifetime, surviving its creating invocation. A handler withou
 a hosted invocation uses actor ownership for its commands and requests; it still
 processes one accepted call or event at a time.
 
+Model the actor as a typed state machine: state records what has been observed,
+event constructors distinguish arrivals, and handlers perform the transition and
+its chosen effects. Pure transition helpers make invariants inspectable; a record
+actor supplies serialized, persistent execution. Use functions or `waitFor` when
+the whole dependency is confined to one invocation, and existing Routing
+collectors when their join already fits. Use a custom actor for incremental joins,
+deduplication or custom event-driven policy. No model turn is
+needed for a transition the program already knows how to take.
+
+Compose sources with `fmap` to tag or project their values and `(<>)` to merge
+them; preserve request identity and source evidence in the event payload.
+One serialized mailbox is not a global transaction: effects can escape before
+a handler commits, and waiting for another handler on that same mailbox creates
+a dependency cycle. Use a continuation triggered by a later event for that case.
+
 Availability of the names below:
 
 - **Shipped** — in every Exomonad cell: `R.definition`, `R.start`, `R.client`,

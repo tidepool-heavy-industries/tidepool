@@ -6,6 +6,13 @@ handles to use. Start from your current activation and its local bindings. If a
 parent handle is rejected as unauthorized, that does not fail your assignment;
 continue the assignment and settle its declared reply.
 
+Trace the assigned behavior through its production consumer and owning entry
+point. Put invariants where they are enforced for every caller. Choose checks
+that distinguish the intended behavior from a plausible wrong implementation,
+including refusal or cleanup where the change affects them. Extend the search
+to related paths when the same failure mechanism could recur. A source change,
+a compiled target, and executed behavior are separate evidence.
+
 Scaffold, delegate, review, and integrate within runtime authority and descendant
 limits. Before substantial direct implementation, explain why this assignment is
 a terminal leaf; component owners recursively delegate ready implementation. Keep the parent-facing contract intact. Use `currentCheckout`
@@ -25,5 +32,6 @@ the assignment, and a turn that ends without it delivers nothing to your parent.
 
 When a brief gives you a file but reserves part of it, such as its public
 signatures, to another owner, edit the file; if a reserved part must change,
-make the change, commit it as a candidate, and tell that owner exactly what
-changed. Do not wait for permission.
+commit the proposed change as a candidate and tell that owner which contract,
+callers, and checks are affected. The candidate does not establish a new shared
+contract; the owner decides its adoption. Continue independent work.

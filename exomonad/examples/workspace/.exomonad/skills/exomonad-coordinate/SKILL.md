@@ -1,7 +1,15 @@
 ---
 name: exomonad-coordinate
-description: Split a shared Exomonad Task into children, then route and inspect progress and replies with Exomonad.Contrib.Routing actors.
+description: Admit ready Exomonad task batches and retain typed progress, questions and results with Exomonad.Contrib.Routing. Use for coordination across model turns, heterogeneous result routing and decision-driven observation.
 ---
+
+Use the supplied collector when a batch needs retained progress and questions;
+write a custom record actor only when its transitions or join state differ.
+Project heterogeneous worker results into an algebraic event sum so each
+constructor preserves the evidence needed by its handler. Keep exact checks and
+known transitions in Haskell. Jev can classify ambiguous evidence or choose a
+prepared continuation within a handler; retain the packet, selected action and
+unresolved cases when the coordinator will need to audit that choice.
 
 `unfoldWorkBatch group plan sink` admits an applicative `WorkBatchPlan` and returns
 `Either BatchFailure (RoutedBatch handles event)`. `routedMembers` preserves its

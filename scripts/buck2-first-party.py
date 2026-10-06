@@ -431,7 +431,6 @@ def source_inputs(package, target, features=(), test_target=False):
         "exomonad/prompts/readonly-agent.md": "//exomonad/prompts:readonly_agent_prompt",
         "exomonad/prompts/scaffolding-agent.md": "//exomonad/prompts:scaffolding_agent_prompt",
         "exomonad/prompts/integration-agent.md": "//exomonad/prompts:integration_agent_prompt",
-        "exomonad/prompts/haskell-tool-description.md": "//exomonad/prompts:haskell_tool_description",
         "exomonad/prompts/haskell-tool-instructions.md": "//exomonad/prompts:haskell_tool_instructions",
         "exomonad/prompts/docs/actors.md": "//exomonad/prompts:doc_actors",
         "exomonad/prompts/docs/cleanup.md": "//exomonad/prompts:doc_cleanup",

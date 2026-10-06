@@ -1,6 +1,6 @@
 ---
 name: exomonad-workbench
-description: Write Haskell notebook cells that typecheck the first time — Text vs String, Label vs Text, annotating polymorphic expressions, explicit value display, multi-line operator chains, and shell arguments. Load when a cell was rejected or a display needs expansion.
+description: "Compose typed Haskell notebook programs: pure transformations, effectful actions, reusable bindings, explicit display, and type-directed recovery. Load when shaping a cell, resolving an ambiguous type or rejected cell, or inspecting retained values."
 ---
 
 Send one cell of ordinary Haskell: declarations, bindings and expressions. GHC
@@ -29,6 +29,29 @@ renderFindingLocation finding = findingPath finding <> ":" <> T.pack (show (find
 let findings = [Finding "src/Retry.hs" 12, Finding "src/Fetch.hs" 44]
 display (map renderFindingLocation findings)
 ```
+
+## Choose the Haskell representation
+
+Use algebraic data types for distinct outcomes and records for named evidence;
+pattern match while the distinction still affects the next action. Keep `Maybe`
+for absence and `Either` for a result with a failure explanation. A list of
+ordinary values supports `map`, `filter`, folds and comprehensions; `traverse`
+or `forM` sequences an effectful operation over it. These traversals do not
+introduce concurrency. Use `Tidepool.Async` to overlap independent effect waits
+within a cell, or `unfold` and retained watches for child-agent work.
+
+Functions, closures and `Eff effects result` actions are values too. Build a
+reusable action or a list of candidate continuations before deciding which to
+run; bind with `<-` when the result is needed. A retained result is reusable
+data, while sequencing a retained action again repeats its effects. Prefer
+`Member Effect effects` constraints for reusable helpers; a concrete effect row
+belongs at an admitted endpoint or actor definition. Effect membership describes
+what code can request, while runtime handles and grants control resources.
+
+Use signatures and typed holes to expose the missing relationship when inference
+is ambiguous. Lazy values and higher-order functions need not be rendered in full:
+keep them bound and display the projection relevant to the next decision. For
+Jev's heterogeneous packets and typed action selection, load `exomonad-jev`.
 
 ## Look up a name from a cell
 
@@ -211,21 +234,22 @@ resolves for the executing actor. If your build carries
 `IsString` for these types, a bare literal works too — the constructor form
 works either way.
 
-## Effectful reads bind with `<-`, never `let`
+## Bind a result with `<-`; retain an action with `let`
 
 `readFile :: FilePath -> Eff effs (Either FsError Text)` — `FilePath` is `Text`
-here, and the result is an action, so `let d = readFile p` binds the action,
-not the text, and every later use is a type error a `T.pack` cannot rescue.
-Bind it, and pattern-match the success in the bind:
+here. `let readIt = readFile p` retains an action for later composition; it does
+not read the file. If the next step needs the text, sequence the action with
+`<-` and handle its `Either`. `T.pack` cannot turn an unexecuted action into
+its result. The following refutable bind stops this cell on a failed read:
 
 ```haskell
 Right src <- readFile ".exomonad/config.toml"
 display (T.take 200 src)
 ```
 
-A refutable bind like this fails the statement when the read fails, which is
-usually what you want in a cell; use `either` when the failure is a value you
-carry forward. Nothing here is ever `String`: `T.lines`, `T.splitOn`,
+A refutable bind is useful when failure must stop the dependent suffix. Use
+`case` or `either` when failure should select recovery or remain in the returned
+evidence. Nothing here is ever `String`: `T.lines`, `T.splitOn`,
 `T.stripPrefix` do the path and output work.
 
 `Cmd.stdout` returns `Either OutputIssue Text`. Retain that result and handle

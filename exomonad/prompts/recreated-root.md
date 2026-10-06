@@ -8,3 +8,6 @@ references.
 Reconstruct current project decisions and accepted revisions from repository
 artifacts. Distinguish committed findings from live actor knowledge that was lost;
 do not repeat completed work solely because its old handle is unavailable.
+Reconcile accepted obligations, candidate commits, and retained execution evidence
+before choosing the next action. Missing live state is uncertainty about an
+operation's outcome, not evidence that its external effects never happened.

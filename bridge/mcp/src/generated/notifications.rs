@@ -5,7 +5,7 @@
 pub fn notifications_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Notifications",
-        description: "One-way actor notifications with inbox-backed delivery observations; no typed response obligation.",
+        description: "One-way actor notifications for information that needs no typed reply obligation. Use typed requests when the sender needs a result or retained settlement; use notifications for progress or observations the recipient can incorporate independently. Inbox-backed delivery observations distinguish admission from presentation; delivery does not prove agreement or action.",
         prompt_card: None,
         constructors: &[
             "NotifyWith :: (Int, Int) -> Text -> Notifications (Either NotificationError ((Int, Int), ((Int, Int), (Text, Int))))",

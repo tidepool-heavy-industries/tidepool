@@ -49,12 +49,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_tool_description",
-    src = "haskell-tool-description.md",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_tool_instructions",
     src = "haskell-tool-instructions.md",
     visibility = ["PUBLIC"],

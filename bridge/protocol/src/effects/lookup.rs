@@ -18,11 +18,15 @@ pub fn lookup() -> Effect {
         req_enum: "LookupReq",
         decl_fn: "lookup_decl",
         description: &[
-            "Read-only, GHC-authoritative structured inspection of the executing resident ",
-            "scope or an explicitly named public module.",
+            "Type-directed discovery of the executing resident scope or an explicitly named public module, checked by GHC. ",
+            "Use names when known, `::` queries with `_` holes when the needed type is known, and module exports or documentation for unfamiliar abstractions. ",
+            "`Tidepool.Lookup.lookupRaw` returns structured results without automatic enrichment; preserve each query's missing, ambiguous, rejected or found result, and inspect found entries' availability separately. ",
+            "Lookup inspects an immutable scope view; a declaration's availability under an effect row is separate from runtime resource authority. ",
+            "Use the hosted lookup tool for direct questions, and the structured API to filter candidates or build repeated discovery programs.",
         ],
         prompt_card: Some(&[
-            "Use `Tidepool.Lookup.lookupRaw` for structured lookup without automatic enrichment.",
+            "`Tidepool.Lookup.lookupRaw` returns structured, GHC-checked lookup from the current scope. Search names, `::` types with `_` holes, or docs; keep ambiguity and availability explicit. ",
+            "Use hosted lookup for direct discovery, structured results for programmatic filtering. Finding a signature does not grant its effects or resource authority.",
         ]),
         type_params: &[],
         default_row_args: &[],

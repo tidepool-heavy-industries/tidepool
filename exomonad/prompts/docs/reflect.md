@@ -62,4 +62,9 @@ same value serves every later call in the packet. An authored function can call
 question, and act — with its caller supplying only the task-specific arguments.
 
 Select before sending. The turns hold everything, including long tool output;
-take the items the question actually needs.
+take the items the question actually needs. For a Jev packet, select the current
+assignment, accepted corrections, relevant decisions and source/tool observations
+with provenance. Distinguish quoted claims from verified facts and pending calls
+from completed results. Reuse that selected value across independent questions;
+fetch fresh evidence when history cannot decide the next branch. `reflect` reads
+history; it does not edit the context used by the next model inference.

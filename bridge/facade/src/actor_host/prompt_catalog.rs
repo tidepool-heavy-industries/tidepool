@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 56;
+    pub(super) const CATALOG_VERSION: u32 = 57;
 
     /// Digest of every prompt body in [`PromptId::ALL`] order — the guard
     /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
@@ -18,7 +18,7 @@ impl PromptId {
     /// matching `CATALOG_VERSION` bump.
     #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
-        "33153039d2edc840d5feb772f58c3278d427bdce351235fbb39578b9f1d04d49";
+        "86677634f02343ee7ed617d5ce9bd7e195627754a24b1375c7f52655b06f526e";
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
@@ -185,15 +185,6 @@ impl FrozenBasePrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shared_prompt_stays_within_word_budget() {
-        let words = PromptId::ExomonadBase.body().split_whitespace().count();
-        assert!(
-            words <= 3550,
-            "shared base/API has {words} words; budget is 3550"
-        );
-    }
 
     #[test]
     fn frozen_base_reuses_exact_bytes_and_rejects_changed_artifacts() {

@@ -299,16 +299,16 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
 fn lookup_tool_policy_matches_native_ghc_oracle() {
     let library = crate::haskell_sources::ensure_embedded_stdlib().unwrap();
     let effects = tidepool_mcp::ensure_effects_module(&exomonad_effect_declarations()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let oracle = directory.path().join("LookupPolicyOracle.hs");
+    std::fs::write(&oracle, include_str!("lookup_policy_oracle.hs")).unwrap();
     let mut command = std::process::Command::new("runghc");
     for path in effects.include_paths() {
         command.arg(format!("-i{}", path.display()));
     }
     let output = command
         .arg(format!("-i{}", library.display()))
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/actor_host/lookup_policy_oracle.hs"
-        ))
+        .arg(&oracle)
         .output()
         .expect("run through just with the pinned GHC toolchain");
     assert!(

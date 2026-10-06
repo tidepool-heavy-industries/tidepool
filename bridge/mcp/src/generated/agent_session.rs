@@ -5,8 +5,8 @@
 pub fn agent_session_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "AgentSession",
-        description: "Present one typed request to this actor's attached application. The external application reaches the persistent Haskell workbench through its actor-local transport.",
-        prompt_card: Some("A request activation mounts typed `sessionInput`, `sessionReply`, and `respond` in the attached application."),
+        description: "Present a typed request to an actor's attached application and resume the caller through its reply continuation. Activation binds `sessionInput` and `respond` to that request's assignment and result types; use ordinary Haskell values rather than a prose-only completion report. The request remains an independent obligation: presentation, typed settlement and recipient incorporation are different evidence. Use hosted lookup on `sessionInput` or `respond` when their exact current types are unknown. The application uses its persistent workbench through the actor-local transport; the public request/reply facade owns authored operations.",
+        prompt_card: Some("A request binds typed `sessionInput`, `sessionReply` and `respond`. Compute with the assignment and return the agreed result value; use lookup for its exact type. A typed reply settles this request, while acceptance and incorporation belong to its recipient."),
         constructors: &[
             "AgentSessionWith :: RequestSite (input ': extra) output -> input -> Int -> Maybe Text -> [(Text, Text, Text)] -> AgentSession output",
             "AgentAttachWith :: Maybe Text -> AgentSession ()",

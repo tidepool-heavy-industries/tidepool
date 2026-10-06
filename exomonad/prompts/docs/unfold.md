@@ -3,6 +3,15 @@ cycle in `RECURSIVE-WORK.md`, normally through `lunaLead`/`lunaTask` and
 `unfoldWork`. This page describes the underlying admission primitive used by
 that procedure and by custom typed joins.
 
+An applicative unfold admits the ready frontier; it does not schedule data
+dependencies between its branches. Build a shared contract first, and place a
+branch that needs another child's result in a later monadic stage. Choose the
+continuation too: `waitFor` for one suspended computation, a named watch for
+finite later observation, a routing collector for ongoing batch progress and
+questions, or a record actor for custom event state. Keep the original responses and select lifetime
+independently of observation. The `exomonad-fork` and `exomonad-coordinate` skills
+apply these primitives to Project work.
+
 `unfold` publishes children immediately. Every branch chooses
 `withContext (fromCheckpoint captured)` or `withContext (selected render)`;
 unresolved inherited context is refused before allocation. Capture a useful

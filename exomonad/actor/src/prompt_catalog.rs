@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 const HOSTED_DESCRIPTION_LIMIT: usize = 1024;
-const HASKELL_TOOL_DESCRIPTION: &str = include_str!("../../prompts/haskell-tool-description.md");
 const HASKELL_TOOL_INSTRUCTIONS: &str = include_str!("../../prompts/haskell-tool-instructions.md");
 
 const fn utf8_char_count(value: &str) -> usize {
@@ -18,31 +17,21 @@ const fn utf8_char_count(value: &str) -> usize {
 }
 
 const _: () = assert!(
-    utf8_char_count(HASKELL_TOOL_DESCRIPTION) <= HOSTED_DESCRIPTION_LIMIT,
-    "hosted Haskell tool description exceeds the provider limit"
-);
-const _: () = assert!(
     utf8_char_count(HASKELL_TOOL_INSTRUCTIONS) <= HOSTED_DESCRIPTION_LIMIT,
     "hosted Haskell tool instructions exceed the provider limit"
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptId {
-    HaskellToolDescription,
     HaskellToolInstructions,
 }
 
 impl PromptId {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 2] = [Self::HaskellToolDescription, Self::HaskellToolInstructions];
+    pub(crate) const ALL: [Self; 1] = [Self::HaskellToolInstructions];
 
     pub(crate) fn artifact(self) -> PromptArtifact {
         match self {
-            Self::HaskellToolDescription => PromptArtifact {
-                id: self,
-                role: PromptRole::HostedToolDescription,
-                body: HASKELL_TOOL_DESCRIPTION,
-            },
             Self::HaskellToolInstructions => PromptArtifact {
                 id: self,
                 role: PromptRole::HostedToolInstructions,
@@ -56,25 +45,20 @@ impl PromptId {
     }
 }
 
-/// Fingerprint of the hosted Haskell tool description and instructions that
-/// join every Exomonad actor's effective provider prompt. The composition root
-/// combines this with its role-specific developer prompt fingerprint so cache
-/// observations never silently omit the tool surface.
+/// Fingerprint of the shared hosted Haskell usage instructions. Per-tool
+/// descriptions belong to the typed declarations supplied by the AgentSpec
+/// and the actor-local builtins; this digest does not cover those declarations.
+/// The composition root combines this with its base and role prompt digest.
 pub fn hosted_prompt_fingerprint() -> String {
     let mut hasher = blake3::Hasher::new();
-    for body in [
-        PromptId::HaskellToolDescription.body(),
-        PromptId::HaskellToolInstructions.body(),
-    ] {
-        hasher.update(&(body.len() as u64).to_le_bytes());
-        hasher.update(body.as_bytes());
-    }
+    let body = PromptId::HaskellToolInstructions.body();
+    hasher.update(&(body.len() as u64).to_le_bytes());
+    hasher.update(body.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptRole {
-    HostedToolDescription,
     HostedToolInstructions,
 }
 
@@ -205,26 +189,27 @@ mod tests {
             .all(|artifact| !artifact.body.trim().is_empty()));
         assert_eq!(
             artifacts.map(|artifact| artifact.role),
-            [
-                PromptRole::HostedToolDescription,
-                PromptRole::HostedToolInstructions,
-            ]
+            [PromptRole::HostedToolInstructions]
         );
         assert!(artifacts
             .iter()
             .all(|artifact| artifact.body.chars().count() <= HOSTED_DESCRIPTION_LIMIT));
-        assert!(workbench_doc("unfold", &[]).unwrap().contains("Response a"));
-        assert!(workbench_doc("cleanup", &[])
-            .unwrap()
-            .contains("executeCleanup"));
-        assert!(workbench_doc("refinement", &[])
-            .unwrap()
-            .contains("retained handles"));
-        assert!(workbench_doc("lineage", &[]).unwrap().contains("trace"));
-        assert!(workbench_doc("recovery", &[]).unwrap().contains("recovery"));
-        assert!(workbench_doc("actors", &[])
-            .unwrap()
-            .contains("R.settlement"));
+        for topic in [
+            "tree",
+            "workbench",
+            "request",
+            "unfold",
+            "watch",
+            "deadline",
+            "refinement",
+            "lineage",
+            "cleanup",
+            "recovery",
+            "jev",
+            "actors",
+        ] {
+            assert!(!workbench_doc(topic, &[]).unwrap().trim().is_empty());
+        }
         // Every topic with a workspace skill names it on its last line, and the
         // topic listing names the skills beside the topics. `jev` instead
         // links the skill inline and says so, rather than duplicating its

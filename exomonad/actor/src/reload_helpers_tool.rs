@@ -22,7 +22,7 @@ pub(crate) fn declaration() -> HostedTool {
         implementation: Default::default(),
         effect_keys: Vec::new(),
         name: RELOAD_HELPERS_TOOL.into(),
-        description: "Edit .exomonad/helpers/SessionHelpers.hs (and any SessionHelpers.* modules), then call reload_helpers to typecheck and publish them for later Haskell cells. New modules are allowed. Invalid drafts stay on disk while the last valid revision remains active. Publication is scoped to this actor; it does not change AgentSpec or the registered tool list. Supply also_check to include additional modules in the check.".into(),
+        description: "Publish reusable Haskell helpers for this actor's later cells. Edit .exomonad/helpers/SessionHelpers.hs and SessionHelpers.* modules, then call reload_helpers; saving files alone does not activate them. New helper modules are allowed. The source owner typechecks before publication: an invalid draft stays on disk while the last valid revision remains active. Pass {\"also_check\":[\"SessionHelpers.Extra\"]} to widen the checked module set. Read the receipt for the published revision or refusal. Publication is actor-local; existing captured values retain their definitions. For AgentSpec handler changes use reload_agent_spec; this tool does not replace handlers or the registered tool list.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

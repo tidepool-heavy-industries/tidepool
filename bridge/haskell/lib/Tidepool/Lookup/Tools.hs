@@ -43,7 +43,7 @@ toolsWith select = toolFor (executeWith select)
 toolFor :: (LookupArguments -> Eff effects Text) -> LookupTools (AsServerT (Eff effects))
 toolFor action = LookupTools
   { lookup = presentWith id $ tool
-      "Look up names, Haskell types, or Exomonad documentation. Batch with queries, e.g. [\"Cmd.run\", \":: Int -> Int\", \"doc workbench\"]. Prefix type searches with ::; use _ for unknown parts. Qualified names are resolved before module exports; while a request is pending, `lookup respond` and `lookup sessionInput` show the exact reply and assignment types your request expects. Each query reports independently. Relevant alternatives and one-degree related declarations may be attached; explicit lookup retrieves their full details."
+      "Resolve missing API details before composing a cell: names, module exports, Haskell types or Exomonad documentation in this actor's scope. Pass {\"queries\":[\"Cmd.run\",\":: Int -> Int\",\"doc workbench\"]}; batch related questions. Search by input/output type when the name is unknown. Prefix type searches with :: and use _ for unknown parts. Qualified names are tried before module exports. During a pending request, queries \"respond\" and \"sessionInput\" reveal its exact reply and assignment types. Each query reports independently; narrow ambiguous or truncated matches. Availability labels describe the current effect row: a found signature alone does not establish that it is callable with your effects or runtime authority. When configured, related declarations and alternatives may be attached; explicitly look up a candidate for fuller detail. doc queries are text for this tool, not notebook Haskell."
       action
   }
 

@@ -9,9 +9,26 @@ This file guides contributors; it is not part of the shipped model prompt.
 - Optimize instructions for model decisions: use established technical vocabulary
   with its actual semantics; explain Exomonad-specific departures. Give each contract
   one canonical home, and move rare recovery detail behind targeted discovery.
-  Keep a complete usable baseline within the catalog's checked word budget;
-  inspect the assembled role and tool layers too. Record prompt size when editing;
-  aggressive trimming is a separate evaluation decision.
+  Use semantic compression: preserve relevant concepts and the conditions that
+  change their application. Inspect the assembled role and tool layers too.
+  Record prompt size as an observation, not an arbitrary acceptance ceiling;
+  provider-enforced tool limits still apply.
+- Shape recognition and method selection: describe dependencies, transformations,
+  invariants, and failure mechanisms that transfer across identifiers. Group
+  established method cues by relationship, including useful adjacent approaches;
+  ground them where ambiguity would change a decision. Target lists and examples
+  are starting points, not exhaustive prescriptions.
+- Define acceptance through inspectable artifacts. Separate exploratory scope
+  from the handoff, observations from inferences, and product failures from
+  failures of the investigation. Explain what quiet results can establish and
+  how to check sensitivity. Keep task-specific authority and acceptance with the
+  assignment rather than inventing universal gates.
+- Review wording counterfactually: what recognition, hypothesis, analogy, or
+  decision would be lost if a clause disappeared? Cut duplication and unrelated
+  associations; retain distinct useful referents. Walk through a representative
+  case, an analogous case with different vocabulary, and a case where the method
+  does not apply. These walkthroughs support editorial hypotheses; execution
+  trials must judge decisions and artifacts, not expected words or headings.
 - Keep core callable signatures and representative examples in `api-guide.md`.
   Avoid ritual startup inventories; recommend targeted discovery only for missing
   information. Check against live/public types rather than inventing API shapes.

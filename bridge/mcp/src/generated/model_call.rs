@@ -5,7 +5,7 @@
 pub fn model_call_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "ModelCall",
-        description: "Run one bounded model turn with explicitly supplied tools. Callbacks execute in the caller's effect row; every invocation shares the admitted cell's model budget.",
+        description: "Run a bounded model subroutine with an explicit tool record and typed or textual result through `Tidepool.Model`. Use it when a local reasoning step needs its own instructions and tool loop; use Jev for a finite semantic judgment over supplied evidence, and a child agent when work needs independent context, checkout or lifecycle. Haskell constructs the tool capabilities, input and result decoder, then pattern matches the outcome to continue. Callbacks execute in the caller's effect row; every invocation shares the admitted cell's model budget. A decoded result establishes its schema, not the truth of its claims: retain evidence and validate task-specific invariants before acting.",
         prompt_card: None,
         constructors: &[
             "ModelStartWith :: Value -> ModelCall (Either ModelBoundaryError Value)",

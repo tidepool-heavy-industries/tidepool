@@ -5,7 +5,7 @@
 pub fn commands_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Commands",
-        description: "Actor-owned native command jobs with weighted memory admission.",
+        description: "Native command jobs are retained values for composing process execution, output inspection and continuation under weighted memory admission. Use `Tidepool.Command` (`Cmd`) to build command values, set arguments, directory, environment and resource requirements, then start or run them explicitly. Keep the returned `Cmd.Job` when later code needs observation, cancellation, stream paging or routing; reconstructing a command and running it creates another execution. Distinguish invocation-owned execution from actor-owned work that survives the cell, and bounded observation from completion notification. Compose checks and output selection with Haskell, or ask Jev about semantic evidence before choosing a prepared continuation. Launch refusal, nonzero exit, input acknowledgment, terminal outcome and cleanup are separate facts. Preserve partial-output and retention-gap evidence when interpreting results. The hosted bash/write_stdin/read_output/cancel_command tools provide direct calls; load `exomonad-command` for authored composition.",
         prompt_card: None,
         constructors: &[
             "CommandStartWith :: CommandSpec -> Commands (Either CommandError Text)",

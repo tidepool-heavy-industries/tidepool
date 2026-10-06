@@ -288,6 +288,18 @@ haskellTool
   => Text -> HaskellTool schedule effects base
 haskellTool description = HaskellTool description (toolSchedule (Proxy @schedule)) (toolEffectNames (Proxy @effects))
 
+haskellCellDescription :: Text
+haskellCellDescription =
+  "Run raw Haskell in this actor's persistent notebook to retain typed values and compose effects. Cells accept declarations, let bindings, effectful <- bindings and expressions. Use display value for bounded output; values are not rendered automatically. The whole cell typechecks before execution. Success publishes its declarations and bindings together; failure or pre-publication cancellation publishes no cell names. Completed effects and independently owned captures survive: inspect receipts before retrying. Column-1 boundaries split cell units; keep respond value on one line with nothing after it. Use hosted lookup for missing signatures or doc workbench; doc queries are not Haskell. Use algebraic data types and pattern matching for outcomes; map/filter/folds for pure data, traverse for effectful batches, and typed continuations for orchestration."
+
+asyncHaskellDescription :: Text
+asyncHaskellDescription =
+  "Schedule a cell asynchronously; the next inference need not wait for completion. " <> haskellCellDescription
+
+syncHaskellDescription :: Text
+syncHaskellDescription =
+  "Wait for the cell to settle before this actor's next inference. Shares haskell's effects and scope; this endpoint alone grants no context-editing authority. " <> haskellCellDescription
+
 -- | Notebook tools for a host without context-transaction support.
 data AsyncHaskellTools effects mode = AsyncHaskellTools
   { haskell :: mode :- HaskellCell effects
@@ -297,7 +309,7 @@ asyncHaskellTools
   :: forall effects. (KnownToolEffects effects, AsyncEffects effects)
   => AsyncHaskellTools effects (AsServerT (Eff effects))
 asyncHaskellTools = AsyncHaskellTools
-  { haskell = HaskellTool "Run an asynchronous resident Haskell cell." Asynchronous (toolEffectNames (Proxy @effects))
+  { haskell = HaskellTool asyncHaskellDescription Asynchronous (toolEffectNames (Proxy @effects))
   }
 
 -- | Both notebooks use the same effects and resident scope. The synchronous
@@ -311,8 +323,8 @@ haskellTools
   :: forall effects. (KnownToolEffects effects, AsyncEffects effects)
   => HaskellTools effects (AsServerT (Eff effects))
 haskellTools = HaskellTools
-  { haskell = HaskellTool "Run an asynchronous resident Haskell cell." Asynchronous (toolEffectNames (Proxy @effects))
-  , haskellSync = HaskellTool "Run a resident Haskell cell with the same effects before the next inference." BeforeNextInference
+  { haskell = HaskellTool asyncHaskellDescription Asynchronous (toolEffectNames (Proxy @effects))
+  , haskellSync = HaskellTool syncHaskellDescription BeforeNextInference
       (toolEffectNames (Proxy @effects))
   }
 

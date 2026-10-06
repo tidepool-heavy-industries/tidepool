@@ -2,8 +2,38 @@
 
 Keep reusable property tests beside the owning components and merge them with
 the code. Test small component clusters through their real boundaries as well
-as individual algorithms. End-to-end acceptance proves the assembled system;
-cheap generated histories explore interactions that a few full runs cannot.
+as individual algorithms. End-to-end acceptance exercises the assembled product
+path; cheap generated histories explore interactions that a few full runs cannot.
+
+## Recognize targets and choose the claim
+
+Look for complex construction with a simpler independent check, many histories
+leading to the same apparent state, or an invariant spanning several owners.
+Prioritize mechanisms with broad consumers, plausible failure histories, and
+cheap repeatable observations. These structures suggest different techniques:
+
+- **Derived state:** indexes, caches and retained membership can be compared
+  with full recomputation from primary facts. Vary insertion, replacement,
+  invalidation and removal orders; compare missing and extra results.
+- **Identity and graph structure:** aliases, shared roots, cycles and retirement
+  expose differences between value equality and identity. Compare logical
+  relationships across implementations; unrelated physical handle values need
+  not match. Generate both valid graphs and targeted invalid constructions.
+- **State transitions:** request settlement, publication and cancellation need
+  model-based histories with explicit preconditions and observable effects.
+  Include rejected transitions and check what remains unchanged or partially
+  completed. Equal final return values do not imply equal resource lifetimes.
+- **Transformations:** parsing, serialization, lowering and normalization invite
+  differential and metamorphic tests. Derive laws from the contract: idempotence
+  fits a canonicalizer; reordering fits only operations promised to commute.
+  A round trip can pass when both directions share the same mistake.
+
+Extrapolate by mechanism: a dependency index and a compiler cache can share an
+invalidation problem despite different vocabulary. Do not transfer a model
+whose essential relationship is absent. A sequential lifecycle model does not
+prove concurrent linearizability; a concurrency claim also needs histories,
+ordering observations and schedules that can expose its violation. A single
+fixed defect may be adequately covered by a deterministic regression.
 
 ## Choose an independent oracle
 
@@ -12,6 +42,14 @@ full scans, retained graph membership with a straightforward fixed point, and
 request settlement with accepted facts and the first terminal outcome. Do not
 copy the production algorithm, its caches, or its ordering accidents into the
 oracle. Check both missing and extra results.
+
+State the observation boundary and the law before choosing a generator. Keep
+oracle independence and common-mode failures explicit: sharing production's
+identity map, normalization or traversal can hide the very defect being tested.
+An intentionally slower list, exhaustive check over small domains, or separate
+language implementation can make failures easier to distinguish. GHC is the
+language oracle for evaluation; a synthetic Rust model proves only the smaller
+contract it actually represents.
 
 Separate component and cluster claims. Calling an index directly can establish
 its maintenance algorithm, but cannot prove every caller updates it. A cluster
@@ -49,6 +87,21 @@ deterministic support checks for important partitions. More cases cannot cover
 an operation absent from the generator. Vary operation mixes when repeated
 clears or removals keep every generated state small.
 
+Treat generator support, reachability and observation sensitivity as separate
+questions. A generator may mention release while rarely creating shared owners;
+a checker may inspect membership while missing retained memory. Track the
+preconditions and outcomes that make the claimed failure observable. Rejections
+can be test results, but a campaign dominated by rejected operations supplies
+little evidence about successful transitions. Fix the distribution or model
+before buying more cases.
+
+For repeated stateful exploration, extend a reusable replay driver at the owning
+boundary. Add generation, observation and shrinking capabilities as new
+counterexamples demand them. Shrinking should minimize the causal history,
+not merely its serialized size: preserve the alias, authority distinction or
+ordering that makes the failure real. Check minimized traces against the model's
+preconditions before classifying a failure as a product defect.
+
 ## Run and retain failures
 
 Use the counted native runner and the package's declared resources. Standard
@@ -85,3 +138,9 @@ as production changes.
 
 Passing randomized tests are bounded evidence, not exhaustive correctness.
 Record unmodeled operations and component boundaries alongside the results.
+If a sensitivity check fails, classify whether the generator never reached the
+case, the oracle shared the defect, the observation hid it, or the mutation did
+not violate the stated contract. Repair the investigative machinery before
+claiming that a quiet campaign supports the product. Deliver the property, its
+independent model, generator coverage, a replayable minimized failure when found,
+and the exact execution evidence; a case count alone is not the handoff.

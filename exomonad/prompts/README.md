@@ -15,8 +15,17 @@ environment override, or fallback copy.
 | `recreated-root.md` | `tidepool::actor_host` | Developer-instruction suffix for a retained conversation on a new actor incarnation |
 | `worktree-agent.md` | `tidepool::actor_host` | Instructions for a worktree-backed child actor |
 | `readonly-agent.md` | `tidepool::actor_host` | Instructions for a child actor without a coding worktree |
-| `haskell-tool-description.md` | `exomonad-actor::resident_interactive` | Hosted-tool description |
 | `haskell-tool-instructions.md` | `exomonad-actor::resident_interactive` | Hosted-tool usage instructions |
+
+Hosted tool descriptions are owned by their declarations: `status` and reloads
+in `exomonad/actor/src/*_tool.rs`; notebooks, commands and lookup in
+`bridge/haskell/lib/Tidepool/{Agent/Contract,Command/Tools,Lookup/Tools}.hs`.
+The host preserves the AgentSpec's typed declarations, including descriptions;
+editing a separate Markdown copy would not change those tools. Describe when to
+choose a tool, the evidence its result supplies, and the next decision after
+partial success or refusal. Keep per-tool descriptions within the provider's
+1,024-character limit; schemas own field shapes and detailed references own
+long examples.
 
 User tasks, Haskell-authored startup values, and operator input are authored
 content, not stable prompt artifacts.
@@ -61,15 +70,21 @@ and runtime facts remain a separate `developer_instructions` layer; native
 multi-agent tooling remains disabled.
 
 The composed prompt fingerprint covers base instructions, role instructions,
-and the hosted-tool fingerprint. Source edits take effect after rebuilding and
+and shared hosted-tool usage instructions. It does not fingerprint the per-tool
+declarations; inspect actual provider requests to compare the complete surface.
+Source edits take effect after rebuilding and
 starting a new host; they do not change the base used by descendants of the
 current host. Reattaching an old conversation under a newly built host selects
 the new base explicitly and can change its provider prefix. Fingerprints record
 what Exomonad selected; they do not certify provider application or cache reuse.
 
-The base adapts the bundled Astra prompt's autonomy, collaboration, and
-engineering guidance to Exomonad's scaffold/fork/fold mode. Core signatures and
-compact compositions stay in the shared API guide; detailed reference and
-longer executable examples live in on-demand documents and skills. Base-prompt
-wording is a design choice to exercise through real project work, not a
-validated efficacy result.
+The base teaches task acceptance, structural recognition, method selection,
+evidence, and Exomonad's scaffold/unfold/integrate workflow. Role layers specify
+responsibility and handoffs within that shared guidance. Established methods
+supply retrieval cues; conditions and failure mechanisms explain their use here.
+Core signatures and compact compositions stay in the shared API guide; detailed
+reference and longer executable examples live in on-demand documents and skills.
+Prompt size is recorded for comparison, without a fixed word ceiling. Wording
+and editorial walkthroughs are design hypotheses; the proposed
+[behavioral measurements](next-wave-measurements.md) require actual execution
+before they can establish efficacy.

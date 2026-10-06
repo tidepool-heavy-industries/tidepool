@@ -1,5 +1,28 @@
 # Resident compiler profiling
 
+## Choose the question and measurement
+
+Start with an observed workload and a decision the profile could change. Retain
+the request shape, relevant source, expected outcome, producer and workload
+history. Trace the request through its production consumer before choosing a
+probe; the slowest visible step may be waiting for work owned elsewhere.
+
+| Observation or hypothesis | Discriminating evidence |
+|---|---|
+| Wall time grows without similar worker CPU growth | Admission and phase timing, IO or wait evidence, and cgroup pressure; include work outside the sampled worker before blaming its code |
+| A phase repeatedly consumes CPU | Leaf samples qualified by invocation and phase, plus exact symbols; use a controlled change to test the suspected algorithm or repeated work |
+| Allocation grows while apparent retained size stays stable | Allocation and GC counters with their collection epochs; distinguish transient churn, retained live data and process RSS |
+| Warm requests improve but cold requests do not | Matched producer-specific cohorts and explicit warmup histories; separate setup, compilation and reuse |
+| Identical content is repeatedly read or hashed | Total versus unique bytes and invocation identity; check required validation and invalidation before proposing memoization |
+
+Use cost decomposition and Amdahl's law to prioritize: reducing one phase has
+limited end-to-end value when other work dominates. Investigate retention and
+throughput as well as latency; a faster request can retain more memory or shift
+cost to the next one. Start with existing phase evidence, then collect the
+smallest additional measurement that distinguishes competing explanations.
+
+## Prepare matched producers
+
 Use a separate compiler producer and fresh request cohort. Debug information
 changes worker bytes and therefore its producer identity: neither old exact
 scopes nor a private compilation cache from another producer can be reused.
@@ -18,7 +41,7 @@ Build inside the admitted build environment, after checking the checkout's
 `buck-out` mount and materializing its declared closure:
 
 ```sh
-buck2 build --local-only -c remote.enabled=false \
+swarm-build bash scripts/buck2-run.sh build --local-only -c remote.enabled=false \
   //bridge/haskell:tidepool_extract_bin_profile \
   --build-report target/compiler-profile-build.json
 ```
@@ -32,6 +55,16 @@ a privately owned daemon with one worker, a fresh socket and cache directory,
 and `TIDEPOOL_TIMING=1` set **before startup**. Warm it only with requests created
 by that producer. Record the exact commands and warmup requests. Changing an
 environment variable in a client does not change a resident worker environment.
+
+For before/after comparisons, construct equivalent requests separately under
+each matched producer. Keep optimization profile, workload semantics, warmup,
+resource admission and observation settings comparable; record host contention
+and repeat observations when variation could change the conclusion. A source
+change that removes a dependency is a structural saving; quantify its runtime
+benefit separately. Report instrumentation overhead or altered forcing when it
+could affect the behavior under investigation.
+
+## Capture the request
 
 Find the private worker PID from the daemon's process tree, verify ownership,
 and capture one explicit request command:
@@ -80,6 +113,8 @@ request-local scopes; `--retain-file` alone cannot recover those files afterward
 State unavailable exact input evidence explicitly. Do not substitute an unrelated
 scope or snapshot for the measured request.
 
+## Read the evidence
+
 `capture.json` records the exact command, process identity, worker hash, request
 linkage, clock anchors, exit status and errors. Optional `--worker-build-identity` binds
 source provenance to the sampled worker hash; the current checkout OID is
@@ -115,6 +150,8 @@ sample is counted once within that group. Nested groups still overlap and are
 not additive. Request digests identify inputs; admission IDs and ordinals
 distinguish separate executions of the same inputs.
 
+## Recover phase analysis
+
 Recover phase analysis from an explicitly supplied retained daemon log into a
 new directory, without changing the original capture or rerunning its workload:
 
@@ -136,6 +173,8 @@ the original capture's timing-log error, retained in `original-capture.json`.
 `phase_analysis_complete` also checks parsed records and report bounds. A span
 extending outside the recorded window is marked as having partial CPU sampling;
 its resource deltas still cover its complete span.
+
+## Interpret phases, allocation and samples
 
 Existing `tidepool-timing-detail` diagnostics now include monotonic start/end,
 process CPU, allocation and GC deltas. Nested phases overlap; never add children
@@ -190,3 +229,20 @@ be a separate experiment, with its unwinding failures reported explicitly.
 Installed libraries without useful debug information remain unattributed at
 source level. A zero-event capture, unrecognized loss record, command failure,
 missing log or incomplete phase evidence must remain visible in the report.
+
+## Test sensitivity and deliver the comparison
+
+Before using absent samples or spans to rule out a cost, establish that the
+capture covered the intended worker and request, that the operation ran, and
+that the observation can resolve it. A known CPU-active request on the private
+worker can check sample collection; it cannot prove that every short phase is
+measurable. Missing symbols, worker rotation, lost samples, incomplete spans and
+short observation intervals limit negative conclusions. Improve the capture or
+report the blind spot rather than attributing it to a fast or idle compiler.
+
+Deliver the decision, matched input and producer identities, workload outcomes,
+measurement settings, absolute measurements and variability, and links to the
+retained capture. State which explanation the comparison supports, plausible
+alternatives it leaves open, and the next discriminator if needed. Reuse the
+retained recording for new analysis; collect another workload only when the
+existing evidence cannot answer the question.

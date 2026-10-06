@@ -1,6 +1,6 @@
 ---
 name: exomonad-agent-spec
-description: Use when declaring or reloading the typed tools available to an Exomonad actor.
+description: Define an Exomonad actor's typed tool record, effect profiles and result presentation, or reload implementations without changing its registered surface. Use when reusable Haskell behavior should become a hosted tool.
 ---
 
 An agent spec selects one Haskell record of tools. Its fields and their types
@@ -24,6 +24,13 @@ rule, source file, and installed revision. Run
 ## Put behavior at the right boundary
 
 A tool body receives its declared Haskell input and can use typed effects.
+Keep domain outcomes as algebraic data types through composition and branch on
+constructors; select model-facing text with `presentWith` at the hosted boundary.
+Use an ordinary function when only code calls it, a tool when the model needs a
+named entry point, and a record actor when shared state or continuation must
+survive the call. A semantic judgment inside a tool can select a typed action
+with Jev; retain its evidence and decision when later work needs to inspect it.
+
 Ordinary tool fields are asynchronous; wrap a `Call`, `RawCall`, or `Notify`
 endpoint in `Sync` to hold the caller's next inference until it settles.
 A notebook field uses `HaskellCell effects`, optionally wrapped in `Sync`;
@@ -62,11 +69,17 @@ of acceptance or completion. Use a tool's typed seam for result presentation.
 
 ## Reload
 
-The run owner edits the run workspace, calls `reloadSource`, then calls
-`reload_agent_spec` to rebuild its own spec. A child can prepare edits in its
-checkout, but cannot publish them into the active run tooling. A typecheck
-failure or changed declared tool name, description, kind, schema, scheduling,
-implementation kind, effect profile, or order refuses the reload and leaves the
-installed record active. A tool call already running keeps its implementation.
-A changed tool surface takes effect in a new actor incarnation; this reload
-never changes a child actor's spec.
+Edit the active source, then call `reload_agent_spec`; saving alone does not
+activate it. The tool first publishes checked source through the actor's source
+owner, then rebuilds and compares the spec. A child can prepare edits in its
+checkout but cannot publish them into the active run tooling. Supply `also_check`
+to widen the checked module set.
+
+Read both stages of the receipt. Rejection before source publication retains the
+previous source; spec compilation or surface refusal after publication retains
+the old handlers while later cells already see the new source. Draft files remain
+on disk. Tool names, descriptions, kinds, schemas, scheduling, implementation
+kinds, effect profiles and order must match the registered surface. A changed
+surface needs a new actor incarnation. Accepted calls keep their implementations,
+and a reload never replaces a child's installed spec. Use `reload_helpers` for
+actor-local reusable helpers without replacing tool handlers.

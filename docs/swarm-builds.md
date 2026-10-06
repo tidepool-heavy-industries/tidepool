@@ -85,6 +85,22 @@ that source and requesting the Rust and Haskell libraries reused all four
 required actions from cache. This is historical evidence for those focused
 targets and revisions only.
 
+## Select targets for the claim
+
+Choose the consumer and behavior the change must establish before choosing a
+command. A target listing establishes availability, a linked executable
+establishes compilation, and a counted run establishes only the selected
+executed cases. Component checks, interactions across components, corpus
+agreement with GHC, and frozen release qualification answer different questions.
+Use the smallest target that can expose the changed behavior and its relevant
+failure path; expand when dependencies or unresolved risk justify it.
+
+Trace source registration as well as dependency edges. A passing package command
+does not establish that a newly added module, fixture or integration target was
+compiled or selected. Verify the production consumer, generated target inputs,
+actual test discovery and nonzero execution count. Resolve uncertainty through
+the owning metadata or runner rather than another broad build.
+
 The `justfile` is a thin frontend to the declared native Buck graph.
 Cargo metadata and `Cargo.lock` remain authoritative for Rust package versions
 and dependency edges. `scripts/buck2-first-party.py --package NAME` generates a
@@ -284,10 +300,12 @@ bash scripts/buck2-run.sh test --print-passing-details --local-only -c remote.en
 ```
 
 Report the source OID, exact command, selected/executed test count, exit status,
-and retained log. Building a test binary is not running it. Re-run once to
-measure reuse, distinguishing a warm dependency graph from action-cache hits,
-then change one selected source or fixture and
-verify only its affected dependency closure rebuilds.
+and retained log. Building a test binary is not running it. When investigating
+build reuse, compare the unchanged-input repeat, a controlled source or fixture
+change, and its restoration in an owned checkout. Distinguish a warm dependency
+graph from action-cache hits and verify the affected dependency closure. These
+controls test reuse and invalidation; routine source checks need no extra rebuild
+once their evidence is sufficient.
 
 The exact Prelude bundled with Buck snapshot `20260926-200119` uses one
 `haskell_compile_*` action for all sources of each target/link style. Its
@@ -301,6 +319,27 @@ Generated worker artifacts, test fixtures, browser assets, and web `dist`
 outputs are separate declared actions with explicit source, resource and
 toolchain inputs. Remote execution remains disabled until its independent
 closure, isolation, reuse, and cancellation checks pass.
+
+## Diagnose the failed stage
+
+Preserve the first failing action and complete stderr before retrying. Different
+stages call for different evidence:
+
+| Failure | First discriminator |
+|---|---|
+| Missing or stale toolchain generation | Compare the retained owner, selection, input tree, roots and status with this checkout; no project build has been established |
+| Analysis, compilation or linking | Inspect the declared action and its inputs, source registration and first diagnostic; distinguish a missing input from a source or compiler defect |
+| Empty or wrong test selection | Compare exact runner discovery with the expected module and target; a zero-test run is no behavioral evidence |
+| Executed assertion or property failure | Retain the input, seed or history and matched artifact; minimize through the owning component before expanding the run |
+| Timeout, process death or incomplete cleanup | Inspect retained execution and cleanup outcomes, descendant cgroups and memory events; preserve unknown outcomes rather than reporting a test verdict |
+
+Before starting preparation or an expensive rebuild, inspect existing owned
+work and coordinate with its execution owner. Share a completed compatible
+generation; serialize large closure realization and avoid competing publication
+of checkout configuration. Preserve failed generations and live artifacts for
+their owners. Repeat a command or increase a deadline when it tests an explanation
+or follows a repaired precondition; investigate cache behavior with controlled
+inputs and owned artifacts while preserving shared caches.
 
 ## Daemon lifetime and cache reuse
 

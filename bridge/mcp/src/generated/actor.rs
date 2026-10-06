@@ -5,8 +5,8 @@
 pub fn actor_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Actor",
-        description: "Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; the constructors in this effect are runtime substrate, not a second public API.",
-        prompt_card: Some("`Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits."),
+        description: "Typed actors combine protocol-indexed messages, explicit state, supervision and exact-incarnation identity. Use `Tidepool.Actor` and record actors when several arrivals must update shared state, or a continuation must run after later events. Protocol types constrain requests and replies; the actor definition fixes the successful exit type. A mailbox serializes one actor's turns, while independent actors can progress separately. Keep routing and transition logic in handlers; use Jev for semantic choices within the admitted effect row. `awaitExit` observes `Completed value`, `Failed reason`, or `Cancelled reason` repeatedly, including closure-valued exits. Request settlement, actor exit and caller acceptance are different events. Use response/watch APIs for task results and typed stop/cleanup for lifecycle. The constructors in this effect are runtime substrate; author against the public facade.",
+        prompt_card: Some("`Tidepool.Actor`: protocol-indexed messages, stateful handlers and supervised lifecycle. Use a record actor for persistent joins or event-driven transitions; use ordinary functions for one cell's dataflow. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason` repeatably, preserving closure-valued exits. Task reply, actor exit and acceptance remain distinct."),
         constructors: &[
             "ActorBeginForkGroupWith :: Bool -> Text -> [Text] -> Actor (Int, Text, [Text])",
             "ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Actor (Int, Int, Text)",

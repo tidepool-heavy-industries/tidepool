@@ -63,7 +63,7 @@ pub(crate) fn declaration() -> HostedTool {
         implementation: Default::default(),
         effect_keys: Vec::new(),
         name: STATUS_TOOL.into(),
-        description: "Inspect this actor and its workbench. Example: {\"view\":\"recovery\"}. Omit view for the compact summary's rows that changed since your previous status call; use summary (or all) for every row, revisions for the source revisions you are working against, or detailed, lineage, trace, bindings, live, or watches for other perspectives.".into(),
+        description: "Inspect this actor and its workbench without running a Haskell cell. Omit view (or use changed) for compact roster rows changed since your last changed/summary/all call; the first call shows the full compact roster. summary/all shows every compact row. Choose {\"view\":\"recovery\"} for replayed declarations and losses after machine replacement; bindings for currently available names; live for retained command jobs and binding provenance; watches for watch states and pending responses; revisions for checkout, assignment and active source identities/drift; detailed for provider health and expanded actor state; lineage for ancestry; trace for provider usage and prompt identity. Status does not acknowledge watches or retrieve settled values; use pollWatch/pollResponse for those values.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

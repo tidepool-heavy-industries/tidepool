@@ -1,6 +1,6 @@
 ---
 name: exomonad-jev
-description: Ask Jev, the cheap judgment model, inside a Haskell cell — packets, per-item batteries, calibrated alternatives, and gating an action on a policy. Load when a cell needs a semantic decision (triage, routing, relevance, a review gate) instead of another model round.
+description: "Compose Jev semantic judgments with Haskell dataflow: evidence packets, competing choices, independent per-item questions, ordered rubrics and typed continuations. Use for triage, relevance, routing or policy-gated action when meaning changes the next step; deterministic checks stay in code."
 ---
 
 Jev returns typed semantic judgments inside an effectful program. Batch independent
@@ -26,6 +26,15 @@ one round trip. Both return `Either J.JevError _`. Read the error and fall back
 to your own policy; never retry blindly.
 
 ## Be dense
+
+Choose the question's structure before its wording. A `choice` models competing
+explanations or actions; independent `noul` questions model predicates that can
+all hold; `each` lifts a question over runtime candidates; a `score` models an
+ordered rubric. This is a modeling decision: a relative winner does not prove
+absolute suitability, and an ordered scale cannot represent unrelated causes.
+Include an unresolved or none-applicable alternative when the candidate set can
+miss the case. Keep same-evidence questions in one packet; sequence a later call
+when a result determines which evidence to fetch.
 
 One packet per semantic boundary. Gather evidence, then batch the questions it
 can answer. Use previews only when they contain the deciding evidence; otherwise
@@ -199,6 +208,14 @@ branch as though a decision had been made.
 
 ## The payload is the continuation
 
+A prepared `Eff effects result` is a Haskell value: constructing `Cmd.run command`
+does not run the command. Let each alternative carry its own typed continuation,
+then sequence the selected action through the policy and handler. Running all
+candidates before asking loses the benefit of selection. Keep pure extraction,
+exact checks and known transitions in functions; use Jev where semantic evidence
+selects the next effect. The same pattern works for choosing a source read, a
+specialist assignment, a repair approach or an event handler's next transition.
+
 Alternatives carry the thing that runs, not a key string you later interpret.
 Build the prepared continuations, let Jev select one, and run the selection.
 The wording is model-facing; the payload is yours. `J.many #label key wording
@@ -288,6 +305,16 @@ topic points back to this skill as its canonical reference.
 Historical experiments live in plans/jev-lab when available in the project.
 Their numerical findings apply to those fixtures and questions. No fixed item
 count, wording rule, or confidence floor establishes general reliability.
+
+Calibrate against decisions and outcomes, including near ties, inadequate
+evidence, irrelevant candidates and confidently wrong actions. Compare a revised
+packet or policy on the same retained cases; add a known-answer or deliberately
+missing-evidence case to check whether the procedure can distinguish them.
+Inspect both settled and doubtful outputs. Repeated agreement on the same packet
+can share the same missing assumption; obtain an independent check or new evidence
+when that could change a consequential action. Choose the next read by its chance
+of separating live alternatives relative to its cost, and retain an unresolved
+result when the available evidence or budget cannot settle it.
 
 ## Jev inside an actor
 

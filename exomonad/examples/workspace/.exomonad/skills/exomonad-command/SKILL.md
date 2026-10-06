@@ -8,6 +8,15 @@ contains literal Bash, including multiline scripts and heredocs; optional fields
 select workdir, environment, memory, PTY, and stdin. Haskell `Cmd` composes the same
 command owner when results feed a program.
 
+Treat command construction, execution and observation as separate stages.
+`Cmd.Command` and an `Eff` action are values that can be stored, transformed or
+chosen before execution; a `Cmd.Job` identifies an execution that already exists.
+Use pure list/record transformations to build a batch, `traverse` for sequential
+effectful work, and explicit concurrency when observations can progress
+independently. If only one candidate action should run, carry actions as Jev
+alternative payloads and sequence the selected continuation. Retain the job and
+its source evidence through later routing instead of rebuilding the command.
+
 For Haskell composition, prefer `Cmd.bashCommand script` when the script is a
 `Text` value. It uses the same Bash command owner without executing a quasiquoter
 at compile time. Bash quotations remain convenient for raw multiline literals,
@@ -19,9 +28,9 @@ Call `bash` with:
 {"cmd":"git status --short"}
 ```
 
-For a build, test run, log or diff that may be large or failing, say what you
-are looking for with `focus`; the result keeps the relevant sections and names
-what it omitted, so there is no need to rerun with `sed` ranges:
+With the workspace's selecting presenter (`Project.Shell`), use `focus` to name
+the evidence needed from a large build, test, log or diff. It selects relevant
+sections and names omissions; recover other ranges with retained-output reads:
 
 ```json
 {"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"focus":"the failing test, its assertion and panic message"}
@@ -94,7 +103,7 @@ does not collect test evidence.
 use at most 32 KiB (default 32 KiB). Output that fits `max_output_bytes` is shown
 whole. Without `focus`, output over budget is shown as a head and a tail with a
 marker naming the omitted byte range per stream, plus a recovery pointer; no
-Jev call and no sectioning happen on this path. `focus` filters the output to
+Jev call and no sectioning happen on this path. With that presenter, `focus` filters the output to
 the sections relevant to that text (example: "the failing test and its
 assertion"): the output is split into sections, each scored by Jev for
 relevance to the focus and recent conversation, and the highest-relevance
@@ -103,6 +112,12 @@ naming the sections left out. A `focus`ed call still shows everything, without
 scoring, when it already fits the budget. Shortened
 output is recoverable only to the extent the job still retains it; follow the
 reported output position or gap. Do not rerun merely to obtain hidden output.
+
+These selection rules belong to `Project.Shell`. The shared `Command.tools`
+default presenter ignores `focus` and `intent`; custom presenters receive both.
+Selection for display does not give the cell a typed Jev answer to reuse. When
+later program behavior depends on a semantic classification, retain the source
+evidence and ask explicitly with `J.ask`.
 
 Use Haskell for reusable command values, data-dependent follow-ups, or typed
 completion routing. `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB`,
