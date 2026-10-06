@@ -65,7 +65,8 @@ import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, modulePr
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
-  , requireOriginalExecutableGlobals
+  , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedRootIdentity)
@@ -385,7 +386,7 @@ runActivationPreviewMode compiler caches args path = do
     encodedWitness <- maybe (fail "activation preview witness is unsealed") pure (encodeCheckedTypeWitness sealed)
     let witnessBytes = toStrictByteString encodedWitness
     projection <- try (prepareArtifactsWithProjection requirePreviewProjection
-      originalInterfaces caches prepared [preparedScaffoldTargetName]
+      originalInterfaces outDir caches prepared [preparedScaffoldTargetName]
       (standardAuxiliaryRoots binds) Map.empty [])
       :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedProductContext))
     validateDependencyEvidence (preparedFreshDependencies prepared)
@@ -529,7 +530,7 @@ processFile compiler caches timing args path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared preparedTargets
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
@@ -558,18 +559,18 @@ data PreparedArtifact = PreparedArtifact
 
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
+prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
 prepareArtifacts = prepareArtifactsWithProjection requireProjection
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
-  -> OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
+  -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifactsWithProjection project originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
+prepareArtifactsWithProjection _ _ _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifactsWithProjection project originalInterfaces outDir caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
   timing <- readTimingEnabled
   let result = pprPipelineResult prepared
       hscEnv = prHscEnv result
@@ -602,8 +603,17 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
-  (originalModules,productContext@(products,_)) <- timePhase timing "prepared_original_demand" $
+  (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
     prepareOriginalProducts hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+  productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
+  inventory <- maybe (fail "current original admission did not issue its inventory") pure
+    (preparedCurrentOriginalInventory productContext)
+  let products = preparedProductInventory productContext
+      roots = Set.fromList (map (projectionEntry . contextFor) targets
+        ++ projectionAuxiliaryRoots firstContext)
+      originalBindings = currentOriginalBindingsExcept inventory roots
+      withOriginals context = context {projectionCurrentOriginals = originalBindings}
+      admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
   let originalProducts =
         [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
           either (Left . show) Right outcome)
@@ -611,9 +621,9 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
   recover <- newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) originalModules []
+    (rcPreparedBodies caches) certifiedHomes (withOriginals (contextFor firstTarget)) originalModules []
   artifacts <- forM targets $ \target -> do
-    let context = contextFor target
+    let context = withOriginals (contextFor target)
     -- Package roots grow only from the finite exact original-group inventory.
     -- Recovered package code may expose another original group; rescan each
     -- projected target before admitting the final executable closure.
@@ -633,7 +643,7 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
           if nextRoots == roots
             then do
               (program, constructors) <- project (finalizePreparedCandidate candidate)
-              project (requireOriginalExecutableGlobals hscEnv externalOriginalBinders products
+              project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders products
                 (programGlobals program))
               pure (recovered, program, constructors, roots)
             else do
@@ -1044,7 +1054,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           _ -> []
     sessionBindings <- prepareSessionBindings boundNames result
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
@@ -1561,7 +1571,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
   originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
-  (artifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
+  (artifacts, productContext) <- prepareArtifacts originalInterfaces directory caches prepared
     ["__result"] [] (requestRetainedGenerations args) []
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts

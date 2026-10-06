@@ -10,6 +10,8 @@ module Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
   , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
+  , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   ) where
 
 import Codec.CBOR.Encoding
@@ -26,6 +28,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word64)
 import GHC.Tc.Types (tcg_mod)
+import GHC.Types.Name (Name)
 import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
@@ -50,7 +53,8 @@ import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
   , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands
-  , settleOriginalHomeModuleProducts )
+  , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
+  , RawModuleProducts, preparedTopIdentityBindings )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram
   , GlobalDecl(..), ProjectedGroup(..) )
@@ -124,7 +128,77 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedRetainedNativeVersions :: Map.Map (String,String) String
   }
 
-type PreparedProductContext = (PreparedModuleProducts, Map.Map Module AdmittedFinalizedOriginal)
+data PreparedProductContext = PreparedProductContext
+  { preparedProductInventory :: PreparedModuleProducts
+  , preparedRetainedOriginals :: Map.Map Module AdmittedFinalizedOriginal
+  , preparedProductModules :: [PreparedModule]
+  , preparedRawProducts :: Maybe [RawModuleProducts]
+  , preparedExternalBinders :: Set.Set SymbolIdentity
+  , preparedCurrentOriginalInventory :: Maybe CurrentOriginalInventory
+  }
+
+-- This owner issues the batch only after original Core, exact interface bytes,
+-- and package witnesses have passed the publication checks. The writer consumes
+-- these same immutable encodings rather than making a second availability choice.
+data CurrentOriginalInventory = CurrentOriginalInventory
+  { currentOriginalAvailability :: Map.Map (String,String) ProductAvailability
+  , currentOriginalProducts :: [ModuleProductEncoding]
+  , currentOriginalPackages :: Map.Map (String,String) BS.ByteString
+  , currentOriginalFinalized :: FinalizedModuleArtifacts
+  , currentOriginalNames :: Map.Map Name SymbolIdentity
+  }
+
+currentOriginalBinders :: CurrentOriginalInventory -> Set.Set SymbolIdentity
+currentOriginalBinders inventory = Set.fromList
+  [binder | product' <- currentOriginalProducts inventory
+    , let (_,_,_,groups) = moduleProductInput product'
+    , group <- groups, binder <- projectedBinders group]
+
+-- Entries and auxiliary roots retain their complete original recursive group.
+-- Every remaining group crosses the executable boundary through its exact Name.
+currentOriginalBindingsExcept :: CurrentOriginalInventory -> Set.Set SymbolIdentity
+  -> Map.Map Name SymbolIdentity
+currentOriginalBindingsExcept inventory roots = Map.filter (`Set.member` imported)
+  (currentOriginalNames inventory)
+  where
+    imported = Set.fromList
+      [binder | product' <- currentOriginalProducts inventory
+        , let (_,_,_,groups) = moduleProductInput product'
+        , group <- groups
+        , Set.null (Set.fromList (projectedBinders group) `Set.intersection` roots)
+        , binder <- projectedBinders group]
+
+admitCurrentOriginalProducts :: OriginalInterfaceArtifacts -> FilePath
+  -> PreparedPipelineResult -> PreparedProductContext -> IO PreparedProductContext
+admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
+  case preparedCurrentOriginalInventory productContext of
+    Just _ -> pure productContext
+    Nothing -> do
+      timing <- readTimingEnabled
+      let environment = prHscEnv (pprPipelineResult prepared)
+      finalized <- timeDetailPhase timing "module_products" "capture_finalization" $
+        captureFinalizedModuleArtifacts originalInterfaces environment
+          (pprFinalizedModules prepared) (pprPackageImports prepared)
+          (preparedFreshDependencies prepared) outDir
+      let withheld = Set.fromList
+            [owner | prepared' <- preparedProductModules productContext
+              , let owner = pmModule prepared'
+                    key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              , Map.notMember owner (preparedRetainedOriginals productContext)
+              , maybe True (not . isJust . localFinalizedCore)
+                  (Map.lookup key (finalizedLocalAdmissions finalized))]
+          admittedContext = case preparedRawProducts productContext of
+            Nothing -> productContext
+            Just raw -> productContext {preparedProductInventory = fst
+              (settleOriginalHomeModuleProductsWithoutOwners environment
+                (preparedExternalBinders productContext) withheld raw)}
+      (availability,products,packages) <- admitModuleProducts originalInterfaces admittedContext
+        (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared)
+        (pprPackageImports prepared)
+      let inventory = CurrentOriginalInventory availability products packages finalized
+            (preparedTopIdentityBindings (preparedProductModules productContext))
+      pure admittedContext {preparedCurrentOriginalInventory = Just inventory}
+
 
 -- Final emitted home imports need a native original group. A retained
 -- generation already supplies its implementation; a canonical interface
@@ -186,7 +260,7 @@ prepareOriginalProducts env exact interfaces context external initial = do
           admitted' = Map.union admitted originals
       if Map.null added
         then let (products,_) = settleOriginalHomeModuleProducts env external (Map.elems merged)
-          in pure (modules,(products,admitted'))
+          in pure (modules,PreparedProductContext products admitted' modules (Just (Map.elems merged)) external Nothing)
         else go (modules ++ prepared) admitted'
           (Set.union attempted (Set.fromList pending)) merged (Map.keys added)
 
@@ -210,25 +284,32 @@ writeCertifiedProductsKeeping
   -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
 writeCertifiedProductsKeeping includes originalInterfaces outDir prepared productContext targets =
   writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared
-    (fmap (\products -> (products,Map.empty)) productContext) targets
+    (fmap (\products -> PreparedProductContext products Map.empty (pprModules prepared) Nothing Set.empty Nothing) productContext) targets
 
 writeCertifiedProductsKeepingWithOriginals
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
   -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
 writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared productContext targets = do
     let hscEnv = prHscEnv (pprPipelineResult prepared)
-        retained = maybe Map.empty snd productContext
+        retained = maybe Map.empty preparedRetainedOriginals productContext
         retainedProofs = Map.fromList
           [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),admittedOriginalProof original)
           | (owner,original) <- Map.toAscList retained]
     timing <- readTimingEnabled
     let dependencies = preparedFreshDependencies prepared
-    finalized <- timeDetailPhase timing "module_products" "capture_finalization" $
-      captureFinalizedModuleArtifacts originalInterfaces hscEnv
-        (pprFinalizedModules prepared) (pprPackageImports prepared) dependencies outDir
-    (availability, freshProducts, productPackages) <- timeDetailPhase timing "module_products" "write_products" $
-      writeModuleProducts originalInterfaces outDir productContext (finalizedLocalAdmissions finalized)
-        (pprProductInterfaces prepared) (pprPackageImports prepared)
+    issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
+    finalized <- case issued >>= preparedCurrentOriginalInventory of
+      Just inventory -> pure (currentOriginalFinalized inventory)
+      Nothing -> timeDetailPhase timing "module_products" "capture_finalization" $
+        captureFinalizedModuleArtifacts originalInterfaces hscEnv
+          (pprFinalizedModules prepared) (pprPackageImports prepared) dependencies outDir
+    let inventory = issued >>= preparedCurrentOriginalInventory
+        availability = maybe Map.empty currentOriginalAvailability inventory
+        freshProducts = maybe [] currentOriginalProducts inventory
+        productPackages = maybe Map.empty currentOriginalPackages inventory
+    timeDetailPhase timing "module_products" "write_products" $
+      writeProductInventory outDir freshProducts
+        [(unit,name,bytes) | ((unit,name),bytes) <- Map.toAscList productPackages]
     let withCertified = foldr (\candidate -> Map.insert
           (candidateUnit candidate, candidateModule candidate) ProductReady)
           availability (pprAcceptedCandidates prepared)
@@ -303,16 +384,15 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
 -- An immutable original product needs captured finalized Core as well as its
 -- interface. Unsupported Core remains interface-only; native target projection
 -- and required global ownership still enforce their own complete contracts.
-writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedProductContext
+admitModuleProducts :: OriginalInterfaceArtifacts -> PreparedProductContext
   -> Map.Map (String,String) LocalFinalizedAdmission
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
          [ModuleProductEncoding], Map.Map (String,String) BS.ByteString)
-writeModuleProducts _ outDir Nothing _ _ _ = do
-  writeProductInventory outDir [] []
-  pure (Map.empty, [], Map.empty)
-writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) finalized interfaces packageRoots = do
+admitModuleProducts originalInterfaces productContext finalized interfaces packageRoots = do
+  let inventory = preparedProductInventory productContext
+      retained = preparedRetainedOriginals productContext
   timing <- readTimingEnabled
   forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
     forM_ omissions $ \omission ->
@@ -348,7 +428,6 @@ writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) finali
       packageBundles =
         [(unit, moduleName', sidecar)
         | ((unit, moduleName'), _, Just _, Just sidecar) <- outcomes]
-  writeProductInventory outDir products packageBundles
   pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products,
     Map.fromList [((unit,name),bytes) | (unit,name,bytes) <- packageBundles])
   where
