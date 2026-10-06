@@ -21,6 +21,8 @@ use tracing_subscriber::prelude::*;
 const MAX_CAPTURED_CELLS: usize = 512;
 const MAX_REQUESTS_PER_CELL: usize = 64;
 const MAX_CAPTURED_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_HOST_TIMINGS_PER_CELL: usize = 512;
+const MAX_HOST_TIMING_LABEL_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 struct CompilerRequest {
@@ -55,9 +57,111 @@ impl tracing::field::Visit for RequestFields {
 
 #[derive(Default)]
 struct RequestState {
-    active: Option<(u64, String, Vec<CompilerRequest>)>,
+    active: Option<CellCaptureState>,
     next_cell: u64,
     owners: HashSet<(String, u64, u64)>,
+}
+
+struct CellCaptureState {
+    index: u64,
+    label: String,
+    compiler_requests: Vec<CompilerRequest>,
+    host_timings: Vec<HostTimingObservation>,
+    dropped_host_timings: u64,
+}
+
+impl CellCaptureState {
+    fn new(index: u64, label: &str) -> Self {
+        Self {
+            index,
+            label: label.into(),
+            compiler_requests: Vec::new(),
+            host_timings: Vec::new(),
+            dropped_host_timings: 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+struct HostTimingObservation {
+    ordinal: u64,
+    // This orders host events against physical submissions without assigning
+    // pre-submission work to a previous or speculative future request.
+    identified_request_count: usize,
+    measurement: HostTimingMeasurement,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum HostTimingMeasurement {
+    ToolchainStage {
+        stage: String,
+        elapsed_ms: u64,
+        payload_bytes: u64,
+        owners: Option<u64>,
+        node: String,
+        round: String,
+    },
+    CompilerPhase {
+        phase: String,
+        elapsed_ms: u64,
+        accepted: Option<bool>,
+        success: Option<bool>,
+    },
+}
+
+#[derive(Default)]
+struct HostTimingFields {
+    stage: Option<String>,
+    phase: Option<String>,
+    node: Option<String>,
+    round: Option<String>,
+    ms: Option<u64>,
+    elapsed_ms: Option<u64>,
+    bytes: Option<u64>,
+    owners: Option<u64>,
+    owners_known: Option<bool>,
+    accepted: Option<bool>,
+    success: Option<bool>,
+    oversized_label: bool,
+}
+
+impl tracing::field::Visit for HostTimingFields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        let slot = match field.name() {
+            "stage" => &mut self.stage,
+            "phase" => &mut self.phase,
+            "node" => &mut self.node,
+            "round" => &mut self.round,
+            _ => return,
+        };
+        if value.len() > MAX_HOST_TIMING_LABEL_BYTES {
+            self.oversized_label = true;
+        } else {
+            *slot = Some(value.into());
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "ms" => self.ms = Some(value),
+            "elapsed_ms" => self.elapsed_ms = Some(value),
+            "bytes" => self.bytes = Some(value),
+            "owners" => self.owners = Some(value),
+            _ => {}
+        }
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        match field.name() {
+            "owners_known" => self.owners_known = Some(value),
+            "accepted" => self.accepted = Some(value),
+            "success" => self.success = Some(value),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
 }
 
 #[derive(Clone, Default)]
@@ -69,6 +173,8 @@ struct CapturedCell {
     source_sha256: String,
     source_path: PathBuf,
     compiler_requests: Vec<CompilerRequest>,
+    host_timings: Vec<HostTimingObservation>,
+    dropped_host_timings: u64,
 }
 
 struct ActiveCell<'a> {
@@ -81,6 +187,55 @@ struct ActiveCell<'a> {
 }
 
 impl CellRequestObserver {
+    fn capture_host_timing(&self, event: &tracing::Event<'_>) {
+        let mut fields = HostTimingFields::default();
+        event.record(&mut fields);
+        let toolchain_stage = event.metadata().target() == "exomonad_harness::timing";
+        if !toolchain_stage && fields.phase.is_none() && !fields.oversized_label {
+            return;
+        }
+        let mut state = self.0.lock();
+        let Some(active) = state.active.as_mut() else {
+            return;
+        };
+        let ordinal =
+            (active.host_timings.len() as u64).saturating_add(active.dropped_host_timings);
+        let measurement = (|| {
+            if fields.oversized_label {
+                return None;
+            }
+            Some(if toolchain_stage {
+                HostTimingMeasurement::ToolchainStage {
+                    stage: fields.stage?,
+                    elapsed_ms: fields.ms?,
+                    payload_bytes: fields.bytes?,
+                    owners: match fields.owners_known? {
+                        true => Some(fields.owners?),
+                        false => None,
+                    },
+                    node: fields.node?,
+                    round: fields.round?,
+                }
+            } else {
+                HostTimingMeasurement::CompilerPhase {
+                    phase: fields.phase?,
+                    elapsed_ms: fields.elapsed_ms?,
+                    accepted: fields.accepted,
+                    success: fields.success,
+                }
+            })
+        })();
+        if active.host_timings.len() == MAX_HOST_TIMINGS_PER_CELL || measurement.is_none() {
+            active.dropped_host_timings = active.dropped_host_timings.saturating_add(1);
+            return;
+        }
+        active.host_timings.push(HostTimingObservation {
+            ordinal,
+            identified_request_count: active.compiler_requests.len(),
+            measurement: measurement.expect("validated typed host timing fields"),
+        });
+    }
+
     fn begin(&self, label: &str, source: &str) -> ActiveCell<'_> {
         assert!(
             source.len() <= MAX_CAPTURED_SOURCE_BYTES,
@@ -107,7 +262,7 @@ impl CellRequestObserver {
         let source_path = run_root.join(format!("cell-{index:04}.hs"));
         std::fs::write(&source_path, source.as_bytes()).unwrap();
         let source_sha256 = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
-        state.active = Some((index, label.into(), Vec::new()));
+        state.active = Some(CellCaptureState::new(index, label));
         ActiveCell {
             observer: self,
             index,
@@ -143,6 +298,9 @@ fn with_cell_request_capture<T>(
             "source_sha256": &captured.source_sha256,
             "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
             "compiler_requests": &captured.compiler_requests,
+            "host_timings": &captured.host_timings,
+            "host_timings_dropped": captured.dropped_host_timings,
+            "host_timings_complete": captured.dropped_host_timings == 0,
             "completed": matches!(&result, Ok(Ok(_))), "phase": phase,
         })
     );
@@ -155,16 +313,18 @@ fn with_cell_request_capture<T>(
 impl ActiveCell<'_> {
     fn finish(mut self) -> CapturedCell {
         let mut state = self.observer.0.lock();
-        let (index, label, compiler_requests) = state.active.take().expect("active measured cell");
-        assert_eq!(index, self.index);
-        assert_eq!(label, self.label);
+        let captured = state.active.take().expect("active measured cell");
+        assert_eq!(captured.index, self.index);
+        assert_eq!(captured.label, self.label);
         self.completed = true;
         CapturedCell {
-            index,
-            label,
+            index: captured.index,
+            label: captured.label,
             source_sha256: self.source_sha256.clone(),
             source_path: self.source_path.clone(),
-            compiler_requests,
+            compiler_requests: captured.compiler_requests,
+            host_timings: captured.host_timings,
+            dropped_host_timings: captured.dropped_host_timings,
         }
     }
 }
@@ -186,6 +346,13 @@ where
         event: &tracing::Event<'_>,
         _context: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        if matches!(
+            event.metadata().target(),
+            "exomonad_harness::timing" | "tidepool_extract_cmd::daemon"
+        ) {
+            self.capture_host_timing(event);
+            return;
+        }
         if event.metadata().target() != "tidepool_extract_cmd::endpoint" {
             return;
         }
@@ -244,14 +411,14 @@ where
             state.owners.insert(request.key()),
             "physical daemon request has one cell owner"
         );
-        let Some((_, _, requests)) = state.active.as_mut() else {
+        let Some(active) = state.active.as_mut() else {
             return;
         };
         assert!(
-            requests.len() < MAX_REQUESTS_PER_CELL,
+            active.compiler_requests.len() < MAX_REQUESTS_PER_CELL,
             "bounded requests per measured cell"
         );
-        requests.push(request);
+        active.compiler_requests.push(request);
     }
 }
 
@@ -264,7 +431,7 @@ mod cell_request_observer_tests {
         assert!(state.active.is_none());
         let index = state.next_cell;
         state.next_cell += 1;
-        state.active = Some((index, label.into(), Vec::new()));
+        state.active = Some(CellCaptureState::new(index, label));
         drop(state);
         ActiveCell {
             observer,
@@ -281,6 +448,87 @@ mod cell_request_observer_tests {
             daemon_epoch = %"a".repeat(64), admission_id, request_ordinal,
             compile_request = "0123456789abcdef", transport = "daemon",
             "compiler request identified");
+    }
+
+    #[test]
+    fn cell_capture_retains_existing_typed_host_timings_in_logical_order() {
+        let observer = CellRequestObserver::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(observer.clone()),
+            || {
+                let stage = || {
+                    tidepool_toolchain::timing::record_stage(
+                        tidepool_toolchain::timing::NO_NODE,
+                        tidepool_toolchain::timing::NO_ROUND,
+                        "future.context_stage",
+                        Duration::from_millis(7),
+                        123,
+                    )
+                };
+                stage();
+                let cell = active(&observer, "host-timings");
+                stage();
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "compiler_preflight", elapsed_ms = 2_u64,
+                    "unparsed event wording");
+                identified(1, 1);
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "compiler_response", elapsed_ms = 11_u64,
+                    success = true, "unparsed response wording");
+                let captured = cell.finish();
+                assert_eq!(captured.host_timings.len(), 3);
+                assert_eq!(captured.dropped_host_timings, 0);
+                assert_eq!(captured.host_timings[0].ordinal, 0);
+                assert_eq!(captured.host_timings[0].identified_request_count, 0);
+                assert!(matches!(
+                    &captured.host_timings[0].measurement,
+                    HostTimingMeasurement::ToolchainStage {
+                        stage, elapsed_ms: 7, payload_bytes: 123, owners: None, ..
+                    } if stage == "future.context_stage"
+                ));
+                assert_eq!(captured.host_timings[2].ordinal, 2);
+                assert_eq!(captured.host_timings[2].identified_request_count, 1);
+                assert!(matches!(
+                    &captured.host_timings[2].measurement,
+                    HostTimingMeasurement::CompilerPhase {
+                        phase, elapsed_ms: 11, success: Some(true), accepted: None,
+                    } if phase == "compiler_response"
+                ));
+                stage();
+                let next = active(&observer, "next").finish();
+                assert!(next.host_timings.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn cell_capture_reports_bounded_or_unreadable_host_timings() {
+        let observer = CellRequestObserver::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(observer.clone()),
+            || {
+                let cell = active(&observer, "bounded");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", "missing typed elapsed field");
+                for _ in 0..MAX_HOST_TIMINGS_PER_CELL + 3 {
+                    tidepool_toolchain::timing::record_stage(
+                        tidepool_toolchain::timing::NO_NODE,
+                        tidepool_toolchain::timing::NO_ROUND,
+                        "context.stage",
+                        Duration::ZERO,
+                        0,
+                    );
+                }
+                let captured = cell.finish();
+                assert_eq!(captured.host_timings.len(), MAX_HOST_TIMINGS_PER_CELL);
+                assert_eq!(captured.dropped_host_timings, 4);
+                assert_eq!(captured.host_timings[0].ordinal, 1);
+                assert_eq!(
+                    captured.host_timings.last().unwrap().ordinal,
+                    MAX_HOST_TIMINGS_PER_CELL as u64
+                );
+            },
+        );
     }
 
     #[test]
