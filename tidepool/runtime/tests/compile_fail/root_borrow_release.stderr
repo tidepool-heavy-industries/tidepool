@@ -1,0 +1,2 @@
+error[E0502]: cannot borrow `*machine` as mutable because it is also borrowed as immutable
+ --> tests/compile_fail/root_borrow_release.rs:5:5

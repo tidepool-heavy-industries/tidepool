@@ -664,9 +664,7 @@ impl PreparedMachine<'_> {
             // Every root is retained before installation can allocate or collect.
             for (&pointer, rep) in relocated.iter().zip(&root_reps) {
                 let rep = rep.runtime_rep();
-                let slot = self
-                    .old_space
-                    .adopt_root(&self.machine, pointer as *mut u8)
+                let slot = crate::old_space::OwnedRootCell::new(&self.machine, pointer as *mut u8)
                     .map_err(|cause| runtime_error(&self.machine, cause))?;
                 let raw = self.handles.insert_handle(slot, realm, rep);
                 handles.push(PreparedHandle::new(raw, rep));

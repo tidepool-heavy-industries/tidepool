@@ -5595,7 +5595,7 @@ impl PreparedEngine {
     pub fn handle_slot(
         &self,
         handle: ValueHandle,
-    ) -> Option<tidepool_codegen::old_space::RootSlot> {
+    ) -> Option<tidepool_codegen::old_space::RootRef<'_>> {
         self.machine.handle_slot(handle)
     }
 
@@ -8719,7 +8719,7 @@ pub(super) mod tests {
                 let first = engine.handle_slot(handle.raw()).unwrap();
                 let second = engine.handle_slot(distinct.raw()).unwrap();
                 assert_ne!(first.addr(), second.addr());
-                assert_eq!(unsafe { first.current() }, unsafe { second.current() });
+                assert_eq!(first.current(), second.current());
             }
             state.bind_in(original_scope, original).unwrap();
             state

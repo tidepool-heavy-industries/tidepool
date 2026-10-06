@@ -9,6 +9,7 @@ use crate::{
     machine_state::{GcRootBoundaries, MachineState},
 };
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use tidepool_heap::{
     descriptor_region::{DescriptorArena, DescriptorOldSpace, DescriptorSourceSpace},
@@ -365,67 +366,43 @@ impl super::OldSpace {
     }
 
     /// Promote selected prepared roots and give each one a stable,
-    /// persistently registered slot owned by this old-space owner.
+    /// persistently registered cell transferred into its ledger owner.
     ///
     /// The returned slots are the only representation a handle ledger may
     /// retain.  Callers must never retain the temporary result/argument slot:
     /// that storage belongs to one execution frame and is removed at unwind.
     pub(crate) unsafe fn retain_prepared(
         &mut self,
-        machine: &MachineState,
+        machine: &Rc<MachineState>,
         vmctx: &mut VMContext,
         selected: &[*mut *mut u8],
         descriptors: &[Arc<ObjectDescriptor>],
-    ) -> Result<Vec<super::RootSlot>, RuntimeError> {
+    ) -> Result<Vec<super::OwnedRootCell>, RuntimeError> {
         // Every fallible bookkeeping step is completed before promotion
-        // mutates the nursery.  After promotion only infallible Box ownership
+        // mutates the nursery.  After promotion only infallible ownership
         // publication remains, so a multi-result transfer is all-or-nothing
         // from the caller's perspective.
         let mut retained = Vec::new();
         retained
             .try_reserve_exact(selected.len())
             .map_err(|_| RuntimeError::HeapOverflow)?;
-        self.slots
-            .try_reserve(selected.len())
-            .map_err(|_| RuntimeError::HeapOverflow)?;
+        machine.try_reserve_persistent_roots(selected.len())?;
         for &source in selected {
             if source.is_null() || (*source).is_null() {
                 return Err(crate::host_fns::bad_pointer());
             }
         }
-        self.promote_prepared(machine, vmctx, selected, descriptors)?;
         for &source in selected {
-            let pointer = *source;
-            let mut cell = Box::new(pointer);
-            let address: *mut *mut u8 = &mut *cell;
-            self.slots.push(cell);
-            machine.register_persistent_root(address);
-            retained.push(super::RootSlot::new(address));
+            retained.push(super::OwnedRootCell::new(machine, *source)?);
         }
+        // New cells are complete registered physical roots before promotion;
+        // the copier updates them together with the selected temporary slots.
+        // Original invocation/code owners remain admitted throughout this span.
+        // No native call, callback or program-liveness collection runs until
+        // the caller publishes the cells into the ledger. Physical registration
+        // alone would not retain program code. Refusal drops candidate owners.
+        self.promote_prepared(machine, vmctx, selected, descriptors)?;
         Ok(retained)
-    }
-
-    /// Give an initialized managed reference its own persistently registered
-    /// root slot, without copying. Normally the reference is already in old
-    /// space or a static region. During a non-collecting installation it may
-    /// name a staged nursery object, provided its descriptor owner is
-    /// committed before the next collection or the root is deregistered on
-    /// rollback.
-    pub(crate) fn adopt_root(
-        &mut self,
-        machine: &MachineState,
-        pointer: *mut u8,
-    ) -> Result<super::RootSlot, RuntimeError> {
-        self.slots
-            .try_reserve(1)
-            .map_err(|_| RuntimeError::HeapOverflow)?;
-        let mut cell = Box::new(pointer);
-        let address: *mut *mut u8 = &mut *cell;
-        self.slots.push(cell);
-        machine.register_persistent_root(address);
-        // SAFETY: the boxed cell is owned by this old space for its whole
-        // life and was just registered as a persistent root.
-        Ok(unsafe { super::RootSlot::new(address) })
     }
 
     /// # Safety

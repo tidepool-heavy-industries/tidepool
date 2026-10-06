@@ -537,7 +537,8 @@ fn mount_original(
         .require_prepared()
         .unwrap()
         .handle_slot(original_handle)
-        .unwrap();
+        .unwrap()
+        .addr() as usize;
     let reservation = owner.reservation().clone();
     let certificate = interface.value_interface_certificate();
     let handles = resident.value_handle_count();
@@ -564,7 +565,7 @@ fn mount_original(
             .handle_slot(original_handle)
             .unwrap()
             .addr(),
-        original_root.addr(),
+        original_root as *mut *mut u8,
     );
     assert_eq!(
         resident.codegen_totals(),

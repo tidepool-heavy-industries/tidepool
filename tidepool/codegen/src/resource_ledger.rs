@@ -2,23 +2,18 @@
 //!
 //! This module owns identities and scope membership for parked continuations,
 //! live value handles, and scope-local cancellation flags. It deliberately
-//! registers identities separately from GC roots. A detached managed-root
-//! receipt settles its registration unless
-//! another ledger entry takes custody. Scope closure removes matching entries
-//! first and hands their rooted payloads back to the JIT boundary.
+//! owns each retained cell and its collector registration. A frame-owned
+//! managed-root value moves the original cell with its exact representation.
+//! Scope closure removes entries before their cell owners settle registration.
 
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::machine_state::MachineState;
-use crate::old_space::RootSlot;
+use crate::old_space::{OwnedRootCell, RootSlot};
 use crate::prepared_program::ProgramId;
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{RuntimeRep, TypeNodeId, ValueId};
-
-pub(crate) type FrameCell = RootSlot;
 
 /// What a resume needs to interpret the answer and re-enter a prepared
 /// continuation. The evidence owner and the runner can be different
@@ -59,41 +54,26 @@ impl PreparedReplyEvidence {
 
 pub(crate) type FrameEvidence = PreparedFrameEvidence;
 
-/// Frame custody of a persistent root and its exact representation. Issued
-/// only during atomic parking; dropping an unclaimed receipt releases its
-/// registration, without freeing the physical root cell.
+/// Atomic frame ownership of a persistent cell and its exact representation.
+/// Only the cell owns registration settlement and physical storage.
 pub(crate) struct OwnedManagedRoot {
-    slot: Option<RootSlot>,
+    cell: OwnedRootCell,
     rep: RuntimeRep,
-    machine: Weak<MachineState>,
 }
 
 impl OwnedManagedRoot {
     pub(crate) fn addr(&self) -> *mut *mut u8 {
-        self.slot
-            .expect("an owned root has not been consumed")
-            .addr()
+        self.cell.addr()
     }
 
-    pub(crate) fn into_parts(mut self) -> (RootSlot, RuntimeRep) {
-        (
-            self.slot.take().expect("an owned root is consumed once"),
-            self.rep,
-        )
-    }
-}
-
-impl Drop for OwnedManagedRoot {
-    fn drop(&mut self) {
-        if let (Some(slot), Some(machine)) = (self.slot.take(), self.machine.upgrade()) {
-            machine.deregister_persistent_root(slot.addr());
-        }
+    pub(crate) fn into_parts(self) -> (OwnedRootCell, RuntimeRep) {
+        (self.cell, self.rep)
     }
 }
 
 /// One parked continuation and all policy needed to resume it.
 pub(crate) struct ContinuationFrame {
-    pub(crate) cell: FrameCell,
+    pub(crate) cell: OwnedRootCell,
     pub(crate) realm: RealmId,
     pub(crate) live_payload_root: Option<OwnedManagedRoot>,
     pub(crate) evidence: FrameEvidence,
@@ -105,7 +85,7 @@ pub(crate) struct ContinuationFrame {
 /// arrays), and a bare-handle delivery must recover that representation from
 /// the ledger, not assume it.
 pub(crate) struct HandleEntry {
-    pub(crate) slot: RootSlot,
+    pub(crate) slot: OwnedRootCell,
     pub(crate) realm: RealmId,
     pub(crate) rep: RuntimeRep,
     pub(crate) class: HandleClass,
@@ -163,7 +143,7 @@ impl RootHandleLedger {
 
     pub(crate) fn insert(
         &mut self,
-        slot: RootSlot,
+        slot: OwnedRootCell,
         realm: RealmId,
         rep: RuntimeRep,
         class: HandleClass,
@@ -207,7 +187,7 @@ impl RootHandleLedger {
 
     /// Every live handle's root slot.
     pub(crate) fn slots(&self) -> impl Iterator<Item = RootSlot> + '_ {
-        self.handles.values().map(|entry| entry.slot)
+        self.handles.values().map(|entry| entry.slot.physical())
     }
 
     /// Every [`HandleClass::Value`] handle owned by `realm`. A code export
@@ -322,6 +302,13 @@ impl ResourceLedger {
             .clone()
     }
 
+    pub(crate) fn try_reserve_continuations(
+        &mut self,
+        count: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.continuations.try_reserve(count)
+    }
+
     pub(crate) fn park(&mut self, frame: ContinuationFrame) -> ContinuationId {
         let id = ContinuationId(self.next_continuation_id);
         self.next_continuation_id += 1;
@@ -388,7 +375,7 @@ impl ResourceLedger {
     /// word the slot holds (see [`HandleEntry::rep`]).
     pub(crate) fn insert_handle(
         &mut self,
-        slot: RootSlot,
+        slot: OwnedRootCell,
         realm: RealmId,
         rep: RuntimeRep,
     ) -> ValueHandle {
@@ -397,7 +384,11 @@ impl ResourceLedger {
 
     /// [`Self::insert_handle`] for a machine-lifetime export root: same
     /// handle namespace, counted as [`HandleClass::CodeExport`].
-    pub(crate) fn insert_export_handle(&mut self, slot: RootSlot, rep: RuntimeRep) -> ValueHandle {
+    pub(crate) fn insert_export_handle(
+        &mut self,
+        slot: OwnedRootCell,
+        rep: RuntimeRep,
+    ) -> ValueHandle {
         self.handles
             .insert(slot, RealmId::ROOT, rep, HandleClass::CodeExport)
     }
@@ -414,14 +405,12 @@ impl ResourceLedger {
         &mut self,
         handle: ValueHandle,
         rep: RuntimeRep,
-        machine: &Rc<MachineState>,
     ) -> Option<OwnedManagedRoot> {
         self.handle(handle).filter(|entry| entry.rep == rep)?;
         let entry = self.take_handle(handle)?;
         Some(OwnedManagedRoot {
-            slot: Some(entry.slot),
+            cell: entry.slot,
             rep: entry.rep,
-            machine: Rc::downgrade(machine),
         })
     }
 
@@ -454,10 +443,6 @@ impl ResourceLedger {
         self.cancel_flags.remove(&realm);
         ClosedRealm { frames, handles }
     }
-
-    pub(crate) fn drain_continuations(&mut self) -> Vec<ContinuationFrame> {
-        self.continuations.drain().map(|(_, frame)| frame).collect()
-    }
 }
 
 #[cfg(test)]
@@ -467,12 +452,19 @@ mod tests {
     #[test]
     fn a_handle_records_the_representation_it_was_minted_with() {
         let mut ledger = ResourceLedger::default();
-        let mut cell: *mut u8 = std::ptr::null_mut();
-        // SAFETY: the ledger only stores the slot address here; nothing reads
-        // through it in this test, and `cell` outlives the ledger.
-        let slot = unsafe { RootSlot::new(&mut cell) };
-        let lifted = ledger.insert_handle(slot, RealmId::ROOT, RuntimeRep::LiftedRef);
-        let unlifted = ledger.insert_handle(slot, RealmId::ROOT, RuntimeRep::UnliftedRef);
+        let machine = std::rc::Rc::new(crate::machine_state::MachineState::new());
+        // Representation bookkeeping needs no heap dereference; both cells
+        // have their real independent registration/storage owner.
+        let lifted = ledger.insert_handle(
+            OwnedRootCell::new(&machine, std::ptr::null_mut()).unwrap(),
+            RealmId::ROOT,
+            RuntimeRep::LiftedRef,
+        );
+        let unlifted = ledger.insert_handle(
+            OwnedRootCell::new(&machine, std::ptr::null_mut()).unwrap(),
+            RealmId::ROOT,
+            RuntimeRep::UnliftedRef,
+        );
         assert_eq!(
             ledger.handle(lifted).map(|e| e.rep),
             Some(RuntimeRep::LiftedRef)
