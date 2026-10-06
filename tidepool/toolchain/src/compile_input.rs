@@ -23,6 +23,7 @@ use crate::CompileError;
 #[derive(Debug, Clone)]
 pub struct SealedOriginalCompileInput {
     identity: String,
+    source: Arc<str>,
     original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<PreparedProgram>,
@@ -56,6 +57,11 @@ impl SourceReplayEligibility {
 }
 
 impl SealedOriginalCompileInput {
+    /// Exact generated source bytes consumed by this completed original.
+    pub fn original_source(&self) -> &str {
+        &self.source
+    }
+
     pub fn source_replay_eligibility(&self) -> SourceReplayEligibility {
         self.replay
     }
@@ -734,6 +740,7 @@ pub(crate) fn seal(
         .collect::<Vec<_>>();
     Ok(Some(SealedOriginalCompileInput {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
+        source: source.into(),
         original_interfaces: Arc::new(
             crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)

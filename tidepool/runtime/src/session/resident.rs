@@ -987,13 +987,13 @@ enum StartupCompileIdentity {
 }
 
 impl PreparedStartupEntry {
-    /// Stable compiler input identity for journal continuity. Native admission
-    /// still depends on this capsule's original installed program and owners.
-    pub fn compile_input_identity(&self) -> &str {
+    /// Replay-eligible input observation for journal continuity. Completed
+    /// originals with untracked inputs can execute without this observation.
+    pub fn compile_input_identity(&self) -> Option<&str> {
         match &self.compile_identity {
-            StartupCompileIdentity::Issued(identity) => identity.original_input_identity(),
+            StartupCompileIdentity::Issued(identity) => identity.replay_eligible_identity(),
             #[cfg(test)]
-            StartupCompileIdentity::Fixture => "test-startup-fixture",
+            StartupCompileIdentity::Fixture => Some("test-startup-fixture"),
         }
     }
 }

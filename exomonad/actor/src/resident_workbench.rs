@@ -14896,13 +14896,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(first.declarations, second.declarations);
 
         // A new ordinary source request must execute the untracked quoter again.
+        std::fs::write(&quotation_input, "42").unwrap();
         let installation =
             crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
-        let templates = resident_workbench_templates(
-            &source.preamble,
-            &format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})", installation.effect_row),
-            "import qualified QuotedAgentSpec\nimport qualified Tidepool.Agent.Contract\nimport qualified Tidepool.Effects.Core\n",
-        );
+        let templates = [tidepool_runtime::session::TurnTemplate {
+            kind: tidepool_runtime::session::TemplateSelector::BindDiscard,
+            source: proof.original_source().into(),
+        }];
         let scratch = tempfile::tempdir().unwrap();
         let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let ordinary =
@@ -14924,10 +14924,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 retained_imports: &[],
             })
             .unwrap();
-        assert!(matches!(
-            ordinary,
-            tidepool_runtime::session::TurnResult::Bind { .. }
-        ));
+        let tidepool_runtime::session::TurnResult::Bind { compiled, .. } = ordinary else {
+            panic!("ordinary quotation request must complete its actual discarded bind")
+        };
+        let successor = compiled.original_compile_input().unwrap();
+        assert_eq!(
+            proof.original_input_identity(),
+            successor.original_input_identity()
+        );
+        assert_ne!(first._prepared.entry.compiled().prepared, compiled.prepared);
+        assert!(successor.replay_eligible_identity().is_none());
+        workbench.access.with_machine(context, move |session, _, _| {
+            let entry = session.prepare_startup_entry(compiled.code())?;
+            assert!(entry.compile_input_identity().is_none(), "changed untracked quotation output cannot authorize durable successor continuity");
+            Ok(())
+        }).await.unwrap();
         assert!(
             std::fs::read_to_string(quotation_input.with_extension("executions"))
                 .unwrap()

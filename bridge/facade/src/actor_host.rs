@@ -1881,7 +1881,14 @@ async fn run_owned(
             "root startup requires its installed executable entry",
         ));
     };
-    let bootstrap_identity = entry.compile_input_identity().to_owned();
+    let bootstrap_identity = entry
+        .compile_input_identity()
+        .ok_or_else(|| {
+            runtime_error(
+                "durable root bootstrap requires replay-eligible compiler input continuity",
+            )
+        })?
+        .to_owned();
     let worktree_admission = fork_workspace_admission(
         worktrees.clone(),
         worktree_authority.clone(),

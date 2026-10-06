@@ -117,6 +117,27 @@ struct PreparationState {
 const RETAINED_TOOLSETS: usize = 16;
 
 impl ToolsetPreparation {
+    fn lookup(&self, recipe: &InstallerRecipe) -> (Arc<PreparationTask>, bool) {
+        let mut state = self.state.lock();
+        match state.tasks.get(recipe).cloned() {
+            Some(task) => {
+                if state.ready_order.contains(recipe) {
+                    state.ready_order.retain(|key| key != recipe);
+                    state.ready_order.push_back(recipe.clone());
+                }
+                (task, false)
+            }
+            None => {
+                let task = Arc::new(PreparationTask {
+                    outcome: Mutex::new(None),
+                    completed: tokio::sync::Notify::new(),
+                });
+                state.tasks.insert(recipe.clone(), Arc::clone(&task));
+                (task, true)
+            }
+        }
+    }
+
     pub(crate) async fn prepare(
         self: &Arc<Self>,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
@@ -125,26 +146,7 @@ impl ToolsetPreparation {
         source: crate::CheckpointSourceLayer,
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
-        let (task, launch) = {
-            let mut state = self.state.lock();
-            match state.tasks.get(&recipe).cloned() {
-                Some(task) => {
-                    if state.ready_order.contains(&recipe) {
-                        state.ready_order.retain(|key| key != &recipe);
-                        state.ready_order.push_back(recipe.clone());
-                    }
-                    (task, false)
-                }
-                None => {
-                    let task = Arc::new(PreparationTask {
-                        outcome: Mutex::new(None),
-                        completed: tokio::sync::Notify::new(),
-                    });
-                    state.tasks.insert(recipe.clone(), Arc::clone(&task));
-                    (task, true)
-                }
-            }
-        };
+        let (task, launch) = self.lookup(&recipe);
         if launch {
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
@@ -160,28 +162,40 @@ impl ToolsetPreparation {
                 })
                 .await
                 .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
-                *task.outcome.lock() = Some(outcome);
-                task.completed.notify_waiters();
-                owner.completed(key, &task);
+                owner.settle(key, &task, outcome);
             });
         }
         task.wait().await
     }
 
-    fn completed(&self, key: InstallerRecipe, task: &Arc<PreparationTask>) {
-        let succeeded = task.outcome.lock().as_ref().is_some_and(Result::is_ok);
+    fn settle(
+        &self,
+        key: InstallerRecipe,
+        task: &Arc<PreparationTask>,
+        outcome: Result<Arc<PreparedToolset>, PreparationFailure>,
+    ) {
+        let succeeded = outcome.is_ok();
         let mut state = self.state.lock();
+        // A waiter can observe completion while this lock is held, but its next
+        // lookup cannot pass the failed-task retirement or ready-cache bound.
+        *task.outcome.lock() = Some(outcome);
         if !state
             .tasks
             .get(&key)
             .is_some_and(|current| Arc::ptr_eq(current, task))
         {
+            drop(state);
+            task.completed.notify_waiters();
             return;
         }
         if !succeeded {
             state.tasks.remove(&key);
+            drop(state);
+            task.completed.notify_waiters();
             return;
         }
+        drop(state);
+        task.completed.notify_waiters();
         state.ready_order.push_back(key);
         while state.ready_order.len() > RETAINED_TOOLSETS {
             if let Some(retired) = state.ready_order.pop_front() {
@@ -210,27 +224,21 @@ mod tests {
     fn failed_preparation_retires_only_its_exact_lookup_task() {
         let owner = ToolsetPreparation::default();
         let key = recipe("failed");
-        let failed = Arc::new(PreparationTask {
-            outcome: Mutex::new(Some(Err(PreparationFailure::Source("transient".into())))),
-            completed: tokio::sync::Notify::new(),
-        });
-        owner
-            .state
-            .lock()
-            .tasks
-            .insert(key.clone(), Arc::clone(&failed));
-        owner.completed(key.clone(), &failed);
+        let (failed, launched) = owner.lookup(&key);
+        assert!(launched);
+        owner.settle(
+            key.clone(),
+            &failed,
+            Err(PreparationFailure::Source("transient".into())),
+        );
         assert!(!owner.state.lock().tasks.contains_key(&key));
-        let retry = Arc::new(PreparationTask {
-            outcome: Mutex::new(None),
-            completed: tokio::sync::Notify::new(),
-        });
-        owner
-            .state
-            .lock()
-            .tasks
-            .insert(key.clone(), Arc::clone(&retry));
-        owner.completed(key.clone(), &failed);
+        let (retry, launched) = owner.lookup(&key);
+        assert!(launched);
+        owner.settle(
+            key.clone(),
+            &failed,
+            Err(PreparationFailure::Source("late original refusal".into())),
+        );
         assert!(Arc::ptr_eq(
             owner.state.lock().tasks.get(&key).unwrap(),
             &retry
@@ -261,6 +269,29 @@ mod tests {
         assert!(
             matches!(task.wait().await, Err(PreparationFailure::Source(detail)) if detail == "original refusal")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observed_failure_has_already_retired_before_immediate_retry() {
+        let owner = Arc::new(ToolsetPreparation::default());
+        let key = recipe("retry");
+        let (failed, launch) = owner.lookup(&key);
+        assert!(launch);
+        let waiter_owner = Arc::clone(&owner);
+        let waiter_key = key.clone();
+        let waiter_task = Arc::clone(&failed);
+        let waiter = tokio::spawn(async move {
+            assert!(waiter_task.wait().await.is_err());
+            let (retry, launch) = waiter_owner.lookup(&waiter_key);
+            assert!(launch);
+            assert!(!Arc::ptr_eq(&retry, &waiter_task));
+        });
+        owner.settle(
+            key,
+            &failed,
+            Err(PreparationFailure::Source("transient".into())),
+        );
+        waiter.await.unwrap();
     }
 }
 

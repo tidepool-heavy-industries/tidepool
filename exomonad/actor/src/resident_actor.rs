@@ -12039,7 +12039,7 @@ where
                         "pending root lost its original unexecuted startup entry",
                     ));
                 };
-                if entry.compile_input_identity() != intent.bootstrap_identity {
+                if entry.compile_input_identity() != Some(intent.bootstrap_identity.as_str()) {
                     return Err(Self::failure(
                         "startup intent differs from its original compiler-issued input identity",
                     ));
