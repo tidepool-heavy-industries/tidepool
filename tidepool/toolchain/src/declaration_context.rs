@@ -6603,6 +6603,9 @@ mod tests {
         let (view, lexical) = context
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
+        assert!(lexical
+            .iter()
+            .all(|node| node.owner != identity("fixture", "Hidden")));
         let typed_owners = |view: &ArtifactView| {
             let mut owners = view
                 .descriptors()
@@ -6613,6 +6616,11 @@ mod tests {
             owners
         };
         let expected_owners = vec![
+            (identity("fixture", "Hidden"), ArtifactKind::OriginalModule),
+            (
+                identity("fixture", "Hidden"),
+                ArtifactKind::CanonicalModuleInterface,
+            ),
             (
                 identity("fixture", "InstanceOwner"),
                 ArtifactKind::OriginalModule,
