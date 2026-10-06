@@ -9,7 +9,9 @@ module Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
-  , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
+  , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
+  , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
+  , prepareOriginalProductsWithCollector
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   ) where
@@ -17,7 +19,8 @@ module Tidepool.CompilerProducts
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Applicative ((<|>))
-import Control.Exception (throwIO)
+import Control.Exception (throwIO, evaluate)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar_, readMVar)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
@@ -38,6 +41,7 @@ import Numeric (readHex)
 import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
 import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
+import System.Mem.StableName (StableName, makeStableName)
 import System.Info qualified as SystemInfo
 import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
 import Tidepool.DependencyEvidence
@@ -91,11 +95,18 @@ import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 prepareCompilerProjectionContext
   :: PreparedPipelineResult -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
   -> Maybe JsonAuthority -> IO ProjectionContext
-prepareCompilerProjectionContext prepared retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
+prepareCompilerProjectionContext prepared retainedGenerations owner target auxiliaryRoots hostJsonAuthority =
+  prepareCompilerProjectionContextForEnvironment
+    (prHscEnv (pprPipelineResult prepared))
+    (compilationScope <$> preparedExactCompilation prepared)
+    retainedGenerations owner target auxiliaryRoots hostJsonAuthority
+
+prepareCompilerProjectionContextForEnvironment
+  :: HscEnv -> Maybe ExactScope -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
+  -> Maybe JsonAuthority -> IO ProjectionContext
+prepareCompilerProjectionContextForEnvironment environment exactScope retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
   timing <- readTimingEnabled
-  let environment = prHscEnv (pprPipelineResult prepared)
-      exactScope = compilationScope <$> preparedExactCompilation prepared
-      symbol occurrence = SymbolIdentity (T.pack (unitString (moduleUnit owner)))
+  let symbol occurrence = SymbolIdentity (T.pack (unitString (moduleUnit owner)))
         (T.pack (moduleNameString (moduleName owner))) "value" (T.pack occurrence) Nothing
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority environment
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority environment
@@ -121,6 +132,39 @@ prepareCompilerProjectionContext prepared retainedGenerations owner target auxil
     , projectionJsonAuthority = jsonAuthority
     , projectionTextUnit = textAuthority
     }
+
+-- Completed native tasks retain their raw projection under the exact compiler
+-- object and projection inputs. A differently prepared body or authority falls
+-- back to local projection; an owner name alone never supplies cached results.
+newtype OriginalProjectionCollector = OriginalProjectionCollector
+  (MVar (Map.Map Module (StableName PreparedModule, ProjectionContext, RawModuleProducts)))
+
+newOriginalProjectionCollector :: IO OriginalProjectionCollector
+newOriginalProjectionCollector = OriginalProjectionCollector <$> newMVar Map.empty
+
+-- The pipeline acquires authorities on its coordinator before tasks start.
+-- The returned observer runs inside each admitted native task, then publishes
+-- immutable results under a short lock; it does no live Session acquisition.
+observeOriginalProjection :: OriginalProjectionCollector
+  -> Map.Map SymbolIdentity Word64 -> [String] -> Maybe JsonAuthority
+  -> HscEnv -> Map.Map ModuleName ModIface -> Module -> Maybe ExactScope
+  -> IO (PreparedModule -> IO ())
+observeOriginalProjection (OriginalProjectionCollector completed) retained auxiliaryRoots json
+    environment interfaces owner exact = do
+  context <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
+    "__original_projection" auxiliaryRoots json
+  pure $ \prepared -> do
+    raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts environment interfaces context prepared)
+    identity <- evaluate prepared >>= makeStableName
+    let selectedContext = originalProjectionContext prepared context
+    modifyMVar_ completed (pure . Map.insert (pmModule prepared) (identity,selectedContext,raw))
+
+originalProjectionContext :: PreparedModule -> ProjectionContext -> ProjectionContext
+originalProjectionContext prepared context = context
+  { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
+  , projectionAuxiliaryRoots = Set.toAscList (Set.fromList (projectionAuxiliaryRoots context)
+      `Set.intersection` Set.fromList (Map.elems (preparedTopIdentityBindings [prepared])))
+  }
 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalProducts :: [ModuleProductEncoding]
@@ -235,15 +279,36 @@ prepareOriginalProductsWithExecutor
   :: CompilerExecutor -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
   -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
-prepareOriginalProductsWithExecutor executor env exact interfaces context external initial = do
+prepareOriginalProductsWithExecutor = prepareOriginalProductsUsingCollector Nothing
+
+prepareOriginalProductsWithCollector
+  :: OriginalProjectionCollector -> CompilerExecutor -> HscEnv -> Maybe ExactScope
+  -> Map.Map ModuleName ModIface -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
+  -> IO ([PreparedModule], PreparedProductContext)
+prepareOriginalProductsWithCollector collector = prepareOriginalProductsUsingCollector (Just collector)
+
+prepareOriginalProductsUsingCollector
+  :: Maybe OriginalProjectionCollector -> CompilerExecutor -> HscEnv -> Maybe ExactScope
+  -> Map.Map ModuleName ModIface -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
+  -> IO ([PreparedModule], PreparedProductContext)
+prepareOriginalProductsUsingCollector collector executor env exact interfaces context external initial = do
+  seeds <- case collector of
+    Nothing -> pure Map.empty
+    Just (OriginalProjectionCollector completed) -> readMVar completed
   modulesRef <- newIORef (Map.fromList [(pmModule prepared, prepared) | prepared <- initial])
   admittedRef <- newIORef Map.empty
   attemptedRef <- newIORef Set.empty
   rawRef <- newIORef Map.empty
   knownRef <- newIORef (Set.union external (Set.fromList
     (Map.elems (preparedTopIdentityBindings initial))))
-  let lower selected prepared = forceRawModuleProducts
-        (projectRawOriginalHomeModuleProducts env selected context prepared)
+  let lower selected prepared = do
+        identity <- evaluate prepared >>= makeStableName
+        case Map.lookup (pmModule prepared) seeds of
+          Just (capturedIdentity,capturedContext,raw)
+            | identity == capturedIdentity
+            , originalProjectionContext prepared context == capturedContext -> pure raw
+          _ -> forceRawModuleProducts
+            (projectRawOriginalHomeModuleProducts env selected context prepared)
       completed _ raw = do
         modifyIORef' rawRef (Map.insert (rawOriginalProductOwner raw) raw)
         modules <- readIORef modulesRef
