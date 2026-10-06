@@ -92,8 +92,8 @@ import Tidepool.FinalizedModuleArtifacts
   ( finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
-  , originalInterfaceBytes, generatedActivationPreviewRecipe)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
+  , originalInterfaceBytes, generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe)
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..), WorkerExecutionSource(..)
@@ -949,7 +949,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
               ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
     let templates = requestTurnTemplates args
         protectedTemplates = itemTurnTemplates <$> admitted
-        templateInterfaces = maybe [] itemTemplateInterfaces admitted
+        templateImports = maybe (CheckedTemplateImports [] []) itemTemplateImports admitted
         verifyProtectedTemplate path captured = forM_ protectedTemplates $ \expected ->
           unless (any (\(kind,file) -> file == path
               && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
@@ -1053,7 +1053,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           purpose <- case protectedTemplates of
             Nothing -> pure basePurpose
             Just _ -> do
-              recipe <- generatedScaffoldRecipe templateInterfaces protected spliced modulePath modName >>= either fail pure
+              recipe <- generatedScaffoldRecipe templateImports protected spliced modulePath modName >>= either fail pure
               pure (GeneratedScaffoldCompile recipe basePurpose)
           compiler (PreparedProducts (requestModuleCandidates args))
             (Map.keysSet (requestRetainedGenerations args)) purpose
@@ -1213,9 +1213,15 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
       -- Preserve the latest plan for failure diagnostics without encoding and
       -- writing a provisional result before every successful check attempt.
       writeIORef provisionalOutput (Just (out, plan, rendered))
+      let baseCheckPurpose = GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose
+      compilePurpose <- case admittedScope >>= scopeCheckedCell of
+        Nothing -> pure baseCheckPurpose
+        Just admission -> do
+          recipe <- generatedCheckingTemplateRecipe (checkedTemplateImports admission)
+            template rendered modulePath moduleName' >>= either fail pure
+          pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
       compiler checkedSelection Set.empty
-        (withSourceImportIntents (cellPlanPrologue effective)
-          (GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose))
+        (withSourceImportIntents (cellPlanPrologue effective) compilePurpose)
         scope modulePath (requestIncludes args) (requestBuildProductsDir args))
         (maybe initialPlan (\(plan,_,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
@@ -1351,11 +1357,19 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                 rendered <- either fail pure (renderCellCheckSource checkingTemplate plan)
                 let globalSource = globalProgramKeys offset (length (cellPlanItems plan)) rendered
                 writeFile checkPath globalSource
+                let baseCheckPurpose =
+                      GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
+                        (CheckedItemCompile [] (programOriginal state) prefix)
+                compilePurpose <- case scopeCheckedCell scope of
+                  Nothing -> pure baseCheckPurpose
+                  Just checked -> do
+                    moduleName' <- maybe (fail "compiled cell check has no module owner") pure (extractModuleName globalSource)
+                    recipe <- generatedCheckingTemplateRecipe (checkedTemplateImports checked)
+                      template globalSource checkPath moduleName' >>= either fail pure
+                    pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
                 scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs))
                   (Map.keysSet (requestRetainedGenerations localArgs))
-                  (withSourceImportIntents (cellPlanPrologue plan)
-                    (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
-                      (CheckedItemCompile [] (programOriginal state) prefix)))
+                  (withSourceImportIntents (cellPlanPrologue plan) compilePurpose)
                   (Just (scopeFromWorkerRequest localArgs)) checkPath (requestIncludes args) (requestBuildProductsDir args)
           (checked,compiled) <- timePhase timing "cell_program_segment_check" (checkCellInstances check withPrefix)
           signatures <- cellCheckedBinderSignatures compiled
@@ -1391,7 +1405,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) signatures
             (fmap (\value -> case expressionPlanLift value of ExpressionPure -> "pure"; ExpressionEffectful -> "effectful") expression)
             generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
-            prefix (scopeValues scope) []
+            prefix (scopeValues scope) (checkedTemplateImports admission)
           localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
             , requestInjectVals = map exactModule (scopeValues scope)
             , requestRetainedGenerations = programRetained state }

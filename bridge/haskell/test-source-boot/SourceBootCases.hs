@@ -164,11 +164,11 @@ import Tidepool.DependencyEvidence
   , DependencyQualifier(..), renderDependencyQualifier
   , selectedFreshHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
-  ( CheckedTemplateInterface(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
-  , generatedActivationPreviewRecipe )
+  , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
@@ -626,7 +626,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
       value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G7" valuePath (digest valueBytes) requirements
   let admitted = base
         { scopePurpose = ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing AuthoredCellCheck) [work,"lib",effects] }
+            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) [work,"lib",effects] }
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
   isolated <- readCheckedValueImportAuthority environment [value]
   unless (case isolated of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
@@ -717,7 +717,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
     fail "canonical current-source fixture unexpectedly retained native execution authority"
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       check compile purpose = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
@@ -891,7 +891,7 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       parsedPurpose flags source = do
         plan <- analyzeCellWithFlags flags "" source >>= either (fail . show) pure
@@ -1068,7 +1068,7 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   flags <- defaultParserDynFlags
   parsed <- analyzeCellWithFlags flags "" "import MetadataQuotedTarget\n(7 :: Int)"
@@ -1152,7 +1152,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
     "import CanonicalUnusedSource (Answer)\n(1 :: Answer)" >>= either (fail . show) pure
   let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
       admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       check compile = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
@@ -1270,7 +1270,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   hiddenPath <- writeGenuineCandidateNativeScope [] (originalOwners original) work originalFixture
   let hidden = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
   protected <- readFile target
-  recipe <- generatedScaffoldRecipe [] protected protected target "Expr" >>= either fail pure
+  recipe <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
       supportOwner = ("main","Tidepool.Internal.Resume")
       requireHiddenSource label = requireOriginalSourceRejection label (ExecutionSourceUnavailable supportOwner)
@@ -1299,7 +1299,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       Right () -> fail "scaffold general-purpose import acquired hidden source authority"
     let extra = unlines (take 5 (lines protected) ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
     writeFile target extra
-    duplicate <- generatedScaffoldRecipe [] protected extra target "Expr" >>= either fail pure
+    duplicate <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected extra target "Expr" >>= either fail pure
     requireHiddenSource "additional authored hidden import" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile duplicate GeneralCompile)
         (Just hidden) target [] Nothing
@@ -1311,12 +1311,12 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     copyFile "test-source-boot/fixtures/GeneratedScaffoldHelper.hs" (work </> "GeneratedScaffoldHelper.hs")
     let helperTarget = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHelper"] ++ drop 5 (lines protected))
     writeFile target helperTarget
-    helperRecipe <- generatedScaffoldRecipe [] protected helperTarget target "Expr" >>= either fail pure
+    helperRecipe <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected helperTarget target "Expr" >>= either fail pure
     requireHiddenSource "fresh helper importing hidden support" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile helperRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected)
-    lineRecipe <- generatedScaffoldRecipe [] protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
+    lineRecipe <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
     requireSourceSelectionInput "logical LINE import location differs from protected occurrence"
       "generated scaffold import occurrence differs from its protected recipe" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile lineRecipe GeneralCompile)
@@ -1336,17 +1336,42 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         withTemplate = unlines (take 5 (lines protected)
           ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
     writeFile target withTemplate
-    capturedTemplate <- generatedScaffoldRecipe [templateInterface] withTemplate withTemplate target "Expr"
+    let templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
+        templateImports = CheckedTemplateImports templateRoot [templateInterface]
+    capturedTemplate <- generatedScaffoldRecipe templateImports withTemplate withTemplate target "Expr"
       >>= either fail pure
     let capturedPurpose = GeneratedScaffoldCompile capturedTemplate (CheckedItemCompile [] Nothing [])
     interfaceOnly <- compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult interfaceOnly))) $
       fail "initial template interface changed the native result"
+    let supportOwner = ("main","TemplateSupport")
+        rootOwner = ("main","TemplateRoot")
+        supportInterface = CheckedTemplateInterface (fst supportOwner) (snd supportOwner) (replicate 64 '1') []
+        rootInterface = CheckedTemplateInterface (fst rootOwner) (snd rootOwner) (replicate 64 '2') [supportOwner]
+        rootGraph = [rootInterface,supportInterface]
+        rootTemplate = unlines (take 5 (lines protected) ++ ["import TemplateRoot"] ++ drop 5 (lines protected))
+        leakedSupport = unlines (take 5 (lines protected)
+          ++ ["import TemplateRoot","import TemplateSupport"] ++ drop 5 (lines protected))
+    writeFile target rootTemplate
+    _ <- generatedScaffoldRecipe (CheckedTemplateImports [rootOwner] rootGraph)
+      rootTemplate rootTemplate target "Expr" >>= either fail pure
+    writeFile target leakedSupport
+    supportAsRoot <- generatedScaffoldRecipe (CheckedTemplateImports [rootOwner] rootGraph)
+      leakedSupport leakedSupport target "Expr"
+    case supportAsRoot of
+      Right _ -> pure ()
+      Left message -> fail ("support-only current import was rejected before current-source selection: " ++ message)
+    let checkPath = work </> "CellCheck.hs"
+        checkingTemplate = "module CellCheck where\ncell = 1\n"
+    writeFile checkPath checkingTemplate
+    _ <- generatedCheckingTemplateRecipe (CheckedTemplateImports [] [])
+      checkingTemplate checkingTemplate checkPath "CellCheck" >>= either fail pure
+    writeFile target withTemplate
     requireSourceSelectionInput "template interface cannot replace paired native owner"
       "generated scaffold lacks one paired original native owner" $
       compile (PreparedProducts Nothing) Set.empty
         (ExactScopeCompile capturedPurpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
-    wrongSeal <- generatedScaffoldRecipe [templateInterface {templateInterfaceSha256=replicate 64 'f'}]
+    wrongSeal <- generatedScaffoldRecipe (CheckedTemplateImports templateRoot [templateInterface {templateInterfaceSha256=replicate 64 'f'}])
       withTemplate withTemplate target "Expr" >>= either fail pure
     requireSourceSelectionInput "changed initial template interface seal"
       "checked template graph interface seal changed" $
@@ -1355,20 +1380,20 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let secondImport = unlines (take 5 (lines withTemplate)
           ++ ["import qualified Tidepool.Internal.Resume as AuthoredSecond"] ++ drop 5 (lines withTemplate))
     writeFile target secondImport
-    secondRecipe <- generatedScaffoldRecipe [templateInterface] withTemplate secondImport target "Expr"
+    secondRecipe <- generatedScaffoldRecipe templateImports withTemplate secondImport target "Expr"
     unless (case secondRecipe of Left _ -> True; Right _ -> False) $
       fail "authored second import acquired protected template authority"
     let qualifiedTemplate = unlines (take 5 (lines protected)
           ++ ["import qualified Tidepool.Internal.Resume as CapturedTemplate"] ++ drop 5 (lines protected))
     writeFile target qualifiedTemplate
-    qualifiedRecipe <- generatedScaffoldRecipe [templateInterface] qualifiedTemplate qualifiedTemplate target "Expr"
+    qualifiedRecipe <- generatedScaffoldRecipe templateImports qualifiedTemplate qualifiedTemplate target "Expr"
       >>= either fail pure
     qualifiedResult <- compile (PreparedProducts Nothing) Set.empty
       (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing [])) (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult qualifiedResult))) $
       fail "qualified protected template changed original execution"
     let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedTemplate))
-    aliasRecipe <- generatedScaffoldRecipe [templateInterface] qualifiedTemplate changedAlias target "Expr"
+    aliasRecipe <- generatedScaffoldRecipe templateImports qualifiedTemplate changedAlias target "Expr"
     unless (case aliasRecipe of Left _ -> True; Right _ -> False) $
       fail "changed qualified import alias retained protected template authority"
     writeFile target (withTemplate ++ "\ntamperedTemplateTarget = 0 :: Int\n")
@@ -1380,7 +1405,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       let rendered = T.unpack (T.replace "module Expr where" (T.pack ("module " ++ name ++ " where")) (T.pack protected))
           generatedPath = work </> (name ++ ".hs")
       writeFile generatedPath rendered
-      generated <- generatedScaffoldRecipe [] protected rendered generatedPath name >>= either fail pure
+      generated <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected rendered generatedPath name >>= either fail pure
       let wrapped = ExactScopeCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) admittedScope
       checked <- compile (PreparedProducts Nothing) Set.empty wrapped (Just hidden) generatedPath [] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $
@@ -2278,7 +2303,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck) [work]}
+        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) [work]}
       scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     positive <- compile CheckedEnvironment Set.empty GeneralCompile Nothing ordinaryTarget [work] Nothing
@@ -4585,7 +4610,7 @@ exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
         (sessionHiPath work valueOwner) (digest intBytes) []
       admitted = base {scopePurpose=ExactCellPurpose
         (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0') (replicate 64 '0')
-          [] ["Tidepool.Session.Val.G2"] [] [value] Nothing AuthoredCellCheck) [work]}
+          [] ["Tidepool.Session.Val.G2"] [] [value] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) [work]}
   withResidentPipelineSelected [work] $ \compile -> do
     let native session = compile (PreparedProducts Nothing) Set.empty GeneralCompile
           (Just session) target [work] Nothing

@@ -147,7 +147,9 @@ signatures supply the exact type authority.
 receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
 and rejected explicitly. Original live inputs use a compiler-issued thin value
 interface; execution uses admitted item recipes. Exact scope purposes are
-`cell-check3`, `cell-program2` and `checked-item4`. Expressions reserve one
+`cell-check4`, `cell-program3` and `checked-item5`. Direct template roots are
+separate from their closed support graph; support rows do not authorize new
+template imports. Expressions reserve one
 capture generation and observation name, with no auxiliary display recipe or
 presentation admission. Authored display operations and activation previews
 retain their separate compiler and runtime paths.

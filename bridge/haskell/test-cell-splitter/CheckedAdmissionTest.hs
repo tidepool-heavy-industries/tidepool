@@ -22,6 +22,7 @@ import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CheckedRecipe (writeCheckedItemReceipt, checkedRecipeSource)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import Tidepool.ExactHydration (CheckedTemplateImports(..))
 import Tidepool.ExactScope
 import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), workerArgv, workerRequestFromArgv)
 import Tidepool.ExtractUtil (shaHex)
@@ -36,11 +37,11 @@ checkedAdmissionChecks = withScratch $ \root -> do
       fields = [BindGen 7, InjectVal "Val7", TurnTemplate "bind" first,
         TurnTemplate "expr" second, TurnTemplate "bind" first]
       cell = CheckedCellAdmission "cell-admission" (digest source) (digest wrapper)
-        inventory ["Val7"] [] [] Nothing AuthoredCellCheck
+        inventory ["Val7"] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck
       item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
         (digest source) "bind" ["café"] inventory ["Val7"]
         [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
-        Nothing 7 "prefix" [] Nothing Nothing [] [] []
+        Nothing 7 "prefix" [] Nothing Nothing [] [] (CheckedTemplateImports [] [])
       verdict = StmtBinders KBind ["café"] []
       retainedInput = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "input" Nothing
   BS.writeFile first "first"

@@ -51,7 +51,7 @@ import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(..), withFileObservations, observeFile)
 import System.IO.Error (isAlreadyExistsError)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateInterface(..))
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateInterface(..), CheckedTemplateImports(..))
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -460,6 +460,7 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedInjectedModules :: [String]
   , checkedReservedModules :: [String]
   , checkedValueInterfaces :: [ExactIfaceArtifact]
+  , checkedTemplateImports :: CheckedTemplateImports
   , checkedPlannedCell :: Maybe PlannedCellAdmission
   , checkedCellPurpose :: CheckedCellPurpose
   } deriving (Eq, Show)
@@ -498,7 +499,7 @@ data CheckedItemAdmission = CheckedItemAdmission
   , itemPlannedDeclaration :: Maybe ((String,String),String)
   , itemCompletedValues :: [CompletedValueImport]
   , itemValueInterfaces :: [ExactIfaceArtifact]
-  , itemTemplateInterfaces :: [CheckedTemplateInterface]
+  , itemTemplateImports :: CheckedTemplateImports
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -1354,22 +1355,22 @@ decodeScope = do
         validateInterfaces injected values
         paths <- includePaths
         pure (ExactInspectionPurpose values paths)
-      "cell-check3" -> do
-        unless (authCount == 9) (fail "invalid cell-check admission")
+      "cell-check4" -> do
+        unless (authCount == 10) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> pure Nothing
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> checkedTemplateImports <*> pure Nothing
           <*> pure AuthoredCellCheck
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
         paths <- includePaths
         pure (ExactCellPurpose admission paths)
-      "cell-program2" -> do
-        unless (authCount == 14) (fail "invalid compiled cell admission")
+      "cell-program3" -> do
+        unless (authCount == 15) (fail "invalid compiled cell admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> checkedTemplateImports
           <*> (Just <$> (PlannedCellAdmission <$> digestField <*> absolute <*> digestField <*> digestField
             <*> bounded 10000 (do
               slotFields <- decodeListLen
@@ -1384,7 +1385,7 @@ decodeScope = do
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (ExactCellPurpose admission paths)
-      "checked-item4" -> do
+      "checked-item5" -> do
         unless (authCount == 20) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
@@ -1418,7 +1419,7 @@ decodeScope = do
         planned <- plannedDeclaration
         values <- completedValues
         valueInputs <- valueInterfaces
-        templateInputs <- templateInterfaces
+        templateInputs <- checkedTemplateImports
         validateInterfaces injected valueInputs
         validateValues valueImports values
         paths <- includePaths
@@ -1464,6 +1465,17 @@ decodeScope = do
         unless (all (`Set.member` ownerSet) (templateInterfaceImports input))
           (fail "checked template edge leaves its captured graph")
       pure inputs
+    checkedTemplateImports = do
+      array 2
+      roots <- bounded 4096 (array 2 >> (,) <$> nonempty <*> nonempty)
+      graph <- templateInterfaces
+      let rootSet = Set.fromList roots
+          graphOwners = Set.fromList
+            [(templateInterfaceUnit input,templateInterfaceModule input) | input <- graph]
+      unique "checked template direct roots" roots
+      unless (rootSet `Set.isSubsetOf` graphOwners)
+        (fail "checked template direct root leaves its sealed graph")
+      pure (CheckedTemplateImports roots graph)
     plannedDeclaration = do
       token <- peekTokenType
       if token == TypeNull then decodeNull >> pure Nothing else do

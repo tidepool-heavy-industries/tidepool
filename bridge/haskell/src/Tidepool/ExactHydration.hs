@@ -21,7 +21,9 @@ module Tidepool.ExactHydration
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , CheckedTemplateInterface(..)
-  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
+  , CheckedTemplateImports(..)
+  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, generatedCheckingTemplateRecipe
+  , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
   , installExactLexicalGraphWithScaffold
@@ -221,20 +223,39 @@ data CheckedTemplateInterface = CheckedTemplateInterface
   , templateInterfaceImports :: [(String,String)]
   } deriving (Eq, Show)
 
+-- Direct roots authorize imports written in a protected template. The graph
+-- supplies only the sealed transitive support needed by those roots.
+data CheckedTemplateImports = CheckedTemplateImports
+  { checkedTemplateRoots :: [(String,String)]
+  , checkedTemplateGraph :: [CheckedTemplateInterface]
+  } deriving (Eq, Show)
+
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
-  [(CheckedTemplateInterface,Int,Maybe String)] [CheckedTemplateInterface] GeneratedScaffoldInstanceScope
+  [(CheckedTemplateInterface,Int,Maybe String)] [CheckedTemplateInterface]
+  GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose
   deriving (Eq)
 
 data GeneratedScaffoldInstanceScope = ImportedTemplateInstances | OriginalPreviewInstances CheckedTemplateInterface
   deriving (Eq)
 
-instance Show GeneratedScaffoldRecipe where
-  show (GeneratedScaffoldRecipe path name _ line interfaces _ _) =
-    "GeneratedScaffoldRecipe " ++ show (path,name,line,interfaces)
+data GeneratedScaffoldPurpose = NativeTurnTemplate | CheckingCellTemplate
+  deriving (Eq, Show)
 
-generatedScaffoldRecipe :: [CheckedTemplateInterface] -> String -> String -> FilePath -> String
+instance Show GeneratedScaffoldRecipe where
+  show (GeneratedScaffoldRecipe path name _ line interfaces _ _ role) =
+    "GeneratedScaffoldRecipe " ++ show (path,name,line,interfaces,role)
+
+generatedScaffoldRecipe :: CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
+generatedScaffoldRecipe = generatedScaffoldRecipeFor NativeTurnTemplate
+
+generatedCheckingTemplateRecipe :: CheckedTemplateImports -> String -> String -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedCheckingTemplateRecipe = generatedScaffoldRecipeFor CheckingCellTemplate
+
+generatedScaffoldRecipeFor :: GeneratedScaffoldPurpose -> CheckedTemplateImports -> String -> String -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedScaffoldRecipeFor purpose (CheckedTemplateImports roots interfaces) protectedTemplate rendered path name = do
   canonical <- canonicalizePath path
   let compilerImport = "import qualified Tidepool.Internal.Resume as TidepoolResume"
       occurrences text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == compilerImport]
@@ -253,7 +274,13 @@ generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
           ([(_,shape)],[(line,renderedShape)]) | shape == renderedShape -> Right (Just (interface,line,shape))
           _ -> Left "checked template interface import is missing, duplicated, or changed"
   pure $ do
-    selected <- catMaybes <$> mapM templateOccurrence interfaces
+    let rootSet = Set.fromList roots
+        graphOwners = [(templateInterfaceUnit interface,templateInterfaceModule interface) | interface <- interfaces]
+    unless (length roots == Set.size rootSet && all (`elem` graphOwners) roots)
+      (Left "checked template roots are duplicated or leave their sealed graph")
+    selected <- catMaybes <$> mapM templateOccurrence
+      [interface | interface <- interfaces
+      , (templateInterfaceUnit interface,templateInterfaceModule interface) `Set.member` rootSet]
     let key interface = (templateInterfaceUnit interface,templateInterfaceModule interface)
         graph = Map.fromList [(key interface,interface) | interface <- interfaces]
         reachable seen [] = Right (Map.elems seen)
@@ -264,9 +291,10 @@ generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
               reachable (Map.insert owner interface seen) (templateInterfaceImports interface ++ rest)
     unless (Map.size graph == length interfaces) (Left "duplicate checked template interface")
     closure <- reachable Map.empty [key interface | (interface,_,_) <- selected]
-    case (occurrences protectedTemplate,occurrences rendered) of
-      ([_],[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances)
-      _ -> Left "generated scaffold import is missing or duplicated"
+    case (purpose,occurrences protectedTemplate,occurrences rendered) of
+      (NativeTurnTemplate,[_],[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
+      (CheckingCellTemplate,[],[]) -> Right (GeneratedScaffoldRecipe canonical name bytes 0 selected closure ImportedTemplateInstances purpose)
+      _ -> Left "generated scaffold support import differs from its template role"
 
 -- Only the activation admission supplies this complete original instance
 -- graph. Its synthetic edges affect GHC's instance traversal without exposing
@@ -274,10 +302,12 @@ generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
 generatedActivationPreviewRecipe :: [CheckedTemplateInterface] -> (String,String) -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedActivationPreviewRecipe interfaces originalOwner protectedTemplate rendered path name = do
-  recipe <- generatedScaffoldRecipe interfaces protectedTemplate rendered path name
+  let roots = [(templateInterfaceUnit interface,templateInterfaceModule interface) | interface <- interfaces]
+      imports = CheckedTemplateImports roots interfaces
+  recipe <- generatedScaffoldRecipe imports protectedTemplate rendered path name
   pure $ do
     original <- recipe
-    let GeneratedScaffoldRecipe canonical target bytes line selected _ _ = original
+    let GeneratedScaffoldRecipe canonical target bytes line selected _ _ role = original
         owners = Set.fromList [(templateInterfaceUnit interface,templateInterfaceModule interface)
           | interface <- interfaces]
     unless (all (all (`Set.member` owners) . templateInterfaceImports) interfaces)
@@ -286,10 +316,10 @@ generatedActivationPreviewRecipe interfaces originalOwner protectedTemplate rend
         , (templateInterfaceUnit interface,templateInterfaceModule interface) == originalOwner] of
       [interface] -> Right interface
       _ -> Left "activation preview lacks its sealed original target"
-    pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget))
+    pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget) role)
 
 captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
-captureGeneratedScaffoldTarget (GeneratedScaffoldRecipe path _ expected _ _ _ _) requested = do
+captureGeneratedScaffoldTarget (GeneratedScaffoldRecipe path _ expected _ _ _ _ _) requested = do
   canonical <- canonicalizePath requested
   actual <- BS.readFile canonical
   pure $ if canonical == path && actual == expected then Right expected
@@ -326,7 +356,7 @@ readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionS
   -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
 readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners planned
-    recipe@(GeneratedScaffoldRecipe path target expected line templateInterfaces templateGraph instanceScope) parsed sourceGraph env = do
+    recipe@(GeneratedScaffoldRecipe path target expected line templateInterfaces templateGraph instanceScope purpose) parsed sourceGraph env = do
   checked <- captureGeneratedScaffoldTarget recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
@@ -346,7 +376,9 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
     let support = mkModule (stringToUnit (unitString (homeUnitId (hsc_home_unit env))))
           (mkModuleName "Tidepool.Internal.Resume")
         key = (unitString (moduleUnit support),moduleNameString (moduleName support))
-    resume <- if any (\case ModuleNode _ loaded -> ms_mod loaded == support; _ -> False)
+    resume <- if purpose == CheckingCellTemplate
+      then Right noGeneratedScaffoldImports
+      else if any (\case ModuleNode _ loaded -> ms_mod loaded == support; _ -> False)
         (mgModSummaries' sourceGraph)
       then Right noGeneratedScaffoldImports
       else do
