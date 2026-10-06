@@ -891,6 +891,14 @@ struct RetainedArtifactRow {
     interface_evidence: Value,
 }
 
+/// Native generation demands belong to executable requests. A pure preview
+/// observes only its mounted input and must not inherit unrelated heap inputs.
+#[derive(Clone, Copy)]
+pub(crate) enum RetainedGenerationPolicy {
+    PreserveCertifiedDemand,
+    PureActivationPreview,
+}
+
 #[derive(Clone)]
 pub(crate) struct ExactCompilationRequest {
     pub(crate) context: Arc<ExactDeclarationContext>,
@@ -1426,10 +1434,12 @@ impl ExactCompilationRequest {
     pub(crate) fn apply_to(
         &self,
         command: &mut tidepool_extract_cmd::ExtractCmd,
+        retained_policy: RetainedGenerationPolicy,
     ) -> Result<(), CompileError> {
         let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
             .map_err(failure)?;
-        let retained = certified_retained_generation_tags(
+        let retained = retained_generation_inputs(
+            retained_policy,
             request.retained_generations(),
             self.groups.iter().flat_map(PendingCertifiedGroup::imports),
         )?;
@@ -2417,6 +2427,26 @@ fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, CompileError> {
         return Err(failure("exact artifact exceeds byte bound"));
     }
     Ok(bytes)
+}
+
+fn retained_generation_inputs<'a>(
+    policy: RetainedGenerationPolicy,
+    retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
+    imports: impl Iterator<Item = &'a crate::certified_products::PendingImportOwner>,
+) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
+    match policy {
+        RetainedGenerationPolicy::PreserveCertifiedDemand => {
+            certified_retained_generation_tags(retained, imports)
+        }
+        RetainedGenerationPolicy::PureActivationPreview => {
+            if !retained.is_empty() {
+                return Err(failure(
+                    "pure activation preview cannot carry retained heap generations",
+                ));
+            }
+            Ok(BTreeMap::new())
+        }
+    }
 }
 
 fn certified_retained_generation_tags<'a>(
@@ -4300,6 +4330,43 @@ mod tests {
         let mut duplicate = node.clone();
         duplicate.imports.push(duplicate.imports[0].clone());
         assert!(compose_lexical_nodes([&duplicate]).is_err());
+    }
+
+    #[test]
+    fn pure_preview_refuses_explicit_heap_inputs_and_omits_unrelated_certified_tags() {
+        let retained = crate::certified_products::PendingImportOwner::Retained {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "main".into(),
+                module: "Tidepool.Session.Val.G7".into(),
+                namespace: "value".into(),
+                occurrence: "groupStore".into(),
+                record_parent: None,
+            },
+            generation: 7,
+        };
+        let native = retained_generation_inputs(
+            RetainedGenerationPolicy::PreserveCertifiedDemand,
+            BTreeMap::new(),
+            [&retained].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(native.len(), 1, "ordinary native demand is preserved");
+        assert!(retained_generation_inputs(
+            RetainedGenerationPolicy::PureActivationPreview,
+            BTreeMap::new(),
+            [&retained].into_iter(),
+        )
+        .unwrap()
+        .is_empty());
+        assert!(
+            retained_generation_inputs(
+                RetainedGenerationPolicy::PureActivationPreview,
+                native,
+                [&retained].into_iter(),
+            )
+            .is_err(),
+            "an explicitly requested heap input cannot be silently removed"
+        );
     }
 
     #[test]

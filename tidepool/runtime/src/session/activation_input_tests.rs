@@ -1703,6 +1703,155 @@ fn ordinary_home_display_fixture(session: SessionId) -> InputFixture {
 }
 
 #[test]
+fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_explicit_heap_inputs()
+{
+    use tidepool_toolchain::activation_preview::{
+        ActivationPreviewSelection, ActivationPreviewSpecification,
+    };
+    use tidepool_toolchain::artifacts::ModuleCandidateOffer;
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+
+    let fixture = ordinary_home_display_fixture(SessionId(1741));
+    let mut resident = fixture.fresh();
+    publish_fixture_declaration(
+        &mut resident,
+        &fixture.recipe,
+        include_str!("fixtures/activation-preview-retained-prefix.hs"),
+        1,
+    );
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let (bound, producer, _) = compile_checked_binding(
+        &mut resident,
+        &fixture.recipe,
+        include_str!("fixtures/activation-preview-retained-request.hs"),
+        execution.clone(),
+    );
+    assert!(bound.is_empty());
+    let retained = producer
+        .certification
+        .as_ref()
+        .unwrap()
+        .groups
+        .iter()
+        .flat_map(|group| group.imports())
+        .find_map(|import| match import {
+            PendingImportOwner::Retained {
+                identity,
+                generation,
+            } if identity.occurrence == "previewPrefix" => Some((identity.clone(), *generation)),
+            _ => None,
+        })
+        .expect("actual request producer must retain its earlier live prefix binding");
+    let producer_fixture = InputFixture {
+        root: tempfile::tempdir().unwrap(),
+        session: fixture.session,
+        recipe: fixture.recipe.clone(),
+        producer,
+    };
+    let reservation = producer_fixture.start(&mut resident);
+    let (_, hole) = producer_fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let input = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
+    let mounted = mount_original(&mut resident, owner, interface);
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let template = turn::assemble_activation_preview_module(512);
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("ActivationPreviewTemplate.hs");
+    std::fs::write(&source, &template).unwrap();
+    let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+    command
+        .input(&source)
+        .turn()
+        .activation_preview()
+        .turn_out(scratch.path().join("turn.cbor"))
+        .output_dir(scratch.path())
+        .includes(&fixture.recipe.include)
+        .session_root(admission.view().session_root())
+        .session_incarnation(admission.view().session().0.to_string())
+        .bind_gen(admission.generation().0);
+    let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
+        command.bind().unwrap(),
+    )
+    .unwrap();
+    let ActivationPreviewSelection::Ready(offer) = ModuleCandidateOffer::select_activation_preview(
+        &endpoint,
+        &fixture.recipe.include,
+        scratch.path(),
+        admission.exact_context().clone(),
+        admission.input_interface().clone(),
+        ActivationPreviewSpecification {
+            admission_digest: admission.digest(),
+            generation: admission.generation().0,
+            budget: 512,
+            template_source: template.clone(),
+        },
+    )
+    .unwrap() else {
+        panic!("original display environment must be available");
+    };
+    if let Some(root) = offer.checked_value_root() {
+        command.session_root(root);
+    }
+    command.retained_generation(
+        tidepool_extract_cmd::SymbolIdentity {
+            unit: retained.0.unit,
+            module: retained.0.module,
+            namespace: retained.0.namespace,
+            occurrence: retained.0.occurrence,
+            record_parent: retained.0.record_parent,
+        },
+        retained.1,
+    );
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    assert!(
+        offer.apply_to(&mut command).is_err(),
+        "genuine preview offer refuses an explicit retained heap input"
+    );
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
+    drop(offer);
+    drop(endpoint);
+    let handles = resident.value_handle_count();
+    let visibility = resident.public_visibility_snapshot_in(ScopeId::ROOT);
+    let compiled =
+        match turn::compile_activation_preview(admission, &template, 512, &fixture.recipe.include)
+            .expect("pure preview must not transport unrelated original prefix generations")
+        {
+            turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+            turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
+                panic!("actual custom display remains available")
+            }
+        };
+    let ResidentOutcome::Completed { result, .. } =
+        resident.run_activation_preview(compiled).unwrap()
+    else {
+        panic!("pure display must complete");
+    };
+    assert_eq!(
+        result.to_json(),
+        serde_json::json!(["original task display 42", false])
+    );
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(
+        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        visibility
+    );
+}
+
+#[test]
 fn activation_preview_executes_original_ordinary_home_custom_display_after_readers_drop() {
     use tidepool_toolchain::activation_preview::ActivationPreviewDisposition;
     let fixture = ordinary_home_display_fixture(SessionId(1739));

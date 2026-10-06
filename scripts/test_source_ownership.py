@@ -68,6 +68,8 @@ TEST_ONLY_SOURCES = {
         'exomonad/actor/src/resident_workbench/display_callback_immediate.hs',
     }),
     'tidepool-runtime': frozenset({
+        'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',
+        'tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs',
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/fixtures/checked-cell-template.hs',

@@ -2028,7 +2028,13 @@ impl ModuleCandidateOffer {
     /// tags. Runtime live-value admission remains a separate authority.
     pub fn apply_to(&self, command: &mut ExtractCmd) -> Result<(), CompileError> {
         if let Some(exact) = &self.exact {
-            exact.apply_to(command)?;
+            let retained_policy = match &self.checked {
+                Some(NativeCheckedOffer::ActivationPreview(_)) => {
+                    crate::declaration_context::RetainedGenerationPolicy::PureActivationPreview
+                }
+                _ => crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,
+            };
+            exact.apply_to(command, retained_policy)?;
         }
         if let Some(manifest) = self.manifest_path() {
             command.module_candidates(manifest);
@@ -3276,7 +3282,10 @@ fn compile_invocation_inner(
                     .map(|path| path.to_path_buf())
                     .collect::<Vec<_>>(),
             );
-        request.apply_to(&mut cmd)?;
+        request.apply_to(
+            &mut cmd,
+            crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,
+        )?;
         Some(request)
     } else {
         None
