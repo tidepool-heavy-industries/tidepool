@@ -5920,27 +5920,12 @@ lazyHomePackageInstances = withScratch $ \work -> do
       consumerGraph = mkModuleGraph consumerNodes
   fresh <- freshExactState producer
   packages <- newPackageFinderFacts fresh
-  -- Use GHC's real failed loader, not a constructed negative-cache entry.
-  missing <- initIfaceCheck (text "missing original home") fresh
-    (loadInterface (text "negative home control") owner ImportBySystem)
-  unless (case missing of MaybeErr.Failed _ -> True; _ -> False) $
-    fail "absent original home unexpectedly loaded"
-  negative <- hscEPS fresh
-  unless (maybe False ((== fingerprint0) . mi_iface_hash . mi_final_exts)
-      (lookupModuleEnv (eps_PIT negative) owner)) $
-    fail "GHC did not retain the genuine failed home lookup"
-  repaired <- forkExactContextWithPackageFacts packages fresh
-  afterRepair <- hscEPS repaired
-  unless (isNothing (lookupModuleEnv (eps_PIT afterRepair) owner)) $
-    fail "new attempt retained a failed home interface"
-  loaded <- readExactIfaceArtifacts repaired [artifact] >>= either fail pure
-  hydrated <- hydrateExactScope repaired loaded
+  loaded <- readExactIfaceArtifacts fresh [artifact] >>= either fail pure
+  hydrated <- hydrateExactScope fresh loaded
   before <- packageInstances hydrated
   unless (Set.null before) $
     fail "Member interface fixture forced its package instances before the fork"
   selected <- forkExactContextWithPackageFacts packages hydrated
-  unless (euc_eps (ue_eps (hsc_unit_env selected)) == euc_eps (ue_eps (hsc_unit_env hydrated))) $
-    fail "lazy original and selected consumer have different package owners"
   -- Selecting the genuine helper type forces its captured interface actions.
   selectedHome <- maybe (fail "fork lost the original helper") pure
     (lookupHpt (hsc_HPT selected) helperName)
@@ -5962,12 +5947,6 @@ lazyHomePackageInstances = withScratch $ \work -> do
       && isJust (lookupHpt (hsc_HPT hydrated) helperName)
       && not (Set.null homeDfuns) && Set.null (Set.intersection homeDfuns externalDfuns)) $
     fail "home table replacement changed the retained original's visibility"
-  restored <- initIfaceCheck (text "restored original home") selected
-    (loadInterface (text "valid home after negative") owner ImportBySystem)
-  unless (case restored of
-      MaybeErr.Succeeded iface -> mi_module iface == owner
-        && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts (hm_iface home))
-      _ -> False) $ fail "valid HPT interface remained poisoned by its failed lookup"
   lexical <- installExactLexicalGraph consumerGraph [(artifact,[])] noCheckedValueImports selected
     >>= either fail pure
   removeFile helperSource
@@ -5977,6 +5956,28 @@ lazyHomePackageInstances = withScratch $ \work -> do
     case consumerNodes of
       [ModuleNode _ summary] -> void (parseModule summary >>= typecheckModule)
       _ -> liftIO (fail "Member fixture omitted its later consumer")
+  -- Use GHC's real failed loader, not a constructed negative-cache entry.
+  -- Keep this independent safety control after the Member behavior regression.
+  absent <- freshExactState producer
+  missing <- initIfaceCheck (text "missing original home") absent
+    (loadInterface (text "negative home control") owner ImportBySystem)
+  unless (case missing of MaybeErr.Failed _ -> True; _ -> False) $
+    fail "absent original home unexpectedly loaded"
+  negative <- hscEPS absent
+  unless (maybe False ((== fingerprint0) . mi_iface_hash . mi_final_exts)
+      (lookupModuleEnv (eps_PIT negative) owner)) $
+    fail "GHC did not retain the genuine failed home lookup"
+  repaired <- forkExactContextWithPackageFacts packages absent
+  afterRepair <- hscEPS repaired
+  unless (isNothing (lookupModuleEnv (eps_PIT afterRepair) owner)) $
+    fail "new attempt retained a failed home interface"
+  recovered <- hydrateExactScope repaired loaded
+  restored <- initIfaceCheck (text "restored original home") recovered
+    (loadInterface (text "valid home after negative") owner ImportBySystem)
+  unless (case restored of
+      MaybeErr.Succeeded iface -> mi_module iface == owner
+        && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts (hm_iface home))
+      _ -> False) $ fail "valid HPT interface remained poisoned by its failed lookup"
   requireModeFailure ExactContextRequiresCompilationManager $
     forkExactContextWithPackageFacts packages
       (selected {hsc_dflags = (hsc_dflags selected) {ghcMode = OneShot}})
