@@ -500,7 +500,9 @@ where
                         && admitted
                             .source_imports()
                             .inherited_scope()
-                            .map_err(ResidentKernelBehavior::<H, O>::failure)?
+                            .map_err(|error| {
+                                ResidentKernelBehavior::<H, O>::failure(error.to_string())
+                            })?
                             .is_some()
                     {
                         if session != context.placement.session
@@ -550,7 +552,7 @@ where
                                 )
                             }
                             Err(error) => {
-                                return Err(ResidentKernelBehavior::<H, O>::failure(error));
+                                return Err(ResidentKernelBehavior::<H, O>::workbench_failure(error));
                             }
                         },
                     };
@@ -590,7 +592,7 @@ where
                 .retire_checkpoint_scopes(session, scopes)
                 .await
             {
-                return Err(ResidentKernelBehavior::<H, O>::failure(error));
+                return Err(ResidentKernelBehavior::<H, O>::workbench_failure(error));
             }
             pending.unused_scopes.retain(|(owner, _)| *owner != session);
         }
