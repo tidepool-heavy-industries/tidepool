@@ -295,17 +295,19 @@ fn materialization_bytes(entries: &[Arc<ArtifactEntry>]) -> u64 {
 
 /// Execution recipes are selected by original artifact custody. A digest can
 /// check a selected graph but cannot discover a source owner or grant visibility.
+#[cfg(test)]
 fn execution_scope_value(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
 ) -> Result<Option<Value>, CompileError> {
-    execution_scope_value_with_graph_paths(entries, root, &mut BTreeMap::new())
+    execution_scope_value_with_graph_paths(entries, root, &mut BTreeMap::new(), &mut 0)
 }
 
 fn execution_scope_value_with_graph_paths(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
     graph_paths: &mut BTreeMap<[u8; 32], PathBuf>,
+    written_bytes: &mut u64,
 ) -> Result<Option<Value>, CompileError> {
     let originals = entries
         .iter()
@@ -400,6 +402,7 @@ fn execution_scope_value_with_graph_paths(
                             .create_new(true)
                             .open(&path)?;
                         file.write_all(graph.bytes())?;
+                        *written_bytes += graph.bytes().len() as u64;
                         graph_paths.insert(digest, path.clone());
                         path
                     };
@@ -3704,8 +3707,19 @@ impl ExactDeclarationContext {
             .flat_map(|parent| parent.graph_paths.iter())
             .map(|(digest, path)| (*digest, path.clone()))
             .collect::<BTreeMap<_, _>>();
-        let execution_scope =
-            execution_scope_value_with_graph_paths(&entries, root, &mut graph_paths)?;
+        let mut scope_written_bytes = 0;
+        let execution_scope = execution_scope_value_with_graph_paths(
+            &entries,
+            root,
+            &mut graph_paths,
+            &mut scope_written_bytes,
+        )?;
+        let work = validation.work();
+        tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_immutable_materialization",
+            retained_entries = inherited_rows.len(), new_entries = new_entries.len(),
+            recovery_read_bytes = work.read_bytes, recovery_written_bytes = work.written_bytes,
+            recovery_decoded_bytes = work.decoded_bytes, recovery_hash_bytes = work.hash_bytes,
+            scope_written_bytes, "completed private artifact ownership");
         Ok(RetainedArtifactMaterialization {
             _directory: directory,
             _parents: parents,
@@ -3738,6 +3752,7 @@ impl ExactDeclarationContext {
             ));
         }
         std::fs::create_dir_all(root)?;
+        let reused = self.inventory.retained_materialization().is_some();
         let retained = self.inventory.retain_materialization(|parents| {
             self.materialize_retained_artifacts(metadata, parents)
         })?;
@@ -3883,6 +3898,9 @@ impl ExactDeclarationContext {
             .create_new(true)
             .open(&manifest)?;
         output.write_all(&bytes)?;
+        tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_request_references",
+            reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
+            selected_artifacts = artifacts.len(), "exact request references retained immutable products");
         Ok(ExactCompilationRequest {
             context: self.clone(),
             manifest,

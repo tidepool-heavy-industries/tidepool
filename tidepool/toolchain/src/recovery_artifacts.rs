@@ -522,11 +522,14 @@ const CERTIFICATION_LIMIT: u64 = 4 * 1024 * 1024;
 // interfaces and execution graphs beyond the budget are read and verified again.
 const PACKAGE_VALIDATION_RETAIN_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Bytes actually consumed by SHA-256 in recovery materialization/verification.
+/// Payload work at the recovery materialization/verification boundary.
 /// This excludes descriptor-ID hashing and unrelated compiler input work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryArtifactWork {
     pub hash_bytes: u64,
+    pub read_bytes: u64,
+    pub written_bytes: u64,
+    pub decoded_bytes: u64,
 }
 
 pub(crate) fn with_artifact_work<T, E>(
@@ -536,6 +539,9 @@ pub(crate) fn with_artifact_work<T, E>(
     let mut validation = PackageInterfaceValidation::default();
     let result = operation(&mut validation);
     work.hash_bytes += validation.hash_bytes;
+    work.read_bytes += validation.read_bytes;
+    work.written_bytes += validation.written_bytes;
+    work.decoded_bytes += validation.decoded_bytes;
     result
 }
 
@@ -585,6 +591,9 @@ pub(crate) struct PackageInterfaceValidation {
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
     retained_bytes: usize,
     hash_bytes: u64,
+    read_bytes: u64,
+    written_bytes: u64,
+    decoded_bytes: u64,
     #[cfg(test)]
     pub(crate) home_witness_validations: usize,
     execution_sources:
@@ -597,6 +606,15 @@ struct CapturedPackageInterface {
 }
 
 impl PackageInterfaceValidation {
+    pub(crate) fn work(&self) -> RecoveryArtifactWork {
+        RecoveryArtifactWork {
+            hash_bytes: self.hash_bytes,
+            read_bytes: self.read_bytes,
+            written_bytes: self.written_bytes,
+            decoded_bytes: self.decoded_bytes,
+        }
+    }
+
     fn digest(&mut self, bytes: &[u8]) -> [u8; 32] {
         self.hash_bytes += bytes.len() as u64;
         Sha256::digest(bytes).into()
@@ -656,6 +674,7 @@ impl PackageInterfaceValidation {
                 path: path.to_path_buf(),
                 error,
             })?;
+        self.read_bytes += bytes.len() as u64;
         if bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
             return Err(RecoveryArtifactError::InvalidPackageImports(
                 path.to_path_buf(),
@@ -725,6 +744,7 @@ fn verify_execution_source(
         let mut bytes = Vec::new();
         file.take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1)
             .read_to_end(&mut bytes)?;
+        validation.read_bytes += bytes.len() as u64;
         if bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT {
             return Err(RecoveryArtifactError::InvalidReference);
         }
@@ -732,6 +752,7 @@ fn verify_execution_source(
         if digest != reference.sha256 {
             return Err(RecoveryArtifactError::DigestMismatch(path));
         }
+        validation.decoded_bytes += bytes.len() as u64;
         let graph =
             crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(bytes, digest)
                 .map_err(|_| RecoveryArtifactError::InvalidReference)?;
@@ -870,6 +891,7 @@ fn read_package_imports(
         ));
     }
     if let Some(expected) = expected_sha256 {
+        validation.read_bytes += bytes.len() as u64;
         if &validation.digest(&bytes) != expected {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
@@ -949,6 +971,7 @@ pub(crate) fn validate_package_import_evidence_with_validation(
     use ciborium::value::Value;
 
     let invalid = || RecoveryArtifactError::InvalidPackageImports(sidecar_path.to_path_buf());
+    validation.decoded_bytes += bytes.len() as u64;
     let witness: Value = ciborium::de::from_reader(bytes).map_err(|_| invalid())?;
     let mut canonical = Vec::new();
     ciborium::ser::into_writer(&witness, &mut canonical).map_err(|_| invalid())?;
@@ -1167,6 +1190,7 @@ fn materialize_copy_with_validation(
     match mode {
         MaterializationMode::Durable => {
             tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
+            validation.written_bytes += bytes.len() as u64;
         }
         MaterializationMode::Scratch => {
             let mut temporary = tempfile::NamedTempFile::new_in(
@@ -1174,6 +1198,7 @@ fn materialize_copy_with_validation(
                     .ok_or(RecoveryArtifactError::InvalidReference)?,
             )?;
             temporary.write_all(bytes)?;
+            validation.written_bytes += bytes.len() as u64;
             match temporary.persist_noclobber(path) {
                 Ok(_) => {}
                 Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -1245,6 +1270,7 @@ fn verify_existing_materialization(
         if read == 0 {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
+        validation.read_bytes += read as u64;
         validation.hash_bytes += read as u64;
         hasher.update(&buffer[..read]);
         remaining -= read as u64;
@@ -1518,6 +1544,7 @@ pub(crate) fn capture_module_payload(
             path: path.clone(),
             error,
         })?;
+    validation.read_bytes += bytes.len() as u64;
     if bytes.len() as u64 > limit
         || size.is_some_and(|size| size != bytes.len() as u64)
         || validation.digest(&bytes) != *expected
@@ -2774,6 +2801,9 @@ mod tests {
             work.hash_bytes, 3,
             "new file verification hashes exactly the stored bytes"
         );
+        assert_eq!(work.read_bytes, 3);
+        assert_eq!(work.written_bytes, 3);
+        assert_eq!(work.decoded_bytes, 0);
         with_artifact_work(&mut work, |validation| {
             materialize_copy_with_validation(
                 &path,
@@ -2785,6 +2815,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(work.hash_bytes, 6, "existing bytes are freshly verified");
+        assert_eq!(work.read_bytes, 6);
+        assert_eq!(
+            work.written_bytes, 3,
+            "existing materialization performs no payload write"
+        );
         let refused = with_artifact_work(&mut work, |validation| {
             materialize_copy_with_validation(
                 &path,
@@ -2814,6 +2849,8 @@ mod tests {
         })
         .is_err());
         assert_eq!(work.hash_bytes, 9, "length refusal precedes hashing");
+        assert_eq!(work.read_bytes, 9);
+        assert_eq!(work.written_bytes, 3);
         fs::write(&path, bytes).unwrap();
         let mut cached = PackageInterfaceValidation::default();
         cached.verify(&path, &digest).unwrap();
@@ -2821,6 +2858,10 @@ mod tests {
         assert_eq!(
             cached.hash_bytes, 3,
             "existing within-stage capture avoids a second hash"
+        );
+        assert_eq!(
+            cached.read_bytes, 3,
+            "stage capture also avoids another payload read"
         );
         let mut uncached = PackageInterfaceValidation::default();
         uncached.verify_with_budget(&path, &digest, 0).unwrap();
