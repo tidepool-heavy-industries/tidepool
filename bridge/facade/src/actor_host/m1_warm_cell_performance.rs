@@ -10,6 +10,7 @@ use tracing_subscriber::prelude::*;
 
 const WARM_UP: usize = 10;
 const MEASURED: usize = 50;
+const MAX_PENDING_PREPARATION: usize = 128;
 
 #[derive(Clone, serde::Deserialize)]
 pub(super) struct Workload {
@@ -372,10 +373,107 @@ impl ResponsesTransport for WarmTransport {
     }
 }
 
+fn validate_daemon_identity(row: &Value, epoch: &str, daemon_pid: &Value) {
+    assert_eq!(
+        row["daemon_epoch"], epoch,
+        "daemon rotated during production campaign"
+    );
+    assert_eq!(&row["daemon_pid"], daemon_pid);
+}
+
+fn compiler_workload(row: &Value) -> &str {
+    let workload = row["compiler_workload"]
+        .as_str()
+        .unwrap_or_else(|| panic!("compiler request trace lacks typed compiler_workload: {row}"));
+    assert!(
+        matches!(workload, "foreground" | "preparation"),
+        "unknown compiler workload invalidates attribution: {row}"
+    );
+    workload
+}
+
+fn grant_and_slot(row: &Value) -> (u64, u64, u64) {
+    let jobs = row["compiler_jobs"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("compiler trace lacks a numeric compiler_jobs grant: {row}"));
+    let capabilities = row["compiler_capabilities"].as_u64().unwrap_or_else(|| {
+        panic!("compiler trace lacks a numeric compiler_capabilities grant: {row}")
+    });
+    let slot = row["worker"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("compiler trace lacks a numeric worker slot: {row}"));
+    assert!(
+        jobs > 0 && capabilities > 0,
+        "compiler request requires a positive grant: {row}"
+    );
+    (jobs, capabilities, slot)
+}
+
+fn validate_terminal(row: &Value) {
+    assert_eq!(row["transport"], "daemon");
+    assert_eq!(row["exit_code"], 0);
+    assert!(row["worker_pid"].as_u64().is_some_and(|pid| pid > 0));
+    grant_and_slot(row);
+}
+
+fn validate_request_pair(started: &Value, finished: &Value) {
+    assert_eq!(
+        CompilerInvocation::from_trace(started),
+        CompilerInvocation::from_trace(finished)
+    );
+    assert_eq!(compiler_workload(started), compiler_workload(finished));
+    assert_eq!(started["daemon_epoch"], finished["daemon_epoch"]);
+    assert_eq!(started["daemon_pid"], finished["daemon_pid"]);
+    assert_eq!(started["worker_pid"], finished["worker_pid"]);
+    assert_eq!(grant_and_slot(started), grant_and_slot(finished));
+}
+
+fn preparation_opt_in_value(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(value) => {
+            assert_eq!(
+                value, "1",
+                "preparation attribution opt-in must be exactly `1`"
+            );
+            true
+        }
+    }
+}
+
+fn preparation_opt_in() -> bool {
+    let value = std::env::var("TIDEPOOL_PERFORMANCE_ALLOW_PREPARATION").ok();
+    preparation_opt_in_value(value.as_deref())
+}
+
 // The cursor reads each trace byte once, retaining an unfinished trailing line.
 pub(super) struct DaemonTrace {
     input: BufReader<std::fs::File>,
     partial: String,
+    completion_timeout: Duration,
+    preparation_pending: HashMap<CompilerInvocation, PendingPreparation>,
+    preparation_seen: HashSet<CompilerInvocation>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPreparation {
+    started: Value,
+    start_index: usize,
+}
+
+#[derive(Default)]
+pub(super) struct CompilerCompletion {
+    pub(super) foreground: Vec<Value>,
+    pub(super) preparation_background: Vec<PreparationBackground>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct PreparationBackground {
+    pub(super) invocation: CompilerInvocation,
+    pub(super) start_index: usize,
+    pub(super) terminal_index: usize,
+    pub(super) started: Value,
+    pub(super) finished: Value,
 }
 
 impl DaemonTrace {
@@ -383,6 +481,9 @@ impl DaemonTrace {
         Self {
             input: BufReader::new(std::fs::File::open(path).expect("retained owned-daemon JSONL")),
             partial: String::new(),
+            completion_timeout: Duration::from_secs(30),
+            preparation_pending: HashMap::new(),
+            preparation_seen: HashSet::new(),
         }
     }
 
@@ -412,6 +513,11 @@ impl DaemonTrace {
                     fields.extend(object.clone());
                 }
             }
+            // Preserve the existing logger's time evidence for cross-request
+            // service overlap. Missing timestamps remain absent, never inferred.
+            if let Some(timestamp) = event.get("timestamp") {
+                fields.insert("trace_timestamp".into(), timestamp.clone());
+            }
             rows.push(Value::Object(fields));
         }
         rows
@@ -424,43 +530,236 @@ impl DaemonTrace {
         daemon_pid: &Value,
         warm: bool,
     ) -> Vec<Value> {
+        self.completion_with_preparation(expected, epoch, daemon_pid, warm, None, false)
+            .await
+            .foreground
+    }
+
+    async fn completion_with_preparation(
+        &mut self,
+        expected: &BTreeSet<CompilerInvocation>,
+        epoch: &str,
+        daemon_pid: &Value,
+        warm: bool,
+        sample_index: Option<usize>,
+        allow_preparation_background: bool,
+    ) -> CompilerCompletion {
         assert!(
             !expected.is_empty(),
             "actual displayed cell must submit compiler work"
         );
-        let mut finished = HashMap::new();
-        tokio::time::timeout(Duration::from_secs(30), async {
+        let mut foreground_started = HashMap::<CompilerInvocation, Value>::new();
+        let mut foreground = HashMap::new();
+        let mut preparation_background = Vec::new();
+        tokio::time::timeout(self.completion_timeout, async {
             loop {
                 for row in self.read() {
                     let message = row["message"].as_str().unwrap_or_default();
+                    assert_ne!(message, "compiler request abandoned by client", "compiler request abandoned during the measured campaign: {row}");
+                    assert_ne!(message, "compiler request failed", "compiler request failed during the measured campaign: {row}");
                     if matches!(message, "compiler request started" | "compiler request finished") {
                         let correlation = CompilerInvocation::from_trace(&row);
-                        assert!(expected.contains(&correlation), "foreign/concurrent compiler request invalidates exclusive attribution: {row}");
-                        assert_eq!(row["daemon_epoch"], epoch, "daemon rotated during production campaign");
-                        assert_eq!(&row["daemon_pid"], daemon_pid);
-                        if message == "compiler request finished" {
-                            assert_eq!(row["transport"], "daemon");
-                            assert_eq!(row["exit_code"], 0);
-                            assert!(row["worker_pid"].as_u64().is_some_and(|pid| pid > 0));
-                            if warm {
-                                assert!(row["served"].as_u64().is_some_and(|served| served >= 1), "cold request cannot count as warm: {row}");
-                                assert_eq!(row["followed_rotation"], false, "rotated request cannot count as warm");
+                        validate_daemon_identity(&row, epoch, daemon_pid);
+                        let workload = compiler_workload(&row);
+                        let expected_foreground = expected.contains(&correlation);
+                        if expected_foreground {
+                            assert_eq!(workload, "foreground", "an authored cell request must retain foreground classification: {row}");
+                        } else {
+                            assert!(allow_preparation_background && workload == "preparation", "foreign/concurrent compiler request invalidates exclusive attribution: {row}");
+                        }
+                        if message == "compiler request started" {
+                            grant_and_slot(&row);
+                            if expected_foreground {
+                                assert!(foreground_started.insert(correlation, row).is_none(), "duplicate foreground compiler start");
+                            } else {
+                                let start_index = sample_index.expect("preparation attribution requires a measured sample");
+                                assert!(self.preparation_pending.len() < MAX_PENDING_PREPARATION, "bounded preparation background observations");
+                                assert!(self.preparation_seen.len() < MAX_PENDING_PREPARATION, "bounded total preparation observations");
+                                assert!(self.preparation_seen.insert(correlation.clone()), "physical preparation request started more than once");
+                                assert!(self.preparation_pending.insert(correlation, PendingPreparation {
+                                    started: row,
+                                    start_index,
+                                }).is_none(), "duplicate preparation compiler start");
                             }
-                            assert!(finished.insert(correlation, row).is_none(), "duplicate request completion");
+                        } else {
+                            validate_terminal(&row);
+                            if expected_foreground {
+                                let start = foreground_started.remove(&correlation)
+                                    .unwrap_or_else(|| panic!("foreground completion has no exact start: {row}"));
+                                validate_request_pair(&start, &row);
+                                if warm {
+                                    assert!(row["served"].as_u64().is_some_and(|served| served >= 1), "cold foreground request cannot count as warm: {row}");
+                                    assert_eq!(row["followed_rotation"], false, "rotated foreground request cannot count as warm");
+                                }
+                                assert!(foreground.insert(correlation, row).is_none(), "duplicate foreground completion");
+                            } else {
+                                let pending = self.preparation_pending.remove(&correlation)
+                                    .unwrap_or_else(|| panic!("preparation completion has no exact start: {row}"));
+                                validate_request_pair(&pending.started, &row);
+                                preparation_background.push(PreparationBackground {
+                                    invocation: correlation,
+                                    start_index: pending.start_index,
+                                    terminal_index: sample_index.expect("preparation terminal requires a measured sample"),
+                                    started: pending.started,
+                                    finished: row,
+                                });
+                            }
                         }
                     }
                 }
-                if finished.len() == expected.len() { break; }
+                if foreground.len() == expected.len() && foreground_started.is_empty() { break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("actual compiler trace must flush every consumed request");
-        finished.into_values().collect()
+        for (correlation, row) in foreground_started {
+            panic!(
+                "foreground compiler request has no terminal evidence for {correlation:?}: {row}"
+            );
+        }
+        assert!(
+            expected
+                .iter()
+                .all(|request| foreground.contains_key(request)),
+            "foreground compiler request is missing terminal evidence"
+        );
+        CompilerCompletion {
+            foreground: foreground.into_values().collect(),
+            preparation_background,
+        }
+    }
+
+    async fn startup_drain(&mut self, epoch: &str, daemon_pid: &Value) {
+        let mut started = HashMap::<CompilerInvocation, Value>::new();
+        let quiet = Duration::from_millis(50);
+        let deadline = tokio::time::Instant::now() + self.completion_timeout;
+        let mut quiet_since = tokio::time::Instant::now();
+        loop {
+            let rows = self.read();
+            if !rows.is_empty() {
+                quiet_since = tokio::time::Instant::now();
+            }
+            for row in rows {
+                let message = row["message"].as_str().unwrap_or_default();
+                assert_ne!(
+                    message, "compiler request abandoned by client",
+                    "fixed startup compiler request was abandoned: {row}"
+                );
+                assert_ne!(
+                    message, "compiler request failed",
+                    "fixed startup compiler request failed: {row}"
+                );
+                if !matches!(
+                    message,
+                    "compiler request started" | "compiler request finished"
+                ) {
+                    continue;
+                }
+                let invocation = CompilerInvocation::from_trace(&row);
+                validate_daemon_identity(&row, epoch, daemon_pid);
+                compiler_workload(&row);
+                if message == "compiler request started" {
+                    grant_and_slot(&row);
+                    assert!(
+                        started.insert(invocation, row).is_none(),
+                        "duplicate fixed startup compiler request start"
+                    );
+                } else {
+                    validate_terminal(&row);
+                    let start = started.remove(&invocation).unwrap_or_else(|| {
+                        panic!("fixed startup compiler completion has no exact start: {row}")
+                    });
+                    validate_request_pair(&start, &row);
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fixed startup compiler work did not settle: {started:?}"
+            );
+            if started.is_empty()
+                && tokio::time::Instant::now().duration_since(quiet_since) >= quiet
+            {
+                assert!(
+                    self.partial.is_empty(),
+                    "fixed startup trace ended with a partial row"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn final_preparation_drain(
+        &mut self,
+        epoch: &str,
+        daemon_pid: &Value,
+        final_sample: usize,
+    ) -> Vec<PreparationBackground> {
+        let mut settled = Vec::new();
+        let deadline = tokio::time::Instant::now() + self.completion_timeout;
+        while !self.preparation_pending.is_empty() {
+            for row in self.read() {
+                let message = row["message"].as_str().unwrap_or_default();
+                assert_ne!(
+                    message, "compiler request abandoned by client",
+                    "preparation background request was abandoned: {row}"
+                );
+                assert_ne!(
+                    message, "compiler request failed",
+                    "preparation background request failed: {row}"
+                );
+                assert_ne!(
+                    message, "compiler request started",
+                    "new compiler work started after the final sample: {row}"
+                );
+                if message == "compiler request finished" {
+                    let invocation = CompilerInvocation::from_trace(&row);
+                    validate_daemon_identity(&row, epoch, daemon_pid);
+                    assert_eq!(compiler_workload(&row), "preparation");
+                    validate_terminal(&row);
+                    let pending =
+                        self.preparation_pending
+                            .remove(&invocation)
+                            .unwrap_or_else(|| {
+                                panic!("final preparation terminal has no retained start: {row}")
+                            });
+                    validate_request_pair(&pending.started, &row);
+                    settled.push(PreparationBackground {
+                        invocation,
+                        start_index: pending.start_index,
+                        terminal_index: final_sample,
+                        started: pending.started,
+                        finished: row,
+                    });
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "preparation background did not reach terminal evidence: {:?}",
+                self.preparation_pending.keys()
+            );
+            if !self.preparation_pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        for row in self.read() {
+            assert!(
+                !is_compiler_request_event(&row),
+                "compiler activity appeared after the final preparation drain: {row}"
+            );
+        }
+        assert!(
+            self.partial.is_empty(),
+            "final compiler trace ended with a partial row"
+        );
+        settled.sort_by_key(|background| background.invocation.clone());
+        settled
     }
 }
 
 #[tokio::test]
 #[ignore = "requires exclusive owned matched daemon and retained TIDEPOOL_PERFORMANCE_COMPILER_TRACE"]
 async fn production_engine_store_warm_display_cells_50() {
+    let allow_preparation = preparation_opt_in();
     let trace_path = std::path::PathBuf::from(
         std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE")
             .expect("explicit actual daemon trace"),
@@ -472,8 +771,14 @@ async fn production_engine_store_warm_display_cells_50() {
     );
     let endpoint = tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap();
     let mut trace = DaemonTrace::open(&trace_path);
-    let startups = trace
-        .read()
+    let startup_rows = trace.read();
+    assert!(
+        startup_rows
+            .iter()
+            .all(|row| !is_compiler_request_event(row)),
+        "compiler activity before fixture warm-up is stale and invalidates the campaign"
+    );
+    let startups = startup_rows
         .into_iter()
         .filter(|row| row["message"] == "compiler daemon ready")
         .collect::<Vec<_>>();
@@ -553,12 +858,8 @@ async fn production_engine_store_warm_display_cells_50() {
     let fixture = HostedTestRuntime::start(&settings, &provider)
         .await
         .unwrap();
-    // Startup belongs to warm-up evidence, never a measured cell's attribution.
-    trace.read();
-    assert!(
-        trace.partial.is_empty(),
-        "startup trace must flush before submission"
-    );
+    // Fixed startup fixture compilations are validated and drained outside the campaign.
+    trace.startup_drain(&epoch, &daemon_pid).await;
     let api = format!("http://{}/api", fixture.address);
     let origin = format!("https://{}", fixture.address);
     let client = reqwest::Client::new();
@@ -641,12 +942,19 @@ async fn production_engine_store_warm_display_cells_50() {
             "one exact invocation per compiler request"
         );
         let measured = sequence >= WARM_UP;
-        let requests = trace
-            .completion(&expected, &epoch, &daemon_pid, measured)
+        let index = sequence.saturating_sub(WARM_UP);
+        let completion = trace
+            .completion_with_preparation(
+                &expected,
+                &epoch,
+                &daemon_pid,
+                measured,
+                measured.then_some(index),
+                measured && allow_preparation,
+            )
             .await;
         if measured {
-            let index = sequence - WARM_UP;
-            for request in requests {
+            for request in completion.foreground {
                 workers
                     .entry(request["worker_pid"].as_u64().unwrap())
                     .or_default()
@@ -663,6 +971,34 @@ async fn production_engine_store_warm_display_cells_50() {
                     "trace_cursor":trace.input.stream_position().unwrap(),
                 })
             );
+            for background in completion.preparation_background {
+                eprintln!(
+                    "resident-performance-background {}",
+                    json!({
+                        "schema":1,
+                        "runner_id":"warm_cell",
+                        "kind":"compiler_preparation_background",
+                        "index":background.start_index,
+                        "terminal_index":background.terminal_index,
+                        "daemon_epoch":epoch,
+                        "daemon_pid":daemon_pid,
+                        "physical_identity":background.invocation,
+                        "started":background.started,
+                        "terminal":background.finished,
+                        "service_evidence":{
+                            "worker_pid":background.finished["worker_pid"],
+                            "worker_slot":background.finished["worker"],
+                            "compiler_jobs":background.finished["compiler_jobs"],
+                            "compiler_capabilities":background.finished["compiler_capabilities"],
+                            "served":background.finished["served"],
+                            "elapsed_ms":background.finished["elapsed_ms"],
+                            "exit_code":background.finished["exit_code"],
+                            "followed_rotation":background.finished["followed_rotation"]
+                        },
+                        "attribution":"separate-from-foreground-cell"
+                    })
+                );
+            }
         } else {
             eprintln!(
                 "resident-performance-warmup {}",
@@ -680,15 +1016,49 @@ async fn production_engine_store_warm_display_cells_50() {
         .stop()
         .await
         .expect("production host and owned resident actors cleanly stop");
-    for row in trace.read() {
-        assert!(
-            !matches!(
-                row["message"].as_str(),
-                Some("compiler request started" | "compiler request finished")
-            ),
-            "unattributed compiler work after the final sample invalidates the campaign: {row}"
+    for background in trace
+        .final_preparation_drain(&epoch, &daemon_pid, MEASURED - 1)
+        .await
+    {
+        eprintln!(
+            "resident-performance-background {}",
+            json!({
+                "schema":1,
+                "runner_id":"warm_cell",
+                "kind":"compiler_preparation_background",
+                "index":background.start_index,
+                "terminal_index":background.terminal_index,
+                "daemon_epoch":epoch,
+                "daemon_pid":daemon_pid,
+                "physical_identity":background.invocation,
+                "started":background.started,
+                "terminal":background.finished,
+                "service_evidence":{
+                    "worker_pid":background.finished["worker_pid"],
+                    "worker_slot":background.finished["worker"],
+                    "compiler_jobs":background.finished["compiler_jobs"],
+                    "compiler_capabilities":background.finished["compiler_capabilities"],
+                    "served":background.finished["served"],
+                    "elapsed_ms":background.finished["elapsed_ms"],
+                    "exit_code":background.finished["exit_code"],
+                    "followed_rotation":background.finished["followed_rotation"]
+                },
+                "attribution":"separate-from-foreground-cell"
+            })
         );
     }
+}
+
+fn is_compiler_request_event(row: &Value) -> bool {
+    matches!(
+        row["message"].as_str(),
+        Some(
+            "compiler request started"
+                | "compiler request finished"
+                | "compiler request abandoned by client"
+                | "compiler request failed"
+        )
+    )
 }
 
 #[path = "m1_compiler_attribution_tests.rs"]
