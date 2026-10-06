@@ -208,7 +208,7 @@ impl FinalizationEnvelope {
             }
             for (artifact, limit) in [
                 (&module.interface, PACKAGE_INTERFACE_LIMIT),
-                (&module.package_imports, RECEIPT_LIMIT as u64),
+                (&module.package_imports, COMPILER_RECEIPT_BYTES_LIMIT as u64),
             ]
             .into_iter()
             .chain(module.core.iter().map(|core| (core, CORE_LIMIT)))
@@ -252,7 +252,7 @@ impl FinalizationEnvelope {
             }
             for (artifact, limit) in [
                 (&value.interface, PACKAGE_INTERFACE_LIMIT),
-                (&value.package_imports, RECEIPT_LIMIT as u64),
+                (&value.package_imports, COMPILER_RECEIPT_BYTES_LIMIT as u64),
             ] {
                 if artifact.bytes == 0
                     || artifact.bytes > limit
@@ -400,7 +400,12 @@ pub(super) fn decode_envelope_with_operation(
         }
         previous = Some(key.clone());
         let interface = descriptor(&row[3], &row[4], &row[5], PACKAGE_INTERFACE_LIMIT)?;
-        let package_imports = descriptor(&row[6], &row[7], &row[8], RECEIPT_LIMIT as u64)?;
+        let package_imports = descriptor(
+            &row[6],
+            &row[7],
+            &row[8],
+            COMPILER_RECEIPT_BYTES_LIMIT as u64,
+        )?;
         let core = match &row[9] {
             Value::Null => None,
             value => {
@@ -454,7 +459,12 @@ pub(super) fn decode_envelope_with_operation(
         }
         previous = Some(key.clone());
         let interface = descriptor(&row[2], &row[3], &row[4], PACKAGE_INTERFACE_LIMIT)?;
-        let package_imports = descriptor(&row[5], &row[6], &row[7], RECEIPT_LIMIT as u64)?;
+        let package_imports = descriptor(
+            &row[5],
+            &row[6],
+            &row[7],
+            COMPILER_RECEIPT_BYTES_LIMIT as u64,
+        )?;
         operation.charge(
             usize::try_from(interface.bytes)
                 .map_err(|_| CertificationError::Receipt("value payload budget"))?,
@@ -791,7 +801,7 @@ pub(super) fn issue_value_interfaces(
         let packages = capture(
             root,
             &value.package_imports,
-            RECEIPT_LIMIT as u64,
+            COMPILER_RECEIPT_BYTES_LIMIT as u64,
             validation,
         )?;
         let interface = crate::recovery_artifacts::CertifiedJoinedInterface::from_certification_with_validation(
@@ -882,7 +892,7 @@ pub(super) fn issue_interfaces(
         let package_imports = capture(
             root,
             &module.package_imports,
-            RECEIPT_LIMIT as u64,
+            COMPILER_RECEIPT_BYTES_LIMIT as u64,
             validation,
         )?;
         crate::recovery_artifacts::validate_package_imports_with_validation(
