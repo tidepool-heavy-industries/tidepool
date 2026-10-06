@@ -1933,7 +1933,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         reuseEvent stage decision reason summary = do
           disabled <- readIORef disabledSourceOwnersRef
           let actualReason
-                | decision == ReuseWork, ms_mod summary `Set.member` disabled = CacheDisabled
+                | decision == ReuseWork
+                , stage `elem` [SourceFrontend,FinalizedCore,Interface]
+                , ms_mod summary `Set.member` disabled = CacheDisabled
                 | otherwise = reason
           emitReuse timing reuseContext stage decision actualReason (reuseOwner summary) 1 Nothing
     let executionGrant = executionGrantFor selection
