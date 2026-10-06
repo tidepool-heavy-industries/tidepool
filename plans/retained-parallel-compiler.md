@@ -40,6 +40,24 @@ Attempt-local targets, hooks, diagnostics, pending finalizations and failed
 partial additions do not become unconditional shared facts. Bind retained
 unfolding inputs to stable contexts rather than a repeatedly overwritten cell.
 
+Whole-request equality is not the reuse boundary. A worker with the same pinned
+producer and base compiler configuration retains versions by full module identity
+and validated source, dependency, retained-binding and executable inputs. Adding
+an unrelated binding or changing the selected view must not evict unchanged
+support. Import validity includes instance, family and orphan visibility, not
+only positively referenced term names. Each request activates its selected
+environment without turning the retained version inventory into lexical scope.
+Store completed versions once; do not append a full context snapshot or aggregate
+every historical interface cache on each request.
+
+Retain completed lowering and exact-original recovery alongside interfaces.
+Native, checked and presentation purposes must not repeatedly lower or recover
+the same valid owner. Growing recovery demand prepares only newly demanded work.
+Interpreter retention distinguishes an inactive compatible module from a replaced
+executable version; bytecode containing remote pointers belongs to its interpreter
+epoch. Rotation preserves pure compiler products but cannot reuse stale remote
+pointers. Reissue such bytecode from retained finalized Core when required.
+
 Retain compatible interpreter/linkable state. Classify actual BCO and foreign
 object components; unload/relink changed supported home code and rotate only
 for incompatible object replacement or unconfirmed recovery. No interpreter per
@@ -62,6 +80,21 @@ and duplicate decoding. Validate shared source evidence once per acquisition or
 publication stage, keeping pre/post mutable-source observations distinct.
 Admission validates immutable products once; activation selects retained owners.
 Do not add another registry, replay authority, fixture format or compiler.
+
+Transfer a newly produced original once. If the receiving artifact owner already
+retains that exact executable version, use the existing exact/candidate reference
+path rather than emitting its complete payload again. Keep reusable products
+distinct from a view's selected lexical or type-only authority. Preserve encoded
+immutable group bytes and return the writer's bytes directly to certification;
+do not immediately reread the file it just wrote. Descendant materializations own
+only their additions and retain parents, with iterative shared-ancestor traversal.
+
+Delete the obsolete implicit expression-display compilation. The current checker
+does not request automatic rendering, but the planned-cell path still compiles an
+opaque placeholder after every expression. Remove its unused programs, receipts,
+extra generations and proof fields together. Native expression capture and effects
+still execute once; explicit authored `display` and `expand` remain ordinary
+effects, with their existing pagination and continuation semantics.
 
 ### Dependency execution
 
