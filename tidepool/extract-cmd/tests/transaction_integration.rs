@@ -102,9 +102,89 @@ fn direct_transaction_executes_multiple_compiler_requests() {
         }
         diagnostics
     }));
-    assert!(diagnostics[0].contains("tidepool-memo-miss module=Dep"));
-    assert!(!diagnostics[1].contains("tidepool-memo-miss module=Dep"));
-    assert!(diagnostics[2].contains("tidepool-memo-miss module=Dep"));
+    // Loading can capture finalized Core before the later memo lookup, so
+    // its prose miss message does not establish whether any work was reused.
+    // Assert the actual dependency decisions and work, with source versions
+    // linking the cold, unchanged and changed requests in this transaction.
+    let reuse_events: Vec<Vec<serde_json::Value>> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            diagnostic
+                .lines()
+                .filter_map(|line| line.trim_start().strip_prefix("tidepool-reuse "))
+                .map(|json| {
+                    serde_json::from_str::<serde_json::Value>(json)
+                        .expect("compiler reuse observations must be valid JSON")
+                })
+                .collect()
+        })
+        .collect();
+    let mut source_versions = Vec::new();
+    let mut cycles = std::collections::BTreeSet::new();
+    for (index, observed) in reuse_events.iter().enumerate() {
+        let events: Vec<_> = observed
+            .iter()
+            .filter(|event| event["module"] == "Dep")
+            .collect();
+        let decisions: Vec<_> = events
+            .iter()
+            .filter(|event| event["stage"] == "source_frontend" && event["decision"] != "work")
+            .collect();
+        assert_eq!(decisions.len(), 1, "request {index}: {events:?}");
+        let decision = decisions[0];
+        assert_eq!(decision["schema"], 1);
+        assert_eq!(decision["unit"], "main");
+        assert_eq!(decision["purpose"], "general");
+        assert_eq!(decision["items"], 1);
+        assert_eq!(decision["version_kind"], "source_fingerprint");
+        let cycle = decision["cycle"].as_u64().expect("actual compiler cycle");
+        assert!(cycles.insert(cycle), "requests must have distinct cycles");
+        assert!(events.iter().all(|event| event["cycle"] == cycle));
+        let version = decision["version"]
+            .as_str()
+            .filter(|version| !version.is_empty())
+            .expect("dependency source fingerprint");
+        source_versions.push(version.to_owned());
+        let warm = index == 1;
+        assert_eq!(decision["decision"], if warm { "hit" } else { "miss" });
+        assert_eq!(
+            decision["reason"],
+            match index {
+                0 => "absent",
+                1 => "matched",
+                2 => "changed_source",
+                _ => unreachable!(),
+            }
+        );
+        for stage in ["source_frontend", "finalized_core"] {
+            let complete = observed
+                .iter()
+                .filter(|event| {
+                    event["cycle"] == cycle
+                        && event["stage"] == stage
+                        && event["decision"] == "complete"
+                        && event["reason"] == "stage_complete"
+                        && event["module"].is_null()
+                        && event["items"] == 0
+                })
+                .count();
+            assert_eq!(complete, 1, "request {index}, missing {stage} completion");
+            let work = events
+                .iter()
+                .filter(|event| event["stage"] == stage && event["decision"] == "work")
+                .count();
+            assert_eq!(work == 0, warm, "request {index}, {stage}: {events:?}");
+        }
+        if warm {
+            assert!(events.iter().any(|event| {
+                event["stage"] == "finalized_core"
+                    && event["decision"] == "hit"
+                    && event["reason"] == "matched"
+            }));
+        }
+    }
+    assert_eq!(source_versions[0], source_versions[1]);
+    assert_ne!(source_versions[1], source_versions[2]);
 
     std::fs::write(&source, "module Expr where\nresult =\n").unwrap();
     clean_action(retained_scope(|| {
