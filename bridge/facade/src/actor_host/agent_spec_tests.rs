@@ -540,6 +540,40 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
     campaign.hosted.await.unwrap();
 }
 
+#[tokio::test]
+async fn spec_reload_installs_an_already_published_source_revision() {
+    let campaign = start(DESCRIPTION, "one").await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let old_request = policy.snapshot_for_request().expect("installed old spec");
+    assert!(probe(old_request.as_ref()).await.contains("one"));
+    std::fs::write(
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/Project/Tools.hs"),
+        tools_module(DESCRIPTION, "two"),
+    )
+    .unwrap();
+    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ _ _ -> True; _ -> False })").await;
+    assert!(
+        source_reload.to_string().contains("True"),
+        "{source_reload}"
+    );
+    assert!(
+        probe(policy).await.contains("one"),
+        "source publication has not installed new handlers"
+    );
+    let receipt = reload(policy).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+    assert!(probe(policy).await.contains("two"));
+    assert!(
+        probe(old_request.as_ref()).await.contains("one"),
+        "accepted old call keeps its original handler"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// A changed description is a change a model would see, and the tool bridge
 /// registers a list once and serves it read-only. So the reload is refused, the
 /// difference is returned by name, and the record already installed keeps
@@ -552,6 +586,10 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
     let policy = policy.as_ref();
 
     assert!(probe(policy).await.contains("one"));
+
+    let source_layer =
+        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
+    let before_source = source_layer.read_active().unwrap();
 
     std::fs::write(
         workspace.join(".exomonad/Project/Tools.hs"),
@@ -566,6 +604,18 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
     // The previously installed record is still the one serving calls.
     let after = probe(policy).await;
     assert!(after.contains("one"), "{after}");
+
+    assert_eq!(
+        source_layer.read_active().unwrap(),
+        before_source,
+        "refusal preserves the published source as well as handlers"
+    );
+    let cell = dispatch_haskell_script(
+        policy,
+        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+    )
+    .await;
+    assert!(cell.to_string().contains("one"), "{cell}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -582,6 +632,10 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
     let policy = policy.as_ref();
 
     assert!(probe(policy).await.contains("one"));
+
+    let source_layer =
+        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
+    let before_source = source_layer.read_active().unwrap();
 
     let broken =
         tools_module(DESCRIPTION, "one").replace("pure \"one\"", "pure undefinedByThisSpecReload");
@@ -600,6 +654,63 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
         "the edited file is exactly as it was written"
     );
 
+    assert_eq!(
+        source_layer.read_active().unwrap(),
+        before_source,
+        "refusal preserves the published source as well as handlers"
+    );
+    let cell = dispatch_haskell_script(
+        policy,
+        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+    )
+    .await;
+    assert!(cell.to_string().contains("one"), "{cell}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
+    let campaign = start(DESCRIPTION, "one").await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let source_layer =
+        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
+    let before_source = source_layer.read_active().unwrap();
+    let broken = tools_module(DESCRIPTION, "two").replace(
+        "agentSpec = defaultSpec { specTools = tools }",
+        "agentSpec = error \"installer refused\"",
+    );
+    assert!(broken.contains("installer refused"));
+    std::fs::write(
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/Project/Tools.hs"),
+        &broken,
+    )
+    .unwrap();
+    let receipt = reload(policy).await;
+    assert!(receipt.contains("spec preparation failed"), "{receipt}");
+    assert!(!receipt.contains("swapped"), "{receipt}");
+    assert_eq!(source_layer.read_active().unwrap(), before_source);
+    assert!(probe(policy).await.contains("one"));
+    let cell = dispatch_haskell_script(
+        policy,
+        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+    )
+    .await;
+    assert!(cell.to_string().contains("one"), "{cell}");
+    assert_eq!(
+        std::fs::read_to_string(
+            campaign
+                ._repository
+                .path()
+                .join(".exomonad/Project/Tools.hs")
+        )
+        .unwrap(),
+        broken
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

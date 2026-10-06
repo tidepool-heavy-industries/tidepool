@@ -118,6 +118,7 @@ pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
     RetainedSourceLayer, SourceEntryStorage, SourceLayerIssuer, SourceLayerReload,
+    StagedActorSourceReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,

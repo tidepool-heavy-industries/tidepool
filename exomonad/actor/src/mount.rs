@@ -481,16 +481,15 @@ pub trait ActorSourceLayers: Send + Sync {
         let _ = (actor, also_check);
         SourceLayerReload::Unavailable("this host installs no session helpers".into())
     }
-    /// Check a reload candidate, then arbitrate its actual publication against
-    /// invocation cancellation through the existing native decision owner.
-    fn reload_with_publication(
-        &self,
-        _actor: PrincipalId,
-        _also_check: &[String],
-        _publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
-    ) -> SourceLayerReload {
-        SourceLayerReload::Unavailable("source owner does not support cancellable reload".into())
-    }
+
+    /// Retain a checked AgentSpec source candidate without publishing it.
+    /// The actor executes its installer and compares the registered surface
+    /// before consuming the returned source-owner token.
+    fn stage_spec_reload(
+        self: std::sync::Arc<Self>,
+        actor: PrincipalId,
+        also_check: &[String],
+    ) -> Result<Box<dyn StagedActorSourceReload>, SourceLayerReload>;
 
     fn reload_helpers_with_publication(
         &self,
@@ -502,6 +501,26 @@ pub trait ActorSourceLayers: Send + Sync {
             "source owner does not support cancellable helper reload".into(),
         )
     }
+}
+
+/// A source-owner candidate retaining its original expected active revision.
+/// Its capsule contains direct immutable paths and the same retained source
+/// ownership used by ordinary installer admission.
+pub trait StagedActorSourceReload: Send + Sync {
+    fn source(&self) -> &CheckpointSourceLayer;
+
+    /// Called synchronously while the actor's installed-pointer fence is held.
+    /// The source owner takes its publication gate, rejects a changed active
+    /// revision, then arbitrates cancellation with the existing decision.
+    /// After the visibility rename it invokes `on_visible` exactly once before
+    /// confirming durability. The callback replaces the paired source/tools
+    /// lease infallibly and must not await or reenter either owner.
+    /// A before-visibility refusal drops the callback without invoking it.
+    fn commit(
+        self: Box<Self>,
+        publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
+        on_visible: Box<dyn FnOnce() + '_>,
+    ) -> SourceLayerReload;
 }
 
 /// What publishing one actor's own layer did, as the actor engine needs to
