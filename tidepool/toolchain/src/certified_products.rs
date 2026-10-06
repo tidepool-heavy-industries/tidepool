@@ -19,7 +19,8 @@ pub(crate) use finalized_module::{
     CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,
 };
 pub use finalized_module::{
-    CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
+    CapturedArtifactDescriptor, CapturedValueInterfaceReceipt, FinalizationEnvelope,
+    FinalizedModuleReceipt,
 };
 
 use crate::cache::{CompletedSourceEvidence, DependencyEvidence, ProductAvailability};
@@ -264,6 +265,7 @@ pub(crate) struct CertifiedProducts {
     pub groups: Vec<PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub module_interfaces: Vec<CertifiedModuleInterface>,
+    pub value_interfaces: Vec<crate::recovery_artifacts::CertifiedValueInterface>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
 }
 
@@ -3937,6 +3939,7 @@ pub(crate) fn certify_products(
         include,
         exact,
         authored,
+        &[],
         &mut PackageInterfaceValidation::default(),
     )
 }
@@ -3954,6 +3957,7 @@ pub(crate) fn certify_products_with_validation(
     include: &[PathBuf],
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
+    selected_session_values: &[tidepool_repr::SessionModule],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedProducts> {
     receipt
@@ -4484,6 +4488,27 @@ pub(crate) fn certify_products_with_validation(
             ));
         }
     }
+    let value_interfaces = finalized_module::issue_value_interfaces(
+        &receipt.finalization,
+        captured_payload_root,
+        producer_sha256,
+        selected_session_values,
+        &inherited_seals,
+        validation,
+    )?;
+    for interface in &value_interfaces {
+        let value = interface.interface();
+        let key = (value.unit().to_owned(), value.module().to_owned());
+        let seal = sha(value.interface_bytes());
+        if inherited_seals
+            .insert(key, seal)
+            .is_some_and(|old| old != seal)
+        {
+            return Err(CertificationError::Mismatch(
+                "captured value inherited owner conflict",
+            ));
+        }
+    }
     let module_interfaces = finalized_module::issue_interfaces(
         &receipt.finalization,
         captured_payload_root,
@@ -4530,6 +4555,19 @@ pub(crate) fn certify_products_with_validation(
             .chain(inherited_module_interfaces.iter())
             .chain(selected_cached_interfaces.iter().copied()),
     )?;
+    for interface in &value_interfaces {
+        let value = interface.interface();
+        let key = (value.unit().to_owned(), value.module().to_owned());
+        let seal = sha(value.interface_bytes());
+        if admitted_interfaces
+            .insert(key, seal)
+            .is_some_and(|old| old != seal)
+        {
+            return Err(CertificationError::Mismatch(
+                "captured value admitted owner conflict",
+            ));
+        }
+    }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut source_groups = match exact {
         Some(admission) => certified_source_map(&admission.request.groups)?,
@@ -4940,6 +4978,7 @@ pub(crate) fn certify_products_with_validation(
         groups,
         recovery_products,
         module_interfaces,
+        value_interfaces,
         retained_core_products,
     })
 }
@@ -5740,6 +5779,7 @@ pub(crate) mod tests {
             producer,
             &products,
             &[],
+            &[],
             None,
             &mut admission,
         )
@@ -5779,6 +5819,7 @@ pub(crate) mod tests {
                 [3; 32],
                 &products,
                 &[],
+                &[],
                 None,
                 &mut admission,
             )
@@ -5806,6 +5847,7 @@ pub(crate) mod tests {
             producer,
             &products,
             &[],
+            &[],
             None,
             &mut next,
         )
@@ -5825,6 +5867,7 @@ pub(crate) mod tests {
                 producer,
                 &products,
                 &[],
+                &[],
                 None,
                 &mut changed,
             )
@@ -5841,6 +5884,7 @@ pub(crate) mod tests {
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 producer,
                 &replacement_products,
+                &[],
                 &[],
                 None,
                 &mut admission,
@@ -7166,7 +7210,8 @@ pub(crate) mod tests {
             );
         }
         FinalizationEnvelope {
-            profile: finalized_module::FINALIZATION_PROFILE.into(),
+            profile: finalized_module::FINALIZATION_ENVELOPE_PROFILE.into(),
+            value_interfaces: BTreeMap::new(),
             home_units,
             modules: finalized,
         }
@@ -9114,31 +9159,7 @@ pub(crate) mod tests {
     }
 
     fn fixture_envelope_value(envelope: &FinalizationEnvelope) -> Value {
-        value_array([
-            value_text(&envelope.profile),
-            value_array(envelope.home_units.iter().map(value_text)),
-            value_array(envelope.modules.values().map(|module| {
-                value_array([
-                    value_text(&module.unit),
-                    value_text(&module.module),
-                    value_text(hex(&module.source_sha256)),
-                    value_text(module.interface.relative_path.to_string_lossy()),
-                    value_text(hex(&module.interface.sha256)),
-                    Value::Integer(module.interface.bytes.into()),
-                    value_text(module.package_imports.relative_path.to_string_lossy()),
-                    value_text(hex(&module.package_imports.sha256)),
-                    Value::Integer(module.package_imports.bytes.into()),
-                    module.core.as_ref().map_or(Value::Null, |core| {
-                        value_array([
-                            value_text(core.relative_path.to_string_lossy()),
-                            value_text(hex(&core.sha256)),
-                            Value::Integer(core.bytes.into()),
-                        ])
-                    }),
-                    encode_interface_requirements(&module.interface_requirements),
-                ])
-            })),
-        ])
+        finalized_module::encode_fixture_envelope(envelope)
     }
 
     // Test migration of already-issued full facts. Production accepts only v9.

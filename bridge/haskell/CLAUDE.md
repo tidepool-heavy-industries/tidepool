@@ -157,8 +157,11 @@ field is `["source-original", imports]` or `["native-authored-declaration", gene
 the source list seals original authored import qualifiers, boot flags, and resolved
 home owners separately from type requirements; the native form binds the issuer's
 protected native declaration reservation. Scope
-roles must match that authenticated origin. The finalization profile remains
-`tidepool-ghc-finalized-module-v1`. Prior certificate and scope versions are
+roles must match that authenticated origin. Canonical certificates keep profile `tidepool-ghc-finalized-module-v1`.
+The compiler finalization envelope uses `tidepool-ghc-finalized-module-v2`
+with separate source rows and captured selected value-interface rows. Value rows
+retain the exact injected interface, package sidecar and nominal requirements;
+they grant type closure only, never source, native groups or live bindings. Prior certificate and scope versions are
 rejected; deploy the matched issuer and worker and regenerate evidence through
 its producers. Canonical origin alone grants neither lexical import authority
 nor native execution. Request-local native originals retain their protected

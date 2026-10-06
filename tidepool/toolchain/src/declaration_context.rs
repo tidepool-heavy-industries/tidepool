@@ -4105,6 +4105,7 @@ pub(crate) fn certified_product_artifact_view(
         producer,
         products,
         interfaces,
+        &[],
         baseline,
         &mut PackageInterfaceValidation::default(),
     )
@@ -4117,6 +4118,7 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     producer: [u8; 32],
     products: &[CertifiedRecoveryProduct],
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
+    values: &[CertifiedValueInterface],
     baseline: Option<&ExactDeclarationContext>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
@@ -4129,6 +4131,16 @@ pub(crate) fn certified_product_artifact_view_with_validation(
         .cloned()
         .map(ArtifactEntry::canonical)
         .collect::<Vec<_>>();
+    for value in values {
+        if value.interface().toolchain_identity_sha256() != producer {
+            return Err(failure("captured value has another compiler producer"));
+        }
+        entries.push(ArtifactEntry::interface(
+            value.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            value.requirements().to_vec(),
+        ));
+    }
     for product in products {
         entries.push(ArtifactEntry::original_with_validation(
             producer,

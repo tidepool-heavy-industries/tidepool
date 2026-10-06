@@ -2,7 +2,7 @@
 module Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..)
   , emptyPackageImports, encodeCompilerProvidedImport, packageImportRoot, validatePackageImportRoot
-  , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports
+  , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports, decodeCapturedPackageImports
   , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
@@ -192,6 +192,17 @@ readAuthenticatedPackageImports path expectedDigest iface = do
                 | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
                     || encodeRoots iface roots /= bytes -> pure (Left "package import evidence has a different owner or encoding")
                 | otherwise -> pure (Right roots)
+
+-- Authenticate an already captured sidecar against its selected interface.
+-- Current package resolution remains the collective proof's responsibility.
+decodeCapturedPackageImports
+  :: ExactIfaceArtifact -> BS.ByteString -> Either String PackageImportEvidence
+decodeCapturedPackageImports iface bytes = case deserialiseFromBytes decodeRoots (BL.fromStrict bytes) of
+  Left _ -> Left "invalid captured package import evidence"
+  Right (remaining,(owner,roots))
+    | not (BL.null remaining) || owner /= (exactUnit iface,exactModule iface,exactSha256 iface)
+        || encodeRoots iface roots /= bytes -> Left "captured package evidence differs from its interface"
+    | otherwise -> Right roots
 
 -- Only enabled diagnostics force the digest before reporting its bytes. The
 -- ordinary path retains the caller's lazy digest evaluation. No contents or

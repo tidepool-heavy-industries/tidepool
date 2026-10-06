@@ -3,7 +3,7 @@
 
 module Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
-  , originalInterfaceBytes, originalInterfaceSha256, serializeOriginalInterface
+  , originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , freshExactState, freshExactContext, forkExactContext
   , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
@@ -29,7 +29,7 @@ module Tidepool.ExactHydration
   ) where
 
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface)
+import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (mapAccumL)
@@ -682,7 +682,7 @@ serializeOriginalInterface env directory interface =
 -- and immutable bytes. This cache belongs only to the completed transaction;
 -- it neither consults source nor survives in a worker-global map.
 data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
-  HscEnv (Map.Map Module FinalizedModule) (Map.Map Module BS.ByteString) FilePath
+  HscEnv (Map.Map Module FinalizedModule) (Map.Map Module BS.ByteString) [CapturedSessionInterface] FilePath
   (IORef (Map.Map Module (Maybe (BS.ByteString, String))))
 
 -- Only finalization products and explicit admitted captures can supply a home
@@ -710,7 +710,17 @@ newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected
       admitted = Map.fromList selected
   unless (all (\(owner,bytes) -> Map.lookup owner admitted == Just bytes) selected) $
     throwIO ConflictingOriginalInterfaces
-  OriginalInterfaceArtifacts env originals admitted directory <$> newIORef Map.empty
+  let snapshots = Map.fromList [(owner,snapshot) | snapshot <- injected
+        , let (owner,_) = capturedSessionInterface snapshot]
+  unless (all (\snapshot -> let (owner,bytes) = capturedSessionInterface snapshot
+          in case Map.lookup owner snapshots of
+            Just selectedSnapshot -> capturedSessionInterface selectedSnapshot == (owner,bytes)
+              && capturedSessionInterfaceEvidence selectedSnapshot == capturedSessionInterfaceEvidence snapshot
+            Nothing -> False) injected) $ throwIO ConflictingOriginalInterfaces
+  OriginalInterfaceArtifacts env originals admitted (Map.elems snapshots) directory <$> newIORef Map.empty
+
+originalSessionInterfaces :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
+originalSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _) = selected
 
 originalInterfaceBytes :: OriginalInterfaceArtifacts -> Module -> IO (Maybe BS.ByteString)
 originalInterfaceBytes artifacts owner = fmap fst <$> originalInterfaceArtifact artifacts owner
@@ -720,7 +730,7 @@ originalInterfaceSha256 artifacts owner = fmap snd <$> originalInterfaceArtifact
 
 originalInterfaceArtifact :: OriginalInterfaceArtifacts -> Module
   -> IO (Maybe (BS.ByteString, String))
-originalInterfaceArtifact (OriginalInterfaceArtifacts env originals retained directory captured) owner = do
+originalInterfaceArtifact (OriginalInterfaceArtifacts env originals retained _ directory captured) owner = do
   known <- Map.lookup owner <$> readIORef captured
   case known of
     Just artifact -> pure artifact

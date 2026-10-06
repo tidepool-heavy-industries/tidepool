@@ -511,6 +511,29 @@ pub struct ModuleCandidateOffer {
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     checked: Option<NativeCheckedOffer>,
+    selected_session_values: std::sync::OnceLock<Vec<tidepool_repr::SessionModule>>,
+}
+
+fn selected_session_value_modules(
+    command: &ExtractCmd,
+) -> Result<Vec<tidepool_repr::SessionModule>, CompileError> {
+    let mut selected = Vec::new();
+    for name in command.selected_session_values() {
+        let owner = name
+            .to_str()
+            .and_then(tidepool_repr::SessionModule::from_module_name)
+            .filter(|owner| owner.kind == tidepool_repr::SessionModuleKind::Val && owner.gen.0 != 0)
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("invalid selected session value owner".into())
+            })?;
+        if selected.contains(&owner) || selected.len() >= 128 {
+            return Err(CompileError::ExtractFailed(
+                "duplicate or excessive selected session values".into(),
+            ));
+        }
+        selected.push(owner);
+    }
+    Ok(selected)
 }
 
 enum NativeCheckedOffer {
@@ -887,6 +910,7 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: None,
+            selected_session_values: Default::default(),
         })
     }
 
@@ -910,6 +934,7 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: None,
+            selected_session_values: Default::default(),
         })
     }
 
@@ -958,6 +983,7 @@ impl ModuleCandidateOffer {
             checked_values: Some(inputs),
             checked_projections: Vec::new(),
             checked: None,
+            selected_session_values: Default::default(),
         })
     }
 
@@ -1034,6 +1060,7 @@ impl ModuleCandidateOffer {
             checked_values: Some(checked_values),
             checked_projections,
             checked: None,
+            selected_session_values: Default::default(),
         })
     }
 
@@ -1122,6 +1149,7 @@ impl ModuleCandidateOffer {
             checked_values: Some(inputs),
             checked_projections,
             checked: None,
+            selected_session_values: Default::default(),
         })
     }
 
@@ -1231,6 +1259,7 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::Item(checked_item)),
+            selected_session_values: Default::default(),
         })
     }
 
@@ -1337,6 +1366,7 @@ impl ModuleCandidateOffer {
             checked_values: Some(values),
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::ActivationPreview(offer)),
+            selected_session_values: Default::default(),
         }))
     }
 
@@ -1750,6 +1780,7 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_projections: Vec::new(),
             checked: None,
+            selected_session_values: self.selected_session_values.clone(),
         }
     }
 
@@ -2001,6 +2032,18 @@ impl ModuleCandidateOffer {
         }
         if let Some(manifest) = self.manifest_path() {
             command.module_candidates(manifest);
+        }
+        let selected = selected_session_value_modules(command)?;
+        if let Some(previous) = self.selected_session_values.get() {
+            if previous != &selected {
+                return Err(CompileError::ExtractFailed(
+                    "compiler offer session selection changed".into(),
+                ));
+            }
+        } else {
+            self.selected_session_values.set(selected).map_err(|_| {
+                CompileError::ExtractFailed("compiler offer session selection raced".into())
+            })?;
         }
         Ok(())
     }
@@ -2392,6 +2435,10 @@ fn seal_turn_outputs_with_validation(
         &offer.include,
         exact.as_ref(),
         authored,
+        offer
+            .selected_session_values
+            .get()
+            .map_or(&[], Vec::as_slice),
         validation,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -2466,6 +2513,7 @@ fn seal_turn_outputs_with_validation(
             .sha256(),
             &certified.recovery_products,
             &certified.module_interfaces,
+            &certified.value_interfaces,
             exact
                 .as_ref()
                 .map(|admission| admission.request.context.as_ref()),
@@ -3574,6 +3622,7 @@ fn compile_invocation_inner(
                 inv.include,
                 exact.as_ref(),
                 authored,
+                &selected_session_value_modules(&cmd)?,
                 &mut validation,
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -3598,6 +3647,7 @@ fn compile_invocation_inner(
                 groups: Vec::new(),
                 recovery_products: Vec::new(),
                 module_interfaces: Vec::new(),
+                value_interfaces: Vec::new(),
                 retained_core_products: Default::default(),
             }
         };
@@ -3707,6 +3757,7 @@ fn compile_invocation_inner(
                 .sha256(),
                 &certified.recovery_products,
                 &certified.module_interfaces,
+                &certified.value_interfaces,
                 exact_request
                     .as_ref()
                     .map(|request| request.context.as_ref()),

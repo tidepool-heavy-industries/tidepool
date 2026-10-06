@@ -66,7 +66,7 @@ module Tidepool.Session
   , writeSessionIface
   , injectSessionIface
   , injectSessionScope, registerSessionInterfaceLocation
-  , CapturedSessionInterface, capturedSessionInterface
+  , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence
   , injectSessionScopeWithCaptures
     -- * Persistent binder identity
   , sessionBinderName
@@ -86,13 +86,16 @@ import GHC.Driver.Env
 import GHC.Driver.Session (targetProfile)
 
 import GHC.Types.Avail (AvailInfo(..))
-import GHC.Types.Name (Name, mkExternalName)
+import GHC.Types.Name (Name, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (OccName)
 import GHC.Types.Fixity (Fixity)
-import GHC.Types.Id (mkVanillaGlobal)
+import GHC.Types.Id (mkVanillaGlobal, idType)
 import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.Unique (mkUniqueGrimily)
-import GHC.Core.Type (Type)
+import GHC.Core.Type (Type, tyConsOfType)
+import GHC.Core.TyCon (tyConName)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Types.TypeEnv (typeEnvIds)
 
 import GHC.Iface.Decl (tyThingToIfaceDecl)
 import GHC.Iface.Make (mkIfaceExports)
@@ -104,7 +107,7 @@ import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Unit.Module.ModIface
   ( ModIface, mi_module, emptyFullModIface, set_mi_decls, set_mi_exports, set_mi_fixities )
-import GHC.Unit.Module.ModDetails (ModDetails)
+import GHC.Unit.Module.ModDetails (ModDetails(..))
 
 import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Unit.Finder (addHomeModuleToFinder)
@@ -114,8 +117,8 @@ import GHC.Unit.Module.Location
   , ml_obj_file, ml_dyn_obj_file, ml_hie_file )
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable )
-import GHC.Unit.Types (mkModule, GenWithIsBoot(..), ModuleNameWithIsBoot)
-import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleNameString)
+import GHC.Unit.Types (mkModule, GenWithIsBoot(..), ModuleNameWithIsBoot, unitString)
+import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleNameString, moduleUnit)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)
@@ -128,9 +131,9 @@ import qualified Data.ByteString as BS
 import Control.Monad (foldM, unless)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (isDigit)
-import Data.List (isPrefixOf, stripPrefix, nub)
+import Data.List (isPrefixOf, stripPrefix, nub, sort)
 import Data.Word (Word64)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile, doesFileExist)
 import System.IO (openBinaryTempFile, hClose, hIsClosed)
 import System.FilePath (takeDirectory, (</>), (<.>))
 
@@ -331,9 +334,17 @@ injectSessionIface root sm hsc0 = fst <$> liftIO (injectSessionIfaceWithCapture 
 -- | The exact thin-interface bytes consumed by this injection. This snapshot
 -- proves a type dependency; it carries neither source nor executable Core.
 data CapturedSessionInterface = CapturedSessionInterface Module BS.ByteString
+  (Maybe (BS.ByteString, BS.ByteString, [(String,String)]))
 
 capturedSessionInterface :: CapturedSessionInterface -> (Module, BS.ByteString)
-capturedSessionInterface (CapturedSessionInterface owner bytes) = (owner, bytes)
+capturedSessionInterface (CapturedSessionInterface owner bytes _) = (owner, bytes)
+
+-- The tuple preserves the existing issuer's package and nominal-requirement
+-- sidecars alongside the decoded binding types. Absence grants no complete
+-- value artifact; metadata-only injection can still use a bare interface.
+capturedSessionInterfaceEvidence
+  :: CapturedSessionInterface -> Maybe (BS.ByteString, BS.ByteString, [(String,String)])
+capturedSessionInterfaceEvidence (CapturedSessionInterface _ _ evidence) = evidence
 
 injectSessionIfaceWithCapture :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, CapturedSessionInterface)
@@ -370,7 +381,25 @@ injectSessionIfaceWithCapture root sm hsc0 = do
       let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
           hsc1 = hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0
       registerSessionInterfaceLocation path sm hsc1
-      pure (hsc1, CapturedSessionInterface theMod bytes)
+      packageExists <- doesFileExist (path ++ ".packages")
+      requirementsExist <- doesFileExist (path ++ ".requirements")
+      evidence <- if not packageExists && not requirementsExist then pure Nothing else do
+        unless (packageExists && requirementsExist)
+          (fail "selected session interface has incomplete value evidence")
+        packages <- BS.readFile (path ++ ".packages")
+        requirements <- BS.readFile (path ++ ".requirements")
+        let home = homeUnitAsUnit homeU
+            nominalOwners = sort . nub $
+              [(unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              | binder <- typeEnvIds (md_types details)
+              , constructor <- nonDetEltsUniqSet (tyConsOfType (idType binder))
+              , Just owner <- [nameModule_maybe (tyConName constructor)]
+              , moduleUnit owner == home]
+        unless (BS.length packages <= 4 * 1024 * 1024
+            && BS.length requirements <= 4 * 1024 * 1024)
+          (fail "selected session value evidence exceeds bounds")
+        pure (Just (packages,requirements,nominalOwners))
+      pure (hsc1, CapturedSessionInterface theMod bytes evidence)
   where
     injectDetails :: HscEnv -> ModuleName -> ModIface -> IO ModDetails
     injectDetails hsc _ iface =
@@ -382,7 +411,7 @@ injectSessionIfaceWithCapture root sm hsc0 = do
 registerSessionInterfaceLocation :: FilePath -> SessionModule -> HscEnv -> IO ()
 registerSessionInterfaceLocation path owner env = do
   _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
-    (GWIB (renderSessionModule owner) NotBoot :: ModuleNameWithIsBoot)
+    (GWIB (renderSessionModule owner) NotBoot :: ModuleNameWithIsBoot, unitString)
     (sourcelessModLocation path)
   pure ()
 

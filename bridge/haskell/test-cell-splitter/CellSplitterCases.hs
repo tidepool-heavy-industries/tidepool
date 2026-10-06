@@ -64,7 +64,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , originalInterfaceBytes, originalInterfaceSha256 )
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements )
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
@@ -219,6 +219,8 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
     Left _ -> pure ()
     Right _ -> fail "finalization accepted an absent value-dependency capture"
   removeFile valuePath
+  removeFile (valuePath ++ ".packages")
+  removeFile (valuePath ++ ".requirements")
   originals <- newPreparedOriginalInterfaceArtifacts prepared root
   retainedBytes <- originalInterfaceBytes originals valueOwner
   unless (retainedBytes == Just consumedBytes)
@@ -231,6 +233,40 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
   unless (any (\((_, name), sha) -> name == moduleNameString (renderSessionModule owner)
             && sha == sealed) requirements)
     (fail "later source finalization omitted its exact thin value dependency")
+  let selectedSeal = ((Text.pack "main",Text.pack (moduleNameString (renderSessionModule owner))),Text.pack sealed)
+  unless (selectedSeal `elem` finalizedInterfaceSeals finalized
+      && finalizedValueInterfaceSeals finalized == [selectedSeal])
+    (fail "certificate closure omitted the selected captured value seal")
+  unless (all ((/= moduleNameString (renderSessionModule owner)) . snd)
+      (Map.keys (finalizedLocalAdmissions finalized)))
+    (fail "type-only capture issued source/native authority")
+  -- The versioned envelope carries the same immutable payload after removal
+  -- of all three mutable input files, without manufacturing a source row.
+  let encoded = toStrictByteString (encodeFinalizedModuleArtifacts finalized)
+  when (BS.null encoded) (fail "captured value finalization envelope is empty")
+  -- Reinject an actually issued interface with altered nominal evidence. The
+  -- source census and checking HPT still cannot authorize that sidecar.
+  _ <- mkBoundBinders ["captured"] 1 root (pprPipelineResult producer)
+  BS.writeFile (valuePath ++ ".requirements") (toStrictByteString
+    (encodeListLen 1 <> encodeListLen 2 <> encodeString "main" <> encodeString "UnselectedNominalOwner"))
+  (_, malformedCaptures) <- injectSessionScopeWithCaptures scope env
+  malformedOriginals <- newOriginalInterfaceArtifactsWithSessionCaptures env
+    (pprFinalizedModules prepared) [] malformedCaptures root
+  malformed <- try (capture malformedOriginals) :: IO (Either SomeException FinalizedModuleArtifacts)
+  case malformed of
+    Left _ -> pure ()
+    Right _ -> fail "captured value requirement sidecar overrode its decoded binding types"
+  _ <- mkBoundBinders ["captured"] 1 root (pprPipelineResult producer)
+  BS.appendFile (valuePath ++ ".packages") "changed"
+  (_, malformedPackages) <- injectSessionScopeWithCaptures scope env
+  packageOriginals <- newOriginalInterfaceArtifactsWithSessionCaptures env
+    (pprFinalizedModules prepared) [] malformedPackages root
+  invalidPackage <- try (capture packageOriginals) :: IO (Either SomeException FinalizedModuleArtifacts)
+  case invalidPackage of
+    Left _ -> pure ()
+    Right _ -> fail "captured value accepted a changed owning package sidecar"
+  removeFile (valuePath ++ ".packages")
+  removeFile (valuePath ++ ".requirements")
   -- A different genuine capture for the same owner cannot replace selected bytes.
   replacement <- mkThinSessionIface env owner [(mkVarOcc "replacement", intTy)]
   writeSessionIface env root owner replacement

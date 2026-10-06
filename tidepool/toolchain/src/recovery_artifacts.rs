@@ -291,16 +291,35 @@ impl CertifiedJoinedInterface {
         interface_bytes: Vec<u8>,
         package_imports_bytes: Vec<u8>,
     ) -> Result<Self, RecoveryArtifactError> {
+        Self::from_certification_with_validation(
+            producer,
+            unit,
+            module,
+            interface_bytes,
+            package_imports_bytes,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+
+    pub(crate) fn from_certification_with_validation(
+        producer: [u8; 32],
+        unit: String,
+        module: String,
+        interface_bytes: Vec<u8>,
+        package_imports_bytes: Vec<u8>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryArtifactError> {
         if producer == [0; 32] || unit.is_empty() || module.is_empty() {
             return Err(RecoveryArtifactError::InvalidReference);
         }
         let digest: [u8; 32] = Sha256::digest(&interface_bytes).into();
-        validate_package_imports(
+        validate_package_imports_with_validation(
             &package_imports_bytes,
             &unit,
             &module,
             &digest,
             Path::new("owned-join.hi.packages"),
+            validation,
         )?;
         Ok(Self {
             toolchain_identity_sha256: producer,
@@ -1146,17 +1165,17 @@ fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, Recov
         component.push(part);
         match fs::symlink_metadata(&component) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(RecoveryArtifactError::InvalidCapturedPayload(candidate))
+                return Err(RecoveryArtifactError::InvalidCapturedPayload(candidate));
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(RecoveryArtifactError::Unavailable(candidate))
+                return Err(RecoveryArtifactError::Unavailable(candidate));
             }
             Err(error) => {
                 return Err(RecoveryArtifactError::Unreadable {
                     path: candidate,
                     error,
-                })
+                });
             }
         }
     }

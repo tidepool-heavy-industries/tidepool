@@ -73,7 +73,7 @@ import Tidepool.LocalNativeDeclaration
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
+  ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore
   , revalidateLocalFinalizedAdmission )
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
@@ -695,7 +695,10 @@ captureFinalizedSourceOriginals compilation accepted target finalized evidence =
     BS.writeFile path bytes
     pure (key,CanonicalInterfaceDescriptor path seal
       (uncurry CanonicalCoreArtifact <$> core) (ScopeInterface SourceOriginalRole))
-  validateCanonicalInterfaces (scopeProducerSha256 scope) interfaces descriptors
+  let valueSeals = Map.fromList
+        [((T.unpack unit,T.unpack name),T.unpack sha)
+        | ((unit,name),sha) <- finalizedValueInterfaceSeals finalized]
+  validateCanonicalInterfacesWithValueSeals (scopeProducerSha256 scope) interfaces valueSeals descriptors
 
 -- The completed source graph and exact-import graph jointly own original
 -- authored adjacency, for both canonical issuance and same-cell retention.
@@ -780,12 +783,24 @@ validateCanonicalInterfaces
   :: String -> [(ExactIfaceArtifact,FilePath,String)]
   -> [((String,String),CanonicalInterfaceDescriptor)]
   -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-validateCanonicalInterfaces producer selectedInterfaces descriptors = do
+validateCanonicalInterfaces producer selectedInterfaces =
+  validateCanonicalInterfacesWithValueSeals producer selectedInterfaces Map.empty
+
+validateCanonicalInterfacesWithValueSeals
+  :: String -> [(ExactIfaceArtifact,FilePath,String)] -> Map.Map (String,String) String
+  -> [((String,String),CanonicalInterfaceDescriptor)]
+  -> IO (Map.Map (String,String) CanonicalInterfaceProof)
+validateCanonicalInterfacesWithValueSeals producer selectedInterfaces valueSeals descriptors = do
   let interfaces = Map.fromList
         [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
         | (iface,packages,packageSha) <- selectedInterfaces]
   unless (Map.size interfaces == length selectedInterfaces)
     (fail "canonical proof has conflicting selected interface owners")
+  let selectedSeals = Map.map (exactSha256 . (\(iface,_,_) -> iface)) interfaces
+  unless (all (\(key,seal) -> maybe True (== seal) (Map.lookup key selectedSeals))
+      (Map.toAscList valueSeals))
+    (fail "captured value interface conflicts with selected canonical owner")
+  let available = Map.union selectedSeals valueSeals
   proofs <- forM descriptors $ \(key,descriptor) -> do
     (iface,packages,packageSha) <- maybe (fail "canonical proof has no exact interface") pure
       (Map.lookup key interfaces)
@@ -810,9 +825,7 @@ validateCanonicalInterfaces producer selectedInterfaces descriptors = do
         ScopeInterface role -> role == originRole (certificateOrigin certificate))
       (fail "canonical module origin differs from its exact interface role")
     let requirements = Map.fromList (certificateRequirements certificate)
-    let matchesRequirement (required,seal) = case Map.lookup required interfaces of
-          Just (value,_,_) -> exactSha256 value == seal
-          Nothing -> False
+    let matchesRequirement (required,seal) = Map.lookup required available == Just seal
     unless (Map.keysSet requirements == Set.fromList (exactRequirements iface)
         && all matchesRequirement (Map.toAscList requirements))
       (fail "canonical module requirements differ from selected exact interfaces")

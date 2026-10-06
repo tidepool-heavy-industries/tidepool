@@ -6,6 +6,7 @@ use super::*;
 use std::path::Component;
 
 pub(crate) const FINALIZATION_PROFILE: &str = "tidepool-ghc-finalized-module-v1";
+pub(crate) const FINALIZATION_ENVELOPE_PROFILE: &str = "tidepool-ghc-finalized-module-v2";
 const CORE_LIMIT: u64 = 32 << 20;
 const FINALIZATION_PAYLOAD_LIMIT: usize = 128 << 20;
 
@@ -159,20 +160,30 @@ pub struct FinalizedModuleReceipt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedValueInterfaceReceipt {
+    pub interface: CapturedArtifactDescriptor,
+    pub package_imports: CapturedArtifactDescriptor,
+    pub interface_requirements: BTreeMap<(String, String), [u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinalizationEnvelope {
     pub profile: String,
     /// Complete compiler home-unit inventory, not a unit inferred from spelling.
     pub home_units: BTreeSet<String>,
     pub modules: BTreeMap<(String, String), FinalizedModuleReceipt>,
+    /// Selected thin interfaces issue no source or native row.
+    pub value_interfaces: BTreeMap<(String, String), CapturedValueInterfaceReceipt>,
 }
 
 impl FinalizationEnvelope {
     fn validate_structure(&self) -> CertResult<()> {
-        if self.profile != FINALIZATION_PROFILE
+        if self.profile != FINALIZATION_ENVELOPE_PROFILE
             || self.home_units.is_empty()
             || self.home_units.len() > MODULE_LIMIT
             || self.home_units.iter().any(String::is_empty)
             || self.modules.len() > MODULE_LIMIT
+            || self.value_interfaces.len() > MODULE_LIMIT
         {
             return Err(CertificationError::Receipt(
                 "finalization inventory bounds/profile",
@@ -229,6 +240,54 @@ impl FinalizationEnvelope {
                 }
             }
         }
+        for (key, value) in &self.value_interfaces {
+            let selected = tidepool_repr::SessionModule::from_module_name(&key.1);
+            if key.0 != "main"
+                || !self.home_units.contains(&key.0)
+                || self.modules.contains_key(key)
+                || !selected.is_some_and(|owner| {
+                    owner.kind == tidepool_repr::SessionModuleKind::Val
+                        && owner.gen.0 != 0
+                        && owner.module_name() == key.1
+                })
+                || value.interface_requirements.len() > MODULE_LIMIT
+                || value.interface_requirements.iter().any(|(owner, seal)| {
+                    owner == key
+                        || !self.home_units.contains(&owner.0)
+                        || owner.1.is_empty()
+                        || *seal == [0; 32]
+                })
+            {
+                return Err(CertificationError::Receipt(
+                    "captured value owner/requirements",
+                ));
+            }
+            for (artifact, limit) in [
+                (&value.interface, PACKAGE_INTERFACE_LIMIT),
+                (&value.package_imports, RECEIPT_LIMIT as u64),
+            ] {
+                if artifact.bytes == 0
+                    || artifact.bytes > limit
+                    || artifact.sha256 == [0; 32]
+                    || artifact.relative_path.as_os_str().is_empty()
+                    || !artifact
+                        .relative_path
+                        .components()
+                        .all(|part| matches!(part, Component::Normal(_)))
+                    || !paths.insert(artifact.relative_path.clone())
+                {
+                    return Err(CertificationError::Receipt(
+                        "captured value payload seal/path/bounds",
+                    ));
+                }
+                total = total
+                    .checked_add(artifact.bytes)
+                    .ok_or(CertificationError::Receipt("finalization payload budget"))?;
+                if total > FINALIZATION_PAYLOAD_LIMIT as u64 {
+                    return Err(CertificationError::Receipt("finalization payload budget"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -268,7 +327,9 @@ impl FinalizationEnvelope {
         }
         if native.iter().any(|module| {
             module.origin == ProductOrigin::RetainedCore
-                && self.modules.contains_key(&(module.unit.clone(), module.module.clone()))
+                && self
+                    .modules
+                    .contains_key(&(module.unit.clone(), module.module.clone()))
         }) {
             return Err(CertificationError::Receipt(
                 "retained core owner has fresh finalization",
@@ -309,9 +370,9 @@ fn descriptor(
 }
 
 pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope> {
-    let row = sized(value, 3)?;
+    let row = sized(value, 4)?;
     let profile = string(&row[0])?.to_owned();
-    if profile != FINALIZATION_PROFILE {
+    if profile != FINALIZATION_ENVELOPE_PROFILE {
         return Err(CertificationError::Receipt("finalization profile"));
     }
     let units = array(&row[1])?;
@@ -397,10 +458,33 @@ pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope>
             },
         );
     }
+    let rows = array(&row[3])?;
+    if rows.len() > MODULE_LIMIT {
+        return Err(CertificationError::Receipt("captured value count"));
+    }
+    let mut value_interfaces = BTreeMap::new();
+    let mut previous = None;
+    for value in rows {
+        let row = sized(value, 9)?;
+        let key = (string(&row[0])?.to_owned(), string(&row[1])?.to_owned());
+        if previous.as_ref().is_some_and(|old| old >= &key) {
+            return Err(CertificationError::Receipt("captured value order"));
+        }
+        previous = Some(key.clone());
+        value_interfaces.insert(
+            key,
+            CapturedValueInterfaceReceipt {
+                interface: descriptor(&row[2], &row[3], &row[4], PACKAGE_INTERFACE_LIMIT)?,
+                package_imports: descriptor(&row[5], &row[6], &row[7], RECEIPT_LIMIT as u64)?,
+                interface_requirements: decode_interface_requirements(&row[8])?,
+            },
+        );
+    }
     let envelope = FinalizationEnvelope {
         profile,
         home_units,
         modules,
+        value_interfaces,
     };
     envelope.validate_structure()?;
     Ok(envelope)
@@ -522,7 +606,9 @@ impl CertifiedModuleInterface {
         package_imports: &[u8],
     ) -> CertResult<()> {
         let (Some(core), Some(descriptor)) = (&self.core, &self.receipt.core) else {
-            return Err(CertificationError::Mismatch("retained original core absent"));
+            return Err(CertificationError::Mismatch(
+                "retained original core absent",
+            ));
         };
         if !matches!(self.origin, CanonicalOrigin::SourceOriginal { .. })
             || accepted.origin != ProductOrigin::RetainedCore
@@ -539,7 +625,9 @@ impl CertifiedModuleInterface {
             || core.len() as u64 != descriptor.bytes
             || sha(core) != descriptor.sha256
         {
-            return Err(CertificationError::Mismatch("retained original promotion identity"));
+            return Err(CertificationError::Mismatch(
+                "retained original promotion identity",
+            ));
         }
         for (required, seal) in &self.receipt.interface_requirements {
             if inherited_seals.get(required) != Some(seal) {
@@ -608,6 +696,83 @@ pub(super) fn canonical_certificate(
     Ok(bytes)
 }
 
+pub(super) fn issue_value_interfaces(
+    envelope: &FinalizationEnvelope,
+    root: &Path,
+    producer: [u8; 32],
+    selected: &[tidepool_repr::SessionModule],
+    inherited: &BTreeMap<(String, String), [u8; 32]>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<crate::recovery_artifacts::CertifiedValueInterface>> {
+    envelope.validate_structure()?;
+    let mut available = inherited.clone();
+    for (key, seal) in envelope
+        .modules
+        .iter()
+        .map(|(key, row)| (key, row.interface.sha256))
+        .chain(
+            envelope
+                .value_interfaces
+                .iter()
+                .map(|(key, row)| (key, row.interface.sha256)),
+        )
+    {
+        if available
+            .insert(key.clone(), seal)
+            .is_some_and(|old| old != seal)
+        {
+            return Err(CertificationError::Mismatch(
+                "captured value selected owner conflict",
+            ));
+        }
+    }
+    let mut issued = Vec::new();
+    for (key, value) in &envelope.value_interfaces {
+        let owner = tidepool_repr::SessionModule::from_module_name(&key.1)
+            .ok_or(CertificationError::Receipt("captured value session owner"))?;
+        if !selected.contains(&owner) {
+            return Err(CertificationError::Mismatch(
+                "captured value was not selected by the request",
+            ));
+        }
+        if value
+            .interface_requirements
+            .iter()
+            .any(|(owner, seal)| available.get(owner) != Some(seal))
+        {
+            return Err(CertificationError::Mismatch(
+                "captured value type dependency closure",
+            ));
+        }
+        let bytes = capture(root, &value.interface, PACKAGE_INTERFACE_LIMIT, validation)?;
+        let packages = capture(
+            root,
+            &value.package_imports,
+            RECEIPT_LIMIT as u64,
+            validation,
+        )?;
+        let interface = crate::recovery_artifacts::CertifiedJoinedInterface::from_certification_with_validation(
+            producer,key.0.clone(),key.1.clone(),bytes,packages,validation)
+            .map_err(CertificationError::CapturedModulePayload)?;
+        issued.push(
+            crate::recovery_artifacts::CertifiedValueInterface::from_admitted_interface(
+                interface,
+                value
+                    .interface_requirements
+                    .keys()
+                    .map(
+                        |(unit, module)| crate::declaration_join::ExactModuleIdentity {
+                            unit: unit.clone(),
+                            module: module.clone(),
+                        },
+                    )
+                    .collect(),
+            ),
+        );
+    }
+    Ok(issued)
+}
+
 pub(super) fn issue_interfaces(
     envelope: &FinalizationEnvelope,
     root: &Path,
@@ -622,7 +787,7 @@ pub(super) fn issue_interfaces(
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedModuleInterface>> {
     envelope.validate_structure()?;
-    if producer == [0; 32] || envelope.profile != FINALIZATION_PROFILE {
+    if producer == [0; 32] || envelope.profile != FINALIZATION_ENVELOPE_PROFILE {
         return Err(CertificationError::Mismatch(
             "finalization producer/profile",
         ));
@@ -825,9 +990,10 @@ pub(super) fn recover_interface(
         row[11].clone(),
     ]);
     let envelope = decode_envelope(&value_array([
-        row[2].clone(),
+        value_text(FINALIZATION_ENVELOPE_PROFILE),
         row[4].clone(),
         value_array([descriptor_row]),
+        value_array([]),
     ]))?;
     let receipt = envelope
         .modules
@@ -853,7 +1019,8 @@ pub(super) fn recover_interface(
     )
     .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
     let canonical_envelope = FinalizationEnvelope {
-        profile: FINALIZATION_PROFILE.into(),
+        profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+        value_interfaces: BTreeMap::new(),
         home_units: envelope.home_units,
         modules: BTreeMap::new(),
     };
@@ -910,7 +1077,8 @@ pub(super) fn fixture_interface(
         interface_requirements,
     };
     let envelope = FinalizationEnvelope {
-        profile: FINALIZATION_PROFILE.into(),
+        profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+        value_interfaces: BTreeMap::new(),
         home_units,
         modules: BTreeMap::new(),
     };
@@ -950,7 +1118,8 @@ pub(super) fn fixture_source_imports(
             .into(),
     };
     let envelope = FinalizationEnvelope {
-        profile: FINALIZATION_PROFILE.into(),
+        profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+        value_interfaces: BTreeMap::new(),
         home_units: (*interface.home_units).clone(),
         modules: BTreeMap::new(),
     };
@@ -970,6 +1139,53 @@ pub(super) fn fixture_source_imports(
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap()
+}
+
+#[cfg(test)]
+pub(super) fn encode_fixture_envelope(envelope: &FinalizationEnvelope) -> Value {
+    value_array([
+        value_text(&envelope.profile),
+        value_array(envelope.home_units.iter().map(value_text)),
+        value_array(envelope.modules.values().map(|module| {
+            value_array([
+                value_text(&module.unit),
+                value_text(&module.module),
+                value_text(hex(&module.source_sha256)),
+                value_text(module.interface.relative_path.to_string_lossy()),
+                value_text(hex(&module.interface.sha256)),
+                Value::Integer(module.interface.bytes.into()),
+                value_text(module.package_imports.relative_path.to_string_lossy()),
+                value_text(hex(&module.package_imports.sha256)),
+                Value::Integer(module.package_imports.bytes.into()),
+                module.core.as_ref().map_or(Value::Null, |core| {
+                    value_array([
+                        value_text(core.relative_path.to_string_lossy()),
+                        value_text(hex(&core.sha256)),
+                        Value::Integer(core.bytes.into()),
+                    ])
+                }),
+                encode_interface_requirements(&module.interface_requirements),
+            ])
+        })),
+        value_array(
+            envelope
+                .value_interfaces
+                .iter()
+                .map(|((unit, module), value)| {
+                    value_array([
+                        value_text(unit),
+                        value_text(module),
+                        value_text(value.interface.relative_path.to_string_lossy()),
+                        value_text(hex(&value.interface.sha256)),
+                        Value::Integer(value.interface.bytes.into()),
+                        value_text(value.package_imports.relative_path.to_string_lossy()),
+                        value_text(hex(&value.package_imports.sha256)),
+                        Value::Integer(value.package_imports.bytes.into()),
+                        encode_interface_requirements(&value.interface_requirements),
+                    ])
+                }),
+        ),
+    ])
 }
 
 #[cfg(test)]
@@ -1043,14 +1259,16 @@ mod tests {
                         seals: &BTreeMap<_, _>,
                         interface: &[u8],
                         packages: &[u8]| {
-            original.validate_native_promotion(
-                accepted, [7; 32], seals, interface, packages,
-            )
+            original.validate_native_promotion(accepted, [7; 32], seals, interface, packages)
         };
         assert!(validate(
-            &original, &accepted, &requirements,
-            original.interface_bytes(), original.package_imports_bytes(),
-        ).is_ok());
+            &original,
+            &accepted,
+            &requirements,
+            original.interface_bytes(),
+            original.package_imports_bytes(),
+        )
+        .is_ok());
         let receipt_mutations: [fn(&mut CertifiedModuleReceipt); 8] = [
             |row: &mut CertifiedModuleReceipt| row.origin = ProductOrigin::Fresh,
             |row: &mut CertifiedModuleReceipt| row.unit = "other-home".into(),
@@ -1065,48 +1283,78 @@ mod tests {
             let mut changed = accepted.clone();
             mutate(&mut changed);
             assert!(validate(
-                &original, &changed, &requirements,
-                original.interface_bytes(), original.package_imports_bytes(),
-            ).is_err());
+                &original,
+                &changed,
+                &requirements,
+                original.interface_bytes(),
+                original.package_imports_bytes(),
+            )
+            .is_err());
         }
         for seals in [BTreeMap::new(), BTreeMap::from([(required, [0; 32])])] {
-            assert!(matches!(validate(
-                &original, &accepted, &seals,
-                original.interface_bytes(), original.package_imports_bytes(),
-            ), Err(CertificationError::FinalizedInterfaceRequirement { .. })));
+            assert!(matches!(
+                validate(
+                    &original,
+                    &accepted,
+                    &seals,
+                    original.interface_bytes(),
+                    original.package_imports_bytes(),
+                ),
+                Err(CertificationError::FinalizedInterfaceRequirement { .. })
+            ));
         }
         assert!(validate(
-            &original, &accepted, &requirements,
-            b"changed interface", original.package_imports_bytes(),
-        ).is_err());
+            &original,
+            &accepted,
+            &requirements,
+            b"changed interface",
+            original.package_imports_bytes(),
+        )
+        .is_err());
         assert!(validate(
-            &original, &accepted, &requirements,
-            original.interface_bytes(), b"changed packages",
-        ).is_err());
+            &original,
+            &accepted,
+            &requirements,
+            original.interface_bytes(),
+            b"changed packages",
+        )
+        .is_err());
         let canonical_mutations: [fn(&mut CertifiedModuleInterface); 4] = [
             |module: &mut CertifiedModuleInterface| module.core = None,
-            |module: &mut CertifiedModuleInterface| module.core = Some(b"changed Core".to_vec().into()),
+            |module: &mut CertifiedModuleInterface| {
+                module.core = Some(b"changed Core".to_vec().into())
+            },
             |module: &mut CertifiedModuleInterface| module.producer_sha256 = [0; 32],
-            |module: &mut CertifiedModuleInterface| module.origin = CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 },
+            |module: &mut CertifiedModuleInterface| {
+                module.origin = CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
+            },
         ];
         for mutate in canonical_mutations {
             let mut changed = original.clone();
             mutate(&mut changed);
             assert!(validate(
-                &changed, &accepted, &requirements,
-                original.interface_bytes(), original.package_imports_bytes(),
-            ).is_err());
+                &changed,
+                &accepted,
+                &requirements,
+                original.interface_bytes(),
+                original.package_imports_bytes(),
+            )
+            .is_err());
         }
         let envelope = FinalizationEnvelope {
-            profile: FINALIZATION_PROFILE.into(),
+            profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+            value_interfaces: BTreeMap::new(),
             home_units: original.home_units().clone(),
             modules: BTreeMap::from([(
-                (original.unit().into(), original.module().into()), original.receipt.clone(),
+                (original.unit().into(), original.module().into()),
+                original.receipt.clone(),
             )]),
         };
         assert!(matches!(
             envelope.validate_owners(&[accepted], &BTreeMap::new()),
-            Err(CertificationError::Receipt("retained core owner has fresh finalization")),
+            Err(CertificationError::Receipt(
+                "retained core owner has fresh finalization"
+            )),
         ));
     }
 
@@ -1201,7 +1449,8 @@ mod tests {
         let mut receipt = fixture.receipt.clone();
         receipt.source_sha256 = sha(bytes);
         let envelope = FinalizationEnvelope {
-            profile: FINALIZATION_PROFILE.into(),
+            profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+            value_interfaces: BTreeMap::new(),
             home_units: fixture.home_units().clone(),
             modules: BTreeMap::from([(("home-a".into(), "Owner".into()), receipt)]),
         };
@@ -1351,7 +1600,8 @@ mod tests {
             CanonicalOrigin::SourceOriginal { .. }
         ));
         let envelope = FinalizationEnvelope {
-            profile: FINALIZATION_PROFILE.into(),
+            profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+            value_interfaces: BTreeMap::new(),
             home_units: source.home_units().clone(),
             modules: BTreeMap::new(),
         };
@@ -1451,7 +1701,8 @@ mod tests {
     fn complete_home_units_refuse_a_home_owner_as_package() {
         let module = interface(None);
         let envelope = FinalizationEnvelope {
-            profile: FINALIZATION_PROFILE.into(),
+            profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+            value_interfaces: BTreeMap::new(),
             home_units: module.home_units().clone(),
             modules: BTreeMap::new(),
         };
@@ -1469,7 +1720,8 @@ mod tests {
         let module = interface(Some(b"tidy-core".to_vec()));
         let key = (module.unit().to_owned(), module.module().to_owned());
         let envelope = FinalizationEnvelope {
-            profile: FINALIZATION_PROFILE.into(),
+            profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+            value_interfaces: BTreeMap::new(),
             home_units: module.home_units().clone(),
             modules: BTreeMap::from([(key.clone(), module.receipt.clone())]),
         };
@@ -1497,5 +1749,147 @@ mod tests {
         let mut changed = envelope;
         changed.home_units.remove(module.unit());
         assert!(changed.validate_structure().is_err());
+    }
+    #[test]
+    fn selected_value_capture_closes_types_without_source_or_native_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
+        let key = ("main".to_owned(), selected.module_name());
+        let bytes = b"selected thin interface".to_vec();
+        let packages = value_array([
+            value_text("TPPKGROOTS"),
+            value_text("2"),
+            value_array([
+                value_text(&key.0),
+                value_text(&key.1),
+                value_text(hex(&sha(&bytes))),
+            ]),
+            value_array([]),
+            value_array([]),
+        ]);
+        let mut package_bytes = Vec::new();
+        ciborium::ser::into_writer(&packages, &mut package_bytes).unwrap();
+        std::fs::write(root.path().join("value.hi"), &bytes).unwrap();
+        std::fs::write(root.path().join("value.packages"), &package_bytes).unwrap();
+        let nominal = interface(None);
+        let inherited = BTreeMap::from([(
+            (nominal.unit().to_owned(), nominal.module().to_owned()),
+            nominal.interface_sha256(),
+        )]);
+        let envelope = FinalizationEnvelope {
+            profile: FINALIZATION_ENVELOPE_PROFILE.into(),
+            home_units: BTreeSet::from(["main".into(), nominal.unit().to_owned()]),
+            modules: BTreeMap::new(),
+            value_interfaces: BTreeMap::from([(
+                key.clone(),
+                CapturedValueInterfaceReceipt {
+                    interface: CapturedArtifactDescriptor {
+                        relative_path: "value.hi".into(),
+                        sha256: sha(&bytes),
+                        bytes: bytes.len() as u64,
+                    },
+                    package_imports: CapturedArtifactDescriptor {
+                        relative_path: "value.packages".into(),
+                        sha256: sha(&package_bytes),
+                        bytes: package_bytes.len() as u64,
+                    },
+                    interface_requirements: inherited.clone(),
+                },
+            )]),
+        };
+        let encoded = encode_fixture_envelope(&envelope);
+        let decoded = decode_envelope(&encoded).unwrap();
+        assert_eq!(decoded, envelope);
+        let issue = |value: &FinalizationEnvelope,
+                     selected: &[tidepool_repr::SessionModule],
+                     inherited: &BTreeMap<_, _>| {
+            issue_value_interfaces(
+                value,
+                root.path(),
+                nominal.producer_sha256(),
+                selected,
+                inherited,
+                &mut PackageInterfaceValidation::default(),
+            )
+        };
+        let values = issue(&decoded, &[selected], &inherited).unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].interface().interface_bytes(), bytes);
+        assert!(decoded.modules.is_empty());
+        let consumer_bytes = b"consumer interface".to_vec();
+        let package = value_array([
+            value_text("TPPKGROOTS"),
+            value_text("2"),
+            value_array([
+                value_text("main"),
+                value_text("Consumer"),
+                value_text(hex(&sha(&consumer_bytes))),
+            ]),
+            value_array([]),
+            value_array([]),
+        ]);
+        let mut package_bytes = Vec::new();
+        ciborium::ser::into_writer(&package, &mut package_bytes).unwrap();
+        let consumer = fixture_interface(
+            nominal.producer_sha256(),
+            "main",
+            "Consumer",
+            [8; 32],
+            consumer_bytes,
+            package_bytes,
+            BTreeMap::from([(key.clone(), sha(&bytes))]),
+            None,
+        );
+        let view = crate::declaration_context::certified_product_artifact_view_with_validation(
+            nominal.producer_sha256(),
+            &[],
+            &[nominal.clone(), consumer],
+            &values,
+            None,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        use crate::artifact_inventory::ArtifactKind;
+        let descriptors = view.descriptors();
+        assert!(descriptors
+            .iter()
+            .any(|row| row.kind == ArtifactKind::ValueInterface
+                && row.owner.unit == key.0
+                && row.owner.module == key.1));
+        assert!(descriptors
+            .iter()
+            .all(|row| row.kind != ArtifactKind::OriginalModule));
+        assert!(issue(&decoded, &[], &inherited).is_err());
+        assert!(issue(
+            &decoded,
+            &[tidepool_repr::SessionModule::val(
+                tidepool_repr::Generation(2)
+            )],
+            &inherited
+        )
+        .is_err());
+        assert!(issue(&decoded, &[selected], &BTreeMap::new()).is_err());
+        let mut changed = decoded.clone();
+        changed
+            .value_interfaces
+            .get_mut(&key)
+            .unwrap()
+            .interface_requirements
+            .insert(
+                (nominal.unit().to_owned(), nominal.module().to_owned()),
+                [9; 32],
+            );
+        assert!(issue(&changed, &[selected], &inherited).is_err());
+        let mut old = decoded.clone();
+        old.profile = FINALIZATION_PROFILE.into();
+        assert!(decode_envelope(&encode_fixture_envelope(&old)).is_err());
+        let mut duplicate = encoded;
+        let rows = duplicate.as_array_mut().unwrap()[3].as_array_mut().unwrap();
+        rows.push(rows[0].clone());
+        assert!(decode_envelope(&duplicate).is_err());
+        std::fs::write(root.path().join("value.packages"), b"altered sidecar").unwrap();
+        assert!(issue(&decoded, &[selected], &inherited).is_err());
+        std::fs::write(root.path().join("value.hi"), b"altered interface").unwrap();
+        assert!(issue(&decoded, &[selected], &inherited).is_err());
     }
 }

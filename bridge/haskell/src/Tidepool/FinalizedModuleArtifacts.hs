@@ -5,17 +5,20 @@
 -- names these bounded files; it never duplicates their payloads inline.
 module Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
-  , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals
+  , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals, finalizedValueInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
   , localFinalizedRequirements, localFinalizedCore, revalidateLocalFinalizedAdmission
   , matchesCapturedFinalization ) where
 
+import Codec.CBOR.Decoding qualified as D
+import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding
 import Control.Exception (Exception, IOException, evaluate, throwIO, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when, replicateM)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -33,10 +36,11 @@ import System.Mem.StableName (StableName, makeStableName)
 
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256 )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces )
 import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
 import Tidepool.FinalizedCore (captureFinalizedCore, isUnsupportedFinalizedCore)
-import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, decodeCapturedPackageImports)
+import Tidepool.Session (capturedSessionInterface, capturedSessionInterfaceEvidence)
 
 -- The producer's strict profile limits match the owning Rust receipt decoder.
 interfaceLimit, packageLimit, coreLimit, payloadLimit :: Int
@@ -79,7 +83,11 @@ data CapturedModule = CapturedModule
 
 data CapturedModules = CapturedModules FilePath [CapturedModule]
 
-data FinalizedModuleArtifacts = FinalizedModuleArtifacts [T.Text] (Maybe CapturedModules)
+data CapturedValueInterface = CapturedValueInterface
+  T.Text T.Text CapturedPayload CapturedPayload [(T.Text,T.Text,T.Text)]
+
+-- Selected type interfaces never enter the original source/native inventory.
+data FinalizedModuleArtifacts = FinalizedModuleArtifacts [T.Text] (Maybe CapturedModules) [CapturedValueInterface]
 
 -- Only this owner can project an admission from a completed capture. There is
 -- no decoder or public constructor: serialized descriptors cannot mint it.
@@ -89,7 +97,7 @@ data LocalFinalizedAdmission = LocalFinalizedAdmission [T.Text] FilePath Capture
 -- Owner-free targets still carry the complete compiler home-unit census.
 emptyFinalizedModuleArtifacts :: HscEnv -> FinalizedModuleArtifacts
 emptyFinalizedModuleArtifacts env = FinalizedModuleArtifacts
-  (map (T.pack . unitIdString) (Set.toAscList (hsc_all_home_unit_ids env))) Nothing
+  (map (T.pack . unitIdString) (Set.toAscList (hsc_all_home_unit_ids env))) Nothing []
 
 captureFinalizedModuleArtifacts
   :: OriginalInterfaceArtifacts -> HscEnv -> Map.Map ModuleName FinalizedModule
@@ -162,10 +170,40 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
       unless (validDigest sha) $ throwIO (MissingFinalizedDependency requiredUnit requiredName)
       pure (T.pack requiredUnit,T.pack requiredName,T.pack sha)
     pure (CapturedModule (T.pack unit) (T.pack name) source interface package core requirements identity)
+  let required = Set.fromList [(unit,name)
+        | CapturedModule _ _ _ _ _ _ dependencies _ <- rows, (unit,name,_) <- dependencies]
+  values <- forM [snapshot | snapshot <- originalSessionInterfaces originals
+      , let (owner,_) = capturedSessionInterface snapshot
+      , (T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))) `Set.member` required
+          || maybe False (const True) (capturedSessionInterfaceEvidence snapshot)] $ \snapshot -> do
+    let (owner,bytes) = capturedSessionInterface snapshot
+        unit = unitString (moduleUnit owner)
+        name = moduleNameString (moduleName owner)
+        artifact = ExactIfaceArtifact unit name "" (T.unpack (digest bytes)) []
+    (packageBytes,requirementBytes,nominalOwners) <- maybe
+      (throwIO (MissingFinalizedPackages unit name)) pure (capturedSessionInterfaceEvidence snapshot)
+    _ <- either fail pure (decodeCapturedPackageImports artifact packageBytes)
+    owners <- case deserialiseFromBytes decodeValueRequirements (BL.fromStrict requirementBytes) of
+      Right (remaining,selected) | BL.null remaining
+          , Set.size (Set.fromList selected) == length selected
+          , Set.fromList selected == Set.fromList nominalOwners -> pure selected
+      _ -> fail "captured value requirements differ from its decoded binding types"
+    dependencies <- forM (sortOn id owners) $ \(requiredUnit,requiredName) -> do
+      unless (T.pack requiredUnit `elem` homeUnits && (requiredUnit,requiredName) /= (unit,name))
+        (throwIO (MissingFinalizedDependency requiredUnit requiredName))
+      sha <- originalInterfaceSha256 originals (mkModule (stringToUnit requiredUnit) (mkModuleName requiredName))
+        >>= maybe (throwIO (MissingFinalizedDependency requiredUnit requiredName)) pure
+      pure (T.pack requiredUnit,T.pack requiredName,T.pack sha)
+    interface <- capture absoluteDirectory "value.hi" interfaceLimit bytes
+    package <- capture absoluteDirectory "value.packages.cbor" packageLimit packageBytes
+    pure (CapturedValueInterface (T.pack unit) (T.pack name) interface package dependencies)
+  forM_ (duplicates [(unit,name) | CapturedValueInterface unit name _ _ _ <- values]) $
+    \(unit,name) -> throwIO (DuplicateFinalizedOwner (T.unpack unit) (T.unpack name))
   let total = sum [size iface + size packages' + maybe 0 size core
         | CapturedModule _ _ _ iface packages' core _ _ <- rows]
+        + sum [size iface + size package | CapturedValueInterface _ _ iface package _ <- values]
   when (total > payloadLimit) $ throwIO (FinalizedPayloadTooLarge "aggregate")
-  pure (FinalizedModuleArtifacts homeUnits (Just (CapturedModules absoluteDirectory rows)))
+  pure (FinalizedModuleArtifacts homeUnits (Just (CapturedModules absoluteDirectory rows)) values)
   where
     originalKey original = let owner = mi_module (hm_iface (finalizedHomeModInfo original))
       in (unitString (moduleUnit owner),moduleNameString (moduleName owner))
@@ -182,10 +220,23 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
 
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =
-  [((unit,name),sha) | CapturedModule unit name _ (CapturedPayload _ sha _) _ _ _ _ <- capturedRows artifacts]
+  finalizedValueInterfaceSeals artifacts ++ [((unit,name),sha) | CapturedModule unit name _ (CapturedPayload _ sha _) _ _ _ _ <- capturedRows artifacts]
+
+finalizedValueInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
+finalizedValueInterfaceSeals (FinalizedModuleArtifacts _ _ values) =
+  [((unit,name),sha) | CapturedValueInterface unit name (CapturedPayload _ sha _) _ _ <- values]
+
+decodeValueRequirements :: D.Decoder s [(String,String)]
+decodeValueRequirements = do
+  count <- D.decodeListLen
+  when (count > 128) (fail "captured value requirement bound")
+  replicateM count $ do
+    width <- D.decodeListLen
+    unless (width == 2) (fail "captured value requirement shape")
+    (,) <$> (T.unpack <$> D.decodeString) <*> (T.unpack <$> D.decodeString)
 
 finalizedLocalAdmissions :: FinalizedModuleArtifacts -> Map.Map (String,String) LocalFinalizedAdmission
-finalizedLocalAdmissions (FinalizedModuleArtifacts units captured) = case captured of
+finalizedLocalAdmissions (FinalizedModuleArtifacts units captured _) = case captured of
   Nothing -> Map.empty
   Just (CapturedModules directory rows) -> Map.fromList
     [((T.unpack unit,T.unpack name),LocalFinalizedAdmission units directory row)
@@ -240,7 +291,7 @@ revalidateLocalFinalizedAdmission (LocalFinalizedAdmission _ directory
               | otherwise -> Right ()
 
 capturedRows :: FinalizedModuleArtifacts -> [CapturedModule]
-capturedRows (FinalizedModuleArtifacts _ captured) = case captured of
+capturedRows (FinalizedModuleArtifacts _ captured _) = case captured of
   Nothing -> []
   Just (CapturedModules _ rows) -> rows
 
@@ -251,13 +302,18 @@ payloadSha :: CapturedPayload -> String
 payloadSha (CapturedPayload _ sha _) = T.unpack sha
 
 encodeFinalizedModuleArtifacts :: FinalizedModuleArtifacts -> Encoding
-encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _) =
-  array [encodeString "tidepool-ghc-finalized-module-v1",list encodeString units,list encodeModule (capturedRows artifacts)]
+encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _ values) =
+  array [encodeString "tidepool-ghc-finalized-module-v2",list encodeString units
+    ,list encodeModule (capturedRows artifacts),list encodeValue (sortOn valueOwner values)]
   where
     encodeModule (CapturedModule unit name source interface package core requirements _) =
       array ([encodeString unit,encodeString name,encodeString source]
         ++ payloadFields interface ++ payloadFields package
         ++ [maybe encodeNull (array . payloadFields) core,list encodeRequirement requirements])
+    valueOwner (CapturedValueInterface unit name _ _ _) = (unit,name)
+    encodeValue (CapturedValueInterface unit name interface package requirements) =
+      array ([encodeString unit,encodeString name] ++ payloadFields interface ++ payloadFields package
+        ++ [list encodeRequirement requirements])
     encodeRequirement (unit,name,sha) = array (map encodeString [unit,name,sha])
     payloadFields (CapturedPayload path sha count) =
       [encodeString (T.pack path),encodeString sha,encodeWord64 (fromIntegral count)]
