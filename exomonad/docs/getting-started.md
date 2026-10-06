@@ -186,6 +186,9 @@ just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$PREPARE_REPORT" \
   prepare --workspace /path/to/your/project --directory /path/to/deployment
 ```
 
+The destination's immediate parent must already exist and be accessible.
+Preparation creates the final directory and refuses missing parent directories.
+
 Preparation creates an immutable deployment that later runs can reuse. It
 covers the required root toolset and explicitly configured preparation roles.
 Those are the only role configurations covered by that deployment. Recipe

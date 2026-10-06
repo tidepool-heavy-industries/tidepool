@@ -977,6 +977,62 @@ async fn enter_workspace_budget(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PreparationDirectoryError {
+    #[error("preparation destination must name an absolute child directory without parent components: {directory:?}")]
+    InvalidDestination { directory: PathBuf },
+    #[error("preparation parent must already exist and be accessible: {parent:?}: {source}")]
+    ParentUnavailable {
+        parent: PathBuf,
+        #[source]
+        source: tidepool_atomic_write::WriteError,
+    },
+    #[error("could not durably establish preparation directory {directory:?} below its existing parent {parent:?}: {source}")]
+    ChildEstablishment {
+        parent: PathBuf,
+        directory: PathBuf,
+        #[source]
+        source: tidepool_atomic_write::WriteError,
+    },
+}
+
+fn establish_preparation_directory(
+    requested: &Path,
+) -> Result<tidepool_atomic_write::DirectoryAnchor, PreparationDirectoryError> {
+    let invalid = || PreparationDirectoryError::InvalidDestination {
+        directory: requested.to_path_buf(),
+    };
+    if !requested.is_absolute()
+        || requested.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(invalid());
+    }
+    let parent = requested.parent().ok_or_else(invalid)?;
+    let name = requested.file_name().ok_or_else(invalid)?;
+    // The existing parent is the caller's established durability boundary.
+    // Retry from this same parent; a visible failed child is never promoted
+    // into an anchor whose own parent link has not been confirmed.
+    let anchor =
+        tidepool_atomic_write::DirectoryAnchor::open_existing(parent).map_err(|source| {
+            PreparationDirectoryError::ParentUnavailable {
+                parent: parent.to_path_buf(),
+                source,
+            }
+        })?;
+    anchor
+        .child(name)
+        .map_err(|source| PreparationDirectoryError::ChildEstablishment {
+            parent: anchor.path().to_path_buf(),
+            directory: anchor.path().join(name),
+            source,
+        })
+}
+
 pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = resolve_workspace(options.workspace)?;
     let configuration = read_project_config(&workspace)?.0;
@@ -991,10 +1047,7 @@ pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::
     } else {
         std::env::current_dir()?.join(options.directory)
     };
-    let directory = std::sync::Arc::new(
-        tidepool_atomic_write::DirectoryAnchor::open_existing("/")?
-            .child(requested.strip_prefix("/")?)?,
-    );
+    let directory = std::sync::Arc::new(establish_preparation_directory(&requested)?);
     let mut frozen = workspace::FrozenWorkspace::begin_preparation(&workspace, &directory)?;
     if !matches!(
         frozen.preparation,
@@ -2479,6 +2532,93 @@ mod tests {
         clippy::disallowed_methods,
         reason = "test: launches short-lived process fixtures (a disposable runner, git one-shots) directly"
     )]
+    #[test]
+    fn preparation_directory_requires_existing_parent_and_refuses_path_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("missing-parent");
+        let error = super::establish_preparation_directory(&absent.join("deployment")).unwrap_err();
+        assert!(
+            matches!(error, super::PreparationDirectoryError::ParentUnavailable { parent, source }
+            if parent == absent && source.source.kind() == std::io::ErrorKind::NotFound)
+        );
+        assert!(!absent.exists(), "missing parents refuse before creation");
+        for requested in [
+            std::path::PathBuf::from("relative"),
+            std::path::PathBuf::from("/"),
+            root.path().join("new/../escape"),
+        ] {
+            assert!(matches!(
+                super::establish_preparation_directory(&requested),
+                Err(super::PreparationDirectoryError::InvalidDestination { .. })
+            ));
+        }
+        assert!(!root.path().join("new").exists());
+        assert!(!root.path().join("escape").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preparation_directory_retries_below_owned_parent_and_loads_through_traversal_only_ancestor()
+    {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ancestor = root.path().join("traversal-only");
+        let parent = ancestor.join("owned-parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let _restore_ancestor = RestorePermissions(
+            ancestor.clone(),
+            std::fs::metadata(&ancestor).unwrap().permissions(),
+        );
+        // A private fixture owned by the test UID needs 0111 to reproduce the
+        // effective traversal-only access of a foreign-owned 0711 ancestor.
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o111)).unwrap();
+        assert_eq!(
+            std::fs::File::open(&ancestor).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let requested = parent.join("deployment");
+        let first = super::establish_preparation_directory(&requested).unwrap();
+        assert_eq!(first.path(), requested.canonicalize().unwrap());
+        let retry = super::establish_preparation_directory(&requested).unwrap();
+        assert_eq!(retry.path(), first.path());
+        // Prepared loading reopens its selected deployment directly; it does
+        // not need to read an ancestor above the established boundary.
+        let reopened = tidepool_atomic_write::DirectoryAnchor::open_existing(first.path()).unwrap();
+        let published = first.path().join("selection.json");
+        tidepool_atomic_write::write_durable(&published, b"original selection").unwrap();
+        assert_eq!(
+            std::fs::read(reopened.path().join("selection.json")).unwrap(),
+            b"original selection"
+        );
+
+        let blocked = parent.join("unconfirmed-child");
+        std::fs::create_dir(&blocked).unwrap();
+        let restore_child = RestorePermissions(
+            blocked.clone(),
+            std::fs::metadata(&blocked).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let error = super::establish_preparation_directory(&blocked).unwrap_err();
+        assert!(
+            matches!(error, super::PreparationDirectoryError::ChildEstablishment { parent: boundary, directory, source }
+            if boundary == parent.canonicalize().unwrap() && directory == blocked
+                && source.path == blocked && source.source.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(
+            blocked.is_dir(),
+            "failed durability leaves a visible child, without admitting an anchor"
+        );
+        drop(restore_child);
+        let settled = super::establish_preparation_directory(&blocked).unwrap();
+        assert_eq!(settled.path(), blocked.canonicalize().unwrap());
+    }
+
     #[test]
     fn default_state_creation_uses_the_established_home_boundary() {
         let home = tempfile::tempdir().unwrap();
