@@ -20,7 +20,7 @@ import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedAdmission
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
-import Tidepool.CheckedRecipe (writeCheckedItemReceipt, writeCheckedDisplayReceipt, checkedRecipeSource)
+import Tidepool.CheckedRecipe (writeCheckedItemReceipt, checkedRecipeSource)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope
 import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), workerArgv, workerRequestFromArgv)
@@ -40,37 +40,27 @@ checkedAdmissionChecks = withScratch $ \root -> do
       item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
         (digest source) "bind" ["café"] inventory ["Val7"]
         [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
-        Nothing Nothing 7 "prefix" [] Nothing Nothing [] [] []
-      display = CheckedDisplayAdmission "display-admission" "cell-receipt" 2
-        "observation" 6 7 "prefix" 32 [] inventory ["Val7"] [] "rendered" Nothing [] [] []
+        Nothing 7 "prefix" [] Nothing Nothing [] [] []
       verdict = StmtBinders KBind ["café"] []
-      displayVerdict = StmtBinders KBind (checkedDisplayBinders display) []
-      observation = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "observation" Nothing
+      retainedInput = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "input" Nothing
   BS.writeFile first "first"
   BS.writeFile second "second"
   args <- request fields
-  let displayArgs = args { requestRetainedGenerations = Map.singleton observation 6 }
-      checkCell = validateCheckedCellAdmission args cell source wrapper
+  let checkCell = validateCheckedCellAdmission args cell source wrapper
       checkItem = validateCheckedItemAdmission args item source verdict
-      checkDisplay = validateCheckedDisplayAdmission displayArgs display "" displayVerdict
   checkCell
   checkItem
-  checkDisplay
-  -- All three checkpoints must detect a recipe changed since a previous pass.
+  -- Both checkpoints must detect a recipe changed since a previous pass.
   BS.writeFile first "changed"
   expectFailure "cell template mutation" cellError checkCell
   expectFailure "item template mutation" itemError checkItem
-  expectFailure "display template mutation" displayError checkDisplay
   BS.writeFile first "first"
   checkCell
   checkItem
-  checkDisplay
   forM_ [("reordered", drop 1 (requestTurnTemplates args) ++ take 1 (requestTurnTemplates args)), ("deduplicated", take 2 (requestTurnTemplates args))] $ \(label,templates) -> do
     let changed = args { requestTurnTemplates = templates }
     expectFailure (label ++ " cell recipes") cellError (validateCheckedCellAdmission changed cell source wrapper)
     expectFailure (label ++ " item recipes") itemError (validateCheckedItemAdmission changed item source verdict)
-    expectFailure (label ++ " display recipes") displayError
-      (validateCheckedDisplayAdmission (changed { requestRetainedGenerations = requestRetainedGenerations displayArgs }) display "" displayVerdict)
   expectFailure "UTF-8 cell bytes" cellError (validateCheckedCellAdmission args cell (source ++ " ") wrapper)
   expectFailure "wrapper bytes" cellError (validateCheckedCellAdmission args cell source (wrapper ++ " "))
   expectFailure "injected order" itemError (validateCheckedItemAdmission (args { requestInjectVals = ["Val7", "Val7"] }) item source verdict)
@@ -80,12 +70,6 @@ checkedAdmissionChecks = withScratch $ \root -> do
   let reserved = "let __tidepool_checked_annotation_0 = 1"
   expectFailure "reserved annotation" "authored checked item uses a compiler-reserved annotation name"
     (validateCheckedItemAdmission args (item { itemSourceDigest = digest reserved }) reserved verdict)
-  expectFailure "preview display" displayError (validateCheckedDisplayAdmission (displayArgs { requestActivationPreview = True }) display "" displayVerdict)
-  expectFailure "display source" displayError (validateCheckedDisplayAdmission displayArgs display "authored" displayVerdict)
-  expectFailure "observation generation" "display lacks its exact retained observation generation"
-    (validateCheckedDisplayAdmission (displayArgs { requestRetainedGenerations = Map.singleton observation 5 }) display "" displayVerdict)
-  expectFailure "missing observation" "display lacks its exact retained observation generation"
-    (validateCheckedDisplayAdmission args display "" displayVerdict)
   missing <- try (validateCheckedCellAdmission (args { requestTurnTemplates = [("bind", root </> "absent")] }) cell "changed body" wrapper) :: IO (Either IOException ())
   unless (either isDoesNotExistError (const False) missing) (fail "missing recipe did not retain file-read error precedence")
   -- Literal placement must never rescan authored text for protected markers.
@@ -101,17 +85,16 @@ checkedAdmissionChecks = withScratch $ \root -> do
         , inspect { requestActivationPreview = True }, inspect { requestDeclarationJoin = Just "join" }
         , inspect { requestBindGen = Just 7 }, inspect { requestTarget = Just "run" }
         , inspect { requestInjectVals = ["sibling"] }, inspect { requestInspectOut = Nothing }
-        , inspect { requestRetainedGenerations = Map.singleton observation 6 }
+        , inspect { requestRetainedGenerations = Map.singleton retainedInput 6 }
         ] $ \wrong -> unless (not (matchesInspectionAdmission wrong ["Val7"]))
           (fail "inspection authority admitted another operation or input inventory")
   inspectionScopeChecks root
-  receiptChecks root item display
+  receiptChecks root item
   putStrLn "checked admission: mutation, ordering, authority, recipe and receipt checks passed"
   where
     digest = shaHex . TE.encodeUtf8 . T.pack
     cellError = "cell body, wrapper or injected interfaces differ from immutable admission"
     itemError = "checked item body, verdict, generation, signatures or recipe differs from its protected offer"
-    displayError = "display request differs from its completed observation admission"
 
 request :: [RequestField] -> IO WorkerRequest
 request fields = case workerRequestFromArgv (workerArgv fields) of
@@ -137,15 +120,13 @@ withScratch = bracket acquire removeDirectoryRecursive
       createDirectory path
       pure path
 
-receiptChecks :: FilePath -> CheckedItemAdmission -> CheckedDisplayAdmission -> IO ()
-receiptChecks root item display = do
+receiptChecks :: FilePath -> CheckedItemAdmission -> IO ()
+receiptChecks root item = do
   let scope = ExactScope "manifest" "request" "producer" "semantic" [] Map.empty [] [] [] []
         NoCheckedPurpose Nothing Set.empty
       source = "recipe λ"
   writeCheckedItemReceipt root scope item source
   check "checked-item.cbor" itemGolden
-  writeCheckedDisplayReceipt root scope display source
-  check "checked-display.cbor" displayGolden
   where
     check file golden = do
       actual <- BS.readFile (root </> file)
@@ -156,7 +137,6 @@ receiptChecks root item display = do
       _ -> error "invalid receipt golden"
     unhex _ = error "odd receipt golden"
     itemGolden = "886b545045584143544954454d613167726571756573746e6974656d2d61646d697373696f6e6c63656c6c2d7265636569707402784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d636865636b65642d7265636970652d32"
-    displayGolden = "886e54504558414354444953504c4159613167726571756573746c63656c6c2d726563656970740266707265666978784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d646973706c61792d7265636970652d31"
 
 inspectionScopeChecks :: FilePath -> IO ()
 inspectionScopeChecks root = do

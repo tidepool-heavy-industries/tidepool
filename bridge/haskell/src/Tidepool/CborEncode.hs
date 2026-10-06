@@ -132,7 +132,7 @@ encodeCellOut
   -> ByteString
 encodeCellOut plan pins expressions checkedSource = toStrictByteString $
   let items = cellPlanItems plan in
-  encodeListLen 3 <> encodeString "TPCELLOBSERVATIONS" <> encodeWord 2
+  encodeListLen 3 <> encodeString "TPCELLOBSERVATIONS" <> encodeWord 3
   <> encodeListLen 5
   <> encodeListLen (fromIntegral (length items))
   <> foldMap encodeCellItem items

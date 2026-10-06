@@ -160,7 +160,7 @@ import Data.Data (Data, cast, gmapQ)
 import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
-import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.FinalizedModule (FinalizedModule(..))
@@ -214,9 +214,9 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , ActivationPreviewAdmission(..), scopeActivationPreview
-  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , writeExactCompilation, compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
@@ -597,7 +597,6 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
   let plan = CellExpressionPlan
         { expressionPlanKey = occurrence
         , expressionPlanLift = liftPlan
-        , expressionPlanPresentation = ExpressionOpaque
         , expressionPlanType = renderCellPinType names stableType
         , expressionPlanHeads = nominalHeadsOfType stableType
         }
@@ -4276,10 +4275,7 @@ withSourceSelectionRefusal action = reifyGhc $ \session ->
 -- persistent lexical surface or the mere presence of its interface.
 checkedRecipeOriginal :: ExactScope -> Either String (Maybe ((String,String),String))
 checkedRecipeOriginal admitted = do
-  let original = case (scopeCheckedItem admitted, scopeCheckedDisplay admitted) of
-        (Just item,Nothing) -> itemPlannedDeclaration item
-        (Nothing,Just display) -> displayPlannedDeclaration display
-        _ -> Nothing
+  let original = scopeCheckedItem admitted >>= itemPlannedDeclaration
   forM_ original $ \(owner,_) -> case Map.lookup owner (scopeInterfaceEvidence admitted) of
     Just (ModuleInterfaceEvidence proof) -> case canonicalOrigin proof of
       NativeAuthoredDeclaration _ -> Right ()

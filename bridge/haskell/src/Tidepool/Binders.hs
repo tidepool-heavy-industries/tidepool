@@ -47,7 +47,7 @@ module Tidepool.Binders
   , analyzeOrderedCell, analyzeOrderedCellWithFlags
   , defaultParserDynFlags, templateParserFlags
   , renderCellCheckSource
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
+  , CellExpressionPlan(..), ExpressionLiftPlan(..)
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
   , TemplateSelector(..)
@@ -96,7 +96,7 @@ import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.CheckedCell
   ( renderCheckedTypeWitness, renderRequestTypeSignatures
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..) )
+  , CellExpressionPlan(..), ExpressionLiftPlan(..) )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)

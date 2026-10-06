@@ -1144,7 +1144,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       "generated scaffold target differs from its protected recipe" $
       compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
     writeFile target protected
-    forM_ ["Bind","Display"] $ \name -> do
+    forM_ ["Bind","Capture"] $ \name -> do
       let rendered = T.unpack (T.replace "module Expr where" (T.pack ("module " ++ name ++ " where")) (T.pack protected))
           generatedPath = work </> (name ++ ".hs")
       writeFile generatedPath rendered
