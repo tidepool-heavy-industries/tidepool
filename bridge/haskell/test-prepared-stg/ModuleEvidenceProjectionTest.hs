@@ -160,6 +160,7 @@ verifyModuleEvidenceProjection = do
     , projectionToolchain = "ghc-9.12.2"
     , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
     , projectionRetainedGenerations = Map.empty
+    , projectionCurrentOriginals = mempty
     , projectionEntry = SymbolIdentity "main" "ModuleEvidence" "value" "alpha" Nothing
     , projectionAuxiliaryRoots = []
     , projectionFormattingAuthority = Nothing

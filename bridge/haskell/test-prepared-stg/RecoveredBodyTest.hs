@@ -97,6 +97,7 @@ assertRecoveredExecutionStackBody = do
         , projectionToolchain = Text.pack "ghc-9.12.2"
         , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredExecutionStackCaller")
             (Text.pack "value") (Text.pack "caller") Nothing
         , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
@@ -174,6 +175,7 @@ assertRecoveredDictionaryBody = do
           , projectionToolchain = Text.pack "ghc-9.12.2"
           , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
+          , projectionCurrentOriginals = mempty
           , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredEntryCaller")
               (Text.pack "value") (Text.pack "applicativeDictionary") Nothing
           , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
@@ -292,6 +294,7 @@ assertRecoveredEntryContracts = do
           , projectionToolchain = Text.pack "ghc-9.12.2"
           , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
+          , projectionCurrentOriginals = mempty
           , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredEntryCaller")
               (Text.pack "value") (Text.pack "caller") Nothing
           , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
@@ -405,6 +408,7 @@ assertAllRecoveredBodies = do
           , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
               (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
+          , projectionCurrentOriginals = mempty
           , projectionEntry = entry
           , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
@@ -532,6 +536,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
         , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = SymbolIdentity
             (Text.pack "main") (Text.pack "RecoveredBody") (Text.pack "value")
             (Text.pack "foldableCaller") Nothing
@@ -655,6 +660,7 @@ assertRecoveredKindRep root = do
         , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = entry
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
@@ -773,6 +779,7 @@ assertPatErrorBody root = do
         , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = entry
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
@@ -865,6 +872,7 @@ assertRaiseContracts root = do
         , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = entry
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
@@ -954,6 +962,7 @@ assertBottomingApplications root = do
             , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
                 (Text.pack "sysv64") []
             , projectionRetainedGenerations = mempty
+            , projectionCurrentOriginals = mempty
             , projectionEntry = SymbolIdentity (Text.pack "main")
                 (Text.pack "RaiseContract") (Text.pack "value")
                 (Text.pack occurrence) Nothing

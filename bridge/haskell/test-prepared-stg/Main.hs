@@ -155,6 +155,7 @@ jsonProjectionContext authority result modul entry = do
     , Projection.projectionTarget =
         Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
     , Projection.projectionRetainedGenerations = mempty
+    , Projection.projectionCurrentOriginals = mempty
     , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul)
         "value" (fromString entry) Nothing
     , Projection.projectionAuxiliaryRoots = []
@@ -180,6 +181,7 @@ projectEntryWithAux result modul entry auxEntries retained =
       , Projection.projectionTarget =
           Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
       , Projection.projectionRetainedGenerations = Map.map fromIntegral retained
+      , Projection.projectionCurrentOriginals = mempty
       , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul) "value" (fromString entry) Nothing
       , Projection.projectionAuxiliaryRoots =
           [ Schema.SymbolIdentity "main" (fromString modul) "value" (fromString aux) Nothing
@@ -473,6 +475,7 @@ verifyProjectionInterning dir = do
         , Projection.projectionTarget =
             Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
         , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionCurrentOriginals = mempty
         , Projection.projectionEntry = Schema.SymbolIdentity "main" "M3Vertical" "value" "result" Nothing
         , Projection.projectionAuxiliaryRoots = []
         , Projection.projectionFormattingAuthority = Nothing
@@ -756,6 +759,7 @@ verifyRepeatedConstructorEvidence result = do
         , Projection.projectionTarget =
             Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
         , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionCurrentOriginals = mempty
         , Projection.projectionEntry = Schema.SymbolIdentity "main"
             (fromString "StrictPlainMetadata") "value" (fromString "noUnpack") Nothing
         , Projection.projectionAuxiliaryRoots = []
@@ -926,6 +930,7 @@ verifyRecoveredTypedPreparation dir = do
         , Projection.projectionTarget =
             Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
         , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionCurrentOriginals = mempty
         , Projection.projectionEntry = Schema.SymbolIdentity "main" "TypedPreparationOwner"
             "value" "unrelated" Nothing
         , Projection.projectionAuxiliaryRoots = []

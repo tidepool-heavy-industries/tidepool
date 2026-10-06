@@ -58,6 +58,7 @@ verifyCallerResultProjection = do
       , projectionToolchain = "ghc-9.12.2"
       , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
       , projectionRetainedGenerations = retained
+      , projectionCurrentOriginals = mempty
       , projectionEntry = SymbolIdentity "main" (Text.pack modul) "value" (Text.pack entry) Nothing
       , projectionAuxiliaryRoots = []
       , projectionFormattingAuthority = Nothing
