@@ -8,7 +8,7 @@ module Tidepool.PreparedStg
   , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule, PreparedModuleTask, acquirePreparedModule, runPreparedModuleTask
-  , PreparedSiteEnvironment, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch
+  , PreparedSiteEnvironment, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
   , acquirePreparedModuleWithSiteEnvironment, prepareModuleWithSiteEnvironment
   , RecoveredModuleInput(..)
   , RecoveredModuleFailure(..)
@@ -154,6 +154,17 @@ preparedSiteDependenciesMatch environment siblings prepared =
   not (preparedAuthorityDependent prepared)
     || maybe False (Sites.preparedSiteDependenciesMatch environment siblings)
          (preparedSiteDependencies prepared)
+
+-- | Alternatives retain the same completed Core independently of the authority
+-- observations used during lowering. Only verifiable consumed facts deduplicate.
+preparedSiteDependenciesEquivalent :: PreparedModule -> PreparedModule -> Bool
+preparedSiteDependenciesEquivalent first second =
+  case (preparedAuthorityDependent first, preparedAuthorityDependent second) of
+    (False, False) -> True
+    (True, True) -> case (preparedSiteDependencies first, preparedSiteDependencies second) of
+      (Just facts, Just facts') -> Sites.preparedSiteDependenciesEquivalent facts facts'
+      _ -> False
+    _ -> False
 
 -- | Complete fresh and admitted retained originals share this preparation owner.
 prepareModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModule -> IO PreparedModule

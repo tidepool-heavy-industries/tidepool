@@ -5,7 +5,7 @@ module Tidepool.PreparedSites
   , resolveSiteAuthority
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment
   , preparedSiteRequestAuthority
-  , PreparedSiteDependencies, preparedSiteDependenciesMatch
+  , PreparedSiteDependencies, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
   , elaboratePreparedSitesWithDependencies
   , resolveRequestSiteTyCon
   , SiteRejection(..)
@@ -257,6 +257,14 @@ preparedSiteDependenciesMatch environment imported (PreparedSiteDependencies own
   Map.foldrWithKey (\query previous rest -> rest
     && sameDependencyFact previous (observeDependency environment owned imported query)) True facts
 
+-- | Deduplicate alternatives by the consumed observations, not by all owned
+-- siblings or the ambient interface roster. Unverifiable facts never match.
+preparedSiteDependenciesEquivalent :: PreparedSiteDependencies -> PreparedSiteDependencies -> Bool
+preparedSiteDependenciesEquivalent (PreparedSiteDependencies _ facts)
+    (PreparedSiteDependencies _ facts') =
+  Map.keysSet facts == Map.keysSet facts'
+    && and (Map.elems (Map.intersectionWith sameDependencyFact facts facts'))
+
 resolvePreparedSiteEnvironment :: HscEnv -> IO PreparedSiteEnvironment
 resolvePreparedSiteEnvironment env = do
   declarations <- Map.fromList <$> traverse resolveAuthority authorityDeclarations
@@ -342,20 +350,21 @@ resolveDeclaration env spelling occurrence nominal = do
     Found _ owner -> do
       name <- initIfaceLoad env (lookupOrig owner occurrence)
       existing <- lookupType env name
-      loaded <- case existing of
-        Just thing -> pure (Succeeded thing)
-        Nothing -> initIfaceLoad env (importDecl name)
-      external <- hscEPS env
       let home = lookupHpt (hsc_HPT env) (moduleName owner)
-          interfaces = [hm_iface entry | entry <- maybe [] (:[]) home]
-            ++ [interface | (actual, interface) <- moduleEnvToList (eps_PIT external), actual == owner]
-          selected = find ((== owner) . mi_module) interfaces
-          version = mi_iface_hash . mi_final_exts <$> selected
           declared interface = any (\(_, declaration) -> occurrence `elem`
             (nameOccName (ifName declaration) : ifaceDeclImplicitBndrs declaration)) (mi_decls interface)
           absent = case home of
             Just entry | mi_module (hm_iface entry) == owner, not (declared (hm_iface entry)) -> True
             _ -> False
+      loaded <- case existing of
+        _ | absent -> pure (Failed "declaration absent from original home interface")
+        Just thing -> pure (Succeeded thing)
+        Nothing -> initIfaceLoad env (importDecl name)
+      external <- hscEPS env
+      let interfaces = [hm_iface entry | entry <- maybe [] (:[]) home]
+            ++ [interface | (actual, interface) <- moduleEnvToList (eps_PIT external), actual == owner]
+          selected = find ((== owner) . mi_module) interfaces
+          version = mi_iface_hash . mi_final_exts <$> selected
           missing = case version of
             Just fingerprint | absent -> MissingDeclaration owner fingerprint name
             _ -> UnverifiableDependency
