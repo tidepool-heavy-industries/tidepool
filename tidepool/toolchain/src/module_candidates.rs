@@ -12,7 +12,7 @@ pub(crate) mod deployment;
 #[cfg(test)]
 mod fixture_packets;
 mod inventory;
-mod shared_evidence;
+pub(crate) mod shared_evidence;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -218,11 +218,13 @@ pub(crate) struct CandidateProduct {
 }
 
 impl CandidateProduct {
-    fn decode_product(bytes: &[u8]) -> Option<RawModuleProduct> {
-        let requirements = crate::prepared_artifact::production_requirements().ok()?;
+    fn decode_product(
+        bytes: &[u8],
+        requirements: &tidepool_repr::execution_schema::ProgramRequirements,
+    ) -> Option<RawModuleProduct> {
         let mut products = tidepool_repr::execution_schema::parse_module_products(
             bytes,
-            &requirements,
+            requirements,
             product_decode_limits(),
         )
         .ok()?;
@@ -234,7 +236,8 @@ impl CandidateProduct {
 
     #[cfg(test)]
     pub(crate) fn decode(bytes: Vec<u8>) -> Option<Self> {
-        let decoded = Self::decode_product(&bytes)?;
+        let requirements = crate::prepared_artifact::production_requirements().ok()?;
+        let decoded = Self::decode_product(&bytes, &requirements)?;
         Some(Self { bytes, decoded })
     }
 
@@ -1612,6 +1615,8 @@ fn select_records_inner(
     context: Option<&ExactCandidateContext>,
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
+    let requirements = crate::prepared_artifact::production_requirements().ok()?;
+    let mut evidence_validation = shared_evidence::ValidationStage::acquisition();
     let mut validated = BTreeMap::new();
     let mut package_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let mut validation_elapsed = std::time::Duration::ZERO;
@@ -1640,14 +1645,16 @@ fn select_records_inner(
         };
         let valid = sha(&source_bytes) == record.source_sha256
             && record.evidence.selection_complete
-            && record.evidence.valid(&record.target_source);
+            && evidence_validation
+                .validate(&record.evidence, &record.target_source)
+                .is_ok();
         validation_elapsed += validation_started.elapsed();
         if !valid {
             continue;
         }
         let decode_started = std::time::Instant::now();
         decoded_bytes += record.products.len() as u64;
-        let parsed = CandidateProduct::decode_product(&record.products);
+        let parsed = CandidateProduct::decode_product(&record.products, &requirements);
         decode_elapsed += decode_started.elapsed();
         let Some(product) = parsed else { continue };
         if product.unit != record.unit
@@ -1823,10 +1830,9 @@ fn select_records_inner(
     let mut manifest = Vec::new();
     for (_, (mut record, origin, product, _)) in validated {
         let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
-        let Ok(evidence_bytes) = serde_json::to_vec(&record.evidence) else {
+        let Some(evidence_sha) = record.evidence.json_sha256().map(|digest| hex(&digest)) else {
             continue;
         };
-        let evidence_sha = sha(&evidence_bytes);
         let Some(module_evidence) = record.evidence.modules.iter().find(|module| {
             module.unit == record.unit
                 && module.module == record.module

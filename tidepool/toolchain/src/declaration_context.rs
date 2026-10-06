@@ -295,17 +295,19 @@ fn materialization_bytes(entries: &[Arc<ArtifactEntry>]) -> u64 {
 
 /// Execution recipes are selected by original artifact custody. A digest can
 /// check a selected graph but cannot discover a source owner or grant visibility.
+#[cfg(test)]
 fn execution_scope_value(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
 ) -> Result<Option<Value>, CompileError> {
-    execution_scope_value_with_graph_paths(entries, root, &mut BTreeMap::new())
+    execution_scope_value_with_graph_paths(entries, root, &mut BTreeMap::new(), &mut 0)
 }
 
 fn execution_scope_value_with_graph_paths(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
     graph_paths: &mut BTreeMap<[u8; 32], PathBuf>,
+    written_bytes: &mut u64,
 ) -> Result<Option<Value>, CompileError> {
     let originals = entries
         .iter()
@@ -400,6 +402,7 @@ fn execution_scope_value_with_graph_paths(
                             .create_new(true)
                             .open(&path)?;
                         file.write_all(graph.bytes())?;
+                        *written_bytes += graph.bytes().len() as u64;
                         graph_paths.insert(digest, path.clone());
                         path
                     };
@@ -759,6 +762,8 @@ pub(crate) struct RetainedArtifactMaterialization {
     groups: Arc<[PendingCertifiedGroup]>,
     execution_scope: Option<Value>,
     graph_paths: BTreeMap<[u8; 32], PathBuf>,
+    #[cfg(test)]
+    payload_work: recovery_artifacts::RecoveryArtifactWork,
 }
 
 #[derive(Clone)]
@@ -3602,7 +3607,7 @@ impl ExactDeclarationContext {
                 }
             }
         }
-        let inherited_rows = rows.clone();
+        let inherited_row_count = rows.len();
         let entries = metadata.entries.values().cloned().collect::<Vec<_>>();
         let new_entries = entries
             .iter()
@@ -3642,7 +3647,10 @@ impl ExactDeclarationContext {
             .map(|entry| rows[&entry.descriptor.id].artifact.clone())
             .collect::<Vec<_>>();
         let start = std::time::Instant::now();
-        self.validate_artifacts_with_owned_rows(&artifacts, metadata, &inherited_rows)?;
+        // The recovery writer issued every row from owned immutable bytes and
+        // checked its private file once. Validate selection metadata without
+        // rereading those same private payloads.
+        self.validate_artifacts_with_owned_rows(&artifacts, metadata, &rows)?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
             crate::timing::NO_ROUND,
@@ -3681,6 +3689,7 @@ impl ExactDeclarationContext {
                 }
             }
         }
+        let inherited_group_handle_clones = inherited_groups.len();
         let new_products = original_products(&new_entries);
         let start = std::time::Instant::now();
         inherited_groups.extend(
@@ -3704,8 +3713,21 @@ impl ExactDeclarationContext {
             .flat_map(|parent| parent.graph_paths.iter())
             .map(|(digest, path)| (*digest, path.clone()))
             .collect::<BTreeMap<_, _>>();
-        let execution_scope =
-            execution_scope_value_with_graph_paths(&entries, root, &mut graph_paths)?;
+        let mut scope_written_bytes = 0;
+        let execution_scope = execution_scope_value_with_graph_paths(
+            &entries,
+            root,
+            &mut graph_paths,
+            &mut scope_written_bytes,
+        )?;
+        let work = validation.work();
+        tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_immutable_materialization",
+            retained_entries = inherited_row_count, new_entries = new_entries.len(),
+            retained_metadata_row_clones = inherited_row_count, inherited_group_handle_clones,
+            retained_graph_path_clones = parents.iter().map(|parent| parent.graph_paths.len()).sum::<usize>(),
+            recovery_read_bytes = work.read_bytes, recovery_written_bytes = work.written_bytes,
+            recovery_decoded_bytes = work.decoded_bytes, recovery_hash_bytes = work.hash_bytes,
+            scope_written_bytes, "completed private artifact ownership");
         Ok(RetainedArtifactMaterialization {
             _directory: directory,
             _parents: parents,
@@ -3713,6 +3735,8 @@ impl ExactDeclarationContext {
             groups: inherited_groups.into(),
             execution_scope,
             graph_paths,
+            #[cfg(test)]
+            payload_work: work,
         })
     }
 
@@ -3738,6 +3762,7 @@ impl ExactDeclarationContext {
             ));
         }
         std::fs::create_dir_all(root)?;
+        let reused = self.inventory.retained_materialization().is_some();
         let retained = self.inventory.retain_materialization(|parents| {
             self.materialize_retained_artifacts(metadata, parents)
         })?;
@@ -3883,6 +3908,9 @@ impl ExactDeclarationContext {
             .create_new(true)
             .open(&manifest)?;
         output.write_all(&bytes)?;
+        tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_request_references",
+            reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
+            selected_artifacts = artifacts.len(), "exact request references retained immutable products");
         Ok(ExactCompilationRequest {
             context: self.clone(),
             manifest,
@@ -4816,6 +4844,63 @@ mod tests {
         drop(second);
         drop(b);
         assert!(!root_a.exists());
+    }
+
+    #[test]
+    fn retained_materialization_many_descendants_measure_metadata_and_payload_work() {
+        let (mut context, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let first = context
+            .prepare_compilation(&scratch.path().join("base"), &producer)
+            .unwrap();
+        let mut previous = first.artifacts;
+        let mut written_bytes = first
+            .materialization
+            .as_ref()
+            .unwrap()
+            .payload_work
+            .written_bytes;
+        let mut inherited_rows = 0;
+        let descendants = 24;
+        for index in 0..descendants {
+            let product = crate::certified_products::fixture_finalized_product(
+                support_product(&format!("Growing{index}")),
+                context.producer,
+            );
+            context = Arc::new(
+                context
+                    .as_ref()
+                    .clone()
+                    .extend_checked_original_products(context.producer, &[product])
+                    .unwrap(),
+            );
+            let request = context
+                .prepare_compilation(&scratch.path().join(format!("child{index}")), &producer)
+                .unwrap();
+            for artifact in &previous {
+                assert!(request.artifacts.contains(artifact));
+            }
+            let retained = request.materialization.as_ref().unwrap();
+            assert_eq!(retained._parents.len(), 1);
+            let retained_files = std::fs::read_dir(retained._directory.path().join("artifacts"))
+                .unwrap()
+                .map(|entry| entry.unwrap().metadata().unwrap().len())
+                .sum::<u64>();
+            assert_eq!(
+                retained.payload_work.written_bytes, retained_files,
+                "only this descendant's new private payloads were written"
+            );
+            assert!(retained.payload_work.written_bytes > 0);
+            inherited_rows += previous.len();
+            written_bytes += retained.payload_work.written_bytes;
+            previous = request.artifacts;
+        }
+        assert_eq!(
+            inherited_rows,
+            descendants * 4 + descendants * (descendants - 1) / 2
+        );
+        println!("retained-descendants count={descendants} immutable_written_bytes={written_bytes} inherited_row_copies={} final_rows={}",
+            inherited_rows, previous.len());
     }
 
     #[test]
@@ -7789,9 +7874,9 @@ mod tests {
                     packages,
                     seal,
                 ),
-                [2; 32],
+                graph.producer_sha256(),
             );
-            Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
+            Arc::new(ArtifactEntry::original(graph.producer_sha256(), product).unwrap())
         };
         let b1 = native_entry(owners[1].clone());
         let scope = execution_scope_fixture(&[Arc::clone(&a), Arc::clone(&b1)], source.path())
