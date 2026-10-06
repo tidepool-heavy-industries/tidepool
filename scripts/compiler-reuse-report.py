@@ -285,11 +285,20 @@ def main():
     parser.add_argument('--require-stage', choices=STAGES, action='append', default=[])
     parser.add_argument('--workload', type=Path, help='retained physical-request/source mapping and disable controls')
     args = parser.parse_args()
+    if args.trace.stat().st_size > 64 * 1024 * 1024:
+        raise ValueError('trace exceeds 64 MiB; retain a bounded exact-request trace')
+    before = hashlib.sha256(args.trace.read_bytes()).hexdigest()
     report = analyze(load_events(args.trace))
-    report['input'] = {'path': str(args.trace.resolve()), 'sha256': hashlib.sha256(args.trace.read_bytes()).hexdigest()}
+    after = hashlib.sha256(args.trace.read_bytes()).hexdigest()
+    if before != after:
+        raise ValueError('trace changed during reporting; retain an immutable request trace')
+    report['input'] = {'path': str(args.trace.resolve()), 'sha256': after}
     if args.workload:
-        report['workload'] = analyze_workload(json.loads(args.workload.read_text()), report)
-        report['workload_input'] = {'path': str(args.workload.resolve()), 'sha256': hashlib.sha256(args.workload.read_bytes()).hexdigest()}
+        if args.workload.stat().st_size > 4 * 1024 * 1024:
+            raise ValueError('workload manifest exceeds four MiB')
+        workload_bytes = args.workload.read_bytes()
+        report['workload'] = analyze_workload(json.loads(workload_bytes), report)
+        report['workload_input'] = {'path': str(args.workload.resolve()), 'sha256': hashlib.sha256(workload_bytes).hexdigest()}
         if report['workload']['status'] != 'observed':
             report['problems'].append('workload/control evidence incomplete')
     for request in report['requests']:
