@@ -6059,7 +6059,10 @@ pub(crate) mod tests {
     #[test]
     fn retained_core_selection_requires_exact_certified_original() {
         let packages = BTreeMap::new();
-        let fixture = original_witness_fixture("Original", None, 7, &packages);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture("Original", None, 7, &packages),
+            [1; 32],
+        );
         let original = recovered_witness_fixtures(std::slice::from_ref(&fixture))
             .remove(0)
             .product;
