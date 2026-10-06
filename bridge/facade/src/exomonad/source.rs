@@ -701,6 +701,18 @@ fn source_manifests(
         .collect()
 }
 
+fn source_root_manifest(root: &Path) -> Result<tidepool_toolchain::cache::SourceRootManifest> {
+    let files = tidepool_toolchain::cache::source_root_manifest(root)?;
+    Ok(tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)?)
+}
+
+fn same_source_manifest(
+    left: &tidepool_toolchain::cache::SourceRootManifest,
+    right: &tidepool_toolchain::cache::SourceRootManifest,
+) -> bool {
+    left.files().eq(right.files())
+}
+
 fn validate_revision_resource(
     directory: &Path,
     roots: usize,
@@ -977,6 +989,82 @@ impl ExomonadSourceReload {
             .clone()
     }
 
+    /// The generated workspace interface is part of the exact run source
+    /// graph. It is separate from the authored source layer and appears once,
+    /// after that layer's ordered roots.
+    fn append_workspace_resources(
+        &self,
+        identities: &mut Vec<String>,
+        include_paths: &mut Vec<PathBuf>,
+        manifests: &mut Vec<tidepool_toolchain::cache::SourceRootManifest>,
+    ) -> Result<()> {
+        if include_paths.len() != manifests.len() {
+            return Err("source graph manifest count differs from its roots".into());
+        }
+        let path = self.frozen.workspace_resources();
+        let manifest = source_root_manifest(&path)?;
+        let canonical = std::fs::canonicalize(&path)?;
+        let mut matches = Vec::new();
+        for (index, include) in include_paths.iter().enumerate() {
+            if std::fs::canonicalize(include)? == canonical {
+                matches.push(index);
+            }
+        }
+        if matches.len() > 1 {
+            return Err(
+                "generated workspace resource appears more than once in the source graph".into(),
+            );
+        }
+        if let Some(index) = matches.first().copied() {
+            if !same_source_manifest(&manifests[index], &manifest) {
+                return Err(
+                    "generated workspace resource changed after workspace validation".into(),
+                );
+            }
+            include_paths[index] = path;
+        } else {
+            include_paths.push(path);
+            manifests.push(manifest);
+        }
+        let identity = format!("workspace:{}", self.frozen.identity());
+        let workspace_identities = identities
+            .iter()
+            .filter(|existing| existing.starts_with("workspace:"))
+            .collect::<Vec<_>>();
+        if workspace_identities.len() > 1
+            || workspace_identities
+                .first()
+                .is_some_and(|existing| existing.as_str() != identity.as_str())
+        {
+            return Err("source graph carries a different workspace resource identity".into());
+        }
+        if workspace_identities.is_empty() {
+            identities.push(identity);
+        }
+        Ok(())
+    }
+
+    /// Paths that may represent the completed deployment's original live
+    /// source revision in an issued graph. Other deployment paths are never
+    /// accepted by toolset projection.
+    fn prepared_run_revision(&self) -> Result<Option<(String, Vec<PathBuf>)>> {
+        let Some(directory) = self.frozen.prepared_source_revision()? else {
+            return Ok(None);
+        };
+        let directory = std::fs::canonicalize(directory)?;
+        let roots = revision_root_count(&directory)?;
+        let manifests = source_manifests(&directory, roots)?;
+        let identity = source_revision(self.frozen.identity(), &manifests[..roots]);
+        validate_revision_resource(&directory, roots, &identity.identity, &manifests)?;
+        Ok(Some((
+            identity.identity,
+            revision_include_paths(&directory, roots)
+                .into_iter()
+                .map(std::fs::canonicalize)
+                .collect::<std::io::Result<Vec<_>>>()?,
+        )))
+    }
+
     fn pinned_checkpoint_graph(
         &self,
         helper_branch: &str,
@@ -994,6 +1082,7 @@ impl ExomonadSourceReload {
         };
         add(&self.helper_layer(helper_branch), "helpers")?;
         add(&self.layer, "run")?;
+        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
@@ -1834,12 +1923,18 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         source: &exomonad_actor::CheckpointSourceLayer,
     ) -> std::result::Result<exomonad_actor::CheckpointSourceLayer, String> {
         self.validate_source_authority(source)?;
-        let identities = source
+        let run_identities = source
             .identities()
             .iter()
             .filter(|identity| identity.starts_with("run:"))
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
+        if run_identities.len() != 1 {
+            return Err("owned source graph must contain exactly one run revision".into());
+        }
+        let prepared_run_revision = self
+            .prepared_run_revision()
+            .map_err(|error| error.to_string())?;
         let source_manifests = source
             .source_manifests()
             .ok_or("owned source graph has no immutable manifests")?;
@@ -1849,11 +1944,26 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         let mut include_paths = Vec::new();
         let mut manifests = Vec::new();
         for (path, manifest) in source.include_paths().iter().zip(source_manifests) {
-            if path.starts_with(self.run_root.join("workspace/revisions")) {
+            let owned_run_revision = path.starts_with(self.run_root.join("workspace/revisions"));
+            let owned_prepared_revision =
+                prepared_run_revision
+                    .as_ref()
+                    .is_some_and(|(identity, paths)| {
+                        run_identities
+                            .iter()
+                            .any(|run| run == &format!("run:{identity}"))
+                            && paths.contains(path)
+                    });
+            if owned_run_revision || owned_prepared_revision {
                 include_paths.push(path.clone());
                 manifests.push(manifest.clone());
             }
         }
+        if include_paths.is_empty() {
+            return Err("owned source graph has no admitted run revision roots".into());
+        }
+        let mut identities = run_identities;
+        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
@@ -1907,12 +2017,17 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .layer
             .checkpoint_revision(self.frozen.identity())
             .map_err(|error| error.to_string())?;
+        let mut identities = vec![format!("run:{}", revision.identity)];
+        let mut include_paths = revision.paths;
+        let mut manifests = revision.manifests.iter().cloned().collect();
+        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)
+            .map_err(|error| error.to_string())?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
-            identities: vec![format!("run:{}", revision.identity)],
-            include_paths: revision.paths,
-            manifests: revision.manifests.iter().cloned().collect(),
+            identities,
+            include_paths,
+            manifests,
             entries: self.entry_storage.clone(),
         })))
     }
@@ -2542,9 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_prepared_source_is_referenced_then_live_reload_is_run_owned() {
-        use exomonad_actor::ActorSourceLayers;
-
+    fn completed_prepared_source_reference_stays_in_its_deployment() {
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
         let original_run = tempfile::tempdir().unwrap();
         let mut frozen = FrozenWorkspace::load(project.path(), original_run.path()).unwrap();
@@ -2562,45 +2675,19 @@ mod tests {
             &prepared_revision,
         )
         .unwrap();
-        std::fs::create_dir_all(deployment.path().join("workspace/entries")).unwrap();
+        let original_preparation = uuid::Uuid::new_v4();
         frozen.preparation = Some(super::super::workspace::WorkspacePreparation::Completed {
-            original: uuid::Uuid::new_v4(),
+            original: original_preparation,
             revision: original.identity.clone(),
-            entries: BTreeMap::new(),
+            entries: BTreeMap::from([("recipe".to_owned(), uuid::Uuid::new_v4())]),
         });
         frozen.prepared_deployment = Some(Arc::new(
             tidepool_atomic_write::DirectoryAnchor::open_existing(deployment.path()).unwrap(),
         ));
 
-        let run = Arc::new(run);
-        let reload = ExomonadSourceReload::new_owned(
-            frozen,
-            project.path().to_path_buf(),
-            run.path().to_path_buf(),
-            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
-            SourceRootOwner::Temporary(Arc::clone(&run)),
-        )
-        .unwrap();
-        let selected = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
-        assert_eq!(
-            selected.identities(),
-            &[format!("run:{}", original.identity)]
-        );
-        assert_eq!(
-            selected.include_paths(),
-            revision_include_paths(
-                &prepared_revision,
-                revision_root_count(&prepared_revision).unwrap()
-            )
-            .iter()
-            .map(|path| std::fs::canonicalize(path).unwrap())
-            .collect::<Vec<_>>()
-        );
-        assert!(matches!(
-            selected.prepared_entries(),
-            Some(exomonad_actor::SourceEntryStorage::CompletedOriginal { directory, .. })
-                if directory == &deployment.path().join("workspace/entries")
-        ));
+        let layer = SourceLayer::new(run.path());
+        let seeded = layer.ensure_active(&frozen).unwrap();
+        assert_eq!(seeded.identity, original.identity);
         let run_revision = run
             .path()
             .join("workspace/revisions")
@@ -2613,6 +2700,84 @@ mod tests {
             std::fs::canonicalize(&run_revision).unwrap(),
             prepared_revision
         );
+        let retained = layer.checkpoint_revision(frozen.identity()).unwrap();
+        assert_eq!(
+            retained.paths,
+            revision_include_paths(
+                &prepared_revision,
+                revision_root_count(&prepared_revision).unwrap()
+            )
+            .iter()
+            .map(|path| std::fs::canonicalize(path).unwrap())
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            std::fs::read_to_string(prepared_revision.join("0/Project/Work.hs")).unwrap(),
+            "module Project.Work where\nwork = 1\n"
+        );
+    }
+
+    #[test]
+    fn source_graph_keeps_workspace_resource_once_through_live_updates() {
+        use exomonad_actor::ActorSourceLayers;
+
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let run = Arc::new(run);
+        let reload = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let workspace_resource = reload.frozen.workspace_resources();
+        let workspace_identity = format!("workspace:{}", reload.frozen.identity());
+        let selected = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(selected.identities().last(), Some(&workspace_identity));
+        assert_eq!(selected.include_paths().last(), Some(&workspace_resource));
+        assert_eq!(
+            selected.source_manifests().unwrap().len(),
+            selected.include_paths().len()
+        );
+        assert_eq!(
+            selected
+                .include_paths()
+                .iter()
+                .filter(|path| std::fs::canonicalize(path).ok()
+                    == std::fs::canonicalize(&workspace_resource).ok())
+                .count(),
+            1
+        );
+        let checkpoint = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(checkpoint.include_paths().last(), Some(&workspace_resource));
+        assert_eq!(
+            checkpoint.source_manifests().unwrap().len(),
+            checkpoint.include_paths().len()
+        );
+        assert_eq!(
+            checkpoint
+                .include_paths()
+                .iter()
+                .filter(|path| std::fs::canonicalize(path).ok()
+                    == std::fs::canonicalize(&workspace_resource).ok())
+                .count(),
+            1
+        );
+        let projected = reload.toolset_layer_from(&checkpoint).unwrap();
+        assert_eq!(projected.include_paths(), selected.include_paths());
+        assert!(checkpoint
+            .include_paths()
+            .iter()
+            .any(|path| path.starts_with(run.path().join("helpers"))));
+        assert!(projected
+            .include_paths()
+            .iter()
+            .all(|path| !path.starts_with(run.path().join("helpers"))));
+        assert!(projected.include_paths().iter().all(|path| {
+            path.starts_with(run.path().join("workspace/revisions")) || path == &workspace_resource
+        }));
 
         std::fs::write(
             project.path().join(".exomonad/Project/Work.hs"),
