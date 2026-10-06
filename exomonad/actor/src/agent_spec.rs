@@ -176,6 +176,16 @@ pub struct InstallationExpression {
     pub expression: String,
 }
 
+impl InstallationExpression {
+    #[must_use]
+    pub fn dispatcher_effect_row(&self) -> String {
+        format!(
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
+            self.effect_row,
+        )
+    }
+}
+
 /// Render the single source of truth for actor spec installation.
 ///
 /// Workspace checks typecheck this expression against each launchable role's
@@ -190,10 +200,12 @@ pub fn installation_expression(
         effects
             .iter()
             .map(|effect| match effect {
+                // These public reexports resolve to the original effect Names,
+                // while remaining in the actor facade's ordinary import scope.
                 crate::ActorEffectKey::Replies =>
-                    "Tidepool.Agent.Reply.Internal.Replies".to_owned(),
+                    "Tidepool.Actors.Exomonad.Replies".to_owned(),
                 crate::ActorEffectKey::Watches =>
-                    "Tidepool.Agent.Watch.Internal.Watches".to_owned(),
+                    "Tidepool.Actors.Exomonad.Watches".to_owned(),
                 effect => format!("Tidepool.Effects.Core.{}", effect.haskell_name()),
             })
             .collect::<Vec<_>>()
@@ -225,6 +237,10 @@ mod tests {
         assert_eq!(
             installation.expression,
             "_ <- Tidepool.Agent.Contract.installSpec @('[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal]) AgentSpec.agentSpec"
+        );
+        assert_eq!(
+            installation.dispatcher_effect_row(),
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects '[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal])"
         );
     }
 
@@ -342,6 +358,6 @@ mod tests {
         assert_ne!(forward, reversed);
         assert!(forward
             .effect_row
-            .contains("Tidepool.Agent.Reply.Internal.Replies"));
+            .contains("Tidepool.Actors.Exomonad.Replies"));
     }
 }

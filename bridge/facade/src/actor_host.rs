@@ -2821,17 +2821,13 @@ pub(crate) fn spec_effect_preflight(
     )?;
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core");
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Contract");
-    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Reply.Internal");
-    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch.Internal");
+    preamble = insert_preamble_imports(&preamble, "Tidepool.Actors.Exomonad");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
     for (label, role) in LAUNCHABLE_ROLES {
         let installation =
             exomonad_actor::agent_spec::installation_expression(entry, role().effect_keys());
-        let dispatcher_effects = format!(
-            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
-            installation.effect_row
-        );
+        let dispatcher_effects = installation.dispatcher_effect_row();
         let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
         let template = templates
             .iter()

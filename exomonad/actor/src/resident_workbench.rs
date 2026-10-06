@@ -4619,10 +4619,7 @@ where
             let admitted_base = ready.effects;
             let prepared = ready.prepared;
             let installation = crate::agent_spec::installation_expression(&prepared.entry_name, &admitted_base);
-            let dispatcher_effects = format!(
-                "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
-                installation.effect_row,
-            );
+            let dispatcher_effects = installation.dispatcher_effect_row();
             let revision = Some(prepared.source_revision.clone());
             let publication_resolved = prepared.resolved.clone();
             let mut compile_context = context.clone();
@@ -12206,7 +12203,7 @@ pub(crate) mod request_tests {
         let include = fixture_include_roots(&effects);
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_notebook_preamble(&declarations, false),
-            "qualified Tidepool.Actors.Exomonad as Exomonad\nqualified Tidepool.Lookup as LookupApi",
+            "Tidepool.Actors.Exomonad\nqualified Tidepool.Actors.Exomonad as Exomonad\nqualified Tidepool.Agent.Contract\nqualified Tidepool.Lookup as LookupApi",
         );
         let effects_alias = "'[Exomonad.Notifications, Sleep, Lookup]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_245);
@@ -14640,9 +14637,22 @@ pub(crate) mod request_tests {
 
     async fn lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner() {
         use crate::lookup::LookupOutcome;
-        use std::cell::Cell;
+        use std::cell::{Cell, RefCell};
 
-        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let (machines, mut context, source, _root) = actor_lookup_registry_fixture();
+        let installation = crate::agent_spec::installation_expression(
+            "Fixture.agentSpec",
+            &[
+                crate::ActorEffectKey::Replies,
+                crate::ActorEffectKey::Watches,
+                crate::ActorEffectKey::Notifications,
+                crate::ActorEffectKey::Sleep,
+                crate::ActorEffectKey::Lookup,
+            ],
+        );
+        // The inspector must compile the same checked effect row as installation,
+        // then retain its typed identity for availability decisions.
+        context.haskell_effects_alias = installation.dispatcher_effect_row();
         let modules = tempfile::tempdir().expect("lookup source fixtures");
         std::fs::create_dir(modules.path().join("LookupPlanParent")).unwrap();
         for (path, bytes) in [
@@ -14686,11 +14696,13 @@ pub(crate) mod request_tests {
         let trace = lookup_trace_path();
         let before = compiler_trace_started_ids(&trace);
         let calls = Cell::new(0);
+        let inspected = RefCell::new(None);
         let answer = crate::lookup::execute(
             real_lookup_request(vec![
                 "LookupPlanParent.ModuleOnly".into(),
                 "LookupPlanParent.Choice".into(),
                 "LookupPlanParent.ConstructorOnly".into(),
+                "LookupApi.lookupRaw".into(),
                 "doc workbench".into(),
             ]),
             "view".into(),
@@ -14700,7 +14712,7 @@ pub(crate) mod request_tests {
             crate::UsagePointerTable::default(),
             |queries| {
                 calls.set(calls.get() + 1);
-                inspect_lookup_queries(
+                let result = inspect_lookup_queries(
                     &view,
                     Some(&inputs),
                     &prepared.preamble,
@@ -14710,7 +14722,9 @@ pub(crate) mod request_tests {
                     &context.haskell_effects_alias,
                     queries,
                     None,
-                )
+                )?;
+                *inspected.borrow_mut() = Some(result.clone());
+                Ok(result)
             },
         );
         assert_eq!(
@@ -14723,6 +14737,22 @@ pub(crate) mod request_tests {
             after.difference(&before).count(),
             1,
             "successful module/name/doc batch must execute exactly one real worker request"
+        );
+        assert!(answer.issue.is_none(), "typed row witness must compile");
+        let inspected = inspected.into_inner().expect("lookup inspections");
+        let lookup = inspected
+            .iter()
+            .find_map(|result| match result {
+                tidepool_runtime::session::InspectionResult::Info { entries, .. } => entries
+                    .iter()
+                    .find(|entry| entry.name == "lookupRaw"),
+                _ => None,
+            })
+            .expect("lookupRaw inspection");
+        assert_eq!(
+            lookup.availability,
+            tidepool_runtime::session::InspectionAvailability::Available,
+            "availability must use the exact installed effect row"
         );
         assert!(
             matches!(&answer.results[0].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
@@ -14738,6 +14768,10 @@ pub(crate) mod request_tests {
         );
         assert!(
             matches!(&answer.results[3].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
+            "lookup effect declaration resolves in the installed row"
+        );
+        assert!(
+            matches!(&answer.results[4].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
             "documentation resolves alongside compiler queries"
         );
         let before_docs = compiler_trace_started_ids(&trace);

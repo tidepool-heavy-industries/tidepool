@@ -450,10 +450,7 @@ fn compile_installer(
     acquisition: OriginalAcquisition,
 ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
     let installation = super::installation_expression(&recipe.entry, &recipe.effects);
-    let dispatcher_effects = format!(
-        "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
-        installation.effect_row,
-    );
+    let dispatcher_effects = installation.dispatcher_effect_row();
     let templates =
         resident_workbench_templates(&recipe.preamble, &dispatcher_effects, &recipe.imports);
     let (compiled, selection) = if let Some(storage) = source.prepared_entries() {
