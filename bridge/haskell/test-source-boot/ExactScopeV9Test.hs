@@ -114,6 +114,18 @@ exactScopeV9Checks manifest = do
   badCertificate "native canonical origin differs"
     (TList (replace 12 (TList [TString "native-authored-declaration",TInt 0]) certificateFields))
   homes <- values (certificateFields !! 4)
+  -- Large inventories still reach their semantic checks. These alterations
+  -- remain invalid: passing a former cache-size boundary grants no authority.
+  let manyHomes = map TString . Set.toAscList . Set.fromList $
+        [home | TString home <- homes] ++
+        [T.pack ("inventory-unit-" ++ show index) | index <- [1 .. 129 :: Int]]
+      manyRequirements = map (\name -> TList
+        [TString (T.pack (fst key)),TString name,differentSHA]) . Set.toAscList . Set.fromList $
+        [T.pack ("InventoryMissing" ++ show index) | index <- [1 .. 129 :: Int]]
+  badCertificate "canonical module certificate differs"
+    (TList (replace 3 differentSHA (replace 4 (TList manyHomes) certificateFields)))
+  badCertificate "canonical module requirements differ"
+    (TList (replace 11 (TList manyRequirements) certificateFields))
   forM_ [TList [],TList (homes ++ homes)] $ \invalid ->
     badCertificate "invalid complete home unit inventory" (TList (replace 4 invalid certificateFields))
   badCertificate "invalid canonical module requirement inventory"

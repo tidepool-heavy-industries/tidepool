@@ -807,7 +807,7 @@ validateCanonicalInterfacesWithValueSeals producer selectedInterfaces valueSeals
     bytes <- readBoundedFile (descriptorCertificatePath descriptor) (4 * 1024 * 1024)
     unless (digest bytes == descriptorCertificateSha256 descriptor)
       (fail "canonical module certificate changed")
-    certificate <- case deserialiseFromBytes decodeCanonicalModuleCertificate (BL.fromStrict bytes) of
+    certificate <- case deserialiseFromBytes (decodeCanonicalModuleCertificate (BS.length bytes)) (BL.fromStrict bytes) of
       Left failure -> fail (show failure)
       Right (remaining,value)
         | BL.null remaining -> pure value
@@ -845,8 +845,10 @@ validateCanonicalInterfacesWithValueSeals producer selectedInterfaces valueSeals
       })
   pure (Map.fromList proofs)
 
-decodeCanonicalModuleCertificate :: Decoder s CanonicalModuleCertificate
-decodeCanonicalModuleCertificate = do
+-- Every encoded item consumes at least one byte. The bounded certificate
+-- payload limits list cardinality without imposing the cache's candidate cap.
+decodeCanonicalModuleCertificate :: Int -> Decoder s CanonicalModuleCertificate
+decodeCanonicalModuleCertificate payloadBytes = do
   array 13
   magic <- string
   version <- decodeWord
@@ -855,7 +857,7 @@ decodeCanonicalModuleCertificate = do
       && profile == "tidepool-ghc-finalized-module-v1")
     (fail "unsupported canonical module certificate")
   producer <- canonicalDigest
-  homes <- bounded 128 nonempty
+  homes <- bounded payloadBytes nonempty
   unless (not (null homes) && and (zipWith (<) homes (drop 1 homes)))
     (fail "invalid complete home unit inventory")
   key@(unit,_) <- (,) <$> nonempty <*> nonempty
@@ -864,7 +866,7 @@ decodeCanonicalModuleCertificate = do
   packages <- canonicalDigest
   token <- peekTokenType
   core <- if token == TypeNull then decodeNull >> pure Nothing else Just <$> canonicalDigest
-  requirements <- bounded 128 (array 3 >> ((,) <$> ((,) <$> nonempty <*> nonempty) <*> canonicalDigest))
+  requirements <- bounded payloadBytes (array 3 >> ((,) <$> ((,) <$> nonempty <*> nonempty) <*> canonicalDigest))
   unless (and (zipWith (<) (map fst requirements) (drop 1 (map fst requirements)))
       && unit `elem` homes && all ((`elem` homes) . fst . fst) requirements
       && key `notElem` map fst requirements)
