@@ -178,7 +178,7 @@ fn parse_owned_invocation(args: &[OsString]) -> Result<OwnedInvocation<'_>, Fron
         let [_, count, rest @ ..] = remaining else {
             return Err(usage());
         };
-        let mut count = std::iter::once(count.clone());
+        let mut count = std::iter::once(count);
         (worker_count(number(&mut count, "--workers")?)?, rest)
     } else {
         (1, remaining)
