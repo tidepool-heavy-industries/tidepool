@@ -4706,13 +4706,13 @@ mod typed_site_tests {
                 .collect::<Vec<_>>(),
             vec![
                 (
-                    "foreign".into(),
-                    "Generated".into(),
+                    "foreign".to_owned(),
+                    "Generated".to_owned(),
                     crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
                 ),
                 (
-                    "main".into(),
-                    "Tidepool.Agent.Ref".into(),
+                    "main".to_owned(),
+                    "Tidepool.Agent.Ref".to_owned(),
                     crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
                 ),
             ]
