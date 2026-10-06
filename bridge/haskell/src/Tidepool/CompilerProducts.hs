@@ -655,7 +655,6 @@ admitModuleProducts :: OriginalInterfaceArtifacts -> PreparedProductContext
          [ModuleProductEncoding], Map.Map (String,String) BS.ByteString)
 admitModuleProducts originalInterfaces productContext finalized interfaces packageRoots = do
   let inventory = preparedProductInventory productContext
-      retained = preparedRetainedOriginals productContext
   timing <- readTimingEnabled
   forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
     forM_ omissions $ \omission ->
@@ -694,6 +693,7 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
   pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products,
     Map.fromList [((unit,name),bytes) | (unit,name,bytes) <- packageBundles])
   where
+    retained = preparedRetainedOriginals productContext
     issue timing key name owner groups = do
       bytes <- timeDetailPhase timing "module_products.interfaces" (snd key) $
         originalInterfaceBytes originalInterfaces owner
