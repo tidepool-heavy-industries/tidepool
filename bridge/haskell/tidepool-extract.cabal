@@ -25,6 +25,8 @@ extra-source-files:
   test-prepared-stg/ModuleProductCatalogA.hs
   test-prepared-stg/ModuleProductCatalogB.hs
   test-prepared-stg/ReplyInternalFixture.hs
+  test-prepared-stg/RecoveryTagFixture.hs
+  test-prepared-stg/RecoveryTagUse.hs
   test-prepared-stg/RecoveredEntryCaller.hs
   test-prepared-stg/RecoveredExecutionStackCaller.hs
   test-prepared-stg/RecoveredBaseCaller.hs

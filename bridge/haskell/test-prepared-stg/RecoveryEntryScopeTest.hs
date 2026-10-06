@@ -7,16 +7,21 @@ import Data.Map.Strict qualified as Map
 import GHC
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
-import GHC.Types.Id (idArity, idType, idTagSig_maybe, isDeadEndId, localiseId, setIdArity, setIdDmdSig)
+import GHC.Types.Id (idArity, idType, idTagSig_maybe, idCbvMarks_maybe, asNonWorkerLikeId, isDeadEndId, localiseId, setIdArity, setIdDmdSig)
 import GHC.Types.Demand (nopSig)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Env (lookupNameEnv)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.Var (varName)
+import GHC.Types.Var (varName, isId)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Unit.Types (stringToUnit)
+import Tidepool.CertifiedProducts (resolvePackageGlobal)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import System.Directory
   (createDirectoryIfMissing, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.FilePath ((</>))
@@ -35,7 +40,9 @@ assert ok message = unless ok (fail message)
 
 entryScopeTests :: TestTree
 entryScopeTests = testGroup "exact original entry scope"
-  [testCase "native constructor and function entry facts survive partial preparation" nativeEntries]
+  [ testCase "native constructor and function entry facts survive partial preparation" nativeEntries
+  , testCase "original CBV worker survives stripped occurrence metadata" originalCbvWorker
+  ]
 
 -- Compile an independent native original, then read its fat Core through the
 -- normal recovery owner. The O0 decoding flags vary independently of its
@@ -154,6 +161,71 @@ nativeEntries = do
         refused <- try (lower (map (mapBindingReferences missing) strictLeaf))
           :: IO (Either SomeException PreparedModule)
         case refused of Left _ -> pure (); Right _ -> fail "missing private reference escaped scope refusal"
+
+-- A genuine package-original WorkerLike Id carries GHC's strict argument
+-- contract. Compare unchanged recovery with metadata-stripped occurrences;
+-- the canonical interface remains the sole issuer of the CBV marks.
+originalCbvWorker :: IO ()
+originalCbvWorker = do
+  libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
+  forM_ [True, False] $ \ignore -> runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags ((if ignore then gopt_set else gopt_unset)
+      (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas)
+    env <- getSession
+    liftIO $ do
+      let owner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.List")
+          root = SymbolIdentity "ghc-internal" "GHC.Internal.List" "value" "length" Nothing
+      (identifier, _) <- resolvePackageGlobal env root >>= either fail pure
+      fat <- newFatIfaceCache
+      original <- lookupFatIfaceExact env fat (varName identifier) >>= \case
+        FatIfaceFound bindings -> pure bindings
+        _ -> fail "real length original Core absent"
+      owners <- newOwnerInterfaceCache
+      bodies <- newPreparedBodyCache
+      _ <- prepareRecoveredBodies env owners bodies owner original >>= either (fail . show) pure
+      context <- lookupOwnerInterface owners owner >>= maybe (fail "real length owner context absent") pure
+      let entries = ownerInterfaceEntries context
+          input bindings = RecoveredModuleInput owner (ownerInterfaceLocation context) [] bindings entries
+          free = [reference | binding <- original, (_,rhs) <- pairs binding,
+            reference <- nonDetEltsUniqSet (exprSomeFreeVars isId rhs)]
+      rawWorker <- case [reference | reference <- free, occurrence (varName reference) == "$wlength"] of
+        [reference] -> pure reference
+        _ -> fail "real length no longer has its omitted strict worker reference"
+      worker <- maybe (fail "real strict worker missing from declaring interface") pure
+        (Map.lookup (varName rawWorker) entries)
+      assert (varName rawWorker == varName worker && eqType (idType rawWorker) (idType worker))
+        "real strict worker Name/type differs from canonical entry"
+      assert (case idCbvMarks_maybe worker of Just _ -> True; _ -> False)
+        "real length dependency lacks compiler-issued CBV worker marks"
+      assert (varName worker `notElem` [varName binder | binding <- original, (binder,_) <- pairs binding])
+        "CBV control supplies the worker body instead of exercising omitted scope"
+      let strippedWorker = asNonWorkerLikeId rawWorker
+      assert (case idCbvMarks_maybe strippedWorker of Nothing -> True; _ -> False)
+        "CBV control failed to strip actual occurrence worker marks"
+      let stripped = map (mapBindingReferences (Map.singleton (varName rawWorker) strippedWorker)) original
+      baseline <- prepareRecoveredModule env (input original)
+      repaired <- prepareRecoveredModule env (input stripped)
+      assert (caseCount baseline >= 2 && caseCount repaired == caseCount baseline)
+        "canonical CBV scope lost the genuine strict-argument case rewrite"
+      let canonical = entries Map.! varName identifier
+      assertEntry canonical baseline
+      assertEntry canonical repaired
+
+caseCount :: PreparedModule -> Int
+caseCount prepared = sum [countRhs rhs | (Stg.StgTopLifted binding, _) <- pmBindings prepared,
+  rhs <- bodies binding]
+  where
+    bodies (Stg.StgNonRec _ rhs) = [rhs]
+    bodies (Stg.StgRec members) = map snd members
+    countRhs (Stg.StgRhsClosure _ _ _ _ body _) = countExpr body
+    countRhs Stg.StgRhsCon{} = 0
+    countExpr (Stg.StgCase scrutinee _ _ alts) =
+      1 + countExpr scrutinee + sum (map (countExpr . Stg.alt_rhs) alts)
+    countExpr (Stg.StgLet _ binding body) = sum (map countRhs (bodies binding)) + countExpr body
+    countExpr (Stg.StgLetNoEscape _ binding body) = sum (map countRhs (bodies binding)) + countExpr body
+    countExpr (Stg.StgTick _ body) = countExpr body
+    countExpr _ = 0
 
 isConstructorEntry :: Id -> Bool
 isConstructorEntry identifier = case importedIdLFInfo identifier of LFCon{} -> True; _ -> False
