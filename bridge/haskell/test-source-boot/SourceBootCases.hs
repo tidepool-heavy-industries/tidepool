@@ -3862,9 +3862,10 @@ exactBashMetadata effects = withTiming $ withScratch $ \work -> do
       fail "exact bash metadata lost GHC load bytecode or signature parity"
     native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [] Nothing
     unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Command"
-        && dependencyCacheSafe (preparedFreshDependencies native)) $
-      fail "exact bash native compilation lost its quote or input evidence"
-  putStrLn "exact bash: GHC metadata parity, retained bytecode and native compilation passed"
+        && not (dependencyCacheSafe (preparedFreshDependencies native))
+        && not (dependencySelectionComplete (preparedFreshDependencies native))) $
+      fail "exact bash native compilation lost its quote or authorized ordinary source reuse"
+  putStrLn "exact bash: GHC metadata parity, retained bytecode, native compilation and ordinary source reuse refusal passed"
 
 -- Input identity follows checked imports even when authenticated candidates
 -- cause the same source request to produce additional unused native products.
