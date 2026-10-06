@@ -5739,7 +5739,8 @@ mod module_product_tests {
             };
             assert!(
                 matches!(fields.as_slice(), [Atom::Scalar(ScalarLiteral::Int { bits: 64, bytes })]
-                if bytes.as_slice() == value.to_le_bytes())
+                if bytes.as_slice() == value.to_be_bytes()),
+                "quoted boxed Int must retain {value} as a big-endian Int64 scalar: {fields:?}"
             );
             let selected = module_candidates::select_configured(
                 compiled.producer_identity.as_ref().unwrap(),
