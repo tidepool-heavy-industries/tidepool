@@ -159,7 +159,7 @@ import Control.DeepSeq (force)
 import Control.Concurrent (myThreadId)
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, fromException, finally, bracket, mask, try, catch, throwIO, IOException )
-import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
+import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (find, isPrefixOf, nub, nubBy, sort, sortOn, intercalate, foldl')
 import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
@@ -4292,7 +4292,8 @@ withResidentPipelineSelected baseIncludes useCompiler =
 withResidentPipelineSelectedRequests :: [FilePath] -> (RequestRunner -> IO a) -> IO a
 withResidentPipelineSelectedRequests baseIncludes useRequests =
   withResidentCompilerScopes baseIncludes $ \runScope ->
-    useRequests $ \clearRecovery action -> runScope clearRecovery (action . scopedCompile)
+    useRequests $ \clearRecovery action ->
+      runScope clearRecovery (\scope -> action (scopedCompile scope))
 
 -- | Transaction-issued operations share one thread/phase guard. A released
 -- capability cannot access contexts retained by the worker for later requests.
