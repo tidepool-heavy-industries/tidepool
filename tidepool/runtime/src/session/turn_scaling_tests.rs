@@ -592,7 +592,7 @@ fn try_execute_cell_with_template_imports_expectation(
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
-    expected_observation: Option<&serde_json::Value>,
+    expected_observation: Option<i64>,
 ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
@@ -837,10 +837,15 @@ fn try_execute_cell_with_template_imports_expectation(
                 );
                 let outcome = observed?;
                 if let Some(expected) = expected_observation {
-                    let crate::session::ResidentOutcome::Completed { result, .. } = outcome else {
-                        panic!("expected native observation to complete with a value")
-                    };
-                    assert_eq!(result.to_json(), *expected, "native cell result");
+                    assert!(
+                        matches!(outcome, crate::session::ResidentOutcome::Completed { .. }),
+                        "guarded integer {expected} capture did not complete: {outcome:?}"
+                    );
+                    assert_eq!(bound.len(), 1, "one exact native observation binder");
+                    let installed = resident
+                        .current_binding_in(execution.private_scope(), &bound[0].name)
+                        .expect("completed capture installs its original checked binder");
+                    assert_eq!(installed.0.raw(), bound[0].var_id);
                     expected_observation_seen = true;
                 }
             }
@@ -1291,6 +1296,76 @@ fn protected_growing_prefix_100_baseline_100() {
     growing_prefix(100, 100);
 }
 
+// The source action checks its integer before returning the opaque capture
+// thunk. Capture completion does not render or force that thunk in Rust.
+fn guarded_integer_capture_source(expression: &str, expected: i64) -> String {
+    include_str!("fixtures/guarded-integer-capture.hs")
+        .replace("__EXPRESSION__", expression)
+        .replace("__EXPECTED__", &expected.to_string())
+}
+
+#[test]
+fn guarded_integer_capture_rejects_wrong_native_result() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1002),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let before = resident
+        .public_visibility_snapshot_in(public)
+        .unwrap()
+        .bindings;
+    let source = guarded_integer_capture_source("41", 42);
+    let error = try_execute_cell_with_template_imports_expectation(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "wrong_integer_guard",
+        &source,
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::new(),
+        Some(42),
+    )
+    .expect_err("native 41 must fail its authored 42 guard before capture");
+    let ResidentError::Prepared(PreparedRuntimeError::Run(
+        tidepool_codegen::prepared_program::ExecutionError::Runtime(failure),
+    )) = error
+    else {
+        panic!("wrong integer guard did not fail during native execution: {error:?}");
+    };
+    assert!(
+        matches!(
+            failure.cause,
+            tidepool_codegen::host_fns::RuntimeError::RaisedException
+                | tidepool_codegen::host_fns::RuntimeError::RaisedExceptionMessage(_)
+        ),
+        "wrong integer guard did not raise its language exception: {failure:?}"
+    );
+    assert_eq!(
+        resident
+            .public_visibility_snapshot_in(public)
+            .unwrap()
+            .bindings,
+        before,
+        "failed integer guard must publish no captured binding"
+    );
+}
+
 /// Compiler/native attribution only; the packaged Engine/Store gate is separate.
 fn resident_capture_cells(count: usize, durable: bool) {
     tidepool_testing::eval_harness::require_extract();
@@ -1361,9 +1436,9 @@ fn resident_capture_cells(count: usize, durable: bool) {
     }
     // The observer is scoped to each real source submission and associates its
     // physical requests with the one sequential active cell.
-    let warm_source = "(42 :: Int)";
+    let warm_source = guarded_integer_capture_source("42", 42);
     let (warm_result, warm_capture) =
-        with_cell_request_capture(&observer, "warmup", "warmup", warm_source, || {
+        with_cell_request_capture(&observer, "warmup", "warmup", &warm_source, || {
             try_execute_cell_with_template_imports_expectation(
                 &mut resident,
                 public,
@@ -1371,12 +1446,12 @@ fn resident_capture_cells(count: usize, durable: bool) {
                 &images,
                 (0, 0),
                 "warmup",
-                warm_source,
+                &warm_source,
                 0,
                 &publication,
                 AuthorityChecks::Configured,
                 &SourceImports::new(),
-                Some(&serde_json::json!(42)),
+                Some(42),
             )
         });
     let warm_elapsed = warm_result.unwrap().0;
@@ -1386,7 +1461,8 @@ fn resident_capture_cells(count: usize, durable: bool) {
             "schema": 1, "composition": "private-session", "kind": "warmup_cell",
             "index": warm_capture.index, "label": warm_capture.label,
             "elapsed_ns": warm_elapsed.as_nanos(), "completed": true, "captured": true,
-            "workload": "integer-observation", "expected_result": 42,
+            "workload": "guarded-integer-capture", "expected_result": 42,
+            "value_check": "native-integer-guard-before-opaque-capture",
             "source_blake3": blake3::hash(warm_source.as_bytes()).to_hex().to_string(),
             "source_sha256": warm_capture.source_sha256,
             "source_path": warm_capture.source_path,
@@ -1395,9 +1471,9 @@ fn resident_capture_cells(count: usize, durable: bool) {
         })
     );
     for index in 0..count {
-        let source = format!(
-            "({index} + {} :: Int)",
-            42_i64 - i64::try_from(index).unwrap()
+        let source = guarded_integer_capture_source(
+            &format!("{index} + {}", 42_i64 - i64::try_from(index).unwrap()),
+            42,
         );
         assert_eq!(
             tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap(),
@@ -1418,7 +1494,7 @@ fn resident_capture_cells(count: usize, durable: bool) {
                     &publication,
                     AuthorityChecks::Configured,
                     &SourceImports::new(),
-                    Some(&serde_json::json!(42)),
+                    Some(42),
                 )
             });
         let elapsed = result.unwrap().0;
@@ -1432,7 +1508,8 @@ fn resident_capture_cells(count: usize, durable: bool) {
                 "schema": 1, "composition": "private-session", "kind": "warm_cell",
                 "index": index, "label": captured.label,
                 "elapsed_ns": elapsed.as_nanos(), "completed": true, "captured": true,
-                "workload": "integer-addition", "expected_result": 42,
+                "workload": "guarded-integer-addition-capture", "expected_result": 42,
+                "value_check": "native-integer-guard-before-opaque-capture",
                 "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
                 "source_sha256": captured.source_sha256,
                 "source_path": captured.source_path,
