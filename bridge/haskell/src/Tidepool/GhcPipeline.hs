@@ -1923,6 +1923,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     memoTrace <- liftIO readMemoTraceEnabled
     sourceReuseDisabled <- liftIO ((== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_SOURCE_REUSE")
     disabledSourceOwnersRef <- liftIO (newIORef Set.empty)
+    bodyReuseDisabled <- liftIO ((== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
+    disabledPreparedOwnersRef <- liftIO (newIORef Set.empty)
     interpreterAttempt <- case cycleState of
       StandaloneCycle -> liftIO (newIORef InterpreterConfirmed)
       TransactionCycle _ _ _ _ _ _ _ _ attempt -> pure attempt
@@ -3052,13 +3054,15 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 env <- getSession
                 siteEnvironment <- liftIO (resolvePreparedSiteEnvironment env)
                 siblings <- liftIO (readIORef preparedSiblingsRef)
-                let preparedReusable _ product' = preparedSiteDependenciesMatch
+                let preparedNormallyReusable _ product' = preparedSiteDependenciesMatch
                       siteEnvironment siblings (productPrepared product')
+                    preparedReusable entry product' = not bodyReuseDisabled
+                      && preparedNormallyReusable entry product'
                 selectedVersions <- liftIO (readIORef selectedVersionsRef)
                 let selectProduct observation = case observation of
                       CachedObservation summary entry ->
                         let matching = Map.lookup (ms_mod summary) selectedVersions >>= \node ->
-                              find (preparedReusable entry) (completedModuleProducts node)
+                              find (preparedNormallyReusable entry) (completedModuleProducts node)
                         in case matching of
                           Just product' -> CachedObservation summary (entry {gmePayload=ExecutableProduct product'})
                           Nothing -> observation
@@ -3069,15 +3073,15 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     when (preparedUsesSiteAuthority (productPrepared product')) $ liftIO $ do
                       let verifiable = preparedSiteDependenciesEquivalent (productPrepared product') (productPrepared product')
                           decision | not verifiable = ReuseDisabled
-                                   | preparedReusable entry product' = ReuseHit
+                                   | preparedNormallyReusable entry product' = ReuseHit
                                    | otherwise = ReuseMiss
                           reason | not verifiable = CacheDisabled
-                                 | preparedReusable entry product' = Matched
+                                 | preparedNormallyReusable entry product' = Matched
                                  | otherwise = ChangedAuthority
                       reuseEvent SiteWitness decision reason summary
                   _ -> pure ()
                 liftIO (emitReuseComplete timing reuseContext SiteWitness)
-                pure (siteEnvironment,preparedReusable,selectedObservations)
+                pure (siteEnvironment,preparedNormallyReusable,preparedReusable,selectedObservations)
               acquireCompletion observations tasks = case completionFactoryFor selection of
                 Nothing -> pure (PreparedModuleObserver (\_ -> pure ()) (\_ -> pure ()))
                 Just factory -> do
@@ -3108,12 +3112,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           -- Each task's actual cache refusal is determined by
                           -- the frozen typed site witness or executable closure.
                           cached <- maybe (pure Nothing) (fmap (Map.lookup (ms_mod_name summary)) . readIORef) mMemoRef
-                          let reason = case cached >>= payloadProduct . gmePayload of
-                                Just product' | Just entry <- cached
-                                  , not (preparedReusable entry product') -> ChangedAuthority
-                                Just _ -> ChangedDependency
-                                Nothing -> Absent
-                          reuseEvent PreparedBody ReuseMiss reason summary
+                          disabled <- Set.member (ms_mod summary) <$> readIORef disabledPreparedOwnersRef
+                          let reason | disabled = CacheDisabled
+                                     | otherwise = case cached >>= payloadProduct . gmePayload of
+                                         Just product' | Just entry <- cached
+                                           , not (preparedReusable entry product') -> ChangedAuthority
+                                         Just _ -> ChangedDependency
+                                         Nothing -> Absent
+                          reuseEvent PreparedBody (if disabled then ReuseDisabled else ReuseMiss) reason summary
                           reuseEvent PreparedBody ReuseWork reason summary
                       prepared <- either runPreparedModuleTask pure (snd input)
                       observePreparedModule observer prepared
@@ -3148,7 +3154,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         loaded <- finalizeCurrent interfaceUse modSum
                         rememberFinalized loaded
                         pure (LoadedObservation loaded)
-              (siteEnvironment,preparedReusable,observations') <- acquirePreparationEnvironment finalizedObservations
+              (siteEnvironment,preparedNormallyReusable,preparedReusable,observations') <- acquirePreparationEnvironment finalizedObservations
               tasks <- case preparation of
                 CheckOnly -> pure []
                 PrepareStg -> fmap catMaybes $ forM observations' $ \observation -> do
@@ -3160,6 +3166,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         recordExecutableValidity summary True
                         pure (Just (name, Right (productPrepared product')))
                       _ -> do
+                        when bodyReuseDisabled $ forM_ (payloadProduct (gmePayload entry)) $ \product' ->
+                          when (preparedNormallyReusable entry product') $ liftIO $
+                            modifyIORef' disabledPreparedOwnersRef (Set.insert (ms_mod summary))
                         recordExecutableValidity summary False
                         liftIO (modifyIORef' preparedCountRef (+ 1))
                         task <- acquireFinalized siteEnvironment (payloadLoaded summary (gmePayload entry))
@@ -3216,7 +3225,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         rememberFinalized loaded
                         pure (LoadedObservation loaded)
               -- Sibling identities precede lowering even for native cycles.
-              (siteEnvironment,preparedReusable,observations') <- acquirePreparationEnvironment finalizedObservations
+              (siteEnvironment,preparedNormallyReusable,preparedReusable,observations') <- acquirePreparationEnvironment finalizedObservations
               facts <- liftIO (mapM observationFacts observations')
               -- Fresh Core and admitted native outlines retain defining owners,
               -- including dictionaries and reexports. All source owners have
@@ -3243,11 +3252,15 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         HydratedObservation{} -> True
                         CachedObservation summary entry ->
                           case payloadProduct (gmePayload entry) of
-                            Just product' -> preparedReusable entry product'
+                            Just product' -> preparedNormallyReusable entry product'
                               && interfaceReady interfaceUse summary entry
                             Nothing -> False
                         LoadedObservation{} -> False ]
-                  reusableOwners = dependencyClosedReuse referencesByMod locallyReusable
+                  normalReusableOwners = dependencyClosedReuse referencesByMod locallyReusable
+                  reusableOwners
+                    | bodyReuseDisabled = Set.fromList
+                        [ms_mod_name (observationSummary observation) | observation@HydratedObservation{} <- observations']
+                    | otherwise = normalReusableOwners
                   executableDepsValid modSum = pure $ case
                       Map.lookup (ms_mod_name modSum) referencesByMod of
                     Nothing -> False
@@ -3278,6 +3291,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         task <- acquireFinalized siteEnvironment loaded
                         pure (Just (name, Left task))
                       CachedObservation _ entry -> do
+                        when (bodyReuseDisabled && name `Set.member` normalReusableOwners) $ liftIO $
+                          modifyIORef' disabledPreparedOwnersRef (Set.insert (ms_mod summary))
                         liftIO (modifyIORef' preparedCountRef (+ 1))
                         task <- acquireFinalized siteEnvironment (payloadLoaded summary (gmePayload entry))
                         pure (Just (name, Left task))
