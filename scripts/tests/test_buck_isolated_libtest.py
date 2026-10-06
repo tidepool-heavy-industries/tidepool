@@ -93,6 +93,31 @@ class IsolatedLibtestTests(unittest.TestCase):
                 10, artifact_root=root, compiler_mode='owned-resident')
         self.assertTrue(passed)
 
+    def test_passing_diagnostic_startup_retains_marked_campaign_evidence(self):
+        root = Path(self.tmp.name) / 'diagnostic-startup'
+        startup = {'policy': {'mode': 'diagnostic', 'seconds': 600},
+                   'elapsed_ms': 310000, 'over_baseline_budget': True,
+                   'outcome': {'status': 'ready'}}
+        def run(args, timeout, environment=None):
+            self.assertEqual(environment['TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS'], '600')
+            campaign = root / 'hosted-campaign-1'
+            campaign.mkdir()
+            (campaign / 'hosted-outcome.json').write_text(json.dumps({
+                'schema': 2, 'startup': startup,
+                'scenario': {'status': 'passed'}, 'cleanup': {'status': 'confirmed'}}))
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}), \
+             patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                                         900, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertTrue(root.exists())
+        self.assertEqual(record['startup_diagnostic_seconds'], '600')
+        self.assertEqual(record['cleanup_reports'][0]['startup'], startup)
+        self.assertNotIn('artifacts_removed_after_success', record)
+
     def test_passing_libtest_with_unknown_campaign_cleanup_keeps_evidence(self):
         root = Path(self.tmp.name) / 'unconfirmed-artifacts'
         def run(args, timeout, environment=None):
@@ -114,7 +139,8 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_startup_non_admission_is_distinct_from_host_or_process_cleanup(self):
         valid = {
-            'schema': 1,
+            'schema': 2,
+            'startup': {'policy': {'mode': 'standard'}},
             'scenario': {'status': 'failed', 'phase': 'startup'},
             'cleanup': {'status': 'not_started', 'domain': 'host_runtime',
                         'owner_admission': 'not_admitted', 'executor_joined': True},
@@ -472,6 +498,23 @@ class IsolatedLibtestTests(unittest.TestCase):
                     'EXOMONAD_EMBEDDED_ASSET_ROOT']), 1)
                 execute.assert_not_called()
                 self.assertIn('declared resource', errors.getvalue())
+
+    def test_delegated_command_forwards_bounded_startup_and_existing_compiler_diagnostics(self):
+        environment = {
+            'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600',
+            'TIDEPOOL_TIMING': '1',
+            'TIDEPOOL_MEMO_TRACE': '1',
+            'UNRELATED_VARIABLE': 'not-forwarded',
+        }
+        record = {}
+        command, _ = runner.delegated_command(['/libtest'], 900, 'app.slice', record,
+                                              environment=environment)
+        for name, value in environment.items():
+            if name != 'UNRELATED_VARIABLE':
+                self.assertIn('--setenv=' + name + '=' + value, command)
+                self.assertIn(name, record['environment_names'])
+        self.assertNotIn('UNRELATED_VARIABLE', record['environment_names'])
+        self.assertIn('--property=RuntimeMaxSec=900s', command)
 
     def test_delegated_command_exports_declared_inputs_and_only_test_process(self):
         record = {}

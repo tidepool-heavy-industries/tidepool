@@ -864,6 +864,8 @@ def verify(path: Path) -> dict:
     return descriptor
 
 def run_cohort(args) -> int:
+    if 'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS' in os.environ:
+        raise ValueError('diagnostic startup overrides cannot qualify a frozen cohort')
     if args.jobs <= 0:
         raise ValueError("--jobs must be positive")
     if args.service_slice is not None and not args.delegated_service:
@@ -892,7 +894,9 @@ def run_cohort(args) -> int:
         result = subprocess.run(command, env=execution_environment(descriptor), stdout=stdout, stderr=stderr, check=False)
     records = [json.loads(path.read_text()) for path in sorted((output / "tests").glob("*.json"))]
     exact = {record["test"] for record in records} == set(cohort["tests"])
-    confirmed = exact and len(records) == cohort["expected_count"] and all(record["passed"] and record["execution"]["executed_test_count"] == 1 and record["execution"]["exit_code"] == 0 for record in records)
+    confirmed = exact and len(records) == cohort["expected_count"] and all(record["passed"] and record["execution"]["executed_test_count"] == 1
+        and record["execution"]["exit_code"] == 0
+        and record["execution"].get("startup_diagnostic_seconds") is None for record in records)
     code = result.returncode if result.returncode else int(not confirmed)
     report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],

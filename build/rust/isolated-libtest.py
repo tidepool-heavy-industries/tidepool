@@ -117,6 +117,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES', 'TIDEPOOL_EXTRACT_DAEMON_SOCKET',
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
+    'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
     'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL',
     'TIDEPOOL_BROWSER_DRIVER', 'EXOMONAD_EMBEDDED_ASSET_ROOT',
@@ -642,6 +643,9 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     if ignored:
         args.append('--ignored')
     environment = None
+    startup_diagnostic_seconds = os.environ.get('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS')
+    if record is not None and startup_diagnostic_seconds is not None:
+        record['startup_diagnostic_seconds'] = startup_diagnostic_seconds
     if artifact_root is not None:
         artifact_root = Path(artifact_root).absolute()
         artifact_root.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -724,6 +728,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             reports.append(artifact_root / 'compiler/owned-compiler-outcome.json')
         cleanup_reports = []
         for report in reports:
+            outcome = {}
             try:
                 outcome = json.loads(report.read_text())
                 status = outcome['cleanup']['status']
@@ -733,7 +738,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 not_started = (
                     report.name == 'hosted-outcome.json'
                     and type(outcome.get('schema')) is int
-                    and outcome['schema'] == 1
+                    and outcome['schema'] in (1, 2)
                     and outcome.get('scenario', {}).get('status') == 'failed'
                     and outcome.get('scenario', {}).get('phase') == 'startup'
                     and outcome['cleanup'].get('executor_joined') is True
@@ -747,7 +752,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 not_started = False
                 stderr += f'\ncleanup report unavailable: {report}: {error}'
             cleanup_reports.append({'path': str(report), 'status': status,
-                                    'host_runtime_not_started': not_started})
+                                    'host_runtime_not_started': not_started,
+                                    'startup': outcome.get('startup') if isinstance(outcome, dict) else None})
             hosted_runtime_not_started |= not_started
             if status != 'confirmed' and not not_started:
                 passed = False
@@ -767,7 +773,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                                  and (not root.get('compiler_job_queue', {}).get('physical_job_count')
                                       or root['compiler_job_queue'].get('complete', False))
                                  for root in summaries.get('owned_compiler_roots', [])))
-    if passed and artifact_root is not None and evidence_complete and not hosted_runtime_not_started:
+    if (passed and artifact_root is not None and evidence_complete
+            and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
         # Successful scenarios have completed their own acknowledged teardown.
         # The runner additionally confirms its enclosing process/service cleanup.
         shutil.rmtree(artifact_root)

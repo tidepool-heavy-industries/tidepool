@@ -31,6 +31,13 @@ def runtime_tools_fixture(root):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
+        with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):
+            with patch.object(qualification, 'verify') as verify:
+                with self.assertRaisesRegex(ValueError, 'diagnostic startup overrides'):
+                    qualification.run_cohort(SimpleNamespace())
+                verify.assert_not_called()
+
     def test_runtime_tool_owner_checks_declared_executable_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -8,6 +8,111 @@ use tokio::sync::oneshot;
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(300);
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(60);
+const STARTUP_DIAGNOSTIC_SECONDS: &str = "TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS";
+
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum StartupPolicy {
+    Standard,
+    Diagnostic { seconds: u64 },
+}
+
+impl StartupPolicy {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None => Ok(Self::Standard),
+            Some(value) => {
+                let seconds = value.parse::<u64>().map_err(|_| {
+                    format!("{STARTUP_DIAGNOSTIC_SECONDS} must be an integer number of seconds")
+                })?;
+                if seconds <= STARTUP_BUDGET.as_secs() || seconds > 600 {
+                    return Err(format!("{STARTUP_DIAGNOSTIC_SECONDS} must exceed the standard 300-second budget and be at most 600 seconds"));
+                }
+                Ok(Self::Diagnostic { seconds })
+            }
+        }
+    }
+
+    fn budget(self) -> Duration {
+        match self {
+            Self::Standard => STARTUP_BUDGET,
+            Self::Diagnostic { seconds } => Duration::from_secs(seconds),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StartupStage {
+    Assembly,
+    EmbeddedReadiness,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "cause", rename_all = "snake_case")]
+enum StartupFailure {
+    Deadline,
+    AssemblyObserverClosed,
+    ReadinessObserverClosed,
+    RootRetired {
+        actor: ActorRef,
+        terminal: exomonad_actor::ActorTerminal,
+    },
+    HostExited {
+        message: String,
+    },
+    CoordinationFailed {
+        message: String,
+    },
+}
+
+impl StartupFailure {
+    fn message(&self) -> String {
+        match self {
+            Self::Deadline => "production startup exceeded its budget".into(),
+            Self::AssemblyObserverClosed => "production assembly observer closed".into(),
+            Self::ReadinessObserverClosed => "production readiness owner closed".into(),
+            Self::RootRetired { actor, terminal } => format!(
+                "production root {actor} exited before embedded readiness ({:?}): {}",
+                terminal.kind, terminal.summary
+            ),
+            Self::HostExited { message } | Self::CoordinationFailed { message } => message.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum StartupOutcome {
+    Pending,
+    Ready,
+    Failed { failure: StartupFailure },
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct StartupEvidence {
+    policy: StartupPolicy,
+    baseline_budget_seconds: u64,
+    elapsed_ms: Option<u128>,
+    over_baseline_budget: Option<bool>,
+    stage: StartupStage,
+    outcome: StartupOutcome,
+    root_before_cleanup: Option<(ActorRef, Option<exomonad_actor::ActorTerminal>)>,
+}
+
+impl StartupEvidence {
+    fn pending(policy: StartupPolicy) -> Self {
+        Self {
+            policy,
+            baseline_budget_seconds: STARTUP_BUDGET.as_secs(),
+            elapsed_ms: None,
+            over_baseline_budget: None,
+            stage: StartupStage::Assembly,
+            outcome: StartupOutcome::Pending,
+            root_before_cleanup: None,
+        }
+    }
+}
 
 type HostOutcome =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>;
@@ -27,15 +132,20 @@ impl HostTermination {
 
     fn startup_failure(
         self,
-        detail: String,
+        failure: StartupFailure,
         assembly_observed: bool,
         owner_admission: HostOwnerAdmission,
     ) -> (String, CleanupOutcome) {
+        let detail = failure.message();
         if assembly_observed {
             return (detail, CleanupOutcome::from_result(&self.into_result()));
         }
-        let detail = match &self.result {
-            Some(Err(error)) => format!("production host failed during startup: {error}"),
+        // A closed assembly observer can hide its host's own startup refusal.
+        // A deadline or an observed failure was established before teardown.
+        let detail = match (&failure, &self.result) {
+            (StartupFailure::AssemblyObserverClosed, Some(Err(error))) => {
+                format!("production host failed during startup: {error}")
+            }
             _ => detail,
         };
         let cleanup = match &self.joined {
@@ -169,6 +279,7 @@ struct HostedTestDiagnostics {
     root: std::path::PathBuf,
     workspace: std::path::PathBuf,
     run_root: std::path::PathBuf,
+    startup: StartupEvidence,
 }
 
 impl HostedTestDiagnostics {
@@ -194,7 +305,8 @@ impl HostedTestDiagnostics {
 
     fn report(&self, scenario: &ScenarioOutcome, cleanup: &CleanupOutcome) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(&json!({
-            "schema": 1,
+            "schema": 2,
+            "startup": self.startup,
             "scenario": scenario,
             "cleanup": cleanup,
             "workspace": self.workspace,
@@ -579,6 +691,15 @@ impl HostedTestRuntime {
         transport_factory: Option<HostTransportFactory>,
     ) -> Result<Self, String> {
         super::test_campaign::install_tracing();
+        let startup_policy = StartupPolicy::parse(
+            std::env::var(STARTUP_DIAGNOSTIC_SECONDS)
+                .map(Some)
+                .or_else(|error| match error {
+                    std::env::VarError::NotPresent => Ok(None),
+                    error => Err(error.to_string()),
+                })?
+                .as_deref(),
+        )?;
         let mut settings = settings.clone();
         if let Some(root) = std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT") {
             settings.asset_root = std::path::PathBuf::from(root);
@@ -611,6 +732,7 @@ impl HostedTestRuntime {
             root,
             workspace: repository.path().to_path_buf(),
             run_root: run_root.clone(),
+            startup: StartupEvidence::pending(startup_policy),
         });
         if let Some(diagnostics) = &diagnostics {
             diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
@@ -677,45 +799,89 @@ impl HostedTestRuntime {
             .map_err(|error| error.to_string())?;
         let mut exited_during_startup = None;
         let mut assembly_observed = false;
-        let started = tokio::time::timeout(STARTUP_BUDGET, async {
+        let mut observed_root = None;
+        let started_at = std::time::Instant::now();
+        let started = tokio::time::timeout(startup_policy.budget(), async {
             let context = tokio::select! {
-                assembled = &mut assembly => assembled.map_err(|_| "production assembly observer closed".to_owned())?,
+                assembled = &mut assembly => assembled.map_err(|_| StartupFailure::AssemblyObserverClosed)?,
                 result = &mut outcome => {
                     let result = result.unwrap_or_else(|error| Err(error.to_string()));
                     let detail = format!("production host exited during startup: {result:?}");
                     exited_during_startup = Some(result);
-                    return Err(detail);
+                    return Err(StartupFailure::HostExited { message: detail });
                 },
             };
             assembly_observed = true;
+            observed_root = Some(context.actor.clone());
             let address = context.while_root_live("embedded readiness", async {
                 loop {
                     tokio::select! {
                         event = readiness.recv() => match event {
                             Some(ActorHostReadiness::EmbeddedReady { root, address }) if root == context.actor.identity() => return Ok(address),
-                            Some(ActorHostReadiness::CoordinationFailed { error, .. }) => return Err(error),
+                            Some(ActorHostReadiness::CoordinationFailed { error, .. }) => return Err(StartupFailure::CoordinationFailed { message: error }),
                             Some(_) => {},
-                            None => return Err("production readiness owner closed".into()),
+                            None => return Err(StartupFailure::ReadinessObserverClosed),
                         },
                         result = &mut outcome => {
                             let result = result.unwrap_or_else(|error| Err(error.to_string()));
                             let detail = format!("production host exited before readiness: {result:?}");
                             exited_during_startup = Some(result);
-                            return Err(detail);
+                            return Err(StartupFailure::HostExited { message: detail });
                         },
                     }
                 }
-            }).await.map_err(|error| error.to_string())??;
+            }).await.map_err(|error| StartupFailure::RootRetired {
+                actor: error.actor,
+                terminal: error.terminal,
+            })??;
             Ok((context, address))
         }).await;
+        let elapsed = started_at.elapsed();
+        if let Some(diagnostics) = &mut diagnostics {
+            diagnostics.startup.elapsed_ms = Some(elapsed.as_millis());
+            diagnostics.startup.over_baseline_budget = Some(elapsed > STARTUP_BUDGET);
+            diagnostics.startup.stage = if assembly_observed {
+                StartupStage::EmbeddedReadiness
+            } else {
+                StartupStage::Assembly
+            };
+            diagnostics.startup.root_before_cleanup = observed_root
+                .as_ref()
+                .map(|actor| (actor.identity(), actor.terminal().get()));
+        }
         let (context, address) = match started {
-            Ok(Ok(started)) => started,
+            Ok(Ok(started)) => {
+                if let Some(diagnostics) = &mut diagnostics {
+                    diagnostics.startup.outcome = StartupOutcome::Ready;
+                    if let Err(error) =
+                        diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)
+                    {
+                        eprintln!("startup readiness evidence failed: {error}");
+                    }
+                }
+                started
+            }
             failure => {
-                let detail = match failure {
+                let failure = match failure {
                     Ok(Err(error)) => error,
-                    Err(_) => "production startup exceeded its budget".into(),
+                    Err(_) => StartupFailure::Deadline,
                     Ok(Ok(_)) => unreachable!(),
                 };
+                if let Some(diagnostics) = &mut diagnostics {
+                    diagnostics.startup.outcome = StartupOutcome::Failed {
+                        failure: failure.clone(),
+                    };
+                    // Preserve the pre-cleanup observation even if teardown cannot join.
+                    if let Err(error) = diagnostics.report(
+                        &ScenarioOutcome::Failed {
+                            phase: ScenarioPhase::Startup,
+                            message: failure.message().chars().take(2048).collect(),
+                        },
+                        &CleanupOutcome::Unknown,
+                    ) {
+                        eprintln!("startup evidence before cleanup failed: {error}");
+                    }
+                }
                 let outcome: HostOutcome = match exited_during_startup {
                     Some(result) => futures_util::future::ready(result).boxed().shared(),
                     None => outcome
@@ -724,8 +890,11 @@ impl HostedTestRuntime {
                         .shared(),
                 };
                 let termination = Self::terminate(stop.clone(), outcome, Some(thread)).await;
-                let (detail, cleanup) =
-                    termination.startup_failure(detail, assembly_observed, *owner_admission.lock());
+                let (detail, cleanup) = termination.startup_failure(
+                    failure,
+                    assembly_observed,
+                    *owner_admission.lock(),
+                );
                 let evidence = if let Some(diagnostics) = &diagnostics {
                     diagnostics.report(
                         &ScenarioOutcome::Failed {
@@ -882,7 +1051,7 @@ mod tests {
         assert!(*stopping.borrow());
         assert!(termination.joined.is_ok());
         let (message, cleanup) = termination.startup_failure(
-            "production assembly observer closed".into(),
+            StartupFailure::AssemblyObserverClosed,
             false,
             HostOwnerAdmission::Admitted,
         );
@@ -898,7 +1067,7 @@ mod tests {
         let (termination, stopping) = terminated_host(false).await;
         assert!(*stopping.borrow());
         let (_, cleanup) = termination.startup_failure(
-            "production assembly observer closed".into(),
+            StartupFailure::AssemblyObserverClosed,
             false,
             HostOwnerAdmission::NotAdmitted,
         );
@@ -988,7 +1157,7 @@ mod tests {
     async fn startup_host_error_and_executor_failure_are_independent() {
         let (termination, _) = terminated_host(true).await;
         let (message, cleanup) = termination.startup_failure(
-            "production assembly observer closed".into(),
+            StartupFailure::AssemblyObserverClosed,
             false,
             HostOwnerAdmission::Admitted,
         );
@@ -1011,7 +1180,7 @@ mod tests {
             joined: Ok(()),
         };
         let (message, cleanup) = termination.startup_failure(
-            "production assembly observer closed".into(),
+            StartupFailure::AssemblyObserverClosed,
             false,
             HostOwnerAdmission::Admitted,
         );
@@ -1026,7 +1195,9 @@ mod tests {
             joined: Ok(()),
         };
         let (message, cleanup) = termination.startup_failure(
-            "injected readiness failure".into(),
+            StartupFailure::CoordinationFailed {
+                message: "injected readiness failure".into(),
+            },
             true,
             HostOwnerAdmission::Admitted,
         );
@@ -1039,11 +1210,146 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_policy_requires_an_explicit_finite_diagnostic_allowance() {
+        assert_eq!(StartupPolicy::parse(None).unwrap(), StartupPolicy::Standard);
+        assert_eq!(StartupPolicy::Standard.budget(), Duration::from_secs(300));
+        assert_eq!(
+            StartupPolicy::parse(Some("600")).unwrap(),
+            StartupPolicy::Diagnostic { seconds: 600 }
+        );
+        for invalid in ["", "0", "300", "601", "18446744073709551616", "NaN"] {
+            assert!(StartupPolicy::parse(Some(invalid)).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn startup_deadline_remains_primary_when_teardown_retires_the_root() {
+        for assembly_observed in [false, true] {
+            let termination = HostTermination {
+                result: Some(Err(
+                    "actor retired before machine admission: forest host shutdown".into(),
+                )),
+                joined: Ok(()),
+            };
+            let (message, cleanup) = termination.startup_failure(
+                StartupFailure::Deadline,
+                assembly_observed,
+                HostOwnerAdmission::Admitted,
+            );
+            assert_eq!(message, "production startup exceeded its budget");
+            assert_eq!(
+                cleanup,
+                if assembly_observed {
+                    CleanupOutcome::Failed {
+                        message: "actor retired before machine admission: forest host shutdown"
+                            .into(),
+                    }
+                } else {
+                    CleanupOutcome::Unknown
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn root_retirement_before_cleanup_keeps_its_exact_cause() {
+        let actor = ActorRef::first(exomonad_actor::ActorId(7));
+        let terminal = exomonad_actor::ActorTerminal {
+            kind: exomonad_actor::ActorExitKind::Failed,
+            summary: "tool installation refused".into(),
+        };
+        let failure = StartupFailure::RootRetired {
+            actor,
+            terminal: terminal.clone(),
+        };
+        let termination = HostTermination {
+            result: Some(Err("later teardown refusal".into())),
+            joined: Ok(()),
+        };
+        let (message, cleanup) =
+            termination.startup_failure(failure.clone(), true, HostOwnerAdmission::Admitted);
+        assert!(message.contains("7@1") && message.contains("tool installation refused"));
+        assert!(!message.contains("later teardown refusal"));
+        assert_eq!(
+            cleanup,
+            CleanupOutcome::Failed {
+                message: "later teardown refusal".into()
+            }
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let mut diagnostics = diagnostics(&directory);
+        diagnostics.startup.outcome = StartupOutcome::Failed { failure };
+        diagnostics.startup.root_before_cleanup = Some((actor, Some(terminal)));
+        diagnostics
+            .report(
+                &ScenarioOutcome::Failed {
+                    phase: ScenarioPhase::Startup,
+                    message,
+                },
+                &cleanup,
+            )
+            .unwrap();
+        let recorded = report(&directory);
+        assert_eq!(
+            recorded["startup"]["outcome"]["failure"]["cause"],
+            "root_retired"
+        );
+        assert_eq!(
+            recorded["startup"]["root_before_cleanup"][1]["summary"],
+            "tool installation refused"
+        );
+    }
+
+    #[test]
+    fn diagnostic_startup_evidence_survives_scenario_and_cleanup_reporting() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut diagnostics = diagnostics(&directory);
+        diagnostics.startup = StartupEvidence {
+            policy: StartupPolicy::Diagnostic { seconds: 600 },
+            baseline_budget_seconds: 300,
+            elapsed_ms: Some(310_000),
+            over_baseline_budget: Some(true),
+            stage: StartupStage::EmbeddedReadiness,
+            outcome: StartupOutcome::Ready,
+            root_before_cleanup: None,
+        };
+        diagnostics
+            .report(&ScenarioOutcome::Passed, &CleanupOutcome::Confirmed)
+            .unwrap();
+        let recorded = report(&directory);
+        assert_eq!(recorded["schema"], 2);
+        assert_eq!(
+            recorded["startup"]["policy"],
+            json!({"mode": "diagnostic", "seconds": 600})
+        );
+        assert_eq!(recorded["startup"]["elapsed_ms"], 310_000);
+        assert_eq!(recorded["startup"]["over_baseline_budget"], true);
+        assert_eq!(recorded["startup"]["outcome"]["status"], "ready");
+        diagnostics.startup.outcome = StartupOutcome::Failed {
+            failure: StartupFailure::Deadline,
+        };
+        diagnostics
+            .report(
+                &ScenarioOutcome::Failed {
+                    phase: ScenarioPhase::Startup,
+                    message: StartupFailure::Deadline.message(),
+                },
+                &CleanupOutcome::Confirmed,
+            )
+            .unwrap();
+        assert_eq!(
+            report(&directory)["startup"]["outcome"]["failure"]["cause"],
+            "deadline"
+        );
+    }
+
     fn diagnostics(directory: &tempfile::TempDir) -> HostedTestDiagnostics {
         HostedTestDiagnostics {
             root: directory.path().to_path_buf(),
             workspace: directory.path().join("workspace"),
             run_root: directory.path().join("run"),
+            startup: StartupEvidence::pending(StartupPolicy::Standard),
         }
     }
 
