@@ -1,6 +1,9 @@
 //! Request settlement retains the native input owner until its original
 //! publication decision and native confirmation state establish an outcome.
 
+#[cfg(test)]
+mod phase_properties;
+
 use super::*;
 use std::sync::Arc;
 use tidepool_runtime::session::{PublicationClaim, PublicationPhase};
