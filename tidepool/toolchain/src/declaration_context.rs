@@ -982,16 +982,66 @@ fn template_selects_owner(templates: &[String], owner: &ExactModuleIdentity) -> 
 }
 
 fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
-    let import = format!("import {}", owner.module);
-    line == import
-        || line
-            .strip_prefix(&format!("import qualified {} as ", owner.module))
-            .is_some_and(|alias| {
-                !alias.is_empty()
-                    && alias
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-            })
+    let Some(rest) = line.trim_start().strip_prefix("import") else {
+        return false;
+    };
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return false;
+    }
+    let mut rest = rest.trim_start();
+    let qualified = if let Some(qualified) = rest.strip_prefix("qualified") {
+        if !qualified
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            return false;
+        }
+        rest = qualified.trim_start();
+        true
+    } else {
+        false
+    };
+    let Some(after_module) = rest.strip_prefix(&owner.module) else {
+        return false;
+    };
+    if after_module.is_empty() {
+        return true;
+    }
+    if !after_module
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+    {
+        return false;
+    }
+    let mut tail = after_module.trim_start();
+    if qualified {
+        if let Some(alias) = tail.strip_prefix("as ") {
+            let alias_end = alias
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace())
+                .map_or(alias.len(), |(index, _)| index);
+            let name = &alias[..alias_end];
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+            {
+                return false;
+            }
+            tail = alias[alias_end..].trim_start();
+        }
+    }
+    tail.is_empty()
+        || tail.starts_with('(')
+        || tail.strip_prefix("hiding").is_some_and(|items| {
+            items
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+                && items.trim_start().starts_with('(')
+        })
 }
 
 impl RetainedTemplateImports {
@@ -8686,7 +8736,7 @@ mod tests {
     #[test]
     fn checked_template_graph_retains_lexical_dependencies_without_artifact_promotion() {
         let (initial, _) = metadata_fixture();
-        let template = "module Expr where\nimport Joined\n";
+        let template = "module Expr where\nimport Joined hiding (joinedValue)\n";
         let graph = initial
             .template_interface_graph(&[template.to_owned()])
             .unwrap();
@@ -8699,6 +8749,10 @@ mod tests {
         assert!(
             !graph.contains_key(&identity("fixture", "Beta")),
             "artifact requirements cannot grant lexical instances"
+        );
+        assert!(
+            !template_selects_owner(&[template.to_owned()], &identity("fixture", "JoinedExtra")),
+            "an import modifier does not weaken exact module-name matching"
         );
         let mut current = initial.as_ref().clone();
         current.lexical.clear();
