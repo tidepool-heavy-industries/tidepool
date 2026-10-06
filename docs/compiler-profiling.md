@@ -115,6 +115,10 @@ scope or snapshot for the measured request.
 
 ## Read the evidence
 
+For stage-specific reuse decisions and cache-disable controls, use the
+[reuse evidence report](compiler-reuse-evidence.md). Latency alone does not
+establish compile reuse; absent stage completion remains unknown.
+
 `capture.json` records the exact command, process identity, worker hash, request
 linkage, clock anchors, exit status and errors. Optional `--worker-build-identity` binds
 source provenance to the sampled worker hash; the current checkout OID is

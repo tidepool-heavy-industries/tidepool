@@ -25,6 +25,11 @@ COLD_START_GATE_SPEC = importlib.util.spec_from_file_location(
 COLD_START_GATE = importlib.util.module_from_spec(COLD_START_GATE_SPEC)
 COLD_START_GATE_SPEC.loader.exec_module(COLD_START_GATE)
 
+REUSE_SPEC = importlib.util.spec_from_file_location(
+    "compiler_reuse_report", Path(__file__).resolve().with_name("compiler-reuse-report.py"))
+REUSE_REPORT = importlib.util.module_from_spec(REUSE_SPEC)
+REUSE_SPEC.loader.exec_module(REUSE_REPORT)
+
 PREFIX = "resident-performance "
 LIMITS_MS = {"warm_cell": 1000, "cold_start": 10000, "cancel_ack": 250}
 MIN_COUNTS = {"warm_cell": 50, "cold_start": 5, "cancel_ack": 50}
@@ -857,6 +862,8 @@ def main():
     parser.add_argument("--actor-samples", type=Path, help="independent actor-performance rows from the eight-actor fixture")
     parser.add_argument("--durable-samples", type=Path, help="independent durable-performance rows; never count toward product acceptance")
     parser.add_argument("--package-cold-report", type=Path, help="retained report.json from package-cold-start-gate.py")
+    parser.add_argument("--require-reuse-stage", choices=REUSE_REPORT.STAGES, action="append", default=[],
+                        help="require actual completed stage decisions for every retained compiler request")
     args = parser.parse_args()
     samples = list(read_jsonl(args.samples, PREFIX))
     manifest = json.loads(args.manifest.read_text())
@@ -894,6 +901,16 @@ def main():
             if file_sha256(path) != expected_trace_hashes.get(str(path)):
                 raise ValueError(f"cold compiler trace changed during reporting: {path}")
     report = analyze(samples, events, manifest)
+    report["compile_reuse"] = REUSE_REPORT.analyze(events)
+    report["compile_reuse"]["inputs"] = [
+        {"path": str(path), "sha256": file_sha256(path)} for path in trace_paths]
+    if args.require_reuse_stage:
+        reuse = report["compile_reuse"]
+        if reuse["status"] != "observed" or any(
+                request["stages"][stage]["status"] != "observed"
+                for request in reuse["requests"] for stage in args.require_reuse_stage):
+            report["accepted"] = False
+            report["evidence_problems"].append("required compile reuse stage evidence incomplete")
     if cold_report_reference is not None:
         report["package_cold_report"] = cold_report_reference
     durable = []
