@@ -4437,6 +4437,21 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let mut record = candidate_fixture(root.path(), "Library");
+        let include = record.include.clone();
+        let deployment = || CandidateOrigin::Deployment {
+            interface: root.path().join("Library.hi"),
+            packages: root.path().join("Library.packages"),
+        };
+        let admitted = select_records_inner(
+            b"endpoint",
+            &include,
+            scratch.path(),
+            vec![(record.clone(), deployment())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(admitted.by_owner.len(), 1);
+
         record.module_interface_proof = None;
         record
             .module_interface
@@ -4448,13 +4463,7 @@ mod tests {
             b"endpoint",
             &include,
             scratch.path(),
-            vec![(
-                record,
-                CandidateOrigin::Deployment {
-                    interface: root.path().join("Library.hi"),
-                    packages: root.path().join("Library.packages"),
-                },
-            )],
+            vec![(record, deployment())],
             None,
         );
         assert!(selected.is_none());
