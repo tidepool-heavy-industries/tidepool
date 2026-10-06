@@ -357,9 +357,13 @@ resolveDeclaration env spelling occurrence nominal = do
             Just entry | mi_module (hm_iface entry) == owner, not (declared (hm_iface entry)) -> True
             _ -> False
       loaded <- case existing of
-        _ | absent -> pure (Failed "declaration absent from original home interface")
-        Just thing -> pure (Succeeded thing)
-        Nothing -> initIfaceLoad env (importDecl name)
+        _ | absent -> pure Nothing
+        Just thing -> pure (Just thing)
+        Nothing -> do
+          result <- initIfaceLoad env (importDecl name)
+          pure $ case result of
+            Succeeded thing -> Just thing
+            Failed _ -> Nothing
       external <- hscEPS env
       let interfaces = [hm_iface entry | entry <- maybe [] (:[]) home]
             ++ [interface | (actual, interface) <- moduleEnvToList (eps_PIT external), actual == owner]
@@ -372,12 +376,11 @@ resolveDeclaration env spelling occurrence nominal = do
             Just fingerprint -> (Just thing, KnownDeclaration owner fingerprint identity)
             Nothing -> (Just thing, UnverifiableDependency)
       pure $ case loaded of
-        Succeeded thing@(ATyCon tycon) | nominal, tyConName tycon == name ->
+        Just thing@(ATyCon tycon) | nominal, tyConName tycon == name ->
           result thing (NominalIdentity tycon)
-        Succeeded thing@(AnId identifier) | not nominal, idName identifier == name ->
+        Just thing@(AnId identifier) | not nominal, idName identifier == name ->
           result thing (ValueIdentity identifier)
-        Succeeded _ -> (Nothing, missing)
-        Failed _ -> (Nothing, missing)
+        _ -> (Nothing, missing)
     NotFound { fr_pkg = Nothing, fr_unusables = [] } ->
       pure (Nothing, MissingModule (mkModuleName spelling))
     _ -> pure (Nothing, UnverifiableDependency)
