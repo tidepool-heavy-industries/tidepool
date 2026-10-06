@@ -7729,9 +7729,9 @@ mod tests {
                     packages,
                     seal,
                 ),
-                [2; 32],
+                graph.producer_sha256(),
             );
-            Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
+            Arc::new(ArtifactEntry::original(graph.producer_sha256(), product).unwrap())
         };
         let b1 = native_entry(owners[1].clone());
         let scope = execution_scope_fixture(&[Arc::clone(&a), Arc::clone(&b1)], source.path())
