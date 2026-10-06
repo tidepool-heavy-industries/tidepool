@@ -1921,6 +1921,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         Just producer -> unless (producer == scopeProducerSha256 scope)
           (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
+    sourceReuseDisabled <- liftIO ((== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_SOURCE_REUSE")
+    disabledSourceOwnersRef <- liftIO (newIORef Set.empty)
     interpreterAttempt <- case cycleState of
       StandaloneCycle -> liftIO (newIORef InterpreterConfirmed)
       TransactionCycle _ _ _ _ _ _ _ _ attempt -> pure attempt
@@ -1928,8 +1930,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let reuseContext = ReuseContext requestIdentity (compilePurposeLabel (pvPurpose variant))
         reuseOwner summary = Just (ReuseModule (unitString (moduleUnit (ms_mod summary)))
           (moduleNameString (ms_mod_name summary)) SourceFingerprint (show (ms_hs_hash summary)))
-        reuseEvent stage decision reason summary =
-          emitReuse timing reuseContext stage decision reason (reuseOwner summary) 1 Nothing
+        reuseEvent stage decision reason summary = do
+          disabled <- readIORef disabledSourceOwnersRef
+          let actualReason
+                | decision == ReuseWork, ms_mod summary `Set.member` disabled = CacheDisabled
+                | otherwise = reason
+          emitReuse timing reuseContext stage decision actualReason (reuseOwner summary) 1 Nothing
     let executionGrant = executionGrantFor selection
         preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
@@ -2346,17 +2352,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           ++ [mkModuleName (exactModule iface)
              | scope <- maybe [] pure (pvExactScope variant)
              , iface <- scopeValueInterfaces scope])
-    acceptedCandidates <- case candidateManifest of
+    normalCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates (forkExactContextWithPackageFacts packageFinder)
         compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw path
+    let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
     -- One dependency-order decision combines current admitted originals with
     -- source memo validation. An offered name or a previous HPT entry cannot
     -- substitute for this cycle's accepted candidate proof.
     validatedMemo <- do
         retainedEntries <- fmap catMaybes $ forM sourceOrder $ \summary ->
-          case Map.lookup (ms_mod_name summary) acceptedCandidates of
+          case Map.lookup (ms_mod_name summary) normalCandidates of
             Just _ -> recordValidity summary True >> pure Nothing
             Nothing -> do
               cached <- lookupValidMemo summary
@@ -2368,7 +2375,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         liftIO (writeIORef validThisCycleRef Map.empty)
         current <- getSession
         selectedVersions <- liftIO (readIORef selectedVersionsRef)
-        let validEntries = Map.fromList retainedEntries
+        let normalEntries = Map.fromList retainedEntries
+            validEntries = if sourceReuseDisabled then Map.empty else normalEntries
             restoredHomes = [if backendGeneratesCode (backend (ms_hspp_opts summary))
                   then hmi else hmi {hm_linkable=emptyHomeModInfoLinkable}
               | summary <- sourceOrder
@@ -2382,16 +2390,26 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       (payloadLoaded summary (gmePayload entry))))
               , mi_module finalized == owner
               , mi_iface_hash (mi_final_exts (hm_iface hmi)) == mi_iface_hash (mi_final_exts finalized)]
+        when sourceReuseDisabled $ liftIO $ do
+          writeIORef disabledSourceOwnersRef (Set.union (Map.keysSet normalEntries)
+            (Set.fromList [ms_mod summary | summary <- sourceOrder
+              , ms_mod_name summary `Map.member` normalCandidates]))
+          forM_ mMemoRef (`writeIORef` Map.empty)
         setSession (hscUpdateHPT (\table -> foldr
           (\hmi homes -> addToHpt homes (moduleName (mi_module (hm_iface hmi))) hmi)
           table restoredHomes) current)
         pure validEntries
+    disabledSourceOwners <- liftIO (readIORef disabledSourceOwnersRef)
     forM_ sourceOrder $ \summary -> liftIO $ do
       let retainedVersion = ms_mod summary `Map.member` validatedMemo
           canonicalVersion = ms_mod_name summary `Map.member` acceptedCandidates
           reusable = retainedVersion || canonicalVersion
-          decision = if reusable then ReuseHit else ReuseMiss
-          reason | reusable = Matched
+          disabled = ms_mod summary `Set.member` disabledSourceOwners
+          decision | disabled = ReuseDisabled
+                   | reusable = ReuseHit
+                   | otherwise = ReuseMiss
+          reason | disabled = CacheDisabled
+                 | reusable = Matched
                  | ms_mod summary `Set.member` unsealedClosure = ChangedDependency
                  | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
                  | otherwise = case cycleState of
@@ -2404,6 +2422,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                                [validity | entries <- Map.elems previous, validity <- Map.keys entries]
                              then ChangedDependency else ChangedSource
       reuseEvent SourceFrontend decision reason summary
+      when disabled $ do
+        reuseEvent FinalizedCore ReuseDisabled CacheDisabled summary
+        reuseEvent Interface ReuseDisabled CacheDisabled summary
       when reusable $ do
         reuseEvent FinalizedCore ReuseHit Matched summary
         reuseEvent Interface ReuseHit Matched summary
@@ -2539,8 +2560,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           let original = ms_hspp_opts summary
               selected = maybe summary admittedCandidateView
                 (Map.lookup (ms_mod_name summary) acceptedCandidates)
-          in selected { ms_hspp_opts = (canonicalizeDFlags original)
-               { backend = backend original, ghcLink = ghcLink original } }
+              flags = (canonicalizeDFlags original)
+                { backend = backend original, ghcLink = ghcLink original }
+              actualFlags
+                | ms_mod summary `Set.member` disabledSourceOwners = gopt_set flags Opt_ForceRecomp
+                | otherwise = flags
+          in selected { ms_hspp_opts = actualFlags }
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case preparation of
           CheckOnly ->
