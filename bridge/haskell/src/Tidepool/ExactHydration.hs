@@ -92,7 +92,7 @@ import GHC.Unit.Module.Deps (dep_orphs, dep_finsts)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
 import GHC.Unit.Types (GenWithIsBoot(..), InstalledModuleWithIsBoot, UnitId)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Utils.Fingerprint (fingerprintByteString, fingerprintString)
+import GHC.Utils.Fingerprint (fingerprint0, fingerprintByteString, fingerprintString)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts)
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
@@ -758,7 +758,11 @@ hydrateOriginalInterfaces env loaded = do
   where
     pending = filter (not . alreadyHydrated) loaded
     alreadyHydrated iface = case lookupHpt (hsc_HPT env) (moduleName (mi_module iface)) of
-      Just home -> mi_module (hm_iface home) == mi_module iface
+      -- Thin value interfaces have no content fingerprint. Their verified
+      -- captured object must be installed; an older zero-fingerprint HMI
+      -- cannot supply its details or the completed import's allocation witness.
+      Just home -> mi_iface_hash (mi_final_exts iface) /= fingerprint0
+        && mi_module (hm_iface home) == mi_module iface
         && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash (mi_final_exts iface)
       Nothing -> False
     withDetails details = hscUpdateHPT_lazy (\hpt -> foldr

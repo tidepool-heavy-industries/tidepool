@@ -20,7 +20,7 @@ import GHC
   , ms_mod_name, parseModule, typecheckModule, getSession, tm_internals_, ParsedModule )
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Driver.Env (HscEnv)
-import GHC.Builtin.Types (intTy)
+import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkVarOcc, mkTcOcc, mkDataOcc, mkRecFieldOcc)
 import GHC.Data.FastString (mkFastString)
@@ -300,8 +300,20 @@ checkCompletedValueRefinement work baseEnv original = do
         fail "changed or duplicate dependency bytes admitted completed value hydration"
   -- Identical owner, bytes and fingerprint0 still do not authorize the HPT
   -- allocation from an earlier injection or a separately reconstructed read.
-  (recreated, _) <- hydrateCompletedValueImports [requested] hydrated >>= either fail pure
-  forM_ [previousEnv, recreated] $ \stale -> do
+  (recreated, recreatedCompleted) <- hydrateCompletedValueImports [requested] hydrated >>= either fail pure
+  checkCompletedImports target recreated original recreatedCompleted
+  poisonedThin <- mkThinSessionIface baseEnv owner [(occurrence, boolTy), (mkVarOcc "other", intTy)]
+  unless (mi_iface_hash (mi_final_exts poisonedThin) == Fingerprint 0 0) $
+    fail "changed thin value interface ceased to exercise the zero fingerprint case"
+  writeSessionIface baseEnv work owner poisonedThin
+  poisonedEnv <- injectSessionIface work owner baseEnv
+  BS.writeFile (sessionHiPath work owner) bytes
+  -- A previous same-owner, same-zero-hash allocation has different native
+  -- details. The captured Int bytes must replace it before issuing this cap.
+  (repaired, repairedCompleted) <- hydrateCompletedValueImportsWithDependencies [dependency]
+    [requested] poisonedEnv >>= either fail pure
+  checkCompletedImports target repaired original repairedCompleted
+  forM_ [previousEnv, recreated, poisonedEnv] $ \stale -> do
     refused <- try (checkCompletedImports target stale original completed) :: IO (Either IOException ())
     unless (case refused of Left _ -> True; Right _ -> False) $
       fail "stale zero-fingerprint HPT accepted an unrelated readback allocation"

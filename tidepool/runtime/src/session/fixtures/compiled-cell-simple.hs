@@ -1,2 +1,3 @@
 let compiledCellValue = (40 :: Int)
-compiledCellValue + 2
+let compiledCellNext = compiledCellValue + 1
+compiledCellNext + 1
