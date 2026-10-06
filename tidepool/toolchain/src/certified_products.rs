@@ -9236,8 +9236,8 @@ pub(crate) mod tests {
             };
             global
         };
-        let first = package_global("First");
-        let second = package_global("Second");
+        let first = package_global("Alpha");
+        let second = package_global("Omega");
         let compact_dictionary = |globals: &[AcceptedGlobal]| {
             let full = value_array([
                 value_text("TPCERT"),
