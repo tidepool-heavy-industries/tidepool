@@ -5832,9 +5832,23 @@ mod tests {
             .artifact_view()
             .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")))
             .unwrap();
+        // The source import selects lexical support; this fixture's canonical
+        // interface deliberately has no type dependency on InstanceOwner.
+        assert!(relay[&identity("fixture", "InstanceRelay")]
+            .requirements
+            .is_empty());
         assert_eq!(
-            relay[&identity("fixture", "InstanceRelay")].requirements,
-            vec![identity("fixture", "InstanceOwner")]
+            request.program_source_lexical(),
+            &[
+                ExactLexicalNode {
+                    owner: identity("fixture", "InstanceOwner"),
+                    imports: vec![]
+                },
+                ExactLexicalNode {
+                    owner: identity("fixture", "InstanceRelay"),
+                    imports: vec![identity("fixture", "InstanceOwner")]
+                },
+            ]
         );
         let effective = request
             .in_program_context(&directory.path().join("program-inputs"), context)
@@ -5910,13 +5924,18 @@ mod tests {
     fn program_support_dependency_closure_does_not_select_hidden_names() {
         let directory = tempfile::tempdir().unwrap();
         let hidden = support_product("Hidden");
-        let context = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_checked_original_products([2; 32], &[hidden])
-            .unwrap();
+        let relay = crate::certified_products::fixture_finalized_product_with_requirements(
+            support_product("InstanceRelay"),
+            [2; 32],
+            Some(BTreeMap::from([(
+                ("fixture".into(), "Hidden".into()),
+                hidden.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
         let context = Arc::new(
-            context
-                .extend_checked_original_products([2; 32], &[support_product("InstanceRelay")])
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[hidden, relay])
                 .unwrap(),
         );
         let entries = context
@@ -5932,14 +5951,44 @@ mod tests {
                 ])
                 .unwrap(),
         );
+        let support = request.program_support.as_ref().unwrap();
+        let mut actual_owners = support
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect::<Vec<_>>();
+        actual_owners.sort();
         assert_eq!(
-            request
-                .program_support
-                .as_ref()
-                .unwrap()
-                .descriptors()
-                .len(),
-            2
+            actual_owners,
+            vec![
+                (
+                    identity("fixture", "Hidden"),
+                    ArtifactKind::CanonicalModuleInterface
+                ),
+                (
+                    identity("fixture", "InstanceRelay"),
+                    ArtifactKind::OriginalModule
+                ),
+                (
+                    identity("fixture", "InstanceRelay"),
+                    ArtifactKind::CanonicalModuleInterface
+                ),
+            ]
+        );
+        assert_eq!(
+            support
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.owner.clone())
+                .collect::<Vec<_>>(),
+            vec![identity("fixture", "InstanceRelay")]
+        );
+        assert!(!support
+            .source_implementation_roles()
+            .contains_key(&identity("fixture", "Hidden")));
+        assert_eq!(
+            entries[&identity("fixture", "InstanceRelay")].requirements,
+            vec![identity("fixture", "Hidden")]
         );
         let receipt = import_receipt(directory.path(), &request, "InstanceRelay");
         assert!(request.validate_receipt(&receipt, None, &context).is_ok());
@@ -5949,7 +5998,7 @@ mod tests {
         let (retained, lexical) = context
             .retain_value_source_surface(request.program_support.as_ref().unwrap(), &[])
             .unwrap();
-        assert_eq!(retained.descriptors().len(), 2);
+        assert_eq!(retained.artifact_ids(), support.artifact_ids());
         assert!(lexical.is_empty());
     }
 
@@ -5986,7 +6035,35 @@ mod tests {
         let (view, lexical) = context
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
-        assert_eq!(view.descriptors().len(), 2);
+        let typed_owners = |view: &ArtifactView| {
+            let mut owners = view
+                .descriptors()
+                .into_iter()
+                .map(|entry| (entry.owner, entry.kind))
+                .collect::<Vec<_>>();
+            owners.sort();
+            owners
+        };
+        let expected_owners = vec![
+            (
+                identity("fixture", "InstanceOwner"),
+                ArtifactKind::OriginalModule,
+            ),
+            (
+                identity("fixture", "InstanceOwner"),
+                ArtifactKind::CanonicalModuleInterface,
+            ),
+            (
+                identity("fixture", "InstanceRelay"),
+                ArtifactKind::OriginalModule,
+            ),
+            (
+                identity("fixture", "InstanceRelay"),
+                ArtifactKind::CanonicalModuleInterface,
+            ),
+        ];
+        assert_eq!(typed_owners(&view), expected_owners);
+
         let later = (*context)
             .clone()
             .extend_checked_original_products([2; 32], &[support_product("LaterSupport")])
@@ -5999,7 +6076,8 @@ mod tests {
         let (earlier_view, earlier_lexical) = later
             .retain_value_source_surface(&value, &later_support)
             .unwrap();
-        assert_eq!(earlier_view.descriptors().len(), 2);
+        assert_eq!(typed_owners(&earlier_view), expected_owners);
+        assert_eq!(earlier_view.artifact_ids(), view.artifact_ids());
         assert_eq!(earlier_lexical, lexical);
         assert_eq!(
             lexical,
