@@ -61,7 +61,7 @@ import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
-import GHC.Unit.Module.Deps (imp_mods, Usage(..))
+import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
@@ -75,7 +75,7 @@ import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls, mi_deps)
 import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (cg_binds)
@@ -130,7 +130,8 @@ import Tidepool.ExactHydration
   ( CheckedTemplateInterface(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
-  , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
+  , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
+  , generatedActivationPreviewRecipe )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
@@ -870,6 +871,79 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
     ++ ", ordinary fresh refresh accepted, source import shape preserved, " ++ if required
       then "held dependency drift refused and recovered"
       else "unretained dependency remained fresh after drift")
+
+-- A genuine compiler cohort contains both the original target's orphan and an
+-- unrelated sibling. Interface presence and graph reachability cannot replace
+-- the canonical target's original orphan visibility census.
+activationPreviewOriginalOrphanScope :: IO ()
+activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
+  let supportDirectory = work </> "Tidepool/Internal"
+      target = work </> "Expr.hs"
+      originalTarget = ("main","ExecutionSealedQuoter")
+      sibling = ("main","GeneratedScaffoldOrphanSibling")
+  createDirectoryIfMissing True supportDirectory
+  copyFile "lib/Tidepool/Internal/Resume.hs" (supportDirectory </> "Resume.hs")
+  forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
+    ,"GeneratedScaffoldOrphanSibling.hs","GeneratedScaffoldOrphanCapture.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "GeneratedScaffoldOrphanCapture.hs") [work] Nothing
+  captured <- capturePreparedFixture work original
+  let owners = filter (/= "GeneratedScaffoldOrphanCapture") (preparedNames original)
+  scopePath <- writeGenuineCandidateNativeScope owners owners work captured
+  admitted <- readExactScope scopePath >>= either fail pure
+  let byOwner = Map.fromList [((exactUnit interface,exactModule interface),interface)
+        | (interface,_,_) <- scopeInterfaces admitted]
+  graph <- forM (scopeLexical admitted) $ \(owner,imports) -> do
+    interface <- maybe (fail "original orphan control graph lacks its interface") pure
+      (Map.lookup owner byOwner)
+    pure (CheckedTemplateInterface (fst owner) (snd owner) (exactSha256 interface) imports)
+  unless (all (`Map.member` byOwner) [originalTarget,sibling]
+      && sibling `elem` map fst (scopeLexical admitted))
+    (fail "original orphan control did not retain its genuine graph-present sibling")
+  let environment = prHscEnv (pprPipelineResult original)
+  root <- case lookupHpt (hsc_HPT environment) (mkModuleName (snd originalTarget)) of
+    Just home -> pure (hm_iface home)
+    Nothing -> fail "original orphan control lost its compiler target interface"
+  let originalOrphans = [(unitString (moduleUnit owner),moduleNameString (moduleName owner))
+        | owner <- dep_orphs (mi_deps root)]
+  unless (("main","ExecutionHiddenOrphan") `elem` originalOrphans && sibling `notElem` originalOrphans)
+    (fail "original canonical orphan census does not distinguish its unrelated sibling")
+  protected <- readFile "test-source-boot/fixtures/GeneratedScaffoldOrphanExpr.hs"
+  writeFile target protected
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      recipe owner source = generatedActivationPreviewRecipe graph owner source source target "Expr"
+        >>= either fail pure
+      requireMissing label action = do
+        refused <- sourceFailureDiagnostics action
+        case refused of
+          Left diagnostics | any (sourceDiagnosticAt target "No instance for") diagnostics -> pure ()
+          Left diagnostics -> fail (label ++ " failed for another source reason: " ++ show diagnostics)
+          Right _ -> fail (label ++ " acquired an orphan outside its original visibility")
+  withResidentPipelineSelected [work] $ \compile -> do
+    selected <- recipe originalTarget protected
+    let purpose = GeneratedScaffoldCompile selected GeneralCompile
+    accepted <- compile (PreparedProducts Nothing) Set.empty purpose (Just scope) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult accepted)))
+      (fail "protected preview lost its genuine original orphan dictionary")
+    let other = T.unpack (T.replace "c (0 :: Int)" "c True" (T.pack protected))
+    writeFile target other
+    siblingRecipe <- recipe originalTarget other
+    requireMissing "graph-present sibling orphan" $
+      compile CheckedEnvironment Set.empty (GeneratedScaffoldCompile siblingRecipe GeneralCompile)
+        (Just scope) target [] Nothing
+    ownOrphanRecipe <- recipe sibling other
+    ownOrphan <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile ownOrphanRecipe GeneralCompile) (Just scope) target [] Nothing
+    unless (hasIntResultLiteral 99 (prBinds (pprPipelineResult ownOrphan)))
+      (fail "preview original target lost the orphan it defines itself")
+    writeFile target protected
+    requireMissing "ordinary target after scoped preview" $
+      compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [] Nothing
+    recovered <- compile (PreparedProducts Nothing) Set.empty purpose (Just scope) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult recovered)))
+      (fail "preview orphan visibility did not recover after refusal")
+  putStrLn "activation preview orphan scope: original dictionary, graph-present sibling refusal, target-owned orphan, ordinary isolation, recovery"
 
 generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do

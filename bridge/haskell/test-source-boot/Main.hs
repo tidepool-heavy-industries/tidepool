@@ -30,6 +30,7 @@ tests = testGroup "source-boot"
   , testCase "completed program import pairing" $ completedProgramSourceImportPairing
   , testCase "canonical source obligations" $ canonicalSourceObligations
   , testCase "generated scaffold imports" $ generatedScaffoldImports
+  , testCase "activation preview original orphan scope" $ activationPreviewOriginalOrphanScope
   , testCase "hydrated site siblings" $ hydratedSiteSiblings
   , testCase "fresh execution recipe" $ freshExecutionRecipeTest
   , testCase "candidate graph descriptors" $ withTiming (withScratch candidateGraphDescriptorsAt)
