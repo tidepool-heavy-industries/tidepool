@@ -902,9 +902,11 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_final_admission_observation_catches_failure_after_initial_not_found(self):
         first_query = runner.threading.Event()
+        observer_finished = []
         calls = []
         admission_queries = 0
         state_queries = 0
+        final_observations = []
 
         class Process:
             pid = 781239
@@ -925,6 +927,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                 admission_queries += 1
                 if admission_queries == 1:
                     first_query.set()
+                    if not observer_finished[0].wait(2):
+                        raise AssertionError('polling query was not stopped before its reply')
                     return completed_process(args, 1,
                         'LoadState=not-found\nActiveState=inactive\n', '')
                 unit = args[-1]
@@ -939,8 +943,16 @@ class IsolatedLibtestTests(unittest.TestCase):
             return completed_process(args, 0,
                 'LoadState=not-found\nActiveState=inactive\n', '')
 
+        observe = runner.observe_delegated_admission
+        def observe_with_completion(unit, record, finished, final=False):
+            if not final:
+                observer_finished.append(finished)
+            final_observations.append(final)
+            return observe(unit, record, finished, final)
+
         record = {}
         with patch.object(runner.subprocess, 'Popen', return_value=Process()), \
+             patch.object(runner, 'observe_delegated_admission', side_effect=observe_with_completion), \
              patch.object(runner.subprocess, 'run', side_effect=control):
             result = runner.execute(['fake-libtest'], 2, 'app.slice', record)
 
@@ -949,6 +961,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                            if '--property=InvocationID' in args and index > 0)
         stop = next(index for index, args in enumerate(calls) if 'stop' in args)
         self.assertEqual(admission_queries, 2)
+        self.assertEqual(final_observations, [False, True])
         self.assertLess(final_query, stop)
         self.assertEqual(record['manager_admission']['Id'], unit)
         self.assertTrue(result.cleanup_confirmed)
