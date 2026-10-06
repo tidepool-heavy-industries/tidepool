@@ -8,11 +8,335 @@ use crate::session::{
     PublicManifestCommit, PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority,
     ResidentError, ResidentSession, SessionLib, SessionRunContext, SourceImports,
 };
+use parking_lot::Mutex as CaptureMutex;
+use sha2::Digest;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tidepool_codegen::{prepared_program::ImageRegistry, scope::ScopeId};
 use tidepool_repr::SessionId;
 use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_toolchain::checked_cell::CheckedItemKind;
+use tracing_subscriber::prelude::*;
+
+const MAX_CAPTURED_CELLS: usize = 512;
+const MAX_REQUESTS_PER_CELL: usize = 64;
+const MAX_CAPTURED_SOURCE_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+struct CompilerRequest {
+    daemon_epoch: String,
+    admission_id: u64,
+    request_ordinal: u64,
+    compile_request: String,
+}
+
+impl CompilerRequest {
+    fn key(&self) -> (String, u64, u64) {
+        (
+            self.daemon_epoch.clone(),
+            self.admission_id,
+            self.request_ordinal,
+        )
+    }
+}
+
+#[derive(Default)]
+struct RequestFields(std::collections::HashMap<String, String>);
+
+impl tracing::field::Visit for RequestFields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().into(), value.into());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name().into(), format!("{value:?}"));
+    }
+}
+
+#[derive(Default)]
+struct RequestState {
+    active: Option<(u64, String, Vec<CompilerRequest>)>,
+    next_cell: u64,
+    owners: HashSet<(String, u64, u64)>,
+}
+
+#[derive(Clone, Default)]
+struct CellRequestObserver(Arc<CaptureMutex<RequestState>>);
+
+struct CapturedCell {
+    index: u64,
+    label: String,
+    source_sha256: String,
+    source_path: PathBuf,
+    compiler_requests: Vec<CompilerRequest>,
+}
+
+struct ActiveCell<'a> {
+    observer: &'a CellRequestObserver,
+    index: u64,
+    label: String,
+    source_sha256: String,
+    source_path: PathBuf,
+    completed: bool,
+}
+
+impl CellRequestObserver {
+    fn begin(&self, label: &str, source: &str) -> ActiveCell<'_> {
+        assert!(
+            source.len() <= MAX_CAPTURED_SOURCE_BYTES,
+            "bounded authored source"
+        );
+        let artifact_root = PathBuf::from(
+            std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+                .expect("isolated test runner must retain TIDEPOOL_TEST_ARTIFACT_ROOT"),
+        );
+        assert!(artifact_root.is_absolute());
+        let mut state = self.0.lock();
+        assert!(state.active.is_none(), "fixture submits cells sequentially");
+        assert!(
+            state.next_cell < MAX_CAPTURED_CELLS as u64,
+            "bounded cell capture"
+        );
+        let index = state.next_cell;
+        state.next_cell += 1;
+        let run_root = tempfile::Builder::new()
+            .prefix("resident-cell-correlation-")
+            .tempdir_in(&artifact_root)
+            .unwrap()
+            .keep();
+        let source_path = run_root.join(format!("cell-{index:04}.hs"));
+        std::fs::write(&source_path, source.as_bytes()).unwrap();
+        let source_sha256 = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+        state.active = Some((index, label.into(), Vec::new()));
+        ActiveCell {
+            observer: self,
+            index,
+            label: label.into(),
+            source_sha256,
+            source_path,
+            completed: false,
+        }
+    }
+}
+
+fn with_cell_request_capture<T>(
+    observer: &CellRequestObserver,
+    phase: &str,
+    label: &str,
+    source: &str,
+    action: impl FnOnce() -> Result<T, ResidentError>,
+) -> (Result<T, ResidentError>, CapturedCell) {
+    let active = observer.begin(label, source);
+    let span = tracing::info_span!("resident_compiler_cell", label = %label);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(observer.clone()),
+            || span.in_scope(action),
+        )
+    }));
+    let captured = active.finish();
+    eprintln!(
+        "resident-cell-correlation {}",
+        serde_json::json!({
+            "schema": 1, "index": captured.index, "label": &captured.label,
+            "source_path": captured.source_path.display().to_string(),
+            "source_sha256": &captured.source_sha256,
+            "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
+            "compiler_requests": &captured.compiler_requests,
+            "completed": matches!(&result, Ok(Ok(_))), "phase": phase,
+        })
+    );
+    match result {
+        Ok(result) => (result, captured),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+impl ActiveCell<'_> {
+    fn finish(mut self) -> CapturedCell {
+        let mut state = self.observer.0.lock();
+        let (index, label, compiler_requests) = state.active.take().expect("active measured cell");
+        assert_eq!(index, self.index);
+        assert_eq!(label, self.label);
+        self.completed = true;
+        CapturedCell {
+            index,
+            label,
+            source_sha256: self.source_sha256.clone(),
+            source_path: self.source_path.clone(),
+            compiler_requests,
+        }
+    }
+}
+
+impl Drop for ActiveCell<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.observer.0.lock().active = None;
+        }
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for CellRequestObserver
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "tidepool_extract_cmd::endpoint" {
+            return;
+        }
+        let mut fields = RequestFields::default();
+        event.record(&mut fields);
+        let get = |name: &str| fields.0.get(name).map(String::as_str);
+        if get("message") != Some("compiler request identified")
+            || get("transport") != Some("daemon")
+        {
+            return;
+        }
+        if self.0.lock().active.is_none() {
+            return;
+        }
+        let request = CompilerRequest {
+            daemon_epoch: fields
+                .0
+                .get("daemon_epoch")
+                .expect("daemon epoch field")
+                .clone(),
+            admission_id: fields
+                .0
+                .get("admission_id")
+                .expect("admission field")
+                .parse()
+                .unwrap(),
+            request_ordinal: fields
+                .0
+                .get("request_ordinal")
+                .expect("request ordinal field")
+                .parse()
+                .unwrap(),
+            compile_request: fields
+                .0
+                .get("compile_request")
+                .expect("compile request field")
+                .clone(),
+        };
+        assert!(request.admission_id > 0 && request.request_ordinal > 0);
+        assert!(
+            request.daemon_epoch.len() == 64
+                && request.daemon_epoch.bytes().all(|b| b.is_ascii_hexdigit())
+        );
+        assert!(
+            request.compile_request.len() == 16
+                && request
+                    .compile_request
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit())
+        );
+        let mut state = self.0.lock();
+        if state.active.is_none() {
+            return;
+        }
+        assert!(
+            state.owners.insert(request.key()),
+            "physical daemon request has one cell owner"
+        );
+        let Some((_, _, requests)) = state.active.as_mut() else {
+            return;
+        };
+        assert!(
+            requests.len() < MAX_REQUESTS_PER_CELL,
+            "bounded requests per measured cell"
+        );
+        requests.push(request);
+    }
+}
+
+#[cfg(test)]
+mod cell_request_observer_tests {
+    use super::*;
+
+    fn active<'a>(observer: &'a CellRequestObserver, label: &str) -> ActiveCell<'a> {
+        let mut state = observer.0.lock();
+        assert!(state.active.is_none());
+        let index = state.next_cell;
+        state.next_cell += 1;
+        state.active = Some((index, label.into(), Vec::new()));
+        drop(state);
+        ActiveCell {
+            observer,
+            index,
+            label: label.into(),
+            source_sha256: "a".repeat(64),
+            source_path: PathBuf::from(format!("cell-{index}.hs")),
+            completed: false,
+        }
+    }
+
+    fn identified(admission_id: u64, request_ordinal: u64) {
+        tracing::info!(target: "tidepool_extract_cmd::endpoint",
+            daemon_epoch = %"a".repeat(64), admission_id, request_ordinal,
+            compile_request = "0123456789abcdef", transport = "daemon",
+            "compiler request identified");
+    }
+
+    #[test]
+    fn cell_requests_belong_to_the_sequential_active_cell() {
+        let observer = CellRequestObserver::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(observer.clone()),
+            || {
+                let first = active(&observer, "first");
+                identified(1, 1);
+                let first = first.finish();
+                assert_eq!(first.compiler_requests.len(), 1);
+                assert_eq!(first.compiler_requests[0].admission_id, 1);
+
+                let second = active(&observer, "second");
+                identified(2, 1);
+                let second = second.finish();
+                assert_eq!(second.compiler_requests.len(), 1);
+                assert_eq!(second.compiler_requests[0].admission_id, 2);
+            },
+        );
+    }
+
+    #[test]
+    fn cell_capture_preserves_empty_and_rejects_malformed_or_duplicate_requests() {
+        let observer = CellRequestObserver::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(observer.clone()),
+            || {
+                let empty = active(&observer, "empty");
+                assert!(empty.finish().compiler_requests.is_empty());
+
+                let malformed = active(&observer, "malformed");
+                let malformed_event = || {
+                    tracing::info!(target: "tidepool_extract_cmd::endpoint",
+                        daemon_epoch = %"a".repeat(64), admission_id = 2_u64,
+                        transport = "daemon", "compiler request identified");
+                };
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(malformed_event))
+                        .is_err()
+                );
+                drop(malformed);
+
+                let duplicate = active(&observer, "duplicate");
+                identified(3, 1);
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| identified(3, 1)))
+                        .is_err()
+                );
+                let captured = duplicate.finish();
+                assert_eq!(captured.compiler_requests.len(), 1);
+            },
+        );
+    }
+}
 
 #[derive(Clone)]
 pub(in crate::session) struct QuietOutput;
@@ -240,6 +564,36 @@ fn try_execute_cell_with_template_imports(
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
 ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+    try_execute_cell_with_template_imports_expectation(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        publication_target,
+        authority_checks,
+        template_imports,
+        None,
+    )
+}
+
+fn try_execute_cell_with_template_imports_expectation(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: usize,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks,
+    template_imports: &SourceImports,
+    expected_observation: Option<&serde_json::Value>,
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -383,6 +737,7 @@ fn try_execute_cell_with_template_imports(
         .unwrap()
         .expect("nonempty compiled cell has an ordered prefix");
     let submissions_before_effects = tidepool_extract_cmd::extract_spawn_count();
+    let mut expected_observation_seen = false;
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -480,7 +835,14 @@ fn try_execute_cell_with_template_imports(
                     tidepool_extract_cmd::extract_spawn_count(),
                     submissions_before_effects
                 );
-                observed?;
+                let outcome = observed?;
+                if let Some(expected) = expected_observation {
+                    let crate::session::ResidentOutcome::Completed { result, .. } = outcome else {
+                        panic!("expected native observation to complete with a value")
+                    };
+                    assert_eq!(result.to_json(), *expected, "native cell result");
+                    expected_observation_seen = true;
+                }
             }
         }
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
@@ -488,6 +850,12 @@ fn try_execute_cell_with_template_imports(
             tidepool_extract_cmd::extract_spawn_count(),
             submissions_before_effects,
             "native execution must consume the immutable cell without compiler requests"
+        );
+    }
+    if expected_observation.is_some() {
+        assert!(
+            expected_observation_seen,
+            "expected source to execute through the native observation path"
         );
     }
     let work = checked.checked_item(0).unwrap().input_work();
@@ -631,6 +999,47 @@ fn try_execute_cell_with_template_imports(
     Ok((elapsed, native_targets))
 }
 
+fn execute_growth_cell(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: usize,
+    publication: &ScalePublication,
+    observer: Option<&CellRequestObserver>,
+) -> Duration {
+    let Some(observer) = observer else {
+        return execute_cell(
+            resident,
+            public,
+            effects,
+            images,
+            scenario,
+            label,
+            source,
+            declarations,
+            publication,
+        );
+    };
+    let (elapsed, _) = with_cell_request_capture(observer, "binding_growth", label, source, || {
+        Ok(execute_cell(
+            resident,
+            public,
+            effects,
+            images,
+            scenario,
+            label,
+            source,
+            declarations,
+            publication,
+        ))
+    });
+    elapsed.unwrap()
+}
+
 fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool) {
     tidepool_testing::eval_harness::require_extract();
     let no_daemon = std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON");
@@ -651,7 +1060,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             Ok("1"),
             "the historical comparison uses isolated compiler submissions"
         );
-    }
+    };
     let (root_path, root_guard) = scale_workspace(durable);
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
@@ -678,6 +1087,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let observer = durable.then(CellRequestObserver::default);
     let scenario = (prefix, baseline);
     if let ScalePublication::Durable { owner, .. } = &publication {
         measured(
@@ -696,7 +1106,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             },
         );
     }
-    execute_cell(
+    execute_growth_cell(
         &mut resident,
         public,
         &effects,
@@ -706,6 +1116,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         include_str!("fixtures/protected-scale-foundation.hs"),
         1,
         &publication,
+        observer.as_ref(),
     );
     let original = resident
         .compile_view_in(public)
@@ -734,7 +1145,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
                 format!("let ({names}) = ({values})\n")
             })
             .collect::<String>();
-        execute_cell(
+        execute_growth_cell(
             &mut resident,
             public,
             &effects,
@@ -744,6 +1155,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             &source,
             0,
             &publication,
+            observer.as_ref(),
         );
     }
     let mut source = String::new();
@@ -768,7 +1180,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             baseline - 1,
         ));
     }
-    execute_cell(
+    execute_growth_cell(
         &mut resident,
         public,
         &effects,
@@ -778,6 +1190,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         &source,
         0,
         &publication,
+        observer.as_ref(),
     );
     let visible = resident.binding_names_in(public);
     assert_eq!(
@@ -917,6 +1330,7 @@ fn resident_capture_cells(count: usize, durable: bool) {
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let observer = CellRequestObserver::default();
     if let ScalePublication::Durable { owner, .. } = &publication {
         measured(
             &mut resident,
@@ -945,18 +1359,40 @@ fn resident_capture_cells(count: usize, durable: bool) {
             &publication,
         );
     }
-    // Record warm-up separately. Daemon request traces decide whether every
-    // measured cell actually reused a warm worker, including a second slot.
-    execute_cell(
-        &mut resident,
-        public,
-        &effects,
-        &images,
-        (0, 0),
-        "warmup",
-        "(42 :: Int)",
-        0,
-        &publication,
+    // The observer is scoped to each real source submission and associates its
+    // physical requests with the one sequential active cell.
+    let warm_source = "(42 :: Int)";
+    let (warm_result, warm_capture) =
+        with_cell_request_capture(&observer, "warmup", "warmup", warm_source, || {
+            try_execute_cell_with_template_imports_expectation(
+                &mut resident,
+                public,
+                &effects,
+                &images,
+                (0, 0),
+                "warmup",
+                warm_source,
+                0,
+                &publication,
+                AuthorityChecks::Configured,
+                &SourceImports::new(),
+                Some(&serde_json::json!(42)),
+            )
+        });
+    let warm_elapsed = warm_result.unwrap().0;
+    eprintln!(
+        "resident-performance-warmup {}",
+        serde_json::json!({
+            "schema": 1, "composition": "private-session", "kind": "warmup_cell",
+            "index": warm_capture.index, "label": warm_capture.label,
+            "elapsed_ns": warm_elapsed.as_nanos(), "completed": true, "captured": true,
+            "workload": "integer-observation", "expected_result": 42,
+            "source_blake3": blake3::hash(warm_source.as_bytes()).to_hex().to_string(),
+            "source_sha256": warm_capture.source_sha256,
+            "source_path": warm_capture.source_path,
+            "compiler_requests": warm_capture.compiler_requests,
+            "endpoint": identity.to_hex(), "producer": identity.producer_hex(),
+        })
     );
     for index in 0..count {
         let source = format!(
@@ -967,17 +1403,25 @@ fn resident_capture_cells(count: usize, durable: bool) {
             tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap(),
             identity
         );
-        let elapsed = execute_cell(
-            &mut resident,
-            public,
-            &effects,
-            &images,
-            (0, 0),
-            &format!("resident_cell_{index}"),
-            &source,
-            0,
-            &publication,
-        );
+        let label = format!("resident_cell_{index}");
+        let (result, captured) =
+            with_cell_request_capture(&observer, "measured", &label, &source, || {
+                try_execute_cell_with_template_imports_expectation(
+                    &mut resident,
+                    public,
+                    &effects,
+                    &images,
+                    (0, 0),
+                    &label,
+                    &source,
+                    0,
+                    &publication,
+                    AuthorityChecks::Configured,
+                    &SourceImports::new(),
+                    Some(&serde_json::json!(42)),
+                )
+            });
+        let elapsed = result.unwrap().0;
         assert_eq!(
             tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap(),
             identity
@@ -986,9 +1430,13 @@ fn resident_capture_cells(count: usize, durable: bool) {
             "resident-performance {}",
             serde_json::json!({
                 "schema": 1, "composition": "private-session", "kind": "warm_cell",
-                "index": index, "elapsed_ns": elapsed.as_nanos(),
-                "completed": true, "captured": true, "workload": "integer-addition",
+                "index": index, "label": captured.label,
+                "elapsed_ns": elapsed.as_nanos(), "completed": true, "captured": true,
+                "workload": "integer-addition", "expected_result": 42,
                 "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
+                "source_sha256": captured.source_sha256,
+                "source_path": captured.source_path,
+                "compiler_requests": captured.compiler_requests,
                 "endpoint": identity.to_hex(), "producer": identity.producer_hex(),
             })
         );
@@ -1132,12 +1580,13 @@ fn following_declaration_retains_original_native_binding_inventory() {
         .descriptors()
         .iter()
         .any(|descriptor| descriptor.owner.module == original.1.module_name()));
-    assert!(!context.lexical_graph().iter().any(|node| node.owner.module
-        == original.1.module_name()
-        || node
-            .imports
-            .iter()
-            .any(|owner| owner.module == original.1.module_name())));
+    assert!(!context.lexical_graph().iter().any(|node| {
+        node.owner.module == original.1.module_name()
+            || node
+                .imports
+                .iter()
+                .any(|owner| owner.module == original.1.module_name())
+    }));
     execute_cell(
         &mut resident,
         public,
