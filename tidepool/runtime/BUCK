@@ -61,6 +61,8 @@ rust_filegroup(
         "src/session/view.rs": "tidepool/runtime/src/session/view.rs",
         "src/session/workbench.rs": "tidepool/runtime/src/session/workbench.rs",
         "src/span_blocking.rs": "tidepool/runtime/src/span_blocking.rs",
+        "tests/fixtures/ScientificPlain.hs": "tidepool/runtime/tests/fixtures/ScientificPlain.hs",
+        "tests/fixtures/ScientificQuoted.hs": "tidepool/runtime/tests/fixtures/ScientificQuoted.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -202,6 +204,8 @@ rust_filegroup(
         "src/session/view.rs": "tidepool/runtime/src/session/view.rs",
         "src/session/workbench.rs": "tidepool/runtime/src/session/workbench.rs",
         "src/span_blocking.rs": "tidepool/runtime/src/span_blocking.rs",
+        "tests/fixtures/ScientificPlain.hs": "tidepool/runtime/tests/fixtures/ScientificPlain.hs",
+        "tests/fixtures/ScientificQuoted.hs": "tidepool/runtime/tests/fixtures/ScientificQuoted.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -558,8 +562,6 @@ rust_filegroup(
         "tests/fixtures/RetainedReceiveOwner.hs": "tidepool/runtime/tests/fixtures/RetainedReceiveOwner.hs",
         "tests/fixtures/RetainedReceiveProbe.hs": "tidepool/runtime/tests/fixtures/RetainedReceiveProbe.hs",
         "tests/fixtures/RetainedReceiveSupport.hs": "tidepool/runtime/tests/fixtures/RetainedReceiveSupport.hs",
-        "tests/fixtures/ScientificPlain.hs": "tidepool/runtime/tests/fixtures/ScientificPlain.hs",
-        "tests/fixtures/ScientificQuoted.hs": "tidepool/runtime/tests/fixtures/ScientificQuoted.hs",
         "tests/fixtures/checked-quoter-program.hs": "tidepool/runtime/tests/fixtures/checked-quoter-program.hs",
         "tests/prepared_execution.rs": "tidepool/runtime/tests/prepared_execution.rs",
         "tests/prepared_residency.rs": "tidepool/runtime/tests/prepared_residency.rs",
