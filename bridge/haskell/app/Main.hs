@@ -125,7 +125,6 @@ import Tidepool.ExactScope
   , readExactScope, revalidateExactScope, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
-import GHC.Core.Type (splitFunTy_maybe)
 import Tidepool.CheckedCell (encodeCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness)
@@ -996,15 +995,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
             Right prepared ->
               return (index, spliced, prepared)
             Left err@(_ :: SomeException) -> case (sourceFailureDiagnostics err, rest) of
-              (Just _, _ : _) | not (isJust admitted || isJust display) -> compileVariants (index + 1) rest
+              (Just _, _ : _) | not (isJust admitted) -> compileVariants (index + 1) rest
               _               -> throwIO err
     (variant, spliced, prepared) <- compileVariants (0 :: Int) matching
-    let rawResult = pprPipelineResult prepared
-        result = if requestCell args && isJust display then rawResult
-          { prResultType = prResultType rawResult >>= \ty -> case splitFunTy_maybe ty of
-              Just (_,_,_,body) -> Just body
-              Nothing -> Nothing }
-          else rawResult
+    let result = pprPipelineResult prepared
         binds       = prBinds result
         hscEnv      = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
