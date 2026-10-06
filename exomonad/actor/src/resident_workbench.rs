@@ -793,17 +793,10 @@ impl InstalledToolLease {
             ..self.clone()
         }
     }
-
-    pub(crate) fn with_tools(&self, tools: Option<Arc<ResidentWorkbenchTools>>) -> Self {
-        Self {
-            tools,
-            ..self.clone()
-        }
-    }
 }
 
 /// The actor's single current installation. Requests clone an immutable lease;
-/// reload replaces only this pointer after publishing source or handler state.
+/// spec reload replaces the paired source and handlers at source visibility.
 #[derive(Default)]
 pub(crate) struct InstalledToolsState(Mutex<Option<InstalledToolLease>>);
 
@@ -839,11 +832,34 @@ impl InstalledToolsState {
         });
     }
 
-    pub(crate) fn publish_tools(&self, tools: Option<Arc<ResidentWorkbenchTools>>) {
+    /// Fence the exact installation before entering the source owner's gate.
+    /// Publication invokes the synchronous callback only after its visible rename.
+    pub(crate) fn commit_spec_reload(
+        &self,
+        expected: &InstalledToolLease,
+        tools: Arc<ResidentWorkbenchTools>,
+        staged: Box<dyn crate::StagedActorSourceReload>,
+        publication: &Arc<tidepool_runtime::session::PublicationDecision>,
+    ) -> crate::SourceLayerReload {
+        let replacement =
+            InstalledToolLease::new(expected.actor(), staged.source().clone(), Some(tools));
         let mut current = self.0.lock();
-        if let Some(lease) = current.as_ref() {
-            *current = Some(lease.with_tools(tools));
+        let matches = current.as_ref().is_some_and(|current| {
+            current.actor() == expected.actor()
+                && current.source().semantic_digest() == expected.source().semantic_digest()
+                && current
+                    .tools()
+                    .zip(expected.tools())
+                    .is_some_and(|(current, expected)| {
+                        Arc::ptr_eq(&current.dispatch, &expected.dispatch)
+                    })
+        });
+        if !matches {
+            return crate::SourceLayerReload::Unavailable(
+                "the active source or installed handlers changed during preparation".into(),
+            );
         }
+        staged.commit(publication, Box::new(|| *current = Some(replacement)))
     }
 
     pub(crate) fn clear(&self) {
@@ -15395,6 +15411,86 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .lines()
                 .count()
                 > completed_executions.lines().count()
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor() {
+        struct NeverCommitted(crate::CheckpointSourceLayer);
+        impl crate::StagedActorSourceReload for NeverCommitted {
+            fn source(&self) -> &crate::CheckpointSourceLayer {
+                &self.0
+            }
+            fn commit(
+                self: Box<Self>,
+                _: &Arc<tidepool_runtime::session::PublicationDecision>,
+                _: Box<dyn FnOnce() + '_>,
+            ) -> crate::SourceLayerReload {
+                panic!("a stale installation must not enter the source publication owner")
+            }
+        }
+        let (session, context, source, _root) = host_mount_fixture();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None)
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
+        let first = Arc::new(
+            workbench
+                .prepare_tools(context.clone(), 1, vec![])
+                .await
+                .unwrap(),
+        );
+        let second = Arc::new(
+            workbench
+                .prepare_tools(context.clone(), 2, vec![])
+                .await
+                .unwrap(),
+        );
+        assert!(
+            !Arc::ptr_eq(&first.dispatch, &second.dispatch),
+            "native installations own distinct dispatch roots"
+        );
+        let source = crate::CheckpointSourceLayer::default();
+        let expected = InstalledToolLease::new(context.actor, source.clone(), Some(first));
+        let replacement =
+            InstalledToolLease::new(context.actor, source.clone(), Some(second.clone()));
+        let state = InstalledToolsState::default();
+        state.publish(replacement);
+        let decision = tidepool_runtime::session::PublicationDecision::new();
+        assert!(matches!(
+            state.commit_spec_reload(
+                &expected,
+                second.clone(),
+                Box::new(NeverCommitted(source.clone())),
+                &decision
+            ),
+            crate::SourceLayerReload::Unavailable(_)
+        ));
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+        );
+        assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+        assert_eq!(
+            expected.tools().unwrap().install,
+            1,
+            "old accepted lease remains valid"
+        );
+        state.clear();
+        assert!(matches!(
+            state.commit_spec_reload(
+                &expected,
+                second,
+                Box::new(NeverCommitted(source)),
+                &decision
+            ),
+            crate::SourceLayerReload::Unavailable(_)
+        ));
+        assert!(
+            state.current().is_none(),
+            "reload cannot resurrect a retired installation"
         );
     }
 

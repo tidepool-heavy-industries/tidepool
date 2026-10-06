@@ -487,23 +487,9 @@ pub trait ActorSourceLayers: Send + Sync {
     /// before consuming the returned source-owner token.
     fn stage_spec_reload(
         self: std::sync::Arc<Self>,
-        _actor: PrincipalId,
-        _also_check: &[String],
-    ) -> Result<Box<dyn StagedActorSourceReload>, SourceLayerReload> {
-        Err(SourceLayerReload::Unavailable(
-            "source owner does not support staged AgentSpec reload".into(),
-        ))
-    }
-    /// Check a reload candidate, then arbitrate its actual publication against
-    /// invocation cancellation through the existing native decision owner.
-    fn reload_with_publication(
-        &self,
-        _actor: PrincipalId,
-        _also_check: &[String],
-        _publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
-    ) -> SourceLayerReload {
-        SourceLayerReload::Unavailable("source owner does not support cancellable reload".into())
-    }
+        actor: PrincipalId,
+        also_check: &[String],
+    ) -> Result<Box<dyn StagedActorSourceReload>, SourceLayerReload>;
 
     fn reload_helpers_with_publication(
         &self,

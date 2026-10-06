@@ -19,6 +19,17 @@ struct UnconfirmedSource {
 }
 
 impl exomonad_actor::ActorSourceLayers for UnconfirmedSource {
+    fn stage_spec_reload(
+        self: Arc<Self>,
+        _: tidepool_repr::PrincipalId,
+        _: &[String],
+    ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
+    {
+        Err(exomonad_actor::SourceLayerReload::Unavailable(
+            "this source fixture installs no agent spec".into(),
+        ))
+    }
+
     fn layer_include(&self, _: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
         Ok(Vec::new())
     }

@@ -2928,6 +2928,16 @@ mod authority_tests {
     struct SourceService(crate::SourceLayerIssuer);
 
     impl crate::ActorSourceLayers for SourceService {
+        fn stage_spec_reload(
+            self: Arc<Self>,
+            _: tidepool_repr::PrincipalId,
+            _: &[String],
+        ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+            Err(crate::SourceLayerReload::Unavailable(
+                "this source fixture installs no agent spec".into(),
+            ))
+        }
+
         fn validate_source_authority(
             &self,
             source: &crate::CheckpointSourceLayer,

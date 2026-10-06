@@ -57,7 +57,11 @@ where
         let started = std::time::Instant::now();
         let mut receipt = Vec::new();
         if matches!(kind, ReloadKind::Spec) {
-            let Some(active) = self.installed_tools.current_tools() else {
+            let Some(expected) = self
+                .installed_tools
+                .current()
+                .filter(|lease| lease.tools().is_some())
+            else {
                 return Self::finish_owned_task(
                     owned,
                     reload_result(
@@ -65,12 +69,14 @@ where
                     ),
                 );
             };
+            let active = expected.tools().expect("selected installed spec");
             receipt.push(format!("spec: {}", active.resolved.describe()));
             if let Some(module) = active.resolved.checked_module() {
                 if !checked.contains(&module) {
                     checked.push(module);
                 }
             }
+            return self.owned_stage_spec_reload_task(owned, expected, checked, started, receipt);
         }
         let layers = self.environment.source_layers.clone();
         let actor = owned.state.effects.context.actor;
@@ -102,7 +108,7 @@ where
                         .expect("reload cancellation owner")
                         .publication_decision();
                     tokio::task::spawn_blocking(move || {
-                        prepare_source(layers, actor, kind, checked, receipt, &publication)
+                        prepare_helpers(layers, actor, checked, receipt, &publication)
                     })
                     .await
                     .map_err(|error| {
@@ -172,15 +178,68 @@ where
                         )),
                     )));
                 }
-                match kind {
-                    ReloadKind::Helpers => Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                    owned,
+                    reload_result(reload_receipt(outcome, started, receipt)),
+                )))
+            },
+        )
+    }
+
+    fn owned_stage_spec_reload_task(
+        &self,
+        owned: OwnedExecution<H, O>,
+        expected: crate::InstalledToolLease,
+        checked: Vec<String>,
+        started: std::time::Instant,
+        mut receipt: Vec<String>,
+    ) -> OwnedWorkbenchTask<Self> {
+        let layers = self.environment.source_layers.clone();
+        let actor = owned.state.effects.context.actor;
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                Box::pin(async move {
+                    if owned
+                        .state
+                        .effects
+                        .control
+                        .as_ref()
+                        .is_some_and(|control| control.cancellation_requested())
+                    {
+                        return Ok(Err(crate::SourceLayerReload::Cancelled));
+                    }
+                    tokio::task::spawn_blocking(move || {
+                        let layers = layers.ok_or_else(|| {
+                            crate::SourceLayerReload::Unavailable(
+                                "this host installs no source layers".into(),
+                            )
+                        })?;
+                        layers.stage_spec_reload(tidepool_repr::PrincipalId::from(actor), &checked)
+                    })
+                    .await
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "reload source owner failed: {error}"
+                        ))
+                    })
+                })
+            },
+            move |behavior, _kernel, owned, staged| match staged {
+                Err(error) => Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                    owned,
+                    Err(workbench_failure(&[], 0, 1, error)),
+                ))),
+                Ok(Err(outcome)) => {
+                    let label = source_outcome_receipt(outcome, &mut receipt);
+                    Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                         owned,
-                        reload_result(reload_receipt(outcome, started, receipt)),
-                    ))),
-                    ReloadKind::Spec => Ok(WorkbenchAdvance::Park(
-                        behavior.owned_spec_reload_task(owned, started, receipt),
-                    )),
+                        reload_result(reload_receipt(label, started, receipt)),
+                    )))
                 }
+                Ok(Ok(staged)) => Ok(WorkbenchAdvance::Park(
+                    behavior.owned_spec_reload_task(owned, expected, staged, started, receipt),
+                )),
             },
         )
     }
@@ -188,25 +247,18 @@ where
     fn owned_spec_reload_task(
         &self,
         owned: OwnedExecution<H, O>,
+        expected: crate::InstalledToolLease,
+        staged: Box<dyn crate::StagedActorSourceReload>,
         started: std::time::Instant,
         mut receipt: Vec<String>,
     ) -> OwnedWorkbenchTask<Self> {
         let install = self.spec_installs + 1;
-        let expected = self.installed_tools.current();
-        let source = expected.as_ref().map(|lease| lease.source().clone());
-        let selected = match source {
-            Some(source) => WorkbenchCompilationAuthority::admit(
-                owned.state.effects.context.clone(),
-                source,
-                expected.clone(),
-                self.environment.source_layers.as_ref(),
-            ),
-            None => Err(KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
-                actor: owned.state.effects.context.actor,
-                detail: "the active source installation vanished before spec preparation".into(),
-            }),
-        };
+        let selected = WorkbenchCompilationAuthority::admit(
+            owned.state.effects.context.clone(),
+            staged.source().clone(),
+            None,
+            self.environment.source_layers.as_ref(),
+        );
         let (context, authority) = match selected {
             Ok(selected) => selected,
             Err(error) => {
@@ -230,124 +282,121 @@ where
         let granted_effects = self.descriptor.effective_role().effect_keys().to_vec();
         Self::owned_step_task(
             owned,
-            move |_owned| {
+            move |owned| {
                 Box::pin(async move {
-                    let prepare_started = std::time::Instant::now();
-                    let candidate = workbench
-                        .prepare_tools(context.clone(), install, granted_effects)
-                        .await;
-                    tracing::info!(actor = %context.actor, phase = "reload", install,
-                    elapsed_ms = prepare_started.elapsed().as_millis(), success = candidate.is_ok(),
-                    "agent spec preparation");
-                    candidate
+                    if owned
+                        .state
+                        .effects
+                        .control
+                        .as_ref()
+                        .is_some_and(|control| control.cancellation_requested())
+                    {
+                        return Ok(None);
+                    }
+                    workbench
+                        .prepare_tools(context, install, granted_effects)
+                        .await
+                        .map(Some)
                 })
             },
             move |behavior, _kernel, owned, candidate| {
-                let outcome = match candidate {
+                let candidate = match candidate {
                     Err(error) => {
-                        receipt.push(format!("spec: the install fragment did not compile against the new revision, so the previous record is still active. The layer above WAS published, so your cells already see the edited modules.\n{error}"));
-                        "spec did not compile"
+                        receipt.push(format!("spec: preparation failed; previous source and handlers remain active.\n{error}"));
+                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                            owned,
+                            reload_result(reload_receipt(
+                                "spec preparation failed",
+                                started,
+                                receipt,
+                            )),
+                        )));
                     }
-                    Ok(candidate) => {
-                        match behavior.installed_tools.current_tools() {
-                            None => {
-                                receipt.push("spec: the active record vanished mid-reload; nothing was swapped.".into());
-                                "not swapped"
-                            }
-                            Some(active) => {
-                                let current = behavior.installed_tools.current();
-                                let installation_matches = current
-                                    .as_ref()
-                                    .zip(expected.as_ref())
-                                    .is_some_and(|(current, expected)| {
-                                        current.source() == expected.source()
-                                            && current.tools().zip(expected.tools()).is_some_and(
-                                                |(current, expected)| {
-                                                    Arc::ptr_eq(
-                                                        &current.dispatch,
-                                                        &expected.dispatch,
-                                                    )
-                                                },
-                                            )
-                                    });
-                                if !installation_matches {
-                                    receipt.push("spec: the active source or installed record changed during preparation; nothing was swapped.".into());
-                                    return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                                        owned,
-                                        reload_result(reload_receipt(
-                                            "not swapped",
-                                            started,
-                                            receipt,
-                                        )),
-                                    )));
-                                }
-                                let changes = exomonad_tool::surface::compare_surfaces(
-                                    &active.declarations,
-                                    &candidate.declarations,
-                                );
-                                if changes.is_empty() {
-                                    let decision = owned
-                                        .state
-                                        .effects
-                                        .control
-                                        .as_ref()
-                                        .expect("reload publication owner")
-                                        .publication_decision();
-                                    let claim = if decision.phase()
-                                        == tidepool_runtime::session::PublicationPhase::Published
-                                    {
-                                        None
-                                    } else {
-                                        match decision.claim_commit() {
-                                        Some(claim) => Some(claim),
-                                        None => return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(owned,
-                                            reload_result(reload_receipt("cancelled", started, vec!["reload cancelled before spec publication.".into()])),
-                                        ))),
-                                    }
-                                    };
-                                    receipt.push(format!("swapped: install {install} now serves later calls ({}). A call already accepted keeps the implementation it started with.", candidate.provenance()));
-                                    if !candidate.slots.is_empty() {
-                                        receipt
-                                            .push(format!("slots: {}", candidate.slots.join(", ")));
-                                    }
-                                    behavior.spec_installs = install;
-                                    behavior
-                                        .installed_tools
-                                        .publish_tools(Some(Arc::new(candidate)));
-                                    behavior.after_tool.forget_failures();
-                                    if let Some(claim) = claim {
-                                        claim.published();
-                                    }
-                                    "swapped"
-                                } else {
-                                    receipt.push(format!("refused: the rebuilt spec declares a different surface, and the tool list was registered once for this session. The previous record is still serving calls; a changed surface takes effect at your next incarnation.\n{}", exomonad_tool::surface::describe_changes(&changes)));
-                                    "refused"
-                                }
-                            }
-                        }
+                    Ok(None) => {
+                        receipt.push("reload cancelled before spec preparation; previous source and handlers remain active.".into());
+                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                            owned,
+                            reload_result(reload_receipt("cancelled", started, receipt)),
+                        )));
                     }
+                    Ok(Some(candidate)) => candidate,
+                };
+                let active = expected
+                    .tools()
+                    .expect("reload retained its installed spec");
+                let changes = exomonad_tool::surface::compare_surfaces(
+                    &active.declarations,
+                    &candidate.declarations,
+                );
+                if !changes.is_empty() {
+                    receipt.push(format!("refused: the rebuilt spec declares a different registered surface; previous source and handlers remain active. A changed surface requires a new actor incarnation.\n{}", exomonad_tool::surface::describe_changes(&changes)));
+                    return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                        owned,
+                        reload_result(reload_receipt("refused", started, receipt)),
+                    )));
+                }
+                let provenance = candidate.provenance();
+                let slots = candidate.slots.clone();
+                let publication = owned
+                    .state
+                    .effects
+                    .control
+                    .as_ref()
+                    .expect("reload publication owner")
+                    .publication_decision();
+                let outcome = behavior.installed_tools.commit_spec_reload(
+                    &expected,
+                    Arc::new(candidate),
+                    staged,
+                    &publication,
+                );
+                let visible = matches!(
+                    &outcome,
+                    crate::SourceLayerReload::Published { .. }
+                        | crate::SourceLayerReload::PublicationUnconfirmed { .. }
+                );
+                if visible {
+                    behavior.spec_installs = install;
+                    behavior.after_tool.forget_failures();
+                    receipt.push(format!("swapped: install {install} now serves later calls ({provenance}). A call already accepted keeps its original implementation."));
+                    if !slots.is_empty() {
+                        receipt.push(format!("slots: {}", slots.join(", ")));
+                    }
+                }
+                let unconfirmed = match &outcome {
+                    crate::SourceLayerReload::PublicationUnconfirmed { revision, diagnostics } => Some(format!("paired source revision {revision} and install {install} are visible but durability is unconfirmed: {diagnostics}")),
+                    _ => None,
+                };
+                let label = source_outcome_receipt(outcome, &mut receipt);
+                let result = match unconfirmed {
+                    Some(detail) => Err(workbench_failure(
+                        &[],
+                        0,
+                        1,
+                        ResidentActorWorkbenchError::ActorProtocol(detail),
+                    )),
+                    None => reload_result(reload_receipt(
+                        if visible { "swapped" } else { label },
+                        started,
+                        receipt,
+                    )),
                 };
                 Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                    owned,
-                    reload_result(reload_receipt(outcome, started, receipt)),
+                    owned, result,
                 )))
             },
         )
     }
 }
 
-fn prepare_source(
+fn prepare_helpers(
     layers: Option<crate::ActorSourceLayerResolver>,
     actor: ActorRef,
-    kind: ReloadKind,
     checked: Vec<String>,
     mut receipt: Vec<String>,
     publication: &Arc<tidepool_runtime::session::PublicationDecision>,
 ) -> SourcePreparation {
-    let label = match kind {
-        ReloadKind::Helpers => "helpers",
-        ReloadKind::Spec => "layer",
-    };
+    let label = "helpers";
     let Some(layers) = layers else {
         receipt.push(format!("{label}: this host installs no source layers."));
         return SourcePreparation {
@@ -358,12 +407,7 @@ fn prepare_source(
         };
     };
     let principal = tidepool_repr::PrincipalId::from(actor);
-    let reloaded = match kind {
-        ReloadKind::Helpers => {
-            layers.reload_helpers_with_publication(principal, &checked, publication)
-        }
-        ReloadKind::Spec => layers.reload_with_publication(principal, &checked, publication),
-    };
+    let reloaded = layers.reload_helpers_with_publication(principal, &checked, publication);
     let outcome = match reloaded {
         crate::SourceLayerReload::Cancelled => {
             receipt.push(format!("{label}: cancelled before source publication."));
@@ -431,6 +475,54 @@ fn prepare_source(
         receipt,
         source: Some(source),
         failure: None,
+    }
+}
+
+fn source_outcome_receipt(
+    outcome: crate::SourceLayerReload,
+    receipt: &mut Vec<String>,
+) -> &'static str {
+    match outcome {
+        crate::SourceLayerReload::Cancelled => {
+            receipt.push("reload cancelled before paired publication; previous source and handlers remain active.".into());
+            "cancelled"
+        }
+        crate::SourceLayerReload::Unavailable(detail) => {
+            receipt.push(format!(
+                "layer: {detail}; previous source and handlers remain active."
+            ));
+            "unavailable"
+        }
+        crate::SourceLayerReload::Rejected {
+            active,
+            rejected,
+            diagnostics,
+        } => {
+            receipt.push(format!("layer: rejected {rejected}; {active} and previous handlers remain active. Edited files remain on disk.\n{diagnostics}"));
+            "rejected"
+        }
+        crate::SourceLayerReload::Unchanged { revision } => {
+            receipt.push(format!("layer: unchanged at {revision}."));
+            "unchanged"
+        }
+        crate::SourceLayerReload::Published {
+            previous,
+            revision,
+            changed,
+        } => {
+            receipt.push(format!(
+                "layer: published {revision} over {previous}; changed {}.",
+                changed.join(", ")
+            ));
+            "published"
+        }
+        crate::SourceLayerReload::PublicationUnconfirmed {
+            revision,
+            diagnostics,
+        } => {
+            receipt.push(format!("layer: {revision} and its new handlers are visible; durability unconfirmed: {diagnostics}"));
+            "publication unconfirmed"
+        }
     }
 }
 

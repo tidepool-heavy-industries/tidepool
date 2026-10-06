@@ -77,15 +77,16 @@ of acceptance or completion. Use a tool's typed seam for result presentation.
 ## Reload
 
 Edit the active source, then call `reload_agent_spec`; saving alone does not
-activate it. The tool first publishes checked source through the actor's source
-owner, then rebuilds and compares the spec. A child can prepare edits in its
-checkout but cannot publish them into the active run tooling. Supply `also_check`
-to widen the checked module set.
+activate it. The source owner stages and checks an immutable candidate, then the
+actor prepares its installer and compares the registered surface. Source and
+handlers become visible together after those checks. A child can prepare edits
+in its checkout but cannot publish them into the active run tooling. Supply
+`also_check` to widen the checked module set.
 
-Read both stages of the receipt. Rejection before source publication retains the
-previous source; spec compilation or surface refusal after publication retains
-the old handlers while later cells already see the new source. Draft files remain
-on disk. Tool names, descriptions, kinds, schemas, scheduling, implementation
+Read the receipt. Preparation failure, surface refusal, cancellation before commit,
+or a stale candidate retains the previous source and handlers. A durability failure
+after visibility reports the new active source and handlers with uncertainty;
+do not replay the installer. Draft files remain on disk. Tool names, descriptions, kinds, schemas, scheduling, implementation
 kinds, effect profiles and order must match the registered surface. A changed
 surface needs a new actor incarnation. Accepted calls keep their implementations,
 and a reload never replaces a child's installed spec. Use `reload_helpers` for

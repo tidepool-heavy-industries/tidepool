@@ -363,7 +363,7 @@ async fn actor_spec_cost_measurement() {
             before,
             started,
         );
-        assert!(receipt.contains("swapped"), "{receipt}");
+        assert!(receipt.contains("unchanged"), "{receipt}");
 
         std::fs::write(
             campaign
@@ -553,6 +553,10 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
 
     assert!(probe(policy).await.contains("one"));
 
+    let source_layer =
+        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
+    let before_source = source_layer.read_active().unwrap();
+
     std::fs::write(
         workspace.join(".exomonad/Project/Tools.hs"),
         tools_module("Answer one fixed question, and explain it.", "two"),
@@ -566,6 +570,18 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
     // The previously installed record is still the one serving calls.
     let after = probe(policy).await;
     assert!(after.contains("one"), "{after}");
+
+    assert_eq!(
+        source_layer.read_active().unwrap(),
+        before_source,
+        "refusal preserves the published source as well as handlers"
+    );
+    let cell = dispatch_haskell_script(
+        policy,
+        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+    )
+    .await;
+    assert!(cell.to_string().contains("one"), "{cell}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -582,6 +598,10 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
     let policy = policy.as_ref();
 
     assert!(probe(policy).await.contains("one"));
+
+    let source_layer =
+        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
+    let before_source = source_layer.read_active().unwrap();
 
     let broken =
         tools_module(DESCRIPTION, "one").replace("pure \"one\"", "pure undefinedByThisSpecReload");
@@ -600,6 +620,63 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
         "the edited file is exactly as it was written"
     );
 
+    assert_eq!(
+        source_layer.read_active().unwrap(),
+        before_source,
+        "refusal preserves the published source as well as handlers"
+    );
+    let cell = dispatch_haskell_script(
+        policy,
+        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+    )
+    .await;
+    assert!(cell.to_string().contains("one"), "{cell}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
+    let campaign = start(DESCRIPTION, "one").await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let source_layer =
+        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
+    let before_source = source_layer.read_active().unwrap();
+    let broken = tools_module(DESCRIPTION, "two").replace(
+        "agentSpec = defaultSpec { specTools = tools }",
+        "agentSpec = error \"installer refused\"",
+    );
+    assert!(broken.contains("installer refused"));
+    std::fs::write(
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/Project/Tools.hs"),
+        &broken,
+    )
+    .unwrap();
+    let receipt = reload(policy).await;
+    assert!(receipt.contains("spec preparation failed"), "{receipt}");
+    assert!(!receipt.contains("swapped"), "{receipt}");
+    assert_eq!(source_layer.read_active().unwrap(), before_source);
+    assert!(probe(policy).await.contains("one"));
+    let cell = dispatch_haskell_script(
+        policy,
+        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+    )
+    .await;
+    assert!(cell.to_string().contains("one"), "{cell}");
+    assert_eq!(
+        std::fs::read_to_string(
+            campaign
+                ._repository
+                .path()
+                .join(".exomonad/Project/Tools.hs")
+        )
+        .unwrap(),
+        broken
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
