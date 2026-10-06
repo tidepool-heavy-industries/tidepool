@@ -1172,6 +1172,7 @@ fn run_history(
                         ForgetResponseOutcome::Forgotten
                     }
                 });
+                let forgotten = expected == Ok(ForgetResponseOutcome::Forgotten);
                 check(
                     registry.forget_response(caller.actor(owner), ids[key]).map(
                         |(outcome, notices)| {
@@ -1183,7 +1184,7 @@ fn run_history(
                     action,
                     coverage,
                 )?;
-                if expected == Ok(ForgetResponseOutcome::Forgotten) {
+                if forgotten {
                     coverage.forgotten_with_native_lease += usize::from(
                         capabilities
                             .iter()
