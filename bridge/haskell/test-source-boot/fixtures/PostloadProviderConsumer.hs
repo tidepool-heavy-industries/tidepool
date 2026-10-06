@@ -1,6 +1,7 @@
+{-# LANGUAGE QuasiQuotes #-}
 module PostloadProviderConsumer where
 
-import PostloadQuotedProvider qualified as Provider
+import PostloadQuotedProvider (answer)
 
 __result :: Int
-__result = Provider.__result
+__result = [answer|consumer|]
