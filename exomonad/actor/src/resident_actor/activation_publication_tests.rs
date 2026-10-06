@@ -46,7 +46,6 @@ async fn interrupt_during_preview(
         let _ = resident.abort(unused_hole.cont_id(), "unused activation".into());
         drop(unused_input);
     }
-    let roots = resident.persistent_roots_count();
     let handles = resident.value_handle_count();
     context.actor = fixture.actor.identity();
     let machines = Arc::new(ActorMachineRegistry::new());
@@ -312,8 +311,9 @@ async fn interrupt_during_preview(
         "cancelled input releases its checked interface"
     );
     assert!(interface.upgrade().is_none());
-    // Installed program root blocks persist until collection. The actual
-    // install's affine dispatcher and lexical scope must expire at refusal.
+    // Even without an installer, the real preview installs a program whose
+    // code roots persist until collection. Affine request custody must expire
+    // at refusal independently of that compilation residency.
     if genuine_preparation {
         let (tools, dispatch, lexical, scope) = staged_tools
             .lock()
@@ -334,7 +334,6 @@ async fn interrupt_during_preview(
         );
     } else {
         assert!(staged_tools.lock().is_none());
-        assert_eq!(resident.persistent_roots_count(), roots);
     }
     assert_eq!(
         resident.value_handle_count(),
