@@ -144,6 +144,20 @@ impl InputFixture {
     }
 
     fn fresh_with_library(library: SessionLib, recipe: &InputRecipe) -> TestSession {
+        Self::fresh_with_receiver(
+            library,
+            recipe,
+            include_str!("fixtures/activation-input-receiver.hs"),
+            2,
+        )
+    }
+
+    fn fresh_with_receiver(
+        library: SessionLib,
+        recipe: &InputRecipe,
+        receiver_source: &str,
+        binding_count: usize,
+    ) -> TestSession {
         let mut resident = TestSession::unbootstrapped(
             frunk::HNil,
             EmptyOutput,
@@ -165,20 +179,22 @@ impl InputFixture {
                 ..previous_context
             })
             .unwrap();
-        let (bound, receiver, reservation) = compile_checked_binding(
-            &mut resident,
-            recipe,
-            include_str!("fixtures/activation-input-receiver.hs"),
-            execution.clone(),
+        let (bound, receiver, reservation) =
+            compile_checked_binding(&mut resident, recipe, receiver_source, execution.clone());
+        assert_eq!(
+            bound.len(),
+            binding_count,
+            "declared native receiver bindings"
         );
-        assert_eq!(bound.len(), 2, "receiver and native Unit reply bindings");
         for name in ["activationReceiver", "activationUnitReply"] {
             assert_eq!(bound.iter().filter(|binder| binder.name == name).count(), 1);
         }
-        assert!(
-            receiver.asks.is_empty(),
-            "pure receiver setup has no request sites"
-        );
+        if binding_count == 2 {
+            assert!(
+                receiver.asks.is_empty(),
+                "pure receiver setup has no request sites"
+            );
+        }
         let checked_execution = receiver
             .certification
             .as_ref()
@@ -204,7 +220,7 @@ impl InputFixture {
             matches!(outcome, ResidentOutcome::BindingsCommitted { .. }),
             "projected native binding completion: {outcome:?}"
         );
-        publish_checked_fixture(&mut resident, &execution, 2);
+        publish_checked_fixture(&mut resident, &execution, binding_count);
         resident.set_run_context(previous_context).unwrap();
         resident.retire_scope(execution.private_scope());
         let retained = resident
@@ -1157,12 +1173,16 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     assert_eq!(
         original.authenticated_inputs[&site]
             .execution
+            .require_unique(site)
+            .unwrap()
             .toolchain_identity_sha256(),
         producer
     );
     assert!(
         !original.authenticated_inputs[&site]
             .execution
+            .require_unique(site)
+            .unwrap()
             .artifact_view()
             .descriptors()
             .is_empty(),
@@ -1178,13 +1198,17 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let mut conflicting = (*original).clone();
     conflicting.authenticated_inputs.insert(
         site,
-        AuthenticatedInputContext {
-            types: compiler_context.clone(),
-            execution: original.authenticated_inputs[&site].execution.clone(),
-        },
+        AuthenticatedInputContext::capture(
+            compiler_context.clone(),
+            original.authenticated_inputs[&site].execution.clone(),
+        ),
     );
     assert!(
-        repeated_provenance.merge(&conflicting).is_err(),
+        matches!(
+            repeated_provenance.merge(&conflicting),
+            Err(ProgramProvenanceError::AuthenticatedInputTypeContext { site: rejected, .. })
+                if rejected == site
+        ),
         "same site metadata cannot replace its retained authenticated interface context"
     );
     assert_eq!(
@@ -1265,6 +1289,263 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     drop(input);
     drop(receiver);
     assert_eq!(destination.outstanding_custody(), 0);
+}
+
+/// The compiler issues one stable imported request site into two original
+/// outputs. Their unused overlap may compose; executing that site must not
+/// guess which output's original instance environment should render its input.
+#[test]
+fn shared_request_site_composes_but_demands_unique_original_preview_context() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+
+    let (root, base) = InputFixture::source_recipe(false);
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("ProvenanceSharedRequest.hs"),
+        include_str!("fixtures/ProvenanceSharedRequest.hs"),
+    )
+    .unwrap();
+    let mut include = base.include.clone();
+    include.push(home);
+    let recipe = Arc::new(InputRecipe {
+        preamble: insert_preamble_imports(
+            &insert_preamble_imports(&base.preamble, "Data.Text (Text)"),
+            "qualified ProvenanceSharedRequest as Shared",
+        ),
+        row: base.row.clone(),
+        include,
+    });
+    let session = SessionId(1791);
+    let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap();
+    let producer = compiled(compile_turn(
+        &view,
+        &recipe,
+        include_str!("fixtures/provenance-shared-request-producer.hs"),
+        &[],
+    ));
+    assert_startup_origin("shared-site producer", &producer, true);
+    let fixture = InputFixture {
+        root,
+        session,
+        recipe,
+        producer,
+    };
+    let mut source = fixture.fresh();
+    let reservation = fixture.start(&mut source);
+    let submission = suspended(source.resume(reservation, 1).unwrap());
+    let payload = source
+        .live_payload_handle(submission.cont_id())
+        .unwrap()
+        .unwrap();
+    let original = Arc::clone(&payload.provenance);
+    let parcel = source.export_custody(payload).unwrap();
+    let receiver_root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1792),
+        receiver_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(fixture.recipe.include.clone());
+    let mut destination = InputFixture::fresh_with_receiver(
+        library,
+        &fixture.recipe,
+        include_str!("fixtures/provenance-shared-request-receiver.hs"),
+        3,
+    );
+    let receiver = destination
+        .retain_binding_custody("activationReceiver")
+        .unwrap()
+        .unwrap();
+    let receiver_original = Arc::clone(&receiver.provenance);
+    let overlap = original
+        .authenticated_inputs
+        .iter()
+        .filter_map(|(site, context)| {
+            receiver_original
+                .authenticated_inputs
+                .get(site)
+                .map(|other| (*site, context, other))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !overlap.is_empty(),
+        "the unused imported function carries its genuinely issued request site"
+    );
+    for (site, left, right) in &overlap {
+        assert!(original.sites[site].same_metadata(&receiver_original.sites[site]));
+        assert_eq!(left.type_identity, right.type_identity);
+        assert_ne!(
+            left.execution, right.execution,
+            "different original output environments survive issuance"
+        );
+    }
+    let mut composed = (*receiver_original).clone();
+    composed
+        .merge(&original)
+        .expect("compatible unused sites cannot block rooted application");
+    let (_, left, right) = overlap[0];
+    let pool = [left.execution.clone(), right.execution.clone()];
+    let fold = |indices: &[usize]| {
+        let mut contexts = pool[indices[0]].clone();
+        for index in &indices[1..] {
+            contexts.merge(&pool[*index]);
+        }
+        contexts
+    };
+    let mut config = Config::default();
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    TestRunner::new(config)
+        .run(
+            &(proptest::collection::vec(0usize..2, 2..24), any::<usize>()),
+            |(indices, split)| {
+                // Independent list oracle: flatten captured identities, sort, dedup.
+                let mut expected = indices
+                    .iter()
+                    .flat_map(|index| pool[*index].contexts().map(|context| context.identity))
+                    .collect::<Vec<_>>();
+                expected.sort();
+                expected.dedup();
+                let result = fold(&indices);
+                let actual = result
+                    .contexts()
+                    .map(|context| context.identity)
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(actual, expected);
+                let mut reversed = indices.clone();
+                reversed.reverse();
+                prop_assert_eq!(&result, &fold(&reversed));
+                let mut repeated = result.clone();
+                repeated.merge(&result);
+                prop_assert_eq!(&result, &repeated);
+                let split = 1 + split % (indices.len() - 1);
+                let mut associated = fold(&indices[..split]);
+                associated.merge(&fold(&indices[split..]));
+                prop_assert_eq!(result, associated);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let original_context = left.execution.contexts().next().unwrap();
+    let duplicate = OriginalExecutionContexts::Unique(OriginalExecutionContext::capture(
+        Arc::clone(&original_context.context),
+    ));
+    let mut repeated = left.execution.clone();
+    repeated.merge(&duplicate);
+    assert!(
+        Arc::ptr_eq(repeated.contexts().next().unwrap(), original_context),
+        "exact semantic duplicates retain the original context owner"
+    );
+
+    // Negative metadata tampering is observation-only: it cannot mint a native
+    // site or input authority. A lower sorted row exposes partial insertion.
+    let (site, _, _) = overlap[0];
+    let mut conflicting = (*original).clone();
+    let mut fresh = original.sites[&site].clone();
+    fresh.site = 0;
+    assert!(!receiver_original.sites.contains_key(&0));
+    conflicting.sites.insert(0, fresh);
+    conflicting
+        .sites
+        .get_mut(&site)
+        .unwrap()
+        .ty
+        .push_str(" tampered");
+    let mut unchanged = (*receiver_original).clone();
+    assert!(matches!(
+        unchanged.merge(&conflicting),
+        Err(ProgramProvenanceError::SiteMetadata(_))
+    ));
+    assert_eq!(unchanged, *receiver_original);
+
+    drop(source);
+    let imported = destination.import_parcel(parcel, RealmId::ROOT).unwrap();
+    let activation = suspended(
+        destination
+            .run_rooted_application(
+                "sharedOriginalRequest",
+                &receiver,
+                &imported,
+                RealmId::ROOT,
+                None,
+            )
+            .unwrap(),
+    );
+    let demanded = parked_site(&mut destination, &activation);
+    assert!(
+        overlap.iter().any(|(site, _, _)| *site == demanded),
+        "the real continuation executes the shared site, not an unrelated constructed row"
+    );
+    let parked = destination.parked_program_provenance(&activation).unwrap();
+    assert_eq!(*parked, composed);
+    let expected = parked.authenticated_inputs[&demanded]
+        .execution
+        .contexts()
+        .map(|context| context.identity)
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 2);
+    let realm = destination.parked_realm(&activation).unwrap();
+    let handles = destination.value_handle_count();
+    let roots = destination.persistent_roots_count();
+    let custody = destination.outstanding_custody();
+    let holes = destination
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let visibility = destination.public_visibility_snapshot_in(ScopeId::ROOT);
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    assert!(
+        matches!(destination.capture_activation_input(&activation, realm, demanded),
+        Err(ResidentError::AmbiguousActivationInputOriginalContext {site, contexts})
+        if site == demanded && contexts == expected)
+    );
+    assert!(matches!(
+        destination.capture_activation_input(&activation, realm, demanded.wrapping_add(1)),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    assert_eq!(destination.value_handle_count(), handles);
+    assert_eq!(destination.persistent_roots_count(), roots);
+    assert_eq!(destination.outstanding_custody(), custody);
+    assert_eq!(
+        destination
+            .parked_holes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        holes
+    );
+    assert_eq!(
+        destination.public_visibility_snapshot_in(ScopeId::ROOT),
+        visibility
+    );
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        submissions,
+        "ambiguity refuses before mount, preview compilation or display execution"
+    );
+    assert!(destination
+        .state
+        .bindings()
+        .resolve("sessionInput")
+        .is_none());
+    assert!(matches!(
+        fixture.resume_activation(&mut destination, activation),
+        ResidentOutcome::Completed { .. }
+    ));
+    drop(imported);
+    drop(receiver);
+    assert_eq!(destination.outstanding_custody(), 0);
+    assert_eq!(destination.parked_count(), 0);
 }
 
 #[test]

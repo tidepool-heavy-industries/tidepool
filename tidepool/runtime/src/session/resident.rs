@@ -70,7 +70,102 @@ pub struct ProgramProvenance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthenticatedInputContext {
     types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    type_identity: [u8; 32],
+    execution: OriginalExecutionContexts,
+}
+
+impl AuthenticatedInputContext {
+    fn capture(
+        types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        execution: OriginalExecutionContexts,
+    ) -> Self {
+        Self {
+            type_identity: types.semantic_sha256(),
+            types,
+            execution,
+        }
+    }
+}
+
+/// Compatible typed sites can travel through more than one original invocation.
+/// Composition retains those scopes; only a consumer of original instance
+/// visibility may demand a unique one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OriginalExecutionContexts {
+    Unique(Arc<OriginalExecutionContext>),
+    Ambiguous(BTreeMap<[u8; 32], Arc<OriginalExecutionContext>>),
+}
+
+#[derive(Debug)]
+struct OriginalExecutionContext {
+    identity: [u8; 32],
+    context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+}
+
+impl OriginalExecutionContext {
+    fn capture(
+        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            identity: context.semantic_sha256(),
+            context,
+        })
+    }
+}
+
+impl PartialEq for OriginalExecutionContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+
+impl Eq for OriginalExecutionContext {}
+
+impl OriginalExecutionContexts {
+    fn contexts(&self) -> impl Iterator<Item = &Arc<OriginalExecutionContext>> {
+        let (unique, ambiguous) = match self {
+            Self::Unique(context) => (Some(context), None),
+            Self::Ambiguous(contexts) => (None, Some(contexts)),
+        };
+        unique
+            .into_iter()
+            .chain(ambiguous.into_iter().flat_map(|contexts| contexts.values()))
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for context in other.contexts() {
+            match self {
+                Self::Unique(previous) if previous.identity == context.identity => {}
+                Self::Unique(previous) => {
+                    *self = Self::Ambiguous(BTreeMap::from([
+                        (previous.identity, Arc::clone(previous)),
+                        (context.identity, Arc::clone(context)),
+                    ]));
+                }
+                Self::Ambiguous(contexts) => {
+                    contexts
+                        .entry(context.identity)
+                        .or_insert_with(|| Arc::clone(context));
+                }
+            }
+        }
+    }
+
+    fn require_unique(
+        &self,
+        site: u64,
+    ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError>
+    {
+        match self {
+            Self::Unique(context) => Ok(Arc::clone(&context.context)),
+            Self::Ambiguous(contexts) => {
+                Err(ResidentError::AmbiguousActivationInputOriginalContext {
+                    site,
+                    contexts: contexts.keys().copied().collect(),
+                })
+            }
+        }
+    }
 }
 
 /// Detached native value with its original immutable compiler provenance.
@@ -90,7 +185,17 @@ impl ResidentParcel {
     }
 }
 
-pub type ProgramProvenanceError = YieldSiteCollision;
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ProgramProvenanceError {
+    #[error(transparent)]
+    SiteMetadata(#[from] YieldSiteCollision),
+    #[error("typed input authority conflict at site {site}: {existing:?} != {incoming:?}")]
+    AuthenticatedInputTypeContext {
+        site: u64,
+        existing: [u8; 32],
+        incoming: [u8; 32],
+    },
+}
 
 impl ProgramProvenance {
     pub fn from_sites(sites: &[YieldSite]) -> Result<Self, ProgramProvenanceError> {
@@ -107,7 +212,8 @@ impl ProgramProvenance {
                         site: site.site,
                         first: Box::new(previous.clone()),
                         second: Box::new(site.clone()),
-                    });
+                    }
+                    .into());
                 }
             } else {
                 self.sites.insert(site.site, site.clone());
@@ -117,16 +223,30 @@ impl ProgramProvenance {
     }
 
     fn merge(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
+        // A failed composition leaves the original value's evidence unchanged.
+        // Site/type compatibility is independent of original execution scope.
+        for site in other.sites.values() {
+            if let Some(previous) = self.sites.get(&site.site) {
+                if !previous.same_metadata(site) {
+                    return Err(YieldSiteCollision {
+                        site: site.site,
+                        first: Box::new(previous.clone()),
+                        second: Box::new(site.clone()),
+                    }
+                    .into());
+                }
+            }
+        }
         for (site, interfaces) in &other.authenticated_inputs {
             if self
                 .authenticated_inputs
                 .get(site)
-                .is_some_and(|previous| previous != interfaces)
+                .is_some_and(|previous| previous.type_identity != interfaces.type_identity)
             {
-                return Err(YieldSiteCollision {
+                return Err(ProgramProvenanceError::AuthenticatedInputTypeContext {
                     site: *site,
-                    first: Box::new(self.sites[site].clone()),
-                    second: Box::new(other.sites[site].clone()),
+                    existing: self.authenticated_inputs[site].type_identity,
+                    incoming: interfaces.type_identity,
                 });
             }
         }
@@ -136,6 +256,7 @@ impl ProgramProvenance {
         for (site, interfaces) in &other.authenticated_inputs {
             self.authenticated_inputs
                 .entry(*site)
+                .and_modify(|previous| previous.execution.merge(&interfaces.execution))
                 .or_insert_with(|| interfaces.clone());
         }
         Ok(())
@@ -1403,6 +1524,8 @@ pub enum ResidentError {
     InvalidActivationInput { site: u64 },
     #[error("activation site {site} lacks its original canonical input type witness")]
     MissingActivationInputWitness { site: u64 },
+    #[error("activation site {site} has multiple original execution contexts: {contexts:?}")]
+    AmbiguousActivationInputOriginalContext { site: u64, contexts: Vec<[u8; 32]> },
     #[error("activation site {site} lacks compiler-authenticated original input metadata")]
     UnauthenticatedActivationInputWitness { site: u64 },
     #[error("activation site {site} canonical input type differs: original {original:?}, compiled {compiled:?}")]
@@ -3854,6 +3977,7 @@ where
             .authenticated_inputs
             .get(&site)
             .ok_or_else(invalid)?;
+        let original_execution = interfaces.execution.require_unique(site)?;
         let type_evidence = self
             .request_site_type_evidence(site)
             .ok_or_else(invalid)?
@@ -3875,7 +3999,7 @@ where
             type_evidence: Arc::new(type_evidence),
             input_type_witness: Arc::new(input_type_witness),
             prototype,
-            original_execution: interfaces.execution.clone(),
+            original_execution,
             progress_type_witness,
         })
     }
@@ -5425,6 +5549,7 @@ where
         if let Some(original_interfaces) = original_interfaces {
             let original_execution =
                 original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
+            let original_execution = OriginalExecutionContext::capture(original_execution);
             let descriptors = original_interfaces.artifact_view().descriptors();
             let home_units = descriptors
                 .iter()
@@ -5494,10 +5619,10 @@ where
                     .map_err(SessionError::Compile)?;
                 provenance.authenticated_inputs.insert(
                     site.site,
-                    AuthenticatedInputContext {
-                        types: Arc::new(interfaces),
-                        execution: original_execution.clone(),
-                    },
+                    AuthenticatedInputContext::capture(
+                        Arc::new(interfaces),
+                        OriginalExecutionContexts::Unique(original_execution.clone()),
+                    ),
                 );
             }
         }
