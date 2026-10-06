@@ -2430,7 +2430,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
             "privateSourceResult",
             code.code(),
             &bound[0],
-            item.generation().0,
+            item.generation(),
         )
         .unwrap()
     else {
