@@ -2379,6 +2379,12 @@ fn seal_turn_outputs_with_validation(
         product_decode_start.elapsed(),
         product_bytes.len() as u64,
     );
+    validation
+        .inventory
+        .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
+            CompileError::ExtractFailed("source evidence accounting overflow".into())
+        })?)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let exact_source = offer
         .exact
         .as_ref()
@@ -3562,6 +3568,11 @@ fn compile_invocation_inner(
         if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
             validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
+        inventory_operation
+            .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
+                CompileError::ExtractFailed("source evidence accounting overflow".into())
+            })?)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let exact_source = exact_request
             .as_ref()
             .map(|request| {
@@ -4372,7 +4383,12 @@ pub(crate) fn extract_and_read(
     if !meta_path.exists() {
         return Err(CompileError::MissingOutput(meta_path));
     }
-    let meta_bytes = std::fs::read(&meta_path)?;
+    let meta_bytes = certified_products::read_bounded_with_operation(
+        &meta_path,
+        inventory_operation.limits().max_bytes as u64,
+        &inventory_operation,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let products_path = temp_dir.join("module-products.cbor");
     if !products_path.exists() {
         return Err(CompileError::MissingOutput(products_path));
@@ -4390,7 +4406,12 @@ pub(crate) fn extract_and_read(
         if !prepared_path.exists() {
             return Err(CompileError::MissingOutput(prepared_path));
         }
-        let prepared_bytes = std::fs::read(&prepared_path)?;
+        let prepared_bytes = certified_products::read_bounded_with_operation(
+            &prepared_path,
+            DecodeLimits::default().max_bytes as u64,
+            &inventory_operation,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let asks_path = if multi {
             temp_dir.join(format!("{target}.asks.json"))
         } else {

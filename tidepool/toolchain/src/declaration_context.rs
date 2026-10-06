@@ -2498,7 +2498,15 @@ fn decode_exact_compilation_receipt_with_operation(
         }
         None
     } else {
-        Some(serde_json::from_str(string(&source_selection[1])?).map_err(failure)?)
+        let json = string(&source_selection[1])?;
+        operation
+            .charge(
+                json.len()
+                    .checked_mul(32)
+                    .ok_or_else(|| failure("selection evidence accounting overflow"))?,
+            )
+            .map_err(failure)?;
+        Some(serde_json::from_str(json).map_err(failure)?)
     };
     Ok(DecodedExactCompilationReceipt {
         source_path,
