@@ -5676,6 +5676,60 @@ mod module_product_tests {
             unit: "main".into(),
             module: "QuotedOriginal".into(),
         };
+        let context_owner = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "QuotedContextProvider".into(),
+        };
+        let context_products = compile_invocation(
+            &CompileInvocation {
+                source:
+                    "module QuotedContextProvider where\ncontextValue :: Int\ncontextValue = 0\n",
+                targets: &["contextValue"],
+                include: &include,
+                fallback_module_name: "QuotedContextProvider",
+            },
+            |_, _, _| {},
+        )
+        .expect("ordinary compiler producer issues the exact context's interface");
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_interface_artifacts(
+                &context_products
+                    .artifact_view
+                    .interface_projection(&[context_owner])
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_ne!(context.toolchain_identity_sha256(), [0; 32]);
+        let assert_quoted_value = |compiled: &CompiledArtifacts, value: i64| {
+            let values = compiled
+                .certified_groups
+                .iter()
+                .filter(|group| {
+                    group.owner().unit == "main" && group.owner().module == "QuotedOriginal"
+                })
+                .flat_map(|group| group.group().definitions().bindings().iter())
+                .flat_map(|binding| match binding {
+                    Group::NonRecursive(binding) => std::slice::from_ref(binding),
+                    Group::Recursive(bindings) => bindings.as_slice(),
+                })
+                .filter(|binding| {
+                    binding.identity.module == "QuotedOriginal"
+                        && binding.identity.occurrence == "value"
+                })
+                .collect::<Vec<_>>();
+            let [binding] = values.as_slice() else {
+                panic!("one certified original quoted value")
+            };
+            let HeapRhs::Constructor { fields, .. } = &binding.binding.rhs else {
+                panic!("quoted value must be an actual boxed Int constant")
+            };
+            assert!(
+                matches!(fields.as_slice(), [Atom::Scalar(ScalarLiteral::Int { bits: 64, bytes })]
+                if bytes.as_slice() == value.to_be_bytes()),
+                "quoted boxed Int must retain {value} as a big-endian Int64 scalar: {fields:?}"
+            );
+        };
         let mut observed = String::new();
         let mut retained = None;
         for (exact, value) in [(false, 37_i64), (false, 91), (true, 37)] {
@@ -5687,11 +5741,7 @@ mod module_product_tests {
                 }
             };
             let compiled = if exact {
-                compile_invocation_in_context(
-                    &invocation,
-                    Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
-                    &mut on_stage,
-                )
+                compile_invocation_in_context(&invocation, Arc::new(context.clone()), &mut on_stage)
             } else {
                 compile_invocation(&invocation, &mut on_stage)
             }
@@ -5713,35 +5763,8 @@ mod module_product_tests {
                 .iter()
                 .find(|product| product.unit == "main" && product.module == "QuotedOriginal")
                 .expect("actual native quoted owner");
-            let values = quoted
-                .groups
-                .iter()
-                .flat_map(|group| {
-                    group
-                        .definitions()
-                        .bindings()
-                        .iter()
-                        .flat_map(|binding| match binding {
-                            Group::NonRecursive(binding) => std::slice::from_ref(binding),
-                            Group::Recursive(bindings) => bindings.as_slice(),
-                        })
-                        .filter(|binding| {
-                            binding.identity.module == "QuotedOriginal"
-                                && binding.identity.occurrence == "value"
-                        })
-                })
-                .collect::<Vec<_>>();
-            let [binding] = values.as_slice() else {
-                panic!("one original quoted value")
-            };
-            let HeapRhs::Constructor { fields, .. } = &binding.binding.rhs else {
-                panic!("quoted value must be an actual boxed Int constant")
-            };
-            assert!(
-                matches!(fields.as_slice(), [Atom::Scalar(ScalarLiteral::Int { bits: 64, bytes })]
-                if bytes.as_slice() == value.to_be_bytes()),
-                "quoted boxed Int must retain {value} as a big-endian Int64 scalar: {fields:?}"
-            );
+            assert!(!quoted.groups.is_empty());
+            assert_quoted_value(&compiled, value);
             let selected = module_candidates::select_configured(
                 compiled.producer_identity.as_ref().unwrap(),
                 &include,
@@ -5806,6 +5829,7 @@ mod module_product_tests {
         let consumed = compile_invocation_in_context(&invocation, context, |_, _, _| {})
             .expect("source-less original use must not replay its quotation");
         assert_eq!(std::fs::read_to_string(&counter).unwrap(), observed);
+        assert_quoted_value(&consumed, 37);
         assert!(consumed.targets["result"]
             .pending_imports
             .iter()
