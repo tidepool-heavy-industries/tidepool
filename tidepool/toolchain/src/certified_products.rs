@@ -22,7 +22,7 @@ pub use finalized_module::{
     CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
 };
 
-use crate::cache::{DependencyEvidence, ProductAvailability};
+use crate::cache::{CompletedSourceEvidence, DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 
@@ -3897,7 +3897,7 @@ pub(crate) fn certify_products(
     fresh_evidence_bytes: &[u8],
     fresh_input_path: &Path,
     captured_payload_root: &Path,
-    final_evidence: &DependencyEvidence,
+    final_evidence: &CompletedSourceEvidence,
     final_target_source: &str,
     endpoint_identity: &[u8],
     include: &[PathBuf],
@@ -3910,7 +3910,7 @@ pub(crate) fn certify_products(
     let evidence_start = std::time::Instant::now();
     let mut validation = PackageInterfaceValidation::default();
     let normalized = match exact {
-        None => DependencyEvidence::from_worker(
+        None => CompletedSourceEvidence::from_worker(
             fresh_evidence_bytes,
             fresh_input_path,
             final_target_source,
@@ -3931,7 +3931,7 @@ pub(crate) fn certify_products(
     {
         return Err(CertificationError::Mismatch("fresh evidence bytes"));
     }
-    if !final_evidence.valid(final_target_source) {
+    if final_evidence.revalidate(final_target_source).is_err() {
         return Err(CertificationError::StaleEvidence);
     }
     if let Some(admission) = authored {
@@ -7539,7 +7539,7 @@ pub(crate) mod tests {
                     &evidence_bytes,
                     &input,
                     input.parent().unwrap(),
-                    &admitted,
+                    &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
                     source,
                     &producer,
                     &include,
@@ -7596,7 +7596,7 @@ pub(crate) mod tests {
             &evidence_bytes,
             &input,
             input.parent().unwrap(),
-            &admitted,
+            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
             source,
             &producer,
             &include,
@@ -7657,7 +7657,7 @@ pub(crate) mod tests {
                 &new_evidence_bytes,
                 &new_input,
                 new_input.parent().unwrap(),
-                &admitted,
+                &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
                 source,
                 &producer,
                 &include,
@@ -7683,7 +7683,7 @@ pub(crate) mod tests {
                 &incomplete_bytes,
                 &new_input,
                 new_input.parent().unwrap(),
-                &incomplete,
+                &CompletedSourceEvidence::from_normalized(incomplete.clone(), source).unwrap(),
                 source,
                 &producer,
                 &include,
@@ -7710,7 +7710,7 @@ pub(crate) mod tests {
                 &incomplete_bytes,
                 &new_input,
                 new_input.parent().unwrap(),
-                &incomplete,
+                &CompletedSourceEvidence::from_normalized(incomplete.clone(), source).unwrap(),
                 source,
                 &producer,
                 &include,
@@ -7751,7 +7751,7 @@ pub(crate) mod tests {
             &evidence_bytes,
             &input,
             input.parent().unwrap(),
-            &admitted,
+            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
             source,
             &producer,
             &include,
@@ -7768,7 +7768,7 @@ pub(crate) mod tests {
             &evidence_bytes,
             &input,
             input.parent().unwrap(),
-            &admitted,
+            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
             source,
             &producer,
             &include,
@@ -7893,7 +7893,7 @@ pub(crate) mod tests {
                 &current_bytes,
                 &input,
                 input.parent().unwrap(),
-                &current,
+                &CompletedSourceEvidence::from_normalized(current.clone(), source).unwrap(),
                 source,
                 &producer,
                 &include,
@@ -7913,7 +7913,7 @@ pub(crate) mod tests {
                     &current_bytes,
                     &input,
                     input.parent().unwrap(),
-                    &current,
+                    &CompletedSourceEvidence::from_normalized(current.clone(), source).unwrap(),
                     source,
                     &producer,
                     &include,
@@ -7980,7 +7980,7 @@ pub(crate) mod tests {
                 &current_bytes,
                 &input,
                 input.parent().unwrap(),
-                &current,
+                &CompletedSourceEvidence::from_normalized(current.clone(), source).unwrap(),
                 source,
                 &producer,
                 &include,
@@ -8061,7 +8061,7 @@ pub(crate) mod tests {
             &raw_evidence,
             &input,
             directory.path(),
-            &admitted,
+            &CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap(),
             source,
             &producer,
             &[directory.path().to_path_buf()],
@@ -8208,7 +8208,7 @@ pub(crate) mod tests {
                 &raw_evidence,
                 &input,
                 input.parent().unwrap(),
-                &evidence,
+                &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
                 source,
                 b"producer",
                 &[],
@@ -8282,7 +8282,7 @@ pub(crate) mod tests {
             &raw_evidence,
             &input,
             input.parent().unwrap(),
-            &evidence,
+            &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
             source,
             b"producer",
             &[],
@@ -8326,7 +8326,7 @@ pub(crate) mod tests {
                 &raw_evidence,
                 &input,
                 input.parent().unwrap(),
-                &substituted,
+                &CompletedSourceEvidence::from_normalized(substituted.clone(), source).unwrap(),
                 source,
                 b"producer",
                 &[],
@@ -8354,7 +8354,7 @@ pub(crate) mod tests {
                 &raw_evidence,
                 &input,
                 input.parent().unwrap(),
-                &evidence,
+                &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
                 source,
                 b"producer",
                 &[],
@@ -8380,7 +8380,7 @@ pub(crate) mod tests {
             &raw_evidence,
             &input,
             input.parent().unwrap(),
-            &evidence,
+            &CompletedSourceEvidence::from_normalized(evidence.clone(), source).unwrap(),
             source,
             b"producer",
             &[],

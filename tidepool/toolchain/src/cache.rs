@@ -256,6 +256,51 @@ pub struct DependencyEvidence {
     pub modules: Vec<ModuleEvidence>,
 }
 
+/// Validated observations from one completed compilation. This proves the
+/// consumed source bytes and import witnesses, not that executing source again
+/// would reproduce its result. Only the owning validator constructs this proof.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct CompletedSourceEvidence(DependencyEvidence);
+
+impl CompletedSourceEvidence {
+    pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
+        Self::from_worker_evidence(serde_json::from_slice(bytes).ok()?, input, source)
+    }
+
+    pub(crate) fn from_worker_evidence(
+        evidence: DependencyEvidence,
+        input: &Path,
+        source: &str,
+    ) -> Option<Self> {
+        Self::from_normalized(evidence.normalize_worker_paths(input)?, source).ok()
+    }
+
+    pub(crate) fn from_normalized(
+        evidence: DependencyEvidence,
+        source: &str,
+    ) -> Result<Self, DependencyEvidenceFailure> {
+        evidence.validate_consumed_sources(source)?;
+        Ok(Self(evidence))
+    }
+
+    pub(crate) fn revalidate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
+        self.0.validate_consumed_sources(source)
+    }
+
+    pub(crate) fn into_evidence(self) -> DependencyEvidence {
+        self.0
+    }
+}
+
+impl std::ops::Deref for CompletedSourceEvidence {
+    type Target = DependencyEvidence;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleEvidence {
@@ -429,14 +474,14 @@ pub enum ResolutionWitnessFailure {
 }
 
 impl DependencyEvidence {
-    /// Replace the request-local path only after checking the bytes the worker
-    /// says it consumed. Authored dependencies retain their path identity.
+    /// Admit replay-eligible worker evidence after validating consumed bytes.
+    /// Authored dependencies retain their path identity.
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
-        let evidence: Self = serde_json::from_slice(bytes).ok()?;
-        evidence.normalize_worker(input, source)
+        let completed = CompletedSourceEvidence::from_worker(bytes, input, source)?;
+        completed.cache_safe.then(|| completed.into_evidence())
     }
 
-    pub(crate) fn normalize_worker(mut self, input: &Path, source: &str) -> Option<Self> {
+    fn normalize_worker_paths(mut self, input: &Path) -> Option<Self> {
         let evidence = &mut self;
         let input = fs::canonicalize(input).ok()?;
         for item in &mut evidence.sources {
@@ -460,21 +505,24 @@ impl DependencyEvidence {
                 }
             }
         }
-        self.valid(source).then_some(self)
+        Some(self)
     }
 
-    /// Validate contents and negative witnesses. IO errors are misses, including
-    /// inaccessible candidates: absence must be known, not guessed.
+    /// Validate replay eligibility, consumed bytes and negative witnesses. IO
+    /// errors are misses: candidate absence must be known, not guessed.
     pub fn valid(&self, source: &str) -> bool {
         self.validate(source).is_ok()
     }
 
     pub(crate) fn validate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
-        if self.version != 4
-            || !self.cache_safe
-            || self.sources.is_empty()
-            || self.modules.is_empty()
-        {
+        if !self.cache_safe {
+            return Err(DependencyEvidenceFailure::Header);
+        }
+        self.validate_consumed_sources(source)
+    }
+
+    fn validate_consumed_sources(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
+        if self.version != 4 || self.sources.is_empty() || self.modules.is_empty() {
             return Err(DependencyEvidenceFailure::Header);
         }
         let mut paths = std::collections::HashSet::new();
@@ -953,6 +1001,48 @@ mod tests {
         assert!(evidence.valid("target"));
         fs::write(root.path().join("later/Library.hs"), "library = 2").unwrap();
         assert!(!evidence.valid("target"));
+    }
+
+    #[test]
+    fn completed_sources_preserve_replay_refusal_and_revalidate_bytes_and_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let mut raw = evidence(root.path());
+        raw.cache_safe = false;
+        raw.selection_complete = false;
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let completed = CompletedSourceEvidence::from_normalized(raw.clone(), "target").unwrap();
+        assert_eq!(serde_json::to_vec(&completed).unwrap(), bytes);
+        assert!(!completed.valid("target"));
+        assert!(completed.revalidate("target").is_ok());
+        assert!(completed.revalidate("changed target").is_err());
+
+        let input = root.path().join("Target.hs");
+        fs::write(&input, "target").unwrap();
+        let mut worker = raw;
+        for item in &mut worker.sources {
+            if item.path == Path::new(GENERATED_SOURCE) {
+                item.path = input.clone();
+            }
+        }
+        for module in &mut worker.modules {
+            if module.source == Path::new(GENERATED_SOURCE) {
+                module.source = input.clone();
+            }
+        }
+        let worker_bytes = serde_json::to_vec(&worker).unwrap();
+        assert!(DependencyEvidence::from_worker(&worker_bytes, &input, "target").is_none());
+        assert_eq!(
+            CompletedSourceEvidence::from_worker(&worker_bytes, &input, "target").unwrap(),
+            completed
+        );
+        let shadow = root.path().join("first/Library.hs");
+        fs::write(&shadow, "library = 1").unwrap();
+        assert!(completed.revalidate("target").is_err());
+        fs::remove_file(shadow).unwrap();
+        assert!(completed.revalidate("target").is_ok());
+        fs::write(root.path().join("later/Library.hs"), "library = 2").unwrap();
+        assert!(completed.revalidate("target").is_err());
+        assert!(CompletedSourceEvidence::from_worker(&worker_bytes, &input, "target").is_none());
     }
 
     #[test]

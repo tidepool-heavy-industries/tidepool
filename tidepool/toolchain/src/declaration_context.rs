@@ -932,7 +932,7 @@ impl ExactSourceWitness {
 
 pub(crate) struct ExactSourceAdmission {
     pub(crate) witness: ExactSourceWitness,
-    pub(crate) evidence: crate::cache::DependencyEvidence,
+    pub(crate) evidence: crate::cache::CompletedSourceEvidence,
     pub(crate) evidence_bytes: Vec<u8>,
     pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     // Roots accepted by each retained typed protected-recipe authority.
@@ -1016,8 +1016,8 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
-    /// from_worker binds GENERATED_SOURCE to this receipt's hash-verified
-    /// source witness. Resolve its exact unit/module without parsing text.
+    /// Completed-source validation binds GENERATED_SOURCE to this receipt's
+    /// hash-verified witness. Resolve its owner without parsing source text.
     pub(crate) fn generated_source_owner(&self) -> Result<ExactModuleIdentity, CompileError> {
         let owners = self
             .evidence
@@ -1837,9 +1837,10 @@ impl ExactCompilationRequest {
             path,
             Some((&self.request_sha256, self.semantic_sha256)),
         )?;
-        let evidence = evidence
-            .normalize_worker(&source_path, &source)
-            .ok_or_else(|| failure("fresh compilation lacks complete tracked source evidence"))?;
+        let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
+            evidence, &source_path, &source,
+        )
+        .ok_or_else(|| failure("fresh compilation consumed source evidence is invalid"))?;
         let interfaces = context.interface_owners();
         let mut exact_owners: BTreeSet<_> = interfaces
             .iter()
@@ -1995,8 +1996,8 @@ impl ExactCompilationRequest {
                                 && module.boot == owner.2
                         })
                         .is_some_and(|module| {
-                            // from_worker has already bound this marker to
-                            // the hash-verified receipt target snapshot.
+                            // Completed-source validation bound this marker
+                            // to the hash-verified receipt target snapshot.
                             let module_source =
                                 if module.source == Path::new(crate::cache::GENERATED_SOURCE) {
                                     &source_path
@@ -4125,21 +4126,38 @@ mod tests {
                 product: crate::cache::ProductAvailability::Ready,
             });
         }
+        let source = "module Target where\n";
+        let target = root.join("Target.hs");
+        std::fs::write(&target, source).unwrap();
+        sources.push(crate::cache::SourceEvidence {
+            path: target.clone(),
+            sha256: sha256(source.as_bytes()),
+        });
         let evidence = crate::cache::DependencyEvidence {
             version: 4,
             cache_safe: true,
             selection_complete: true,
             sources,
-            resolutions: vec![],
+            resolutions: vec![crate::cache::ResolutionEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: "InstanceOwner".into(),
+                boot: false,
+                selected: Some(root.join("InstanceOwner.hs")),
+                candidates: vec![root.join("InstanceOwner.hs")],
+            }],
             packages: vec![],
             modules: nodes,
         };
+        let evidence_bytes = serde_json::to_vec(&evidence).unwrap();
+        let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
+            evidence, &target, source,
+        ).unwrap();
         ExactSourceAdmission {
             witness: ExactSourceWitness {
-                source_path: root.join("Target.hs"),
-                source_sha256: [3; 32],
+                source_path: target,
+                source_sha256: Sha256::digest(source.as_bytes()).into(),
             },
-            evidence_bytes: serde_json::to_vec(&evidence).unwrap(),
+            evidence_bytes,
             evidence,
             exact_imports: BTreeMap::new(),
             scaffold_roots: BTreeMap::new(),
@@ -4652,29 +4670,38 @@ mod tests {
     }
 
     #[test]
-    fn receipt_observations_do_not_admit_cache_unsafe_compilations() {
+    fn completed_receipt_preserves_replay_refusal_and_exact_import_authority() {
         let directory = tempfile::tempdir().unwrap();
         let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let request = program_request(directory.path(), context.clone());
         let receipt = import_receipt(directory.path(), &request, "Unadmitted");
-        assert!(
-            read_exact_compilation_receipt(&receipt)
-                .unwrap()
-                .evidence
-                .cache_safe
-        );
         let mut value = read_receipt(&receipt);
+        // Start with a complete control that claims no retained import.
+        let modules = value.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        modules[0].as_array_mut().unwrap()[3] = Value::Array(vec![]);
+        write_receipt(&receipt, &value);
+        request.validate_receipt(&receipt, None, &context).unwrap();
+
         let fields = value.as_array_mut().unwrap();
         let mut evidence: crate::cache::DependencyEvidence =
             serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
         evidence.cache_safe = false;
+        evidence.selection_complete = false;
         fields[7] = text(serde_json::to_string(&evidence).unwrap());
         write_receipt(&receipt, &value);
-        let facts = read_exact_compilation_receipt(&receipt).unwrap();
-        assert!(!facts.evidence.cache_safe);
-        assert!(facts.claims.is_empty());
+        let admitted = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert!(!admitted.evidence.cache_safe && !admitted.evidence.selection_complete);
+        assert!(!admitted.evidence.valid("module Consumer where\n"));
+        assert!(admitted.evidence.revalidate("module Consumer where\n").is_ok());
+
+        // Completed source observations do not authorize a retained import.
+        let modules = value.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        modules[0].as_array_mut().unwrap()[3] = Value::Array(vec![Value::Array(vec![
+            text("none"), text("Unadmitted"), Value::Bool(false), text("fixture"),
+        ])]);
+        write_receipt(&receipt, &value);
         assert!(matches!(request.validate_receipt(&receipt, None, &context),
-            Err(CompileError::ExtractFailed(detail)) if detail.contains("complete tracked source evidence")));
+            Err(CompileError::ExtractFailed(detail)) if detail.contains("leaves selected lexical graph")));
     }
 
     #[test]
@@ -5314,13 +5341,12 @@ mod tests {
         assert!(request
             .admit_program_support(baseline, &products, &[support_admission(directory.path())])
             .is_err());
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(directory.path(), empty.clone());
-        let mut forged = support_admission(directory.path());
-        forged.evidence.modules[0].source = directory.path().join("AnotherOwner.hs");
-        assert!(request
-            .admit_program_support(empty, &products, &[forged])
-            .is_err());
+        let original = support_admission(directory.path());
+        let mut forged = original.evidence.into_evidence();
+        forged.modules[0].source = directory.path().join("AnotherOwner.hs");
+        assert!(crate::cache::CompletedSourceEvidence::from_normalized(
+            forged, "module Target where\n",
+        ).is_err());
     }
 
     #[test]
@@ -5330,7 +5356,11 @@ mod tests {
         let mut request = program_request(directory.path(), empty.clone());
         let original = support_admission(directory.path());
         let mut changed = support_admission(directory.path());
-        changed.evidence.modules[1].imports.clear();
+        let mut evidence = changed.evidence.into_evidence();
+        evidence.modules[1].imports.clear();
+        changed.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
+            evidence, "module Target where\n",
+        ).unwrap();
         assert!(request
             .admit_program_support(
                 empty,
@@ -5555,7 +5585,8 @@ mod tests {
         let path = directory.path().join("Additional.hs");
         std::fs::write(&path, b"module Additional where\n").unwrap();
         let mut later = support_admission(directory.path());
-        later.evidence.modules = vec![crate::cache::ModuleEvidence {
+        let mut evidence = later.evidence.into_evidence();
+        evidence.modules = vec![crate::cache::ModuleEvidence {
             unit: "fixture".into(),
             module: "Additional".into(),
             boot: false,
@@ -5563,10 +5594,19 @@ mod tests {
             imports: vec![],
             product: crate::cache::ProductAvailability::Ready,
         }];
-        later.evidence.sources = vec![crate::cache::SourceEvidence {
-            path,
+        evidence.sources = vec![crate::cache::SourceEvidence {
+            path: path.clone(),
             sha256: sha256(b"module Additional where\n"),
         }];
+        evidence.resolutions.clear();
+        later.witness = ExactSourceWitness {
+            source_path: path.clone(),
+            source_sha256: Sha256::digest(b"module Additional where\n").into(),
+        };
+        later.evidence_bytes = serde_json::to_vec(&evidence).unwrap();
+        later.evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
+            evidence, &path, "module Additional where\n",
+        ).unwrap();
         later.exact_imports.insert(
             identity("fixture", "Additional"),
             vec![identity("fixture", "InstanceRelay")],
@@ -5615,11 +5655,15 @@ mod tests {
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
         let mut admission = support_admission(directory.path());
-        admission.evidence.modules.truncate(1);
-        let source = &mut admission.evidence.modules[0];
+        let mut evidence = admission.evidence.into_evidence();
+        evidence.modules.truncate(1);
+        let source = &mut evidence.modules[0];
         source.unit = "main".into();
         source.module = "Tidepool.Internal.Resume".into();
         source.imports.clear();
+        admission.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
+            evidence, "module Target where\n",
+        ).unwrap();
         let context = request
             .admit_program_support(
                 baseline,
@@ -5650,12 +5694,13 @@ mod tests {
     #[test]
     fn program_support_refuses_ambiguous_selected_source_owner() {
         let directory = tempfile::tempdir().unwrap();
-        let mut admission = support_admission(directory.path());
-        admission
-            .evidence
-            .modules
-            .push(admission.evidence.modules[0].clone());
-        assert!(admission.home_imports().is_err());
+        let admission = support_admission(directory.path());
+        let mut evidence = admission.evidence.into_evidence();
+        evidence.modules.push(evidence.modules[0].clone());
+        assert!(consumed_source_home_imports(&evidence, &admission.exact_imports).is_err());
+        assert!(crate::cache::CompletedSourceEvidence::from_normalized(
+            evidence, "module Target where\n",
+        ).is_err());
     }
 
     #[test]

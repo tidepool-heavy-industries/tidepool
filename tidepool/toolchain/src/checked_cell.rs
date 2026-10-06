@@ -460,7 +460,7 @@ pub struct ExactCheckedCell {
     retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     receipt_digest: [u8; 32],
     checked_source: String,
-    evidence: Vec<(String, crate::cache::DependencyEvidence)>,
+    evidence: Vec<(String, crate::cache::CompletedSourceEvidence)>,
     observations: Vec<u8>,
     items: Vec<CheckedItem>,
     include: Vec<std::path::PathBuf>,
@@ -1638,7 +1638,7 @@ impl ExactCheckedCell {
             || self
                 .evidence
                 .iter()
-                .any(|(source, evidence)| !evidence.valid(source))
+                .any(|(source, evidence)| evidence.revalidate(source).is_err())
         {
             return Err(failure(
                 "checked cell producer, context or consumed inputs changed",
@@ -3389,7 +3389,7 @@ pub(crate) fn admit_checked_cell(
                 if !admitted
                     .witness
                     .matches_source(admitted.witness.source_path(), &source)
-                    || !admitted.evidence.valid(&source)
+                    || admitted.evidence.revalidate(&source).is_err()
                 {
                     return Err(failure("compiled program source evidence changed"));
                 }

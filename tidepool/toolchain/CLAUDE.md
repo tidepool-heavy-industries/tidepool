@@ -36,6 +36,15 @@ Package dependencies belong to the producer identity. Incomplete evidence (inclu
 untracked preprocessing or request-time execution) cannot produce a hit.
 Cache safety and test-selection completeness are separate fields.
 
+Completed compiler output uses `CompletedSourceEvidence` to retain validated
+consumed bytes, import owners and negative resolution witnesses even when
+compile-time execution makes replay ineligible. Exact receipts, checked cells
+and canonical/native product certification carry that proof without changing
+its eligibility flags. Cache publication, source replay recipes and sealed
+compile-input reuse keep their stricter eligibility gates. Build actions also
+require the declared input closure; completed runtime output does not establish
+a hermetic build input proof.
+
 Before publication and on each lookup, validate consumed source bytes and
 negative resolution witnesses. The generated request path is normalized to a
 logical source marker; authored dependencies retain absolute path identity.

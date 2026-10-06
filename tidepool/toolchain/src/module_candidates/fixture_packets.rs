@@ -301,7 +301,9 @@ fn source_boot_candidate_packet_producer() {
         // supplies only the original bytes and payloads emitted at that path.
         let source = fs::read_to_string(capture.join("original-source.hs")).unwrap();
         let evidence_bytes = fs::read(capture.join("dependencies.json")).unwrap();
-        let evidence = DependencyEvidence::from_worker(&evidence_bytes, &source_path, &source)
+        let evidence = crate::cache::CompletedSourceEvidence::from_worker(
+            &evidence_bytes, &source_path, &source,
+        )
             .expect("actual consumed source and resolution evidence");
         let receipt_bytes = fs::read(capture.join("certified-products.cbor")).unwrap();
         let receipt = decode_receipt_in(&receipt_bytes, Some(&capture)).unwrap();
@@ -332,6 +334,11 @@ fn source_boot_candidate_packet_producer() {
             None,
         )
         .unwrap();
+        if !evidence.cache_safe || !evidence.selection_complete {
+            assert!(certified.recovery_products.iter().all(|product| {
+                product.execution_source().is_none()
+            }), "completed originals cannot acquire an ordinary source replay recipe");
+        }
         let context = admit_fixture_scope(
             producer_sha,
             &certified,

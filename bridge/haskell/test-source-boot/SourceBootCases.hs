@@ -1253,8 +1253,11 @@ captureRetainedCompilerFixtureWith witnessFixture includes work = do
 retainedExecutionThCounter :: IO ()
 retainedExecutionThCounter = withTiming $ withScratch $ \work -> do
   library <- canonicalizePath "lib"
-  ((_, session, exact, _), initialDiagnostics) <- captureDiagnostics $
+  ((original, session, exact, _), initialDiagnostics) <- captureDiagnostics $
     captureRetainedCompilerFixtureWith "MetadataRetainedAuditedWitness.hs" [work,library] work
+  let originalEvidence = preparedFreshDependencies original
+  when (dependencyCacheSafe originalEvidence || dependencySelectionComplete originalEvidence) $
+    fail "actual retained quotation acquired ordinary source replay eligibility"
   let target = work </> "MetadataQuotedTarget.hs"
       proofs = scopeModuleInterfaceProofs exact
       witness = ("main", "MetadataRetainedWitness")

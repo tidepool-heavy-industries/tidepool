@@ -2526,7 +2526,7 @@ mod authored_tests {
         assert!(admitted
             .validate_ineligible_evidence(&serde_json::to_vec(&raw_evidence).unwrap())
             .is_err());
-        let mut ordinary_evidence = admitted.evidence.clone();
+        let mut ordinary_evidence = admitted.evidence.clone().into_evidence();
         ordinary_evidence.cache_safe = false;
         ordinary_evidence.selection_complete = false;
         assert!(!ordinary_evidence.valid(downstream));

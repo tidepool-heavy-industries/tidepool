@@ -2488,13 +2488,13 @@ fn seal_turn_outputs_inner(
         );
     let evidence = match exact_source.as_ref() {
         Some(source) => Some(source.evidence.clone()),
-        None => cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source),
+        None => cache::CompletedSourceEvidence::from_worker(&evidence_bytes, source_path, source),
     };
     let needs_certificate = offer.has_candidates()
         || offer.exact.is_some()
         || !fresh_products.products().is_empty()
         || !prepared.globals().is_empty()
-        || evidence.as_ref().is_some_and(has_ready_home_module);
+        || evidence.as_deref().is_some_and(has_ready_home_module);
     if receipt_bytes.is_empty() {
         if needs_certificate {
             return Err(CompileError::ExtractFailed(
@@ -2513,7 +2513,7 @@ fn seal_turn_outputs_inner(
         receipt_decode_start.elapsed(),
         receipt_bytes.len() as u64,
     );
-    let Some(valid) = evidence.as_ref().filter(|evidence| evidence.valid(source)) else {
+    let Some(valid) = evidence.as_ref().filter(|evidence| evidence.revalidate(source).is_ok()) else {
         if needs_certificate
             || receipt
                 .modules
@@ -3483,7 +3483,7 @@ fn compile_invocation_inner(
         let evidence = match exact_source.as_ref() {
             Some(source) => Some(source.evidence.clone()),
             None => {
-                cache::DependencyEvidence::from_worker(&evidence_bytes, &input_path, inv.source)
+                cache::CompletedSourceEvidence::from_worker(&evidence_bytes, &input_path, inv.source)
             }
         };
         if let Some((output, _)) = inventory_export {
@@ -3515,7 +3515,7 @@ fn compile_invocation_inner(
                     "fresh module product certificate unavailable".into(),
                 ));
             }
-            if evidence.as_ref().is_some_and(has_ready_home_module) {
+            if evidence.as_deref().is_some_and(has_ready_home_module) {
                 return Err(CompileError::ExtractFailed(
                     "ready module product certificate unavailable".into(),
                 ));
@@ -3525,7 +3525,7 @@ fn compile_invocation_inner(
                 &raw,
                 fresh_products,
                 Vec::new(),
-                evidence.as_ref(),
+                evidence.as_deref(),
                 None,
                 None,
                 &mut *on_stage,
@@ -3538,7 +3538,7 @@ fn compile_invocation_inner(
         let fresh_products =
             certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let valid_evidence = evidence.as_ref().filter(|value| value.valid(inv.source));
+        let valid_evidence = evidence.as_ref().filter(|value| value.revalidate(inv.source).is_ok());
         let cached_receipts: Vec<_> = receipt
             .modules
             .iter()
@@ -3634,7 +3634,7 @@ fn compile_invocation_inner(
             &raw,
             fresh_products,
             extra_products,
-            evidence.as_ref(),
+            evidence.as_deref(),
             exact_request.as_ref(),
             Some(&certified.retained_core_products),
             &mut on_stage,
@@ -4860,20 +4860,22 @@ mod module_product_tests {
     use crate::certified_products::ProductOrigin;
     use std::io::Write;
 
-    #[test]
-    #[serial_test::serial]
-    fn worker_failure_retains_diagnostics_and_executed_request_after_scratch_cleanup() {
-        struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for RestoreEnvironment {
-            fn drop(&mut self) {
-                for (name, value) in self.0.drain(..) {
-                    match value {
-                        Some(value) => unsafe { std::env::set_var(name, value) },
-                        None => unsafe { std::env::remove_var(name) },
-                    }
+    struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl Drop for RestoreEnvironment {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
                 }
             }
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn worker_failure_retains_diagnostics_and_executed_request_after_scratch_cleanup() {
         let root = tempfile::tempdir().unwrap();
         let _restore = RestoreEnvironment(
             ["TIDEPOOL_KEEP_TEST_LOGS", "TIDEPOOL_TEST_ARTIFACT_ROOT"]
@@ -5506,6 +5508,129 @@ mod module_product_tests {
             cohort.len(),
             cached.len()
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn completed_quotations_admit_originals_without_source_replay() {
+        use crate::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
+        use tidepool_repr::execution_schema::{Atom, Group, HeapRhs, ScalarLiteral};
+
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let _restore = RestoreEnvironment(
+            ["TIDEPOOL_COMPILE_CACHE_DIR", tidepool_extract_cmd::DAEMON_SOCKET_ENV]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        }
+        let provider = root.path().join("QuotedProvider.hs");
+        let original_path = root.path().join("QuotedOriginal.hs");
+        let input = root.path().join("quote-input");
+        let counter = root.path().join("quote-input.executions");
+        std::fs::write(
+            &provider,
+            include_str!("../tests/fixtures/completed-source/QuotedProvider.hs"),
+        ).unwrap();
+        std::fs::write(
+            &original_path,
+            include_str!("../tests/fixtures/completed-source/QuotedOriginal.hs")
+                .replace("QUOTE_INPUT_PATH", input.to_str().unwrap()),
+        ).unwrap();
+        let include = [root.path().to_owned()];
+        let source = include_str!("../tests/fixtures/completed-source/QuotedConsumer.hs");
+        let invocation = CompileInvocation {
+            source, targets: &["result"], include: &include,
+            fallback_module_name: "QuotedConsumer",
+        };
+        let quoted_owner = ExactModuleIdentity { unit: "main".into(), module: "QuotedOriginal".into() };
+        let mut observed = String::new();
+        let mut retained = None;
+        for (exact, value) in [(false, 37_i64), (false, 91), (true, 37)] {
+            std::fs::write(&input, value.to_string()).unwrap();
+            let mut completed_requests = 0;
+            let mut on_stage = |stage: &str, _, _| {
+                if stage == timing::STAGE_EXTRACT_SPAWN {
+                    completed_requests += 1;
+                }
+            };
+            let compiled = if exact {
+                compile_invocation_in_context(
+                    &invocation,
+                    Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
+                    &mut on_stage,
+                )
+            } else {
+                compile_invocation(&invocation, &mut on_stage)
+            }.expect("completed quoted source must retain genuine canonical/native originals");
+            assert_eq!(completed_requests, 1, "each explicit request compiles once");
+            observed.push_str(&format!("{value}\n"));
+            assert_eq!(std::fs::read_to_string(&counter).unwrap(), observed);
+            assert!(!compiled.recovery_products.is_empty());
+            assert!(compiled.recovery_products.iter().all(|product| product.execution_source().is_none()));
+            assert!(compiled.certified_groups.iter().all(|group| group.origin() == ProductOrigin::Fresh));
+            let quoted = compiled.module_products.iter()
+                .find(|product| product.unit == "main" && product.module == "QuotedOriginal")
+                .expect("actual native quoted owner");
+            let values = quoted.groups.iter().flat_map(|group| {
+                group.definitions().bindings().iter().flat_map(|binding| match binding {
+                    Group::NonRecursive(binding) => std::slice::from_ref(binding),
+                    Group::Recursive(bindings) => bindings.as_slice(),
+                }).filter(|binding| binding.identity.module == "QuotedOriginal"
+                    && binding.identity.occurrence == "value")
+            }).collect::<Vec<_>>();
+            let [binding] = values.as_slice() else { panic!("one original quoted value") };
+            let HeapRhs::Constructor { fields, .. } = &binding.binding.rhs else {
+                panic!("quoted value must be an actual boxed Int constant")
+            };
+            assert!(matches!(fields.as_slice(), [Atom::Scalar(ScalarLiteral::Int { bits: 64, bytes })]
+                if bytes.as_slice() == value.to_le_bytes()));
+            let selected = module_candidates::select_configured(
+                compiled.producer_identity.as_ref().unwrap(), &include,
+                &root.path().join(format!("offer-{exact}-{value}")),
+            ).unwrap();
+            assert!(selected.is_none_or(|selected| !selected.by_owner.contains_key(
+                &(quoted_owner.unit.clone(), quoted_owner.module.clone()))));
+            if exact {
+                let admission = compiled.exact_source_admission.as_ref().unwrap();
+                assert!(!admission.evidence.cache_safe && !admission.evidence.selection_complete);
+                assert!(admission.evidence.revalidate(source).is_ok());
+                let surface = crate::declaration_join::source_lexical_closure(
+                    std::slice::from_ref(&quoted_owner), &admission.home_imports().unwrap(), &[],
+                    &compiled.artifact_view.source_implementation_roles(),
+                ).unwrap();
+                let owners = surface.lexical.iter().map(|node| node.owner.clone()).collect::<Vec<_>>();
+                let native = compiled.recovery_products.iter()
+                    .filter(|product| product.owner().unit == quoted_owner.unit
+                        && product.owner().module == quoted_owner.module)
+                    .cloned().collect::<Vec<_>>();
+                assert_eq!(native.len(), 1);
+                let owner = native[0].owner().clone();
+                let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    compiled.producer_identity.as_ref().unwrap(),
+                ).sha256();
+                let context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap()
+                    .extend_interface_artifacts(&compiled.artifact_view.interface_projection(&owners).unwrap()).unwrap()
+                    .extend_checked_original_products(producer, &native).unwrap()
+                    .extend(&[], &[], surface.lexical).unwrap();
+                retained = Some((Arc::new(context), owner));
+            }
+        }
+        std::fs::remove_file(&original_path).unwrap();
+        std::fs::remove_file(&provider).unwrap();
+        std::fs::write(&input, "99").unwrap();
+        let (context, original_owner) = retained.unwrap();
+        let consumed = compile_invocation_in_context(&invocation, context, |_, _, _| {})
+            .expect("source-less original use must not replay its quotation");
+        assert_eq!(std::fs::read_to_string(&counter).unwrap(), observed);
+        assert!(consumed.targets["result"].pending_imports.iter().any(|import| {
+            matches!(import, certified_products::PendingImportOwner::Source { owner, .. }
+                if owner == &original_owner)
+        }));
     }
 
     #[test]
