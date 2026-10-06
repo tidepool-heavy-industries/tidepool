@@ -1302,17 +1302,26 @@ impl GeneratedScaffoldImportAuthority {
                 let Some(node) = graph.get(&key) else {
                     return false;
                 };
-                return self.protected_templates.iter().any(|template| {
-                    let imports = template
-                        .lines()
-                        .filter(|line| template_import_line(line, &key))
-                        .collect::<Vec<_>>();
-                    matches!(imports.as_slice(), [import]
-                            if source.lines().filter(|line| line == import).count() == 1)
-                }) && context.artifact_view().entries().iter().any(|entry| {
-                    entry.descriptor.owner == key
-                        && entry.descriptor.interface_sha256 == node.interface_sha256
-                });
+                let occurrences = |text: &str| {
+                    let mut counts = BTreeMap::new();
+                    for line in text.lines().filter(|line| template_import_line(line, &key)) {
+                        *counts.entry(line.to_owned()).or_insert(0usize) += 1;
+                    }
+                    counts
+                };
+                let rendered = occurrences(source);
+                // GHC owns per-occurrence AST/span admission. This receipt
+                // guard requires the whole protected owner census unchanged;
+                // extra authored imports need their ordinary source proof.
+                return !rendered.is_empty()
+                    && self
+                        .protected_templates
+                        .iter()
+                        .any(|template| occurrences(template) == rendered)
+                    && context.artifact_view().entries().iter().any(|entry| {
+                        entry.descriptor.owner == key
+                            && entry.descriptor.interface_sha256 == node.interface_sha256
+                    });
             }
         };
         let owner = match native {
@@ -9142,6 +9151,52 @@ mod tests {
             &format!("{source}import CapturedInterface\n"),
             target
         ));
+        let repeated_source = "module Expr where\n\
+            import CapturedInterface hiding (hidden)\n\
+            import qualified CapturedInterface as Captured\n\
+            import qualified CapturedInterface as Captured\n";
+        let repeated = GeneratedScaffoldImportAuthority {
+            protected_templates: Arc::from([repeated_source.to_owned()]),
+            ..authority.clone()
+        };
+        let repeated_permits = |source: &str| {
+            repeated.permits(
+                &current,
+                source,
+                target,
+                target,
+                "main",
+                "CapturedInterface",
+                "none",
+                false,
+            )
+        };
+        assert!(
+            repeated_permits(repeated_source),
+            "each protected alias and repeated occurrence retains its authority"
+        );
+        assert!(
+            !repeated_permits(&repeated_source.replacen(
+                "import qualified CapturedInterface as Captured\n",
+                "",
+                1,
+            )),
+            "a missing protected occurrence cannot be hidden by owner equality"
+        );
+        assert!(
+            !repeated_permits(&repeated_source.replacen("as Captured", "as Changed", 1,)),
+            "a changed protected alias needs new source authority"
+        );
+        assert!(
+            !repeated_permits(&format!(
+                "{repeated_source}import qualified CapturedInterface as Captured\n"
+            )),
+            "an extra authored occurrence needs ordinary source proof"
+        );
+        assert!(
+            !repeated_permits(&repeated_source.replace("hiding (hidden)", "(hidden)",)),
+            "changing hiding to an explicit import cannot preserve the protected grant"
+        );
         let no_initial_selection = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
                 producer: current.producer,
