@@ -548,7 +548,7 @@ forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env 
   localFinder <- initFinderCache
   let homeUnits = Set.union packageHomes (hsc_all_home_unit_ids env)
       selected (GWIB owner _)
-        | moduleUnit owner `Set.member` homeUnits = localFinder
+        | toUnitId (moduleUnit owner) `Set.member` homeUnits = localFinder
         | otherwise = packages
       finder = localFinder
         { lookupFinderCache = \key -> lookupFinderCache (selected key) key
