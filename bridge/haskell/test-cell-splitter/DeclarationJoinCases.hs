@@ -9,6 +9,7 @@ import Control.Monad (forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
+import Data.IntMap.Strict qualified as IntMap
 import Data.List (isInfixOf, sort)
 import Data.String (fromString)
 import Tidepool.OriginalProductRoots
@@ -45,7 +46,6 @@ import System.IO (hClose, openTempFile)
 import System.Process (callProcess, readProcess)
 import Tidepool.DeclarationJoin
 import Tidepool.ExactHydration
-import Tidepool.TypePolicy (emptyTypeGraph)
 
 declarationJoinScenario :: IO ()
 declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -492,7 +492,7 @@ originalProductRootsProofWith projectedDemand = do
           , Execution.projectedConstructors = []
           , Execution.projectedOperations = []
           , Execution.projectedBindings = []
-          , Execution.projectedTypes = emptyTypeGraph
+          , Execution.projectedTypes = Execution.TypeGraph IntMap.empty IntMap.empty
           , Execution.projectedSites = []
           , Execution.projectedConstructorReplies = []
           , Execution.projectedJsonLayout = Nothing
