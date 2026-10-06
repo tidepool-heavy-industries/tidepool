@@ -52,8 +52,8 @@
         # -fwrite-if-simplified-core writes ALL Core (including workers, loop-breakers)
         # into mi_extra_decls in .hi files, bypassing unfolding heuristics entirely.
         # -fexpose-all-unfoldings + high threshold retained as secondary defense.
-        # Targets: ghc-internal (stdlib impl) + ghc-bignum (Integer/Natural).
-        # base is just re-exports; ghc-prim has no Haskell Core.
+        # ghc-internal owns most stdlib implementation, but base also defines
+        # executable functions. Every selected boot implementation needs Core.
         ghcInternalOverlay =
           final: prev:
           let
@@ -79,10 +79,10 @@
                       fi
                     done
 
-                    # For ALL other boot libraries (containers, bytestring, array, text, etc.),
-                    # inject OPTIONS_GHC AFTER existing pragmas by appending before the module line.
+                    # For the remaining selected boot libraries, inject OPTIONS_GHC
+                    # after existing pragmas by appending before the module line.
                     # This avoids breaking files that start with {-# LANGUAGE MagicHash #-} etc.
-                    for lib in libraries/containers libraries/bytestring libraries/array \
+                    for lib in libraries/base libraries/containers libraries/bytestring libraries/array \
                                libraries/deepseq libraries/directory libraries/filepath \
                                libraries/process libraries/unix libraries/parsec \
                                libraries/mtl libraries/transformers libraries/stm \
@@ -434,7 +434,7 @@
             # Mirrors the two `for` loops in ghcInternalOverlay's postPatch above,
             # minus the one entry tracked in knownMissing below.
             expected="libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim \
-                  libraries/containers libraries/bytestring libraries/array \
+                  libraries/base libraries/containers libraries/bytestring libraries/array \
                   libraries/deepseq libraries/directory libraries/filepath \
                   libraries/process libraries/unix libraries/parsec \
                   libraries/mtl libraries/transformers libraries/stm \

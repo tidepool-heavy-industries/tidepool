@@ -43,7 +43,7 @@ import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTargetReferences
-  , preparedTopIdentities, projectPreparedTarget, prepareProjection
+  , preparedTopIdentities, preparedRootIdentity, projectPreparedTarget, prepareProjection
   , projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Alternative(..), Atom(..), Endianness(..), Expr(..), Group(..)
@@ -73,7 +73,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "recovered-body"
-  [ testCase "original recovered hsc package body" assertRecoveredExecutionStackBody
+  [ testCase "original recovered base package body" assertRecoveredBaseBody
+  , testCase "original recovered hsc package body" assertRecoveredExecutionStackBody
   , testCase "original recovered entry contracts" assertRecoveredEntryContracts
   , testCase "original recovered dictionary defining body" assertRecoveredDictionaryBody
   , testCase "original recovered body closure" assertAllRecoveredBodies
@@ -82,6 +83,82 @@ tests = testGroup "recovered-body"
       libdir <- trim <$> readProcessGhc ["--print-libdir"]
       assertSemigroupSubset root libdir
   ]
+
+-- base has its own executable definitions as well as reexports. Demand the
+-- actual defining Id without optimizer inlining so an absent fat body refuses.
+assertRecoveredBaseBody :: IO ()
+assertRecoveredBaseBody = do
+  root <- getCurrentDirectory
+  libdir <- trim <$> readProcessGhc ["--print-libdir"]
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (gopt_unset (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas)
+      { importPaths = [root </> "test-prepared-stg"] ++ importPaths flags
+      , backend = noBackend, ghcLink = NoLink }
+    target <- guessTarget (root </> "test-prepared-stg" </> "RecoveredBaseCaller.hs") Nothing Nothing
+    setTargets [target]
+    _ <- load LoadAllTargets
+    summary <- getModSummary (mkModuleName "RecoveredBaseCaller")
+    parsed <- parseModule summary
+    typed <- typecheckModule parsed
+    desugared <- desugarModule typed
+    env <- getSession
+    (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
+    home <- maybe (fail "base fixture lacks its finalized home interface") pure
+      (lookupHpt (hsc_HPT env) (ms_mod_name summary))
+    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+    let context = ProjectionContext
+          { projectionProfile = Text.pack "recovered-base-body"
+          , projectionToolchain = Text.pack "ghc-9.12.2"
+          , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
+          , projectionRetainedGenerations = mempty, projectionCurrentOriginals = mempty
+          , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredBaseCaller")
+              (Text.pack "value") (Text.pack "caller") Nothing
+          , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
+          , projectionTimeAuthority = Nothing, projectionJsonAuthority = Nothing
+          , projectionTextUnit = Nothing }
+    defining <- case [identifier | identifier <- preparedTargetReferences context [prepared]
+          , occNameString (nameOccName (varName identifier)) == "toList"
+          , Just owner <- [nameModule_maybe (varName identifier)]
+          , moduleNameString (moduleName owner) == "Data.List.NonEmpty"] of
+      [identifier] -> pure identifier
+      _ -> fail "authored nonempty caller lost its actual base defining Id"
+    let identity = preparedRootIdentity defining
+        rooted = context {projectionAuxiliaryRoots = [identity]}
+    cache <- liftIO newFatIfaceCache
+    exact <- liftIO $ recoverExactBody env cache defining
+    liftIO $ case exact of
+      ExactBody owner bindings -> do
+        assert (Just owner == nameModule_maybe (varName defining))
+          "base body changed its defining owner"
+        assert (varName defining `elem` map varName (bindersOfBinds bindings))
+          "base body lacks its exact defining binder"
+      MissingExactBody _ reason -> fail ("base defining Core is absent: " ++ show reason)
+      BodyInterfaceFailure _ reason -> fail ("base defining interface is unreadable: " ++ reason)
+      BodyTypeMismatch{} -> fail "base defining body type is incompatible"
+      UnsupportedBodyCapability{} -> fail "base toList has unsupported body capability"
+    owners <- liftIO newOwnerInterfaceCache
+    bodies <- liftIO newPreparedBodyCache
+    closure <- liftIO $ recoverPreparedClosure env cache owners bodies rooted [prepared]
+    liftIO $ do
+      assert (null (closureFailures closure)) ("base package closure failed: " ++ show (closureFailures closure))
+      program <- either (fail . ("base native projection failed: " ++) . show) pure
+        (projectPreparedTarget rooted (closureModules closure))
+      let definitions = [symbol | group <- programBindings program
+            , TopBinding symbol _ <- case group of
+                NonRecursive binding -> [binding]
+                Recursive bindings -> bindings]
+      assert (identity `elem` definitions)
+        "native base projection omitted its required exact defining root"
+      case [signature | group <- programBindings program
+          , TopBinding symbol (HeapBinding _ (Function (SignatureId index) _ _ _)) <- case group of
+              NonRecursive binding -> [binding]
+              Recursive bindings -> bindings
+          , symbol == identity
+          , signature : _ <- [drop (fromIntegral index) (programSignatures program)]] of
+        [signature] -> assert (signatureArguments signature == [LiftedRefRep])
+          "native base toList lost its unary callable contract"
+        _ -> fail "native base toList did not emit its exact defining function"
 
 -- The pinned boot-library producer must retain original Core from hsc2hs
 -- inputs too. This pure worker is demanded by ordinary error rendering.
