@@ -1530,13 +1530,15 @@ impl CacheOffer {
 }
 
 fn operation_budget_error(error: &crate::certified_products::CertificationError) -> bool {
-    matches!(
-        error,
-        crate::certified_products::CertificationError::Product(
-            tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
-                | tidepool_repr::execution_schema::ParseError::InventoryByteLimit { .. }
-        )
-    )
+    use crate::certified_products::CertificationError;
+    match error {
+        CertificationError::Product(cause) => operation_parse_budget_error(cause),
+        CertificationError::SizeLimit { .. }
+        | CertificationError::CapturedModulePayload(
+            crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_),
+        ) => true,
+        _ => false,
+    }
 }
 
 fn operation_parse_budget_error(error: &tidepool_repr::execution_schema::ParseError) -> bool {
@@ -1544,6 +1546,8 @@ fn operation_parse_budget_error(error: &tidepool_repr::execution_schema::ParseEr
         error,
         tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
             | tidepool_repr::execution_schema::ParseError::InventoryByteLimit { .. }
+            | tidepool_repr::execution_schema::ParseError::ByteLimit { .. }
+            | tidepool_repr::execution_schema::ParseError::ModuleByteLimit { .. }
     )
 }
 
@@ -1552,10 +1556,7 @@ fn recovery_operation_budget_error(
 ) -> bool {
     matches!(
         error,
-        crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(
-            tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
-                | tidepool_repr::execution_schema::ParseError::InventoryByteLimit { .. }
-        )
+        crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_)
     )
 }
 
