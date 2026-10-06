@@ -7126,19 +7126,19 @@ mod tests {
     /// boundary even when the surrounding test runner owns a compile daemon.
     /// Each native libtest case has its own process, but it still inherits the
     /// runner's daemon socket.
-    struct TestEnvGuard {
+    pub(super) struct TestEnvGuard {
         key: &'static str,
         old: Option<std::ffi::OsString>,
     }
 
     impl TestEnvGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let old = std::env::var_os(key);
             std::env::set_var(key, value);
             Self { key, old }
         }
 
-        fn unset(key: &'static str) -> Self {
+        pub(super) fn unset(key: &'static str) -> Self {
             let old = std::env::var_os(key);
             std::env::remove_var(key);
             Self { key, old }

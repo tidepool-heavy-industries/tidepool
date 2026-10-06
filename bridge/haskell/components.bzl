@@ -3228,6 +3228,8 @@ def declare_haskell_components():
         "test-source-boot/fixtures/InstanceOwner.hs": "test-source-boot/fixtures/InstanceOwner.hs",
         "test-source-boot/fixtures/InstanceRelay.hs": "test-source-boot/fixtures/InstanceRelay.hs",
         "test-source-boot/fixtures/LegacyValueNativeTarget.hs": "test-source-boot/fixtures/LegacyValueNativeTarget.hs",
+        "test-source-boot/fixtures/MemoReuseDependency.hs": "test-source-boot/fixtures/MemoReuseDependency.hs",
+        "test-source-boot/fixtures/MemoReuseTarget.hs": "test-source-boot/fixtures/MemoReuseTarget.hs",
         "test-source-boot/fixtures/MetadataBashTarget.hs": "test-source-boot/fixtures/MetadataBashTarget.hs",
         "test-source-boot/fixtures/MetadataCurrentSourceTarget.hs": "test-source-boot/fixtures/MetadataCurrentSourceTarget.hs",
         "test-source-boot/fixtures/MetadataDeferredFlagsSibling.hs": "test-source-boot/fixtures/MetadataDeferredFlagsSibling.hs",

@@ -3478,6 +3478,89 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "source compiler products survived their transaction"
   putStrLn "exact transaction reuse: check/check and check/native skip dependency work; instance drift, refusal recovery and transaction close passed"
 
+-- Current candidate admission is dependency evidence for fresh importers;
+-- yesterday's HPT entries cannot rescue a changed source or missing product.
+exactTransactionCandidateReuse :: IO ()
+exactTransactionCandidateReuse = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      target = work </> "MemoReuseTarget.hs"
+      anchorPath = work </> "OptionalAnchor.hs"
+      dependencyPath = work </> "MemoReuseDependency.hs"
+      frontends name diagnostics = length
+        [line | line <- lines diagnostics
+        , line == "tidepool-canonical-frontend module=" ++ name
+          || line == "tidepool-checked module=" ++ name ++ " target=False"
+          || ("tidepool-timing-detail parent=typecheck phase=" ++ name ++ " ") `isPrefixOf` line]
+      isInt checked = maybe False (`eqType` intTy) (crResultType checked)
+  forM_ ["OptionalAnchor.hs", "MemoReuseDependency.hs", "MemoReuseTarget.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  original <- runPipelineSelected (PreparedProducts Nothing) target [work]
+  originalFixture <- capturePreparedFixture work original
+  writeGenuineCandidateManifestFor ["OptionalAnchor"] work originalFixture
+  candidates <- readModuleCandidates (manifest work) >>= either fail pure
+  candidate <- case candidates of
+    [value] | candidateModule value == "OptionalAnchor" -> pure value
+    _ -> fail "candidate memo control requires one genuine original leaf"
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath
+        ,ssIncarnation=Just "candidate-transaction-reuse"}
+  withResidentPipelineSelectedRequests [work] $ \runRequest ->
+    runRequest (pure ()) $ \compile -> do
+      let check = compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile
+            (Just scope) target [work] Nothing
+          native = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+            (Just scope) target [work] Nothing
+          requireAccepted prepared diagnostics = unless
+            (map candidateModule (pprAcceptedCandidates prepared) == ["OptionalAnchor"]
+              && frontends "OptionalAnchor" diagnostics == 0
+              && fmap renderType (prResultType (pprPipelineResult prepared)) == Just "Int") $
+                fail "candidate memo control lost current admission or native result type"
+      -- Seed a genuinely finalized importer. Deferred metadata-only checking
+      -- does not itself promise a canonical product to promote in this test.
+      (cold,coldDiagnostics) <- captureDiagnostics native
+      requireAccepted cold coldDiagnostics
+      unless (frontends "MemoReuseDependency" coldDiagnostics == 1
+          && Map.member (mkModuleName "MemoReuseDependency") (pprFinalizedModules cold)) $
+        fail "cold candidate native compile did not finalize its fresh importer"
+      (checked,checkedDiagnostics) <- captureDiagnostics check
+      unless (isInt checked && frontends "MemoReuseDependency" checkedDiagnostics == 0
+          && counterValues "transaction_reused_source_products" checkedDiagnostics == [1]) $
+        fail "checking replayed its already finalized candidate importer"
+      (warm,warmDiagnostics) <- captureDiagnostics native
+      requireAccepted warm warmDiagnostics
+      unless (frontends "MemoReuseDependency" warmDiagnostics == 0
+          && counterValues "transaction_reused_source_products" warmDiagnostics == [1]
+          && Map.member (mkModuleName "MemoReuseDependency") (pprFinalizedModules warm)) $
+        fail "current admitted candidate did not preserve its fresh importer's canonical memo"
+      writeFile anchorPath "module OptionalAnchor where\nanchor :: Bool\nanchor = True\n"
+      changed <- sourceFailureDiagnostics check
+        `finally` copyFile (fixture "OptionalAnchor.hs") anchorPath
+      case changed of
+        Left diagnostics | any (\diagnostic -> sourceDiagnosticAt dependencyPath "Bool" diagnostic
+            && "Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+        Left diagnostics -> fail ("changed candidate source failed for another reason: " ++ show diagnostics)
+        Right _ -> fail "old candidate HPT rescued an invalid current importer"
+      (recovered,recoveryDiagnostics) <- captureDiagnostics native
+      requireAccepted recovered recoveryDiagnostics
+      unless (frontends "MemoReuseDependency" recoveryDiagnostics == 1) $
+        fail "failed candidate/source checking retained a partial memo"
+      let productPath = candidateProductPath candidate
+      productBytes <- BS.readFile productPath
+      BS.writeFile productPath (BSC.pack "invalid original native product")
+      (refused,refusalDiagnostics) <- captureDiagnostics native
+        `finally` BS.writeFile productPath productBytes
+      unless (null (pprAcceptedCandidates refused)
+          && frontends "OptionalAnchor" refusalDiagnostics == 1
+          && frontends "MemoReuseDependency" refusalDiagnostics == 1
+          && counterValues "transaction_reused_source_products" refusalDiagnostics == [0]) $
+        fail "previous accepted candidate or importer survived current native-product refusal"
+      (restored,restoredDiagnostics) <- captureDiagnostics native
+      requireAccepted restored restoredDiagnostics
+      unless (frontends "MemoReuseDependency" restoredDiagnostics == 0
+          && counterValues "transaction_reused_source_products" restoredDiagnostics == [1]) $
+        fail "restored current candidate did not recover its independently validated importer"
+  putStrLn "exact candidate memo: checked/native importer reuse, current source/native refusal, recovery and candidate authority passed"
+
 exactLegacyValueIsolation :: IO ()
 exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
   valueOwner <- maybe (fail "invalid legacy isolation value owner") pure

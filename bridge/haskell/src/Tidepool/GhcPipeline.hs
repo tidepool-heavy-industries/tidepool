@@ -2035,52 +2035,32 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             , "same-incarnation=" ++ show sameIncarnation
                             , "quasiquotes=" ++ renderQuasiQuoteUse (moduleFactQuasiQuoteUse (payloadFacts (gmePayload entry))) ]) (Just entry)
                           pure Nothing
-    validatedMemo <- case pvExactScope variant of
+    let sourceOrder = [summary
+          | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
+          , ms_hsc_src summary == HsSrcFile]
+    -- Current original/candidate admission must not consult last cycle's fresh
+    -- source interfaces. Keep those HMIs only as local restoration candidates;
+    -- their finalized products remain owned by the transaction memo.
+    previousSourceHomes <- case pvExactScope variant of
       Nothing -> pure Map.empty
       Just admitted -> do
-        let sourceOrder = [summary
-              | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
-              , ms_hsc_src summary == HsSrcFile]
-        retainedEntries <- fmap catMaybes $ forM sourceOrder $ \summary -> do
-          cached <- lookupValidMemo summary
-          let ready = cached >>= \entry -> case cachedInterface summary entry of
-                Nothing -> Nothing
-                Just _ -> Just entry
-          recordValidity summary (isJust ready)
-          pure ((\entry -> (ms_mod summary,entry)) <$> ready)
-        liftIO (writeIORef validThisCycleRef Map.empty)
         current <- getSession
-        let validEntries = Map.fromList retainedEntries
-            exactOwners = Set.fromList
+        let exactOwners = Set.fromList
               [mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
               | artifact <- map (\(artifact,_,_) -> artifact) (scopeInterfaces admitted)
                 ++ scopeValueInterfaces admitted]
-            permitted = Set.union exactOwners (Set.fromList
-              [ms_mod summary | summary <- sourceOrder
-              , ms_mod summary `Map.member` validEntries])
-            summariesByOwner = Map.fromList
-              [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph current)]
-            currentSources = Map.fromList [(ms_mod summary,summary) | summary <- sourceOrder]
-            names = Set.toAscList (Set.map moduleName permitted)
-            retainedHomes = [case Map.lookup owner currentSources of
-                  Just summary | not (backendGeneratesCode (backend (ms_hspp_opts summary))) ->
-                    hmi {hm_linkable=emptyHomeModInfoLinkable}
-                  _ -> hmi
-              | name <- names
-              , Just hmi <- [lookupHpt (hsc_HPT current) name]
-              , let owner = mi_module (hm_iface hmi)
-              , owner `Set.member` permitted
-              , case Map.lookup owner validEntries of
-                  Nothing -> True
-                  Just entry -> case Map.lookup owner summariesByOwner of
-                    Nothing -> False
-                    Just summary -> mi_iface_hash (mi_final_exts (hm_iface hmi)) == mi_iface_hash
-                      (mi_final_exts (hm_iface (finalizedHomeModInfo (loadedFinalized
-                        (payloadLoaded summary (gmePayload entry))))))]
+            previousHomes = Map.fromList
+              [(ms_mod summary,hmi) | summary <- sourceOrder
+              , ms_mod summary `Set.notMember` exactOwners
+              , Just hmi <- [lookupHpt (hsc_HPT current) (ms_mod_name summary)]
+              , mi_module (hm_iface hmi) == ms_mod summary]
+            exactHomes = [hmi | owner <- Set.toAscList exactOwners
+              , Just hmi <- [lookupHpt (hsc_HPT current) (moduleName owner)]
+              , mi_module (hm_iface hmi) == owner]
         setSession (hscUpdateHPT (const (foldr
           (\hmi table -> addToHpt table (moduleName (mi_module (hm_iface hmi))) hmi)
-          emptyHomePackageTable retainedHomes)) current)
-        pure validEntries
+          emptyHomePackageTable exactHomes)) current)
+        pure previousHomes
     sourceSelection <- case pvExactScope variant of
       Nothing -> pure Nothing
       Just scope -> withSourceSelectionRefusal
@@ -2101,6 +2081,40 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw path
+    -- One dependency-order decision combines current admitted originals with
+    -- source memo validation. An offered name or a previous HPT entry cannot
+    -- substitute for this cycle's accepted candidate proof.
+    validatedMemo <- case pvExactScope variant of
+      Nothing -> pure Map.empty
+      Just _ -> do
+        retainedEntries <- fmap catMaybes $ forM sourceOrder $ \summary ->
+          case Map.lookup (ms_mod_name summary) acceptedCandidates of
+            Just _ -> recordValidity summary True >> pure Nothing
+            Nothing -> do
+              cached <- lookupValidMemo summary
+              let ready = cached >>= \entry -> case cachedInterface summary entry of
+                    Nothing -> Nothing
+                    Just _ -> Just entry
+              recordValidity summary (isJust ready)
+              pure ((\entry -> (ms_mod summary,entry)) <$> ready)
+        liftIO (writeIORef validThisCycleRef Map.empty)
+        current <- getSession
+        let validEntries = Map.fromList retainedEntries
+            restoredHomes = [if backendGeneratesCode (backend (ms_hspp_opts summary))
+                  then hmi else hmi {hm_linkable=emptyHomeModInfoLinkable}
+              | summary <- sourceOrder
+              , let owner = ms_mod summary
+              , Just entry <- [Map.lookup owner validEntries]
+              , Just hmi <- [Map.lookup owner previousSourceHomes]
+              , isNothing (lookupHpt (hsc_HPT current) (ms_mod_name summary))
+              , let finalized = hm_iface (finalizedHomeModInfo (loadedFinalized
+                      (payloadLoaded summary (gmePayload entry))))
+              , mi_module finalized == owner
+              , mi_iface_hash (mi_final_exts (hm_iface hmi)) == mi_iface_hash (mi_final_exts finalized)]
+        setSession (hscUpdateHPT (\table -> foldr
+          (\hmi homes -> addToHpt homes (moduleName (mi_module (hm_iface hmi))) hmi)
+          table restoredHomes) current)
+        pure validEntries
     let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also

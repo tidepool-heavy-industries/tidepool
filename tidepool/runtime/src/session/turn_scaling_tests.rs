@@ -1694,6 +1694,145 @@ fn demand_missing_retained(
     (identity, generation)
 }
 
+/// Exercise Main's actual checked/native pair with a nonempty admitted retained
+/// policy. The generated targets stay fresh; an independent source dependency
+/// is finalized once and reused by the next phase in the same transaction.
+#[test]
+#[serial_test::serial]
+fn checked_cell_retained_policy_reuses_finalized_dependencies() {
+    use super::tests::TestEnvGuard;
+    use tidepool_extract_cmd::request::ExtractRequest;
+
+    tidepool_testing::eval_harness::require_extract();
+    let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+    let _timing = TestEnvGuard::set("TIDEPOOL_TIMING", "1");
+    for declaration in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let images = Arc::new(ImageRegistry::new());
+        let lib = SessionLib::open(
+            SessionId(1018),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+        persistent.set_image_registry(images.clone());
+        let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+        let mut resident =
+            ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+        execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            "memo_policy_seed",
+            "memoSeed <- pure (41 :: Int)",
+            0,
+            &ScalePublication::Ephemeral,
+        );
+        assert!(resident.current_binding_in(public, "memoSeed").is_some());
+        std::fs::write(
+            root.path().join("SessionBodyDemandSupport.hs"),
+            include_str!("fixtures/session-body-demand-support.hs"),
+        )
+        .unwrap();
+        let imports = SourceImports::from_specs(["qualified SessionBodyDemandSupport"]);
+        let diagnostics = tempfile::tempdir().unwrap();
+        let _capture = TestEnvGuard::set("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE", "1");
+        let _root = TestEnvGuard::set("TIDEPOOL_TEST_ARTIFACT_ROOT", diagnostics.path());
+        let source = if declaration {
+            "memoDeclared :: Int\nmemoDeclared = SessionBodyDemandSupport.retainedFunction memoSeed"
+        } else {
+            "_ <- if SessionBodyDemandSupport.retainedFunction memoSeed == 42 then pure () else error \"checked/native value mismatch\""
+        };
+        try_execute_cell_with_template_imports(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            if declaration {
+                "memo_policy_declaration"
+            } else {
+                "memo_policy_native"
+            },
+            source,
+            usize::from(declaration),
+            &ScalePublication::Ephemeral,
+            AuthorityChecks::Configured,
+            &imports,
+        )
+        .expect("the admitted checked/native pair must preserve its retained value");
+        let transactions = std::fs::read_dir(diagnostics.path().join("compiler-transactions"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        let relevant = transactions
+            .iter()
+            .filter_map(|directory| {
+                let stderr = std::fs::read_to_string(directory.join("compiler.stderr")).ok()?;
+                stderr
+                    .contains("module=SessionBodyDemandSupport")
+                    .then_some((directory, stderr))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(relevant.len(), 1, "one physical whole-cell compiler request");
+        let (directory, stderr) = &relevant[0];
+        let request = ExtractRequest::decode(
+            &std::fs::read(directory.join("compiler-request.bin")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            request.retained_generations().keys().any(|identity| {
+                identity.module.starts_with("Tidepool.Session.Val.")
+                    && identity.occurrence == "memoSeed"
+            }),
+            "the physical request must carry the genuine retained home value"
+        );
+        for phase in ["frontend", "finalization"] {
+            let marker = format!("tidepool-canonical-{phase} module=SessionBodyDemandSupport");
+            assert_eq!(
+                stderr.lines().filter(|line| *line == marker).count(),
+                1,
+                "shared source {phase} repeated in declaration={declaration}: {stderr}"
+            );
+        }
+        assert!(
+            stderr.lines().any(|line| {
+                line.strip_prefix("tidepool-count name=transaction_reused_source_products count=")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .is_some_and(|count| count > 0)
+            }),
+            "native compilation must consume validated canonical products: {stderr}"
+        );
+        assert!(
+            stderr.lines().any(|line| {
+                line.starts_with("tidepool-checked module=") && line.ends_with(" target=True")
+            }),
+            "checking still owns its fresh generated target: {stderr}"
+        );
+        if declaration {
+            execute_cell(
+                &mut resident,
+                public,
+                &effects,
+                &images,
+                (0, 0),
+                "memo_policy_declaration_value",
+                "_ <- if memoDeclared == 42 then pure () else error \"retained declaration value mismatch\"",
+                0,
+                &ScalePublication::Ephemeral,
+            );
+        }
+    }
+}
+
 /// Real retained values and a callable cross the checked-cell compiler boundary.
 /// Rebinding changes the public winner while previously admitted declarations
 /// continue to demand the exact original native owners.

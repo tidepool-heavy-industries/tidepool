@@ -1322,7 +1322,8 @@ runCellProgramMode compiler caches args cellPath exact planned = do
                 rendered <- either fail pure (renderCellCheckSource checkingTemplate plan)
                 let globalSource = globalProgramKeys offset (length (cellPlanItems plan)) rendered
                 writeFile checkPath globalSource
-                scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs)) Set.empty
+                scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs))
+                  (Map.keysSet (requestRetainedGenerations localArgs))
                   (withSourceImportIntents (cellPlanPrologue plan)
                     (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
                       (CheckedItemCompile [] (programOriginal state) prefix)))
@@ -1544,7 +1545,8 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         pure original
       checkOriginal plan = do
         _ <- writeOriginal plan
-        compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty
+        compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args))
+          (Map.keysSet (requestRetainedGenerations args))
           (withSourceImportIntents (cellPlanPrologue plan)
             (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)) scope sourcePath
           (requestIncludes args) (requestBuildProductsDir args)
