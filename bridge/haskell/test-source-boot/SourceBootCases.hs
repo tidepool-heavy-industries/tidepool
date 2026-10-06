@@ -1415,11 +1415,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       compile (PreparedProducts Nothing) Set.empty
         (ExactScopeCompile purpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
     let alteredOwner product' = product' {originalIfaceSha256=replicate 64 'f'}
-    -- A product with another paired interface cannot grant scaffold authority.
-    let differentScope = admittedScope {scopeProducts=map alteredOwner (scopeProducts admittedScope)}
-    requireSourceSelectionInput "wrong paired original interface identity"
-      "generated scaffold lacks one paired original native owner" $
-      compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose differentScope)
+        malformedScope = admittedScope {scopeProducts=map alteredOwner (scopeProducts admittedScope)}
+    requireUserError "mismatched native product/interface seal"
+      "exact interface evidence is incomplete or lacks native module proof" $
+      compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose malformedScope)
         (Just hidden) target [] Nothing
     supportText <- BSC.unpack <$> BS.readFile supportPath
     let incompleteExports = unlines [if line == "  , resumeLifted" then "" else line | line <- lines supportText]
