@@ -12,6 +12,16 @@ pub struct StackRoot {
 /// Why a frame walk could not prove a complete root snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameWalkError {
+    #[error("no current-thread native stack mapping is admitted")]
+    StackMappingUnavailable,
+    #[error("native stack admission belongs to another thread")]
+    StackThreadMismatch,
+    #[error("current stack address {address:#x} is outside admitted mapping {low:#x}..{high:#x}")]
+    InvalidStackMapping {
+        address: usize,
+        low: usize,
+        high: usize,
+    },
     #[error("no stack-map registry is installed for collection")]
     RegistryUnavailable,
     #[error("frame address computation overflowed at {address:#x} ({operation})")]
@@ -38,15 +48,6 @@ pub enum FrameWalkError {
     InvalidFrameLink { fp: usize, saved_fp: usize },
 }
 
-/// Conservative fallback span (bytes) for [`StackBounds::capture`]'s HIGH
-/// bound when the platform thread-stack query is unavailable or fails.
-/// Chosen larger than any `stack_size` this repo's test harnesses hand to a
-/// JIT-driving thread (up to 256 MiB, `tests/call_depth_sequential_vs_nested.rs`),
-/// so a correct frame chain is never rejected; a genuinely wild `fp` is still
-/// caught because it must additionally fall within this span of the caller's
-/// own stack address.
-const CONSERVATIVE_STACK_SPAN: usize = 512 * 1024 * 1024;
-
 /// Explicit bounds on the stack region `walk_frames` is allowed to read.
 /// Every address the walker dereferences (a frame's saved-FP slot, its
 /// return-address slot, and every stack-map root slot) must be proven to lie
@@ -66,18 +67,6 @@ impl StackBounds {
         Self { low, high }
     }
 
-    /// Bounds for the stack the CURRENT thread is running on, given `low`:
-    /// the address of a local in a frame the caller knows sits below (at a
-    /// lower address than) every JIT frame it wants to walk — e.g. a local
-    /// in `perform_gc`, which is always called beneath the JIT call chain.
-    /// `high` comes from a real thread-stack-top query when the platform
-    /// supports one; otherwise `low + CONSERVATIVE_STACK_SPAN`, a bound this
-    /// module can justify (see its doc) but did not measure.
-    pub fn capture(low: usize) -> Self {
-        let high = query_stack_top().unwrap_or_else(|| low.saturating_add(CONSERVATIVE_STACK_SPAN));
-        Self::new(low, high.max(low))
-    }
-
     /// Whether the `len`-byte range starting at `addr` lies entirely within
     /// `[low, high)`. Uses checked addition so an `addr` near `usize::MAX`
     /// (a corrupt frame pointer) reports out-of-bounds instead of wrapping.
@@ -87,48 +76,6 @@ impl StackBounds {
             None => false,
         }
     }
-}
-
-/// Real thread-stack-top query (the highest, i.e. numerically largest,
-/// address in the calling thread's stack region — the stack grows down from
-/// here). Returns `None` when unsupported or the underlying call fails, in
-/// which case [`StackBounds::capture`] falls back to a conservative span.
-#[cfg(target_os = "linux")]
-fn query_stack_top() -> Option<usize> {
-    // SAFETY: `attr` is initialized by `pthread_getattr_np` before any other
-    // field is read, and destroyed exactly once on every return path.
-    unsafe {
-        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
-            return None;
-        }
-        let mut stackaddr: *mut libc::c_void = std::ptr::null_mut();
-        let mut stacksize: libc::size_t = 0;
-        let rc = libc::pthread_attr_getstack(&attr, &mut stackaddr, &mut stacksize);
-        libc::pthread_attr_destroy(&mut attr);
-        if rc != 0 || stackaddr.is_null() {
-            return None;
-        }
-        (stackaddr as usize).checked_add(stacksize)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn query_stack_top() -> Option<usize> {
-    // SAFETY: `pthread_self` is always a valid handle for the calling thread.
-    unsafe {
-        let addr = libc::pthread_get_stackaddr_np(libc::pthread_self());
-        if addr.is_null() {
-            None
-        } else {
-            Some(addr as usize)
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn query_stack_top() -> Option<usize> {
-    None
 }
 
 /// Walk JIT frames starting from the given frame pointer, collecting all GC roots.
@@ -154,7 +101,8 @@ fn query_stack_top() -> Option<usize> {
 ///   complete, which install/rollback (see `PreparedMachine::install`'s T3
 ///   acceptance) guarantees.
 /// - `bounds` must be a `StackBounds` the caller can justify contains every
-///   frame it expects to walk (see [`StackBounds::capture`]).
+///   frame it expects to walk and lies in actual readable storage. Production
+///   bounds come only from the active current-thread native admission.
 ///
 /// # What is enforced
 /// Every address this function dereferences — a frame's saved-FP slot, its

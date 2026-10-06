@@ -3,7 +3,6 @@
 use super::{
     entry_tests::caf_program,
     roots::{InstallationEnvironment, RootWords},
-    safepoint::NativeStackBounds,
     CompiledProgram, DescriptorMeaning,
 };
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
@@ -75,10 +74,6 @@ impl<'a> Invocation<'a> {
         let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(descriptor.allocation_extent() as usize) };
         vmctx.machine_state = (&*machine as *const MachineState).cast_mut();
-        vmctx.prepared_stack_limit = NativeStackBounds::current()
-            .unwrap()
-            .limit_with_frame_reserve(program.pipeline.native_frame_maximum())
-            .unwrap();
         Self {
             program,
             machine,
@@ -93,10 +88,11 @@ impl<'a> Invocation<'a> {
     }
 
     fn force(&mut self) -> (CallStatus, usize) {
-        NativeStackBounds::current()
-            .unwrap()
-            .ensure_current_frame_reserve(self.program.pipeline.native_frame_maximum() * 2)
+        let native_stack = crate::native_stack::NativeStackScope::borrowed(&self.machine).unwrap();
+        let admission = native_stack
+            .admit_entry(self.program.pipeline.native_frame_maximum())
             .unwrap();
+        self.vmctx.prepared_stack_limit = admission.limit();
         let adapter = self
             .program
             .pipeline

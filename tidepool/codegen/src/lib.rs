@@ -14,6 +14,7 @@ pub mod host_fns;
 pub mod layout;
 pub mod machine;
 pub mod machine_state;
+mod native_stack;
 pub mod observation;
 pub mod old_space;
 pub mod pipeline;

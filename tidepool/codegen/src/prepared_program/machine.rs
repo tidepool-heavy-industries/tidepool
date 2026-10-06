@@ -52,7 +52,6 @@ use super::run::{
     runtime_error_from_machine_or_observation, runtime_error_without_machine, try_root_words,
     try_words,
 };
-use super::safepoint::NativeStackBounds;
 use super::{
     CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, Unsupported,
 };
@@ -61,6 +60,7 @@ use crate::descriptor_bridge::{DescriptorMarshalError, DescriptorValue};
 use crate::host_fns::{prepared_gc_trigger, RuntimeError};
 use crate::machine::CancelHandle;
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
+use crate::native_stack::{NativeEntryAdmission, NativeStackScope};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
@@ -1556,6 +1556,7 @@ impl<'code> PreparedMachine<'code> {
         if self.machine.rust_roots_len() != 0
             || unsafe { self.machine.prepared_old_space() }.is_some()
             || self.machine.gc_active_range().is_none()
+            || self.machine.native_stack.borrow().is_some()
         {
             return Err(ExecutionError::NotQuiescent);
         }
@@ -2207,35 +2208,62 @@ impl<'code> PreparedMachine<'code> {
         id: ContinuationId,
     ) -> Result<(PreparedHandle, PreparedFrameEvidence), ExecutionError> {
         self.ensure_handle_access()?;
-        if self.handles.continuation(id).is_none() {
-            return Err(ExecutionError::UnknownContinuation(id));
-        }
-        self.handles
-            .try_reserve_handles(1)
-            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
-        self.handles
-            .continuation_mut(id)
-            .expect("the frame remains owned until transfer")
-            .cell
-            .make_persistent()
-            .map_err(|cause| runtime_error(&self.machine, cause))?;
-        let mut frame = self
-            .handles
-            .take_continuation(id)
-            .expect("the transitioned frame is consumed without another boundary");
-        let (evidence, realm) = (frame.evidence, frame.realm);
-        drop(frame.live_payload_root.take());
-        let raw = self
-            .handles
-            .insert_handle(frame.cell, realm, evidence.continuation_rep);
+        let result = take_parked_on(&self.machine, &mut self.handles, id);
         self.assert_rooting_receipt();
-        Ok((
-            PreparedHandle {
-                raw,
-                rep: evidence.continuation_rep,
-            },
-            evidence,
-        ))
+        result
+    }
+
+    /// Admit this thread and the runner's frame budget before consuming the
+    /// parked frame. Admission refusal leaves the original frame rooted.
+    pub fn run_parked_entry_retained(
+        &mut self,
+        id: ContinuationId,
+        answer: PreparedHandle,
+        options: PreparedCallOptions,
+    ) -> Result<(RealmId, PreparedFrameEvidence, PreparedResultBatch), ExecutionError> {
+        self.ensure_handle_access()?;
+        let frame = self
+            .handles
+            .continuation(id)
+            .ok_or(ExecutionError::UnknownContinuation(id))?;
+        let (realm, evidence) = (frame.realm, frame.evidence);
+        let program = self
+            .programs
+            .get(&evidence.runner)
+            .ok_or(ExecutionError::UnknownProgram(evidence.runner))?;
+        let statics = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("resume: no static catalog"))?
+            .borrow();
+        let native_stack =
+            NativeStackScope::borrowed(&self.machine).map_err(runtime_error_without_machine)?;
+        let admission = native_stack
+            .admit_entry(program.program.get().pipeline.native_frame_maximum())
+            .map_err(runtime_error_without_machine)?;
+        let cancel = self.handles.cancel_flag(realm);
+        let (continuation, _) = take_parked_on(&self.machine, &mut self.handles, id)?;
+        let result = program.run_entry_retained(
+            admission,
+            evidence.resume_entry,
+            &[
+                PreparedInput::Managed(continuation),
+                PreparedInput::Managed(answer),
+            ],
+            options,
+            cancel,
+            realm,
+            &self.machine,
+            &mut self.vmctx,
+            &mut self.old_space,
+            &self.descriptors,
+            &mut self.handles,
+            &statics,
+            &self.descriptor_registry,
+        );
+        drop(self.handles.take_handle(continuation.raw));
+        self.machine.end_prepared_call();
+        result.map(|batch| (realm, evidence, batch))
     }
 
     /// Transfer the frame's live payload cell into a retained handle. The
@@ -2810,17 +2838,12 @@ impl<'code> PreparedMachine<'code> {
             .ok_or(ExecutionError::UnknownProgram(id))?
             .program
             .get();
-        let max_native_frame = program.pipeline.native_frame_maximum();
-        let reserve = max_native_frame
-            .checked_mul(2)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
-        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
-        bounds
-            .ensure_current_frame_reserve(reserve)
+        let native_stack =
+            NativeStackScope::borrowed(&self.machine).map_err(runtime_error_without_machine)?;
+        let admission = native_stack
+            .admit_entry(program.pipeline.native_frame_maximum())
             .map_err(runtime_error_without_machine)?;
-        self.vmctx.prepared_stack_limit = bounds
-            .limit_with_frame_reserve(max_native_frame)
-            .map_err(runtime_error_without_machine)?;
+        self.vmctx.prepared_stack_limit = admission.limit();
         self.machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
@@ -2973,7 +2996,13 @@ impl<'code> PreparedMachine<'code> {
             .programs
             .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
+        let native_stack =
+            NativeStackScope::borrowed(&self.machine).map_err(runtime_error_without_machine)?;
+        let admission = native_stack
+            .admit_entry(program.program.get().pipeline.native_frame_maximum())
+            .map_err(runtime_error_without_machine)?;
         let result = program.run_entry_retained(
+            admission,
             entry,
             arguments,
             options,
@@ -3031,7 +3060,13 @@ impl<'code> PreparedMachine<'code> {
             .programs
             .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
+        let native_stack =
+            NativeStackScope::borrowed(&self.machine).map_err(runtime_error_without_machine)?;
+        let admission = native_stack
+            .admit_entry(program.program.get().pipeline.native_frame_maximum())
+            .map_err(runtime_error_without_machine)?;
         let result = program.run_entry(
+            admission,
             entry,
             arguments,
             options,
@@ -3045,6 +3080,38 @@ impl<'code> PreparedMachine<'code> {
         self.machine.end_prepared_call();
         result
     }
+}
+
+fn take_parked_on(
+    machine: &MachineState,
+    handles: &mut ResourceLedger,
+    id: ContinuationId,
+) -> Result<(PreparedHandle, PreparedFrameEvidence), ExecutionError> {
+    if handles.continuation(id).is_none() {
+        return Err(ExecutionError::UnknownContinuation(id));
+    }
+    handles
+        .try_reserve_handles(1)
+        .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
+    handles
+        .continuation_mut(id)
+        .expect("the frame remains owned until transfer")
+        .cell
+        .make_persistent()
+        .map_err(|cause| runtime_error(machine, cause))?;
+    let mut frame = handles
+        .take_continuation(id)
+        .expect("the transitioned frame is consumed without another boundary");
+    let (evidence, realm) = (frame.evidence, frame.realm);
+    drop(frame.live_payload_root.take());
+    let raw = handles.insert_handle(frame.cell, realm, evidence.continuation_rep);
+    Ok((
+        PreparedHandle {
+            raw,
+            rep: evidence.continuation_rep,
+        },
+        evidence,
+    ))
 }
 
 fn collect_on(
@@ -3068,6 +3135,8 @@ fn collect_on(
             }
         }
     }
+    let _native_stack =
+        NativeStackScope::borrowed(machine).map_err(runtime_error_without_machine)?;
     let empty_registry = crate::stack_map::StackMapRegistry::new();
     let linked = machine.stack_map_chain().is_none();
     if linked {
@@ -3096,6 +3165,7 @@ impl<'code> InstalledProgram<'code> {
     )]
     fn run_entry_retained(
         &self,
+        admission: NativeEntryAdmission<'_>,
         entry: ValueId,
         arguments: &[PreparedInput],
         options: PreparedCallOptions,
@@ -3187,17 +3257,7 @@ impl<'code> InstalledProgram<'code> {
             machine,
             mark: argument_mark,
         };
-        let max_native_frame = self.program.get().pipeline.native_frame_maximum();
-        let reserve = max_native_frame
-            .checked_mul(2)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
-        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
-        bounds
-            .ensure_current_frame_reserve(reserve)
-            .map_err(runtime_error_without_machine)?;
-        vmctx.prepared_stack_limit = bounds
-            .limit_with_frame_reserve(max_native_frame)
-            .map_err(runtime_error_without_machine)?;
+        vmctx.prepared_stack_limit = admission.limit();
         machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
@@ -3216,6 +3276,8 @@ impl<'code> InstalledProgram<'code> {
                 descriptor_registry,
             )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
+            #[cfg(test)]
+            machine.native_entries.set(machine.native_entries.get() + 1);
             unsafe {
                 let adapter: extern "C" fn(
                     *mut VMContext,
@@ -3329,6 +3391,7 @@ impl<'code> InstalledProgram<'code> {
     )]
     fn run_entry(
         &self,
+        admission: NativeEntryAdmission<'_>,
         entry: ValueId,
         arguments: &[u64],
         options: PreparedCallOptions,
@@ -3369,18 +3432,7 @@ impl<'code> InstalledProgram<'code> {
                 actual: arguments.len(),
             });
         }
-        let max_native_frame = self.program.get().pipeline.native_frame_maximum();
-        let native_frame_reserve = max_native_frame
-            .checked_mul(2)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
-        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
-        bounds
-            .ensure_current_frame_reserve(native_frame_reserve)
-            .map_err(runtime_error_without_machine)?;
-        vmctx.prepared_stack_limit = bounds
-            .limit_with_frame_reserve(max_native_frame)
-            .map_err(runtime_error_without_machine)?;
-
+        vmctx.prepared_stack_limit = admission.limit();
         machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
@@ -3401,6 +3453,8 @@ impl<'code> InstalledProgram<'code> {
                 descriptor_registry,
             )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
+            #[cfg(test)]
+            machine.native_entries.set(machine.native_entries.get() + 1);
             unsafe {
                 let adapter: extern "C" fn(
                     *mut VMContext,
@@ -3936,6 +3990,38 @@ mod tests {
             .expect("a settled cancellation must leave the machine reusable");
         assert_eq!(result.values.len(), 1);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn stack_query_refusal_enters_no_generated_code_and_leaves_machine_reusable() {
+        let (mut machine, program) = machine();
+        let options = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let before = machine.machine.gc_generation();
+        machine.machine.fail_next_native_stack_query.set(true);
+        let error = machine
+            .run_entry_retained(program, ValueId(0), &[], options, RealmId::ROOT)
+            .unwrap_err();
+        assert!(matches!(error, ExecutionError::Runtime(failure)
+            if failure.cause == RuntimeError::StackOverflow && failure.disposition == MachineDisposition::Reusable));
+        assert_eq!(machine.machine.native_entries.get(), 0);
+        assert_eq!(machine.machine.gc_generation(), before);
+        assert_eq!(machine.handle_count(), 0);
+        assert!(machine.machine.native_stack.borrow().is_none());
+        machine.quiesce().unwrap();
+        let result = machine
+            .run_entry_retained(program, ValueId(0), &[], options, RealmId::ROOT)
+            .unwrap();
+        assert_eq!(machine.machine.native_entries.get(), 1);
+        assert!(machine.machine.native_stack.borrow().is_none());
+        for value in result.values {
+            if let PreparedResult::Managed(handle) = value {
+                assert!(machine.release(handle));
+            }
+        }
+        machine.quiesce().unwrap();
     }
 
     #[test]

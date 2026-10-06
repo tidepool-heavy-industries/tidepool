@@ -356,6 +356,18 @@ pub struct MachineState {
     #[cfg(test)]
     prepared_test_failure: RefCell<Option<PreparedTestFailure>>,
     stack_map_registry: RefCell<Vec<*const StackMapRegistry>>,
+    /// Weak association only: a thread-bound native scope owns the mapping.
+    /// The final scope clears it before this machine can become quiescent.
+    pub(crate) native_stack:
+        RefCell<Option<std::rc::Weak<crate::native_stack::NativeStackMapping>>>,
+    #[cfg(test)]
+    pub(crate) native_stack_queries: Cell<u64>,
+    #[cfg(test)]
+    pub(crate) fail_next_native_stack_query: Cell<bool>,
+    #[cfg(test)]
+    pub(crate) native_frame_walks: Cell<u64>,
+    #[cfg(test)]
+    pub(crate) native_entries: Cell<u64>,
     /// Code-range index over `stack_map_registry`, populated exactly while
     /// two or more registries are linked (a single registry is searched
     /// directly). Every link/unlink path below keeps it in step with the
@@ -524,6 +536,15 @@ impl MachineState {
             #[cfg(test)]
             prepared_test_failure: RefCell::new(None),
             stack_map_registry: RefCell::new(Vec::new()),
+            native_stack: RefCell::new(None),
+            #[cfg(test)]
+            native_stack_queries: Cell::new(0),
+            #[cfg(test)]
+            fail_next_native_stack_query: Cell::new(false),
+            #[cfg(test)]
+            native_frame_walks: Cell::new(0),
+            #[cfg(test)]
+            native_entries: Cell::new(0),
             stack_map_index: RefCell::new(Arc::default()),
             runtime_error: RefCell::new(None),
             disposition: Cell::new(MachineDisposition::Reusable),

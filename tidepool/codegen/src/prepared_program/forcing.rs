@@ -45,12 +45,12 @@ pub(super) struct ObservationRoots<'a> {
     limit: usize,
     used: usize,
     mark: usize,
-    stack: super::safepoint::NativeStackBounds,
+    stack: crate::native_stack::NativeStackScope<'a>,
 }
 
 impl<'a> ObservationRoots<'a> {
     pub fn new(machine: &'a MachineState, budget: usize) -> Result<Self, ExecutionError> {
-        let stack = super::safepoint::NativeStackBounds::current()
+        let stack = crate::native_stack::NativeStackScope::borrowed(machine)
             .map_err(|cause| super::run::runtime_error(machine, cause))?;
         Ok(Self {
             machine,

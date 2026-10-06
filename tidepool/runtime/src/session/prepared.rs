@@ -5152,27 +5152,15 @@ impl PreparedEngine {
         id: ContinuationId,
         answer: PreparedHandle,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
-        let taken = self.take_for_resume(id, answer);
-        let (continuation, evidence, realm) = match taken {
-            Ok(taken) => taken,
-            Err(error) => {
-                self.machine.release(answer);
-                return Err(error);
-            }
-        };
-        let batch = self.machine.run_entry_retained(
-            evidence.runner,
-            evidence.resume_entry,
-            &[
-                PreparedInput::Managed(continuation),
-                PreparedInput::Managed(answer),
-            ],
-            SETTLE_CALL,
-            realm,
-        );
-        self.machine.release(continuation);
+        if let Err(error) = self.validate_owned_resume(id, answer) {
+            self.machine.release(answer);
+            return Err(error);
+        }
+        let resumed = self
+            .machine
+            .run_parked_entry_retained(id, answer, SETTLE_CALL);
         self.machine.release(answer);
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
+        let (realm, evidence, batch) = resumed.map_err(PreparedRuntimeError::Run)?;
         let settlement = self.settle_batch(evidence.runner, realm, batch)?;
         Ok(PreparedResumed {
             settlement,
@@ -5205,23 +5193,10 @@ impl PreparedEngine {
         if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let (continuation, evidence) = self
+        let (realm, evidence, batch) = self
             .machine
-            .take_parked(id)
+            .run_parked_entry_retained(id, answer, SETTLE_CALL)
             .map_err(PreparedRuntimeError::Run)?;
-        let batch = self.machine.run_entry_retained(
-            evidence.runner,
-            evidence.resume_entry,
-            &[
-                PreparedInput::Managed(continuation),
-                PreparedInput::Managed(answer),
-            ],
-            SETTLE_CALL,
-            realm,
-        );
-        self.machine.release(continuation);
-        // `answer` stays live: the caller owns it before and after.
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
         let settlement = self.settle_batch(evidence.runner, realm, batch)?;
         Ok(PreparedResumed {
             settlement,
@@ -5336,13 +5311,14 @@ impl PreparedEngine {
         self.resume_parked(id, built)
     }
 
-    /// The pre-take checks of a resume, then the take: the frame exists,
+    /// Validate the owned answer before current-thread admission and frame transfer.
+    /// The frame exists,
     /// `answer` is live under its resource scope, the scope is not cancelled.
-    fn take_for_resume(
+    fn validate_owned_resume(
         &mut self,
         id: ContinuationId,
         answer: PreparedHandle,
-    ) -> Result<(PreparedHandle, PreparedFrameEvidence, RealmId), PreparedRuntimeError> {
+    ) -> Result<(), PreparedRuntimeError> {
         let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
@@ -5357,11 +5333,7 @@ impl PreparedEngine {
         if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let (continuation, evidence) = self
-            .machine
-            .take_parked(id)
-            .map_err(PreparedRuntimeError::Run)?;
-        Ok((continuation, evidence, realm))
+        Ok(())
     }
 
     /// Validate and construct an owned response directly from structural
@@ -8691,6 +8663,89 @@ pub(super) mod tests {
             type_display: None,
             defining_expr: None,
             scope: tidepool_codegen::scope::ScopeId::ROOT,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn small_stack_resume_preserves_frame_and_answer_custody_for_normal_thread_retry() {
+        for borrowed in [false, true] {
+            let (mut engine, program, parked) = park_json_fixture_request(
+                Some(ConstructorReply::Static(TypeNodeId(0))),
+                8,
+                serde_json::Value::Null,
+            );
+            let id = parked.unwrap().id;
+            let answer = engine
+                .build_host_value(
+                    RealmId::ROOT,
+                    &HaskellValue::Con(DataConId(105), vec![]),
+                    &json_mount_table(),
+                )
+                .unwrap();
+            let before_roots = engine.persistent_roots_count();
+            engine.machine.quiesce().unwrap();
+            let mut engine = std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    let refused = if borrowed {
+                        engine.resume_with_handle(id, answer.raw())
+                    } else {
+                        engine.resume_parked(id, answer)
+                    };
+                    assert!(matches!(
+                        refused,
+                        Err(PreparedRuntimeError::Run(ExecutionError::Runtime(
+                            tidepool_codegen::machine_state::MachineFailure {
+                                cause: tidepool_codegen::host_fns::RuntimeError::StackOverflow,
+                                disposition:
+                                    tidepool_codegen::machine_state::MachineDisposition::Reusable,
+                            }
+                        )))
+                    ));
+                    assert_eq!(engine.parked_count(), 1);
+                    assert_eq!(engine.prepared_handle_of(answer.raw()).is_some(), borrowed);
+                    assert_eq!(
+                        engine.persistent_roots_count(),
+                        before_roots - usize::from(!borrowed)
+                    );
+                    engine.machine.quiesce().unwrap();
+                    engine
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            let retry = if borrowed {
+                answer
+            } else {
+                engine
+                    .build_host_value(
+                        RealmId::ROOT,
+                        &HaskellValue::Con(DataConId(105), vec![]),
+                        &json_mount_table(),
+                    )
+                    .unwrap()
+            };
+            let resumed = if borrowed {
+                engine.resume_with_handle(id, retry.raw())
+            } else {
+                engine.resume_parked(id, retry)
+            }
+            .unwrap();
+            let PreparedSettlement::Done { value } = resumed.settlement else {
+                panic!("resume returns Done answer")
+            };
+            assert_eq!(
+                engine.machine.observe_handle(program, value, 100).unwrap(),
+                HaskellValue::Con(DataConId(105), vec![])
+            );
+            assert_eq!(engine.parked_count(), 0);
+            if borrowed {
+                assert!(engine.release(answer));
+            }
+            assert!(engine.release(value));
+            engine.quiesce_and_collect_now().unwrap();
+            assert_eq!(engine.residency().root_cells, 0);
         }
     }
 
