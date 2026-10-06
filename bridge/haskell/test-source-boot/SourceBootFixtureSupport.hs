@@ -54,8 +54,8 @@ capturePreparedFixture work prepared = do
   hPutStr stderr diagnostics
   pure capture
 
--- Refusal assertions catch only the owning category. Unexpected source,
--- filesystem, process and cancellation failures keep their original exception.
+-- Refusal assertions catch only the owning category. Unexpected synchronous
+-- failures retain their original cause with control context; cancellation escapes.
 requireOriginalSourceRejection :: String -> ExecutionSourceFailure -> IO a -> IO ()
 requireOriginalSourceRejection label expected action = do
   result <- try (void action) :: IO (Either SomeException ())
