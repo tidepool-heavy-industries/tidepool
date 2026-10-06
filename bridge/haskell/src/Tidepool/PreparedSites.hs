@@ -50,7 +50,7 @@ import GHC.Core.TyCon (TyCon, isNewTyCon, newTyConCo, tyConArity, tyConDataCons,
 import GHC.Core.DataCon
   ( DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe
   , dataConInstOrigArgTys, dataConUnivTyVars, isVanillaDataCon )
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit, hscEPS, lookupType)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_HUG, hsc_home_unit, hscEPS, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
@@ -72,9 +72,10 @@ import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleName
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts, mi_decls)
 import GHC.Unit.External (ExternalPackageState(eps_PIT))
-import GHC.Unit.Module.Env (moduleEnvToList)
+import GHC.Unit.Env (lookupHugByModule)
+import GHC.Unit.Module.Env (moduleEnvToList, lookupModuleEnv)
 import GHC.Iface.Syntax (IfaceDecl(..), ifaceDeclImplicitBndrs)
-import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Types.TypeEnv (typeEnvIds, lookupTypeEnv)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
 import Tidepool.CheckedCell (captureCheckedTypeWitness, captureRequestTypeSignatures)
@@ -271,7 +272,13 @@ resolvePreparedSiteEnvironment env = do
   let versionsOf interfaces = Map.fromList
         [(mi_module interface, mi_iface_hash (mi_final_exts interface)) | interface <- interfaces]
       versions = Map.union (versionsOf (map hm_iface (eltsHpt (hsc_HPT env))))
-        (versionsOf (map snd (moduleEnvToList (eps_PIT external))))
+        (Map.union declarationVersions (versionsOf (map snd (moduleEnvToList (eps_PIT external)))))
+      declarationVersions = Map.fromList
+        [(owner, version) | (_, fact) <- Map.elems declarations ++ Map.elems recovered
+          , (owner, version) <- case fact of
+              KnownDeclaration owner version _ -> [(owner, version)]
+              MissingDeclaration owner version _ -> [(owner, version)]
+              _ -> []]
       tycon role = case fst (declarations Map.! role) of
         Just (ATyCon original) -> Just original
         _ -> Nothing
@@ -362,25 +369,30 @@ resolveDeclaration env spelling occurrence nominal = do
   case found of
     Found _ owner -> do
       name <- initIfaceLoad env (lookupOrig owner occurrence)
-      existing <- lookupType env name
-      let home = lookupHpt (hsc_HPT env) (moduleName owner)
+      let home = lookupHugByModule owner (hsc_HUG env)
           declared interface = any (\(_, declaration) -> occurrence `elem`
             (nameOccName (ifName declaration) : ifaceDeclImplicitBndrs declaration)) (mi_decls interface)
           absent = case home of
-            Just entry | mi_module (hm_iface entry) == owner, not (declared (hm_iface entry)) -> True
+            Just entry | not (declared (hm_iface entry)) -> True
             _ -> False
+      existing <- case home of
+        Just entry -> pure (lookupTypeEnv (md_types (hm_details entry)) name)
+        Nothing -> lookupType env name
       loaded <- case existing of
         _ | absent -> pure Nothing
         Just thing -> pure (Just thing)
+        -- importDecl reads ambient EPS, not the current home declaration. A
+        -- partial home type environment cannot authorize a stale typed object.
+        Nothing | Just _ <- home -> pure Nothing
         Nothing -> do
           result <- initIfaceLoad env (importDecl name)
           pure $ case result of
             Succeeded thing -> Just thing
             Failed _ -> Nothing
       external <- hscEPS env
-      let interfaces = [hm_iface entry | entry <- maybe [] (:[]) home]
-            ++ [interface | (actual, interface) <- moduleEnvToList (eps_PIT external), actual == owner]
-          selected = find ((== owner) . mi_module) interfaces
+      let selected = case home of
+            Just entry -> Just (hm_iface entry)
+            Nothing -> lookupModuleEnv (eps_PIT external) owner
           version = mi_iface_hash . mi_final_exts <$> selected
           missing = case version of
             Just fingerprint | absent -> MissingDeclaration owner fingerprint name
