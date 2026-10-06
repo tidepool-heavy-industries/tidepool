@@ -43,6 +43,14 @@ default 15 minutes); a worker that never replies is killed at expiry and the
 daemon recovers it through the same worker-replacement path a crash uses,
 which only `--persistent` survives.
 
+Direct identity and transaction-BEGIN handshakes share the same process owner.
+A scoped cancellation token arms the child immediately after spawn, before
+identity reads; explicitly bound transactions arm it before BEGIN. Each
+handshake has a five-minute absolute deadline and readiness-polled reads, so
+partial replies do not renew the bound. Identity refusal remains known
+unsubmitted; BEGIN ambiguity remains indeterminate. Refusal, cancellation and
+timeout settle through the endpoint's existing child termination/reap owner.
+
 A `--persistent` daemon serves `--workers N` concurrent GHC workers
 (`daemon::DEFAULT_WORKER_COUNT`, 3 by default) rather than one: a single
 accept thread owns every fence check (epoch, watched-stamp) and PREFLIGHT/STOP

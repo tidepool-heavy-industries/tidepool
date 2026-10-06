@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+#[cfg(test)]
+use std::io::Read;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ static PHYSICAL_REQUEST_SEQUENCE: std::sync::atomic::AtomicU64 =
 
 pub(crate) const BOUND_ENDPOINT_FLAG: &str = "--compiler-endpoint-v1";
 pub(crate) const IDENTITY_MAGIC: &[u8; 8] = b"TPCID002";
+const DIRECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerIdentity {
@@ -201,6 +204,20 @@ struct DirectEndpoint {
 }
 
 impl DirectEndpoint {
+    fn read_handshake(
+        &mut self,
+        bytes: &mut [u8],
+        deadline: Instant,
+        cancellation: Option<&CompilerTransactionCancellation>,
+    ) -> io::Result<()> {
+        let stdout = self.stdout.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "bound endpoint stdout is closed")
+        })?;
+        process::read_exact_until(stdout, bytes, deadline, || {
+            cancellation.is_some_and(CompilerTransactionCancellation::is_cancelled)
+        })
+    }
+
     fn abort(&mut self) {
         drop(self.stdin.take());
         drop(self.stdout.take());
@@ -364,6 +381,13 @@ impl CompilerEndpoint {
     }
 
     fn bind_unscoped(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        Self::bind_unscoped_with_cancellation(cmd, None)
+    }
+
+    fn bind_unscoped_with_cancellation(
+        cmd: &ExtractCmd,
+        cancellation: Option<&CompilerTransactionCancellation>,
+    ) -> Result<Self, SpawnError> {
         let required = std::env::var_os(crate::REQUIRED_DAEMON_ENDPOINT_ENV);
         if let Some(socket) = std::env::var_os(crate::DAEMON_SOCKET_ENV) {
             let socket = PathBuf::from(socket);
@@ -403,7 +427,11 @@ impl CompilerEndpoint {
                 ),
             ));
         }
-        Self::bind_direct(cmd)
+        Self::bind_launch_with_cancellation(
+            LaunchSpec::direct(cmd.program.clone()),
+            cancellation,
+            DIRECT_HANDSHAKE_TIMEOUT,
+        )
     }
 
     pub(crate) fn bind_direct(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
@@ -415,6 +443,14 @@ impl CompilerEndpoint {
     }
 
     fn bind_launch(spec: LaunchSpec) -> Result<Self, SpawnError> {
+        Self::bind_launch_with_cancellation(spec, None, DIRECT_HANDSHAKE_TIMEOUT)
+    }
+
+    fn bind_launch_with_cancellation(
+        spec: LaunchSpec,
+        cancellation: Option<&CompilerTransactionCancellation>,
+        timeout: Duration,
+    ) -> Result<Self, SpawnError> {
         let mut command = process::command(&spec.program);
         command
             .args(&spec.prefix)
@@ -425,33 +461,24 @@ impl CompilerEndpoint {
         let mut child = command
             .spawn()
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            SpawnError::not_submitted(
-                spec.program.clone(),
-                io::Error::other("bound endpoint stdin was not piped"),
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            SpawnError::not_submitted(
-                spec.program.clone(),
-                io::Error::other("bound endpoint stdout was not piped"),
-            )
-        })?;
-        // Construct the owner before reading the handshake so every failure
-        // path closes and reaps the child rather than leaking a half-bound
-        // compiler process.
+        // Own and arm the child before any identity IO can block. The
+        // cancellation target is the same unreaped child retained by this
+        // endpoint, including during an abandoned async caller's binding.
         let mut direct = DirectEndpoint {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take(),
             child: Arc::new(Mutex::new(child)),
-            stdin: Some(stdin),
-            stdout: Some(stdout),
             program: spec.program.clone(),
         };
+        if let Some(cancellation) = cancellation {
+            cancellation.arm(CancellationTarget::Direct(Arc::clone(&direct.child)));
+        }
+        let deadline = Instant::now() + timeout;
         let mut magic = [0u8; 8];
         let mut producer = [0u8; 32];
         let mut consumed_worker = [0u8; 32];
         direct
-            .stdout_mut()?
-            .read_exact(&mut magic)
+            .read_handshake(&mut magic, deadline, cancellation)
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
         if &magic != IDENTITY_MAGIC {
             return Err(SpawnError::not_submitted(
@@ -463,12 +490,10 @@ impl CompilerEndpoint {
             ));
         }
         direct
-            .stdout_mut()?
-            .read_exact(&mut producer)
+            .read_handshake(&mut producer, deadline, cancellation)
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
         direct
-            .stdout_mut()?
-            .read_exact(&mut consumed_worker)
+            .read_handshake(&mut consumed_worker, deadline, cancellation)
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
         Ok(Self {
             identity: CompilerIdentity::direct(producer, consumed_worker),
@@ -488,11 +513,23 @@ impl CompilerEndpoint {
         self,
         cancellation: Option<CompilerTransactionCancellation>,
     ) -> Result<CompilerTransaction, SpawnError> {
+        self.transaction_with_cancellation_timeout(cancellation, DIRECT_HANDSHAKE_TIMEOUT)
+    }
+
+    fn transaction_with_cancellation_timeout(
+        self,
+        cancellation: Option<CompilerTransactionCancellation>,
+        timeout: Duration,
+    ) -> Result<CompilerTransaction, SpawnError> {
         let identity = self.identity.clone();
         let transport_name = self.transport.name();
         let admission_started = Instant::now();
         let transport = match self.transport {
             Transport::Direct(mut endpoint) => {
+                if let Some(cancellation) = &cancellation {
+                    cancellation.arm(CancellationTarget::Direct(Arc::clone(&endpoint.child)));
+                }
+                let deadline = Instant::now() + timeout;
                 let stdin = endpoint.stdin.as_mut().ok_or_else(|| {
                     SpawnError::indeterminate(
                         endpoint.program.clone(),
@@ -509,8 +546,7 @@ impl CompilerEndpoint {
                 })?;
                 let mut accepted = [0u8; 1];
                 endpoint
-                    .stdout_mut()?
-                    .read_exact(&mut accepted)
+                    .read_handshake(&mut accepted, deadline, cancellation.as_ref())
                     .map_err(|source| {
                         SpawnError::indeterminate(endpoint.program.clone(), source)
                     })?;
@@ -519,9 +555,6 @@ impl CompilerEndpoint {
                         endpoint.program.clone(),
                         io::Error::new(io::ErrorKind::InvalidData, "compiler rejected transaction"),
                     ));
-                }
-                if let Some(cancellation) = &cancellation {
-                    cancellation.arm(CancellationTarget::Direct(Arc::clone(&endpoint.child)));
                 }
                 TransactionTransport::Direct(endpoint)
             }
@@ -714,7 +747,8 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
         ));
     }
     let transaction =
-        CompilerEndpoint::bind_unscoped(cmd)?.transaction_with_cancellation(cancellation)?;
+        CompilerEndpoint::bind_unscoped_with_cancellation(cmd, cancellation.as_ref())?
+            .transaction_with_cancellation(cancellation)?;
     let identity = transaction.identity.clone();
     TRANSACTION_SCOPE.with(|scope| -> Result<(), SpawnError> {
         let mut scope = scope.borrow_mut();
@@ -971,6 +1005,172 @@ mod tests {
     use super::*;
     use crate::{BinSource, ExtractRequest};
     use std::time::{Duration, Instant};
+
+    fn direct_handshake_fixture(directory: &Path, phase: u8) -> LaunchSpec {
+        let source = directory.join("endpoint.rs");
+        std::fs::write(&source, include_str!("test_fixtures/control_ack_worker.rs")).unwrap();
+        std::fs::write(directory.join("phase"), [phase]).unwrap();
+        let executable = directory.join("endpoint");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compile the existing immutable transport worker"
+        )]
+        let built = Command::new("rustc")
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        LaunchSpec::direct(executable.into_os_string())
+    }
+
+    fn owned_direct_child(cancellation: &CompilerTransactionCancellation) -> Option<Arc<Mutex<Child>>> {
+        let state = cancellation.state.lock().unwrap();
+        match state.target.as_ref() {
+            Some(CancellationTarget::Direct(child)) => Some(Arc::clone(child)),
+            _ => None,
+        }
+    }
+
+    fn settle_handshake_fixture<T>(
+        binding: std::thread::ScopedJoinHandle<'_, T>,
+        cancellation: &CompilerTransactionCancellation,
+        deadline: Instant,
+    ) -> T {
+        while !binding.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !binding.is_finished() {
+            // Keep a removed-deadline regression bounded through the same
+            // exact child owner, never a PID reconstructed from a fixture.
+            cancellation.cancel();
+        }
+        binding.join().unwrap()
+    }
+
+    fn cancel_stalled_direct_handshake(phase: u8) {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), phase);
+        let cancellation = CompilerTransactionCancellation::new();
+        let reader_cancellation = cancellation.clone();
+        std::thread::scope(|scope| {
+            let binding = scope.spawn(move || {
+                CompilerEndpoint::bind_launch_with_cancellation(
+                    spec,
+                    Some(&reader_cancellation),
+                    Duration::from_secs(5),
+                )
+                .and_then(|endpoint| endpoint.transaction_with_cancellation(Some(reader_cancellation)))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !directory.path().join("stalled").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if !directory.path().join("stalled").exists() {
+                cancellation.cancel();
+                let _ = binding.join();
+                panic!("fixture did not reach the actual handshake barrier");
+            }
+            let child = owned_direct_child(&cancellation);
+            let started = Instant::now();
+            // This is the same token edge invoked by the actor's async-drop guard.
+            cancellation.cancel();
+            let error = settle_handshake_fixture(
+                binding,
+                &cancellation,
+                started + Duration::from_secs(2),
+            ).unwrap_err();
+            let child = child.expect("direct child must be armed before the barrier");
+            assert_eq!(error.source.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(error.permits_rebind(), phase == 3);
+            assert!(started.elapsed() < Duration::from_secs(2));
+            let status = child.lock().unwrap().try_wait().unwrap().expect("binding owner must reap");
+            assert!(!status.success());
+        });
+    }
+
+    #[test]
+    fn direct_identity_handshake_is_cancellable_before_transaction_admission() {
+        cancel_stalled_direct_handshake(3);
+    }
+
+    #[test]
+    fn direct_begin_handshake_is_cancellable_before_acknowledgement() {
+        cancel_stalled_direct_handshake(4);
+    }
+
+    fn timeout_stalled_direct_handshake(phase: u8) {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), phase);
+        let cancellation = CompilerTransactionCancellation::new();
+        let reader_cancellation = cancellation.clone();
+        let started = Instant::now();
+        let error = std::thread::scope(|scope| {
+            let binding = scope.spawn(move || {
+                CompilerEndpoint::bind_launch_with_cancellation(
+                    spec,
+                    Some(&reader_cancellation),
+                    Duration::from_secs(1),
+                )
+                .and_then(|endpoint| {
+                    endpoint.transaction_with_cancellation_timeout(
+                        Some(reader_cancellation),
+                        Duration::from_secs(1),
+                    )
+                })
+            });
+            settle_handshake_fixture(
+                binding,
+                &cancellation,
+                started + Duration::from_secs(3),
+            ).unwrap_err()
+        });
+        assert_eq!(error.source.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.permits_rebind(), phase == 3);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(directory.path().join("stalled").exists());
+        let child = owned_direct_child(&cancellation).expect("direct child must be armed");
+        let status = child.lock().unwrap().try_wait().unwrap().expect("timeout owner must reap");
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn direct_identity_handshake_deadline_terminates_and_reaps_the_child() {
+        timeout_stalled_direct_handshake(3);
+    }
+
+    #[test]
+    fn direct_begin_handshake_deadline_terminates_and_reaps_the_child() {
+        timeout_stalled_direct_handshake(4);
+    }
+
+    #[test]
+    fn direct_handshake_success_keeps_one_worker_for_ordered_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 5);
+        let cancellation = CompilerTransactionCancellation::new();
+        let endpoint = CompilerEndpoint::bind_launch_with_cancellation(
+            spec,
+            Some(&cancellation),
+            Duration::from_secs(5),
+        ).unwrap();
+        let child = owned_direct_child(&cancellation).expect("successful bind must arm child");
+        let mut transaction = endpoint.transaction_with_cancellation(Some(cancellation.clone())).unwrap();
+        let command = ExtractCmd {
+            program: "fixture".into(),
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+        };
+        for expected in [b"1", b"2"] {
+            let response = transaction.execute(&command).unwrap();
+            assert!(response.success());
+            assert_eq!(response.output.stdout.as_slice(), expected.as_slice());
+        }
+        transaction.finish().unwrap();
+        assert!(child.lock().unwrap().try_wait().unwrap().expect("close must reap").success());
+        assert!(cancellation.state.lock().unwrap().target.is_none());
+    }
 
     #[test]
     fn producer_identity_retains_each_compiler_input() {

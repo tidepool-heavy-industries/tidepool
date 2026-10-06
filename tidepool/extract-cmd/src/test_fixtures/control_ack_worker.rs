@@ -12,6 +12,10 @@ fn main() {
     let executable = std::env::current_exe().unwrap();
     let directory = executable.parent().unwrap();
     let phase = std::fs::read(directory.join("phase")).unwrap()[0];
+    if std::env::args().any(|arg| arg == "--compiler-endpoint-v1") {
+        direct_endpoint(directory, phase);
+        return;
+    }
     let first_worker = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -65,6 +69,55 @@ fn main() {
             }
         }
         output.write_all(&[1]).unwrap();
+        output.flush().unwrap();
+    }
+}
+
+// Transport-only frontend controls. These bytes never issue compiler products.
+fn direct_endpoint(directory: &std::path::Path, phase: u8) {
+    let stall = |stage: &[u8]| {
+        std::fs::write(directory.join("stalled"), stage).unwrap();
+        loop {
+            std::thread::park();
+        }
+    };
+    if phase == 3 {
+        stall(b"identity");
+    }
+    let mut input = std::io::stdin();
+    let mut output = std::io::stdout();
+    output.write_all(b"TPCID002").unwrap();
+    output.write_all(&[1; 32]).unwrap();
+    output.write_all(&[2; 32]).unwrap();
+    output.flush().unwrap();
+    let mut prefix = [0; 8];
+    input.read_exact(&mut prefix).unwrap();
+    assert_eq!(&prefix, b"TPDTR001");
+    if phase == 4 {
+        stall(b"begin");
+    }
+    output.write_all(&[1]).unwrap();
+    output.flush().unwrap();
+    let mut requests = 0u32;
+    loop {
+        let mut command = [0];
+        input.read_exact(&mut command).unwrap();
+        if command == [0] {
+            return;
+        }
+        assert_eq!(command, [1]);
+        let _cwd = frame(&mut input);
+        let mut argc = [0; 4];
+        input.read_exact(&mut argc).unwrap();
+        for _ in 0..u32::from_le_bytes(argc) {
+            let _ = frame(&mut input);
+        }
+        requests += 1;
+        let body = requests.to_string();
+        output.write_all(&0i32.to_le_bytes()).unwrap();
+        output.write_all(&(body.len() as u32).to_le_bytes()).unwrap();
+        output.write_all(body.as_bytes()).unwrap();
+        output.write_all(&0u32.to_le_bytes()).unwrap();
         output.flush().unwrap();
     }
 }

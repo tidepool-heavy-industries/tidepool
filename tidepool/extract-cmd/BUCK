@@ -34,6 +34,7 @@ tidepool_rust_library(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:tracing",
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
@@ -72,6 +73,7 @@ tidepool_rust_binary(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:tracing",
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
@@ -115,6 +117,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -160,6 +163,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -190,6 +194,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -220,6 +225,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -255,6 +261,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -302,6 +309,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -333,6 +341,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -363,6 +372,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",
@@ -394,6 +404,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
+        "//third-party/rust:libc",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",
         "//third-party/rust:tracing",

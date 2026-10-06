@@ -19,6 +19,7 @@ path = "src/main.rs"
 # macro's build graph; keeping the digest here avoids any runtime dependency.
 [dependencies]
 tidepool-atomic-write.workspace = true
+libc.workspace = true
 blake3 = "=1.8.6"
 tracing = "0.1"
 tracing-appender = "0.2"

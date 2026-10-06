@@ -6,7 +6,9 @@
 //! or daemon cannot leave its expensive child behind.  Keep this here beside
 //! the one extractor launcher; callers must not reproduce process-tree policy.
 
-use std::io;
+use std::io::{self, Read};
+use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
@@ -34,6 +36,76 @@ pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
     child_dies_with_parent(&mut command);
     command
+}
+
+/// Read a control handshake without blocking beyond its owner deadline.
+/// The caller owns the pipe's only reader, so readiness cannot be consumed
+/// by another thread between poll and read. Cancellation remains observable
+/// even when terminating the child fails to close its inherited output pipe.
+pub(crate) fn read_exact_until(
+    reader: &mut (impl Read + AsRawFd),
+    mut bytes: &mut [u8],
+    deadline: Instant,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "compiler handshake cancelled",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "compiler handshake deadline exceeded",
+            ));
+        }
+        let timeout = remaining.min(Duration::from_millis(50)).as_millis().max(1) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd refers to a descriptor retained by
+        // this reader for the entire call; libc owns the platform's poll ABI.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "compiler handshake pipe closed",
+            ));
+        }
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "compiler handshake cancelled",
+            ));
+        }
+        match reader.read(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "compiler handshake truncated",
+                ))
+            }
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
@@ -183,6 +255,33 @@ mod tests {
     const TRANSITION_ENV: &str = "TIDEPOOL_PARENT_TRANSITION_DIRECTORY";
     const EXPECTED_PARENT_ENV: &str = "TIDEPOOL_EXPECTED_PARENT";
     const NAMESPACE_ENV: &str = "TIDEPOOL_PARENT_NAMESPACE_HELPER";
+
+    #[test]
+    fn handshake_deadline_is_not_renewed_by_partial_bytes() {
+        use std::io::Write;
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for _ in 0..5 {
+                    if writer.write_all(&[1]).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+            });
+            let started = Instant::now();
+            let mut bytes = [0; 5];
+            let error = read_exact_until(
+                &mut reader,
+                &mut bytes,
+                started + Duration::from_millis(150),
+                || false,
+            ).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(started.elapsed() < Duration::from_millis(500));
+            drop(reader);
+        });
+    }
 
     #[test]
     fn parent_exit_before_signal_setup_refuses_the_child() {
