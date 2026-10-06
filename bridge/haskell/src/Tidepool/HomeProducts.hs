@@ -9,7 +9,7 @@ module Tidepool.HomeProducts
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
   , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionSeal
-  , OriginalRecoveryScope, admitOriginalRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
+  , OriginalRecoveryScope, admitOriginalRecoveryScope, originalVersionInRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
   , revalidateAdmittedCore ) where
 
 import Control.Exception
@@ -133,18 +133,24 @@ originalVersionSeal (OriginalVersion owner producer certificate core interface p
     ,producer,certificate,core,interface,packages])))
 
 originalVersionInScope :: ExactScope -> Module -> Maybe OriginalVersion
-originalVersionInScope scope owner = do
-  proof <- Map.lookup key (scopeModuleInterfaceProofs scope)
+originalVersionInScope scope owner = originalVersionFromRows scope owner
+  [row | row@(artifact,_,_) <- scopeInterfaces scope
+    , (exactUnit artifact,exactModule artifact) == originalOwnerKey owner]
+
+originalOwnerKey :: Module -> (String,String)
+originalOwnerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+
+originalVersionFromRows :: ExactScope -> Module -> [(ExactIfaceArtifact,FilePath,String)]
+  -> Maybe OriginalVersion
+originalVersionFromRows scope owner rows = do
+  proof <- Map.lookup (originalOwnerKey owner) (scopeModuleInterfaceProofs scope)
   unless (isSourceOriginal (canonicalOrigin proof)) Nothing
   core <- canonicalCoreArtifact proof
-  case [row | row@(artifact,_,_) <- scopeInterfaces scope
-      , (exactUnit artifact,exactModule artifact) == key] of
+  case rows of
     [(artifact,_,packages)] -> Just (OriginalVersion owner (scopeProducerSha256 scope)
       (canonicalCertificateSha256 proof) (canonicalCoreSha256 core)
       (exactSha256 artifact) packages)
     _ -> Nothing
-  where
-    key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
 
 -- Absence of a defining capability remains unavailable. Advertised invalid
 -- artifacts are refusals; source lookup and frontend compilation never occur.
@@ -158,11 +164,22 @@ recoverAdmittedFinalizedOriginal env scope owner =
 -- acquisition stage. Defining Core bytes are still checked on every lookup,
 -- including hits; only their decoding and native lowering can be retained.
 data OriginalRecoveryScope = OriginalRecoveryScope HscEnv ExactScope
+  (Map.Map (String,String) [(ExactIfaceArtifact,FilePath,String)])
+  (Map.Map (String,String) String)
 
 admitOriginalRecoveryScope :: HscEnv -> ExactScope -> IO OriginalRecoveryScope
 admitOriginalRecoveryScope env scope = do
   either (ioError . userError) pure =<< revalidateExactScope env scope
-  pure (OriginalRecoveryScope env scope)
+  let interfaces = Map.fromListWith (++)
+        [((exactUnit artifact,exactModule artifact),[row])
+          | row@(artifact,_,_) <- scopeInterfaces scope]
+      seals = Map.fromList [((exactUnit artifact,exactModule artifact),exactSha256 artifact)
+        | (artifact,_,_) <- scopeInterfaces scope]
+  pure (OriginalRecoveryScope env scope interfaces seals)
+
+originalVersionInRecoveryScope :: OriginalRecoveryScope -> Module -> Maybe OriginalVersion
+originalVersionInRecoveryScope (OriginalRecoveryScope _ scope interfaces _) owner =
+  originalVersionFromRows scope owner (Map.findWithDefault [] (originalOwnerKey owner) interfaces)
 
 -- A retained body never suppresses current artifact validation. On a hit only
 -- immutable decoded Core is reused; proof, interface row and location belong
@@ -170,21 +187,18 @@ admitOriginalRecoveryScope env scope = do
 recoverAdmittedFinalizedOriginalWithPrevious
   :: OriginalRecoveryScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
   -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
-recoverAdmittedFinalizedOriginalWithPrevious (OriginalRecoveryScope env scope) owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
+recoverAdmittedFinalizedOriginalWithPrevious admittedScope@(OriginalRecoveryScope env scope interfaces seals) owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
   Just proof | isSourceOriginal (canonicalOrigin proof), Just _ <- canonicalCoreArtifact proof -> do
-    row@(artifact,_,_) <- case [row | row@(selected,_,_) <- scopeInterfaces scope
-        , (exactUnit selected,exactModule selected) == key] of
+    row@(artifact,_,_) <- case Map.findWithDefault [] key interfaces of
       [row] -> pure row
       _ -> throwIO CandidateCoreHomeMissing
-    let seals = Map.fromList [((exactUnit selected,exactModule selected),exactSha256 selected)
-          | (selected,_,_) <- scopeInterfaces scope]
     unless (all (\(required,seal) -> Map.lookup required seals == Just seal)
         (Map.toAscList (canonicalRequirements proof)))
       (throwIO CandidateInterfaceRequirementsMismatch)
     let admission = ModuleInterfaceAdmission proof
         location = ms_location (exactInterfaceSummary env artifact)
     home <- admittedHomeInterface env admission owner
-    version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInScope scope owner)
+    version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInRecoveryScope admittedScope owner)
     bytes <- readAdmittedCore admission
     original <- case previous of
       Just (oldVersion,old) | oldVersion == version -> pure (admittedOriginalModule old)

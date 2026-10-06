@@ -78,7 +78,7 @@ import Tidepool.PreparedStg.Internal
 import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.HomeProducts
-  ( OriginalVersion, originalVersionOwner, originalVersionInScope, AdmittedFinalizedOriginal
+  ( OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase)
@@ -371,7 +371,7 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
   admittedScope <- admitOriginalRecoveryScope env scope
   scoped <- newMVar Map.empty
   pure $ \siblings owner -> do
-    let key = originalVersionInScope scope owner
+    let key = originalVersionInRecoveryScope admittedScope owner
     stableHit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version <$> readMVar (cachedOriginalModules cache)) key
     scopedHit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version <$> readMVar scoped) key
     let hit = case stableHit of Just found -> Just found; Nothing -> scopedHit
