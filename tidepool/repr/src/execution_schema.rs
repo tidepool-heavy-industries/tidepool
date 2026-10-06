@@ -1783,6 +1783,9 @@ mod validation;
 
 pub mod testing;
 
+#[cfg(test)]
+mod inventory_limits_tests;
+
 pub use decode::parse_program;
 pub use link::link_program;
 

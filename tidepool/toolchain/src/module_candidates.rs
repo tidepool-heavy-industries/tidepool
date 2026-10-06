@@ -20,8 +20,8 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, DecodeLimits, ModuleVersion, ProjectedGroup, RawModuleProduct, ResultContract,
-    RuntimeRep, Signature, SymbolIdentity,
+    CachedHomeOwner, InventoryDecodeLimits, ModuleVersion, ProjectedGroup, RawModuleProduct,
+    ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
@@ -35,15 +35,14 @@ const RECORD_VERSION: u32 = 10;
 const HEADER_LIMIT: usize = 64 << 10;
 const PAYLOAD_LIMIT: usize = 128 << 20;
 const PACKAGE_BUNDLE_LIMIT: usize = 16 << 20;
-// A measured 33,955,557-byte ordinary resident display graph exceeds 32 MiB.
-// This is the aggregate worker sidecar limit; each durable module record
-// remains independently capped by RECORD_LIMIT after exact row splitting.
-pub(crate) const PRODUCT_MAX_BYTES: usize = 64 << 20;
+// A measured 33,955,557-byte ordinary resident display graph fits within one
+// module's bound. The enclosing inventory can contain many such owners.
+pub(crate) const PRODUCT_MODULE_MAX_BYTES: usize = 64 << 20;
 
-pub(crate) fn product_decode_limits() -> DecodeLimits {
-    DecodeLimits {
-        max_bytes: PRODUCT_MAX_BYTES,
-        ..DecodeLimits::default()
+pub(crate) fn product_decode_limits() -> InventoryDecodeLimits {
+    InventoryDecodeLimits {
+        max_module_bytes: PRODUCT_MODULE_MAX_BYTES,
+        ..InventoryDecodeLimits::default()
     }
 }
 
@@ -52,7 +51,7 @@ pub(crate) fn product_decode_limits() -> DecodeLimits {
 /// the same worker request.
 #[cfg(test)]
 fn split_module_product_bytes(bytes: &[u8], products: &[RawModuleProduct]) -> Option<Vec<Vec<u8>>> {
-    if bytes.len() > PRODUCT_MAX_BYTES {
+    if bytes.len() > product_decode_limits().max_bytes {
         return None;
     }
     let Value::Array(header) = ciborium::de::from_reader::<Value, _>(bytes).ok()? else {
@@ -222,11 +221,10 @@ impl CandidateProduct {
         bytes: &[u8],
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
     ) -> Option<RawModuleProduct> {
-        let mut products = tidepool_repr::execution_schema::parse_module_products(
-            bytes,
-            requirements,
+        let mut products = tidepool_repr::execution_schema::InventoryOperation::new(
             product_decode_limits(),
         )
+        .parse_module_products(bytes, requirements)
         .ok()?;
         if products.len() != 1 {
             return None;
@@ -2613,7 +2611,6 @@ mod tests {
         assert_eq!(carrier.decoded().module, "Library");
         assert_eq!(carrier.decoded().interface, [0x42]);
         assert!(CandidateProduct::decode(b"corrupt product".to_vec()).is_none());
-        assert!(CandidateProduct::decode(vec![0; PRODUCT_MAX_BYTES + 1]).is_none());
         let mut trailing = bytes;
         trailing.push(0);
         assert!(CandidateProduct::decode(trailing).is_none());
@@ -2794,9 +2791,8 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_product_bound_admits_measured_display_graph_but_rejects_over_limit() {
-        assert!(product_decode_limits().max_bytes >= 33_955_557);
-        assert!(split_module_product_bytes(&vec![0; PRODUCT_MAX_BYTES + 1], &[]).is_none());
+    fn product_module_bound_admits_measured_display_graph() {
+        assert!(product_decode_limits().max_module_bytes >= 33_955_557);
         assert_eq!(RECORD_LIMIT, 32 << 20);
     }
 
