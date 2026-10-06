@@ -17778,9 +17778,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// decision while sharing the immutable admission and checked input proof.
     pub(crate) struct ActivationPublicationPhaseFixture {
         prepared: PreparedActivationInput,
-        session: Mutex<ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        session: Mutex<Option<Box<ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>>>>,
         context: crate::ActorSessionContext,
-        _receipt: tidepool_runtime::session::CheckoutReceipt,
+        receipt: Option<tidepool_runtime::session::CheckoutReceipt>,
         _machines: Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
         run_root: tempfile::TempDir,
         _source_root: tempfile::TempDir,
@@ -17803,6 +17803,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 owner: original.owner.clone(),
                 public_scope: original.public_scope,
                 private_scope: original.private_scope,
+                admitted_public: original.admitted_public.clone(),
                 admission: original.admission.clone(),
                 decision: decision.clone(),
             });
@@ -17817,7 +17818,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
         pub(crate) fn make_pending(&self) {
             use std::os::unix::fs::PermissionsExt;
-            let mut session = self.session.lock();
+            let mut held = self.session.lock();
+            let session = held.as_mut().unwrap();
             let owner = self.prepared.execution.owner.durable().unwrap();
             let scope = self.context.placement.lexical_scope;
             let writer = session
@@ -17849,12 +17851,27 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         pub(crate) fn make_ready(&self) {
             self.session
                 .lock()
+                .as_mut()
+                .unwrap()
                 .confirm_durable_public_scope(
                     self.prepared.execution.owner.durable().unwrap(),
                     self.context.placement.lexical_scope,
                 )
                 .unwrap();
             assert!(self.prepared.execution.owner.is_ready());
+        }
+    }
+
+    impl Drop for ActivationPublicationPhaseFixture {
+        fn drop(&mut self) {
+            let session = self.session.get_mut().take().unwrap();
+            let holes = session
+                .parked_holes()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            self._machines
+                .settle_suspended(self.receipt.take().unwrap(), session, holes);
         }
     }
 
@@ -17956,9 +17973,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .into_parts();
         ActivationPublicationPhaseFixture {
             prepared,
-            session: Mutex::new(*session),
+            session: Mutex::new(Some(session)),
             context,
-            _receipt: receipt,
+            receipt: Some(receipt),
             _machines: machines,
             run_root,
             _source_root: source_root,
