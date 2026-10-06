@@ -1537,6 +1537,53 @@ homeDependencyDigests graph policies = dependencyIdentityDigests ownFrame (Map.m
         HomeDependency name kind = dependency
         HomeDependencyWitness _selectedPath fingerprint = fst (graph Map.! dependency)
 
+reverseDependencyClosure :: Ord owner => Map.Map owner (Set.Set owner) -> Set.Set owner -> Set.Set owner
+reverseDependencyClosure graph changed = visit Set.empty (Set.toList changed)
+  where
+    dependents = Map.fromListWith Set.union
+      [(dependency,Set.singleton owner) | (owner,dependencies) <- Map.toList graph
+        , dependency <- Set.toList dependencies]
+    visit seen [] = seen
+    visit seen (owner:rest)
+      | owner `Set.member` seen = visit seen rest
+      | otherwise = visit (Set.insert owner seen)
+          (Set.toList (Map.findWithDefault Set.empty owner dependents) ++ rest)
+
+sourceImportOwners :: ModSummary -> Set.Set Module
+sourceImportOwners summary = Set.fromList (mapMaybe selected
+  (ms_textual_imps summary ++ ms_srcimps summary))
+  where
+    selected (qualifier,locatedName) = case qualifier of
+      NoPkgQual -> Just (mkModule (moduleUnit (ms_mod summary)) (unLoc locatedName))
+      ThisPkg unit -> Just (mkModule (stringToUnit (unitIdString unit)) (unLoc locatedName))
+      OtherPkg _ -> Nothing
+
+sourceDependencyGraph :: ModuleGraph -> Map.Map Module (Set.Set Module)
+sourceDependencyGraph graph = Map.fromListWith Set.union
+  [(ms_mod summary,sourceImportOwners summary) | ModuleNode _ summary <- mgModSummaries' graph]
+
+-- Exact originals retain their authenticated inputs. Legacy value injection
+-- refuses only its importing closure, including recorded indirect home uses.
+unsealedSourceInputs :: PipelineVariant -> HscEnv -> Set.Set Module
+unsealedSourceInputs variant env = Set.fromList
+  [mkModule home name | name <- pvDownsweepExcludes variant
+    , mkModule home name `Set.notMember` sealed]
+  where
+    home = homeUnitAsUnit (hsc_home_unit env)
+    sealed = Set.fromList
+      [mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
+        | scope <- maybe [] pure (pvExactScope variant)
+        , artifact <- map (\(value,_,_) -> value) (scopeInterfaces scope)
+          ++ [value | scopePurpose scope /= NoCheckedPurpose, value <- scopeValueInterfaces scope]]
+
+usesUnsealedSourceInputs :: Set.Set Module -> HscEnv -> GutsMemoEntry -> Bool
+usesUnsealedSourceInputs inputs _ _ | Set.null inputs = False
+usesUnsealedSourceInputs inputs env entry = any (`Set.member` keys)
+  (homeInterfaceUsageOwners env (hm_iface (finalizedHomeModInfo
+    (payloadFinalized (gmePayload entry)))))
+  where
+    keys = Set.map (\owner -> (unitString (moduleUnit owner),moduleNameString (moduleName owner))) inputs
+
 -- Hash strongly connected dependency identities once. Each node retains a
 -- fixed-size digest rather than a copy of its complete transitive closure.
 dependencyIdentityDigests
@@ -1974,6 +2021,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- invalidate its ordinary importer. Ordinary dependencies additionally
     -- propagate compile validity in summary order below.
     let exactIdentities = exactModuleDigests (pvExactScope variant)
+        unsealedInputs = unsealedSourceInputs variant previous
+        unsealedClosure
+          | Set.null unsealedInputs = Set.empty
+          | otherwise = reverseDependencyClosure (sourceDependencyGraph modGraphRaw) unsealedInputs
         homeImportKey modSum (qualifier,locatedName) = case qualifier of
           NoPkgQual -> Just (unitString (moduleUnit (ms_mod modSum)),moduleNameString (unLoc locatedName))
           ThisPkg unit -> Just (unitIdString unit,moduleNameString (unLoc locatedName))
@@ -2106,6 +2157,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               let entry = completedModuleEntry node
                   validity = gmeValidity entry
               in payloadOwner (gmePayload entry) == ms_mod summary
+                && ms_mod summary `Set.notMember` unsealedClosure
+                && not (usesUnsealedSourceInputs unsealedInputs previous entry)
                 && memoSourceHash validity == ms_hs_hash summary
                 && memoRetained validity == retainedFor summary
                 && memoHomeDependencies validity == homeDependencyWitnesses summary
@@ -2187,7 +2240,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             -- Cpp/TemplateHaskell gate here, before any entry lookup:
             -- unconditional. A 'QuasiQuotes'-only module may be memoizable
             -- when its previous parse proved that it contains no quotations.
-            if not depsOk || hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts modSum)
+            if ms_mod modSum `Set.member` unsealedClosure
+              then memoMiss modSum "unsealed-input" >> pure Nothing
+              else if not depsOk || hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts modSum)
               then do
                 -- Only the deps this cycle actually marked invalid —
                 -- not every direct dependency, which the always-on
@@ -2337,6 +2392,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           reusable = retainedVersion || canonicalVersion
           decision = if reusable then ReuseHit else ReuseMiss
           reason | reusable = Matched
+                 | ms_mod summary `Set.member` unsealedClosure = ChangedDependency
                  | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
                  | otherwise = case cycleState of
                      StandaloneCycle -> CacheDisabled
@@ -4485,23 +4541,32 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   setSession (hscUpdateFlags flags attempt {hsc_targets=[]})
   result <- runCompileCycle selection
     (TransactionCycle cache memo candidates
-      (if admitted then universeSourceVersions universe else Map.empty)
-      (if admitted then universeIfaceVersions universe else Map.empty) activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
+      (universeSourceVersions universe)
+      (universeIfaceVersions universe) activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
     policy incarnation timing requestIdentity sessionT0 resources variant path
   final <- getSession
   recovery <- liftIO (readIORef recoveryRef)
   let context = ActiveCompilerAttempt final recovery
       recoveryContext = RecoveryContext recoveryIdentity recovery
   snapshot <- liftIO (readIORef memo)
+  let unsealed = unsealedSourceInputs variant final
+      indirectRefusals = Set.fromList [payloadOwner (gmePayload entry)
+        | entry <- Map.elems snapshot, usesUnsealedSourceInputs unsealed final entry]
+      refused
+        | Set.null unsealed = Set.empty
+        | otherwise = reverseDependencyClosure (sourceDependencyGraph (hsc_mod_graph final))
+            (Set.union unsealed indirectRefusals)
+      admittedSnapshot = Map.filter
+        ((`Set.notMember` refused) . payloadOwner . gmePayload) snapshot
   -- Commit after the complete compiler operation. Failed/cancelled targets or
   -- partial dependency additions never enter this inventory.
   epoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
-  ifaceVersions <- liftIO (retainCompilerIfaceEntries epoch targetOwner snapshot cache (universeIfaceVersions universe))
+  ifaceVersions <- liftIO (retainCompilerIfaceEntries epoch targetOwner admittedSnapshot cache (universeIfaceVersions universe))
   let sourceNodes = Map.fromListWith Map.union
         [(owner,Map.singleton (memoSelectionKey (gmeValidity entry))
             (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry final home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
                 (productPrepared product') (productPrepared product')]) (payloadProduct (gmePayload entry))))))
-        | entry <- Map.elems snapshot
+        | entry <- Map.elems admittedSnapshot
         , let owner = payloadOwner (gmePayload entry)
         , owner /= targetOwner
         , let home = lookupHpt (hsc_HPT final) (moduleName owner)]
@@ -4521,12 +4586,12 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
     writeIORef active (Just context)
     modifyIORef' universeRef (\current -> current
       { universeEnvironment=retainedView, universeRecovery=recoveryContext
-      , universeSourceVersions=if admitted then Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
-          sourceNodes (universeSourceVersions current) else universeSourceVersions current
+      , universeSourceVersions=Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
+          sourceNodes (universeSourceVersions current)
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion
           originalVersions (universeOriginalVersions current)
           else universeOriginalVersions current
-      , universeIfaceVersions=if admitted then ifaceVersions else universeIfaceVersions current })
+      , universeIfaceVersions=ifaceVersions })
   pure result
 
 -- Each key owns one immutable product. Upgrade incomplete acceleration once,
@@ -4589,15 +4654,7 @@ activateCompilerInterpreter versions selected recompiled env = forM_ (hsc_interp
         ([owner | (owner,current) <- Map.toList selected, versionConflict owner current]
          ++ [linkableModule linkable | linkable <- linkables
             , stampConflict linkable || linkableModule linkable `Set.member` recompiled])
-      dependents = Map.fromListWith Set.union
-        [(dependency,Set.singleton owner) | (owner,context) <- Map.toList known
-          , dependency <- Set.toList (executableDependencies context)]
-      staleClosure visited [] = visited
-      staleClosure visited (owner:rest)
-        | owner `Set.member` visited = staleClosure visited rest
-        | otherwise = staleClosure (Set.insert owner visited)
-            (Set.toList (Map.findWithDefault Set.empty owner dependents) ++ rest)
-      stale = staleClosure Set.empty (Set.toList changed)
+      stale = reverseDependencyClosure (Map.map executableDependencies known) changed
       incompatible = any (\linkable -> linkableModule linkable `Set.member` stale && native linkable) linkables
       keep = filter ((`Set.notMember` stale) . linkableModule) linkables
   if incompatible
