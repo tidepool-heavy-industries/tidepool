@@ -72,14 +72,16 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelected )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
-  , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )
+  , writeGenuineMetadataScope )
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
-import SourceBootFixtureSupport (withTiming, withScratch, captureDiagnostics)
+import SourceBootFixtureSupport
+  ( withTiming, withScratch, captureDiagnostics, capturePreparedFixture
+  , writeExecutionScope, hasIntResultLiteral )
 import Tidepool.RetainedUnfoldings
   ( emptyRetainedContext, installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
@@ -446,12 +448,13 @@ hexBytes = concatMap (\byte -> let rendered = showHex byte ""
 -- providers. Their effectful quoter must run once in that canonical frontend,
 -- and the checked/native consumer must use the resulting finalized product.
 postloadProviderFrontendOnce :: IO ()
-postloadProviderFrontendOnce = withTiming $ withScratch $ \work -> do
+postloadProviderFrontendOnce = withTiming $ withScratch $ \producerRoot -> withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
-      provider = work </> "MetadataObservedQuotedTarget.hs"
+      retained = "MetadataQuoteSupport"
+      provider = work </> "PostloadQuotedProvider.hs"
       target = work </> "PostloadProviderConsumer.hs"
       counter = work </> "postload-quoter-executions"
-      owners = ["MetadataQuoteSupport", "MetadataQuoter", "MetadataObservedQuotedTarget"]
+      owners = ["PostloadObservedQuoter", "PostloadQuotedProvider"]
       captured phase name diagnostics = length
         [line | line <- lines diagnostics, line == "tidepool-canonical-" ++ phase
           ++ " module=" ++ name]
@@ -461,27 +464,37 @@ postloadProviderFrontendOnce = withTiming $ withScratch $ \work -> do
             && captured "finalization" name diagnostics == 1) owners) $ do
           hPutStrLn stderr ("post-load quoter executions=" ++ show actual ++ "\n" ++ diagnostics)
           fail "post-load fresh provider replayed its quoter or lost canonical capture"
-        assert (Text.pack "tidepool-count name=exact_execution_fresh_provider_compiles count=3 "
+        assert (Text.pack "tidepool-count name=exact_execution_fresh_provider_compiles count=2 "
             `Text.isInfixOf` Text.pack diagnostics)
-          "regression did not enter the three-provider post-load pass"
+          "regression did not enter the two-provider post-load pass"
+        assert (captured "frontend" retained diagnostics == 0
+            && captured "finalization" retained diagnostics == 0)
+          "post-load execution replayed its retained original"
       executable env name = case lookupHpt (hsc_HPT env) (mkModuleName name) of
         Nothing -> False
         Just home -> case homeMod_bytecode (hm_linkable home) of
           Just _ -> True
           Nothing -> False
-  forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "PostloadProviderConsumer.hs"] $ \name ->
+  -- Issue an actual canonical original in a separate workspace. The consumer
+  -- receives its immutable interface/Core custody, not its source or a memo.
+  let originalSource = producerRoot </> "MetadataQuoteSupport.hs"
+  copyFile (fixture "MetadataQuoteSupport.hs") originalSource
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing originalSource [producerRoot] Nothing
+  originalFixture <- capturePreparedFixture producerRoot original
+  scopePath <- writeExecutionScope work originalFixture [retained]
+  forM_ ["PostloadObservedQuoter.hs", "PostloadProviderConsumer.hs"] $ \name ->
     copyFile (fixture name) (work </> name)
-  observedSource <- Text.pack <$> readFile (fixture "MetadataObservedQuotedTarget.hs")
-  writeFile provider (Text.unpack (Text.replace "{{QUOTER_COUNTER}}" (Text.pack counter) observedSource))
-  scopePath <- writeGenuineEmptyMetadataScope work
+  quotedSource <- Text.pack <$> readFile (fixture "PostloadQuotedProvider.hs")
+  writeFile provider (Text.unpack (Text.replace "{{QUOTER_COUNTER}}" (Text.pack counter) quotedSource))
   let scope = emptySessionScope {ssRoot=work, ssExactScope=Just scopePath}
   writeFile counter ""
   withResidentPipelineSelected [work] $ \compile -> do
     (checked, diagnostics) <- captureDiagnostics $
       compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing
     requireOnce diagnostics
-    assert (all (executable (crHscEnv checked)) owners)
-      "checked consumer lost its fresh providers' real GHC bytecode"
+    assert (all (executable (crHscEnv checked)) (retained : owners))
+      "checked consumer lost its retained or fresh providers' real GHC bytecode"
     assert (case crResultType checked of Just _ -> True; Nothing -> False)
       "checked provider consumer lost its result type"
   -- A separate fresh compiler makes this native check independent of the
@@ -493,6 +506,10 @@ postloadProviderFrontendOnce = withTiming $ withScratch $ \work -> do
     requireOnce diagnostics
     assert (all (\name -> Map.member (mkModuleName name) (pprFinalizedModules prepared)) owners)
       "native consumer omitted a fresh provider's canonical finalized product"
-    assert (all (executable (prHscEnv (pprPipelineResult prepared))) owners)
-      "native consumer lost its fresh providers' real GHC bytecode"
-  putStrLn "post-load providers: actual quoter42 once in each checked/native cycle, canonical capture and executable bytecode passed"
+    quoted <- maybe (fail "native consumer omitted its quoted provider") pure
+      (Map.lookup (mkModuleName "PostloadQuotedProvider") (pprFinalizedModules prepared))
+    assert (hasIntResultLiteral 42 (cg_binds (finalizedTidyGuts quoted)))
+      "native finalized provider lost the actual quoted integer42"
+    assert (all (executable (prHscEnv (pprPipelineResult prepared))) (retained : owners))
+      "native consumer lost its retained or fresh providers' real GHC bytecode"
+  putStrLn "post-load providers: genuine retained root, actual quoter42 once in each checked/native cycle, canonical capture and executable bytecode passed"
