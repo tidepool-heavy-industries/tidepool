@@ -116,6 +116,7 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
 import Tidepool.PreparedStg (newPreparedBodyCache, pmSitedSiblings)
 import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
+import Tidepool.Timing (ReuseContext(..))
 import Tidepool.CompilerExecution (withCompilerExecutor, serialCompilerExecutionGrant)
 import System.Mem.StableName (makeStableName)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -2588,7 +2589,7 @@ originalProjectionProducts = withScratch $ \work -> do
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
     let inputs = PreparedModuleCompletionInputs
           (Set.fromList (map pmModule (pprModules paired)))
-          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty
+          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty (ReuseContext 0 "fixture")
         completionOrder = [consumer,ownerModule,provider,independent]
     (observer,pendingWorklist) <- observeOriginalProjectionWithRecovery pendingRawCache
       pendingBodyCache executor Map.empty [] Nothing pairedEnv pairedInterfaces
@@ -2648,7 +2649,7 @@ originalProjectionProducts = withScratch $ \work -> do
       fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
     let inputs = PreparedModuleCompletionInputs
           (Set.fromList (map pmModule (pprModules captured)))
-          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty
+          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty (ReuseContext 0 "fixture")
     (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
       Map.empty [] Nothing capturedEnv (pprProductInterfaces captured) (pmModule consumer)
       (Just capturedScope) inputs

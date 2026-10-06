@@ -208,6 +208,8 @@ import Tidepool.Timing
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
   , newTimingRequestIdentity
+  , ReuseContext(..), ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
+  , ReuseVersionKind(..), emitReuse, emitReuseComplete
   , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, acquirePreparedModule, runPreparedModuleTask
   , PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
@@ -289,6 +291,7 @@ data PreparedModuleCompletionInputs = PreparedModuleCompletionInputs
   { completionSourceOwners :: Set.Set Module
   , completionSiblings :: Map.Map String Id
   , completionExternalOriginals :: Set.Set SymbolIdentity
+  , completionReuseContext :: ReuseContext
   }
 
 data PreparedModuleObserver = PreparedModuleObserver
@@ -1867,6 +1870,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         Just producer -> unless (producer == scopeProducerSha256 scope)
           (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
+    let reuseContext = ReuseContext requestIdentity (compilePurposeLabel (pvPurpose variant))
+        reuseOwner summary = Just (ReuseModule (unitString (moduleUnit (ms_mod summary)))
+          (moduleNameString (ms_mod_name summary)) SourceFingerprint (show (ms_hs_hash summary)))
+        reuseEvent stage decision reason summary =
+          emitReuse timing reuseContext stage decision reason (reuseOwner summary) 1 Nothing
     let executionGrant = executionGrantFor selection
         preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
@@ -2324,6 +2332,26 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (\hmi homes -> addToHpt homes (moduleName (mi_module (hm_iface hmi))) hmi)
           table restoredHomes) current)
         pure validEntries
+    forM_ sourceOrder $ \summary -> liftIO $ do
+      let retainedVersion = ms_mod summary `Map.member` validatedMemo
+          canonicalVersion = ms_mod_name summary `Map.member` acceptedCandidates
+          reusable = retainedVersion || canonicalVersion
+          decision = if reusable then ReuseHit else ReuseMiss
+          reason | reusable = Matched
+                 | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
+                 | otherwise = case cycleState of
+                     StandaloneCycle -> CacheDisabled
+                     TransactionCycle _ _ _ versions _ _ _ _ ->
+                       case Map.lookup (ms_mod summary) versions of
+                         Nothing -> Absent
+                         Just previous ->
+                           if any ((== ms_hs_hash summary) . memoSourceHash)
+                               [validity | entries <- Map.elems previous, validity <- Map.keys entries]
+                             then ChangedDependency else ChangedSource
+      reuseEvent SourceFrontend decision reason summary
+      when reusable $ do
+        reuseEvent FinalizedCore ReuseHit Matched summary
+        reuseEvent Interface ReuseHit Matched summary
     case cycleState of
       StandaloneCycle -> pure ()
       TransactionCycle _ _ _ _ _ activateRecovery _ _ -> liftIO $ do
@@ -2336,6 +2364,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     getSession >>= liftIO . activateCompilerInterpreter interpreterState selectedExecutables recompiledOwners
     epoch <- liftIO (compilerInterpreterEpoch <$> readIORef interpreterState)
     when (epoch /= beforeEpoch) $ do
+      liftIO (emitReuse timing reuseContext NativeImage ReuseEpochRotated Epoch Nothing 1 Nothing)
       current <- getSession
       setSession (hscUpdateHPT (\table -> foldr
         (\home homes -> addToHpt homes (moduleName (mi_module (hm_iface home))) (withoutBytecode home))
@@ -2554,6 +2583,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   atomicModifyIORef' frontendQuasiQuotesRef (\known ->
                     (Map.insert (ms_mod summaryC) (quotes, current) known, ()))
                   when (ms_mod_name summaryC == targetName) (writeIORef targetEnvironmentRef (Just tcg))
+                  reuseEvent SourceFrontend ReuseWork Absent summaryC
                   when timing $ hPutStrLn stderr $
                     "tidepool-canonical-frontend module=" ++ moduleNameString (ms_mod_name summaryC)
                 pure (FrontendTypecheck tcg, warnings)) session
@@ -2594,6 +2624,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (not (null files)) quotes
                   pending = PendingFinalization summaryC facts output tidy details env
                   action = HscRecomp tidy (ms_location summaryC) partial oldHash
+              reuseEvent FinalizedCore ReuseWork Absent summaryC
+              reuseEvent Interface ReuseWork Absent summaryC
               when timing $ hPutStrLn stderr $
                 "tidepool-canonical-finalization module=" ++ moduleNameString (ms_mod_name summaryC)
               if not (backendGeneratesCode (backend (hsc_dflags phaseEnv)))
@@ -2797,6 +2829,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     familyEnvironment <- getSession
                     liftIO (validateCompilationFamilies familyEnvironment tcg)
                     pure (tcg, quotes)
+                liftIO (reuseEvent SourceFrontend ReuseWork Absent modSum)
                 when (ms_mod_name modSum == targetName) $
                   liftIO (writeIORef targetEnvironmentRef (Just tcGblEnv))
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
@@ -2862,6 +2895,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
+                liftIO (reuseEvent FinalizedCore ReuseWork Absent (mfSummary mf))
+                liftIO (reuseEvent Interface ReuseWork Absent (mfSummary mf))
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
                 (interfaceMs, registration) <- registerPreparedInterface timing requestIdentity interfaceReuse
                   interfaceUse mf simplified
@@ -2943,11 +2978,24 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                          ++ [binder | admitted <- Map.elems acceptedCandidates
                             , group <- candidateGroups (admittedCandidateOriginal admitted)
                             , binder <- candidateGroupBinders group])
-                      inputs = PreparedModuleCompletionInputs sourceOwners siblings externalOriginals
+                      inputs = PreparedModuleCompletionInputs sourceOwners siblings externalOriginals reuseContext
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
               lowerTasks observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
-                let lower input = do
+                let summariesByName = Map.fromList [(ms_mod_name summary,summary) | summary <- summaries]
+                    lower input = do
+                      forM_ (Map.lookup (fst input) summariesByName) $ \summary -> case snd input of
+                        Right _ -> reuseEvent PreparedBody ReuseHit Matched summary
+                        Left _ -> do
+                          -- This task performs lowering; a missing authority
+                          -- witness is a disabled cache, not proof of a change.
+                          cached <- maybe (pure Nothing) (fmap (Map.lookup (ms_mod_name summary)) . readIORef) mMemoRef
+                          let reason = case cached >>= payloadProduct . gmePayload of
+                                Just product' | preparedUsesSiteAuthority (productPrepared product') -> CacheDisabled
+                                Just _ -> ChangedDependency
+                                Nothing -> Absent
+                          reuseEvent PreparedBody ReuseMiss reason summary
+                          reuseEvent PreparedBody ReuseWork reason summary
                       prepared <- either runPreparedModuleTask pure (snd input)
                       observePreparedModule observer prepared
                       pure prepared
@@ -3389,6 +3437,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       familyEnvironment <- getSession
                       liftIO (validateCompilationFamilies familyEnvironment checkedEnvironment)
                       pure (checkedEnvironment, quotes)
+                  liftIO (reuseEvent SourceFrontend ReuseWork Absent summary)
                   let inspectionProbes = capturedInspectionProbes tcg
                       retainInterface reason = do
                         -- A later source module's normal home import resolves via
@@ -3404,6 +3453,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
                           (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
                             mkIfaceTc env Sf_None details canonical Nothing tcg
+                        liftIO (reuseEvent Interface ReuseWork Absent summary)
                         let linkable = maybe emptyHomeModInfoLinkable hm_linkable
                               (lookupHpt (hsc_HPT env) (ms_mod_name summary))
                             hmi = HomeModInfo (set_mi_extra_decls Nothing iface) details linkable
@@ -3489,8 +3539,30 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           WithCompilerExecution _ _ inner -> finish inner
           WithPreparedModuleCompletion _ inner -> finish inner
     result <- finish selection
+    liftIO $ do
+      emitReuseComplete timing reuseContext SourceFrontend
+      emitReuseComplete timing reuseContext FinalizedCore
+      case preparation of
+        PrepareStg -> emitReuseComplete timing reuseContext PreparedBody
+        CheckOnly -> pure ()
     getSession >>= liftIO . recordCompilerInterpreter interpreterState selectedExecutables
     pure result
+
+compilePurposeLabel :: CompilePurpose -> String
+compilePurposeLabel purpose = case purpose of
+  GeneralCompile -> "general"
+  LookupTypeCompile -> "lookup_type"
+  CertifyHomeProductsCompile -> "certify_home_products"
+  OriginalDeclarationCompile -> "original_declaration"
+  CheckedItemCompile{} -> "checked_item"
+  HostActivationPreviewCompile{} -> "activation_preview"
+  ProgramItemCompile{} -> "program_item"
+  PlannedDeclarationCheck{} -> "planned_declaration"
+  CellProgramCompile inner _ -> compilePurposeLabel inner
+  GeneratedScaffoldCompile _ inner -> compilePurposeLabel inner
+  GeneratedInstanceCheck _ inner -> compilePurposeLabel inner
+  ParsedImportSelection _ inner -> compilePurposeLabel inner
+  CompletedProgramImports _ inner -> compilePurposeLabel inner
 
 -- | Hash every source and compare it with the fingerprint captured by GHC's
 -- downsweep. A mismatch makes the evidence incomplete; publication re-hashes
