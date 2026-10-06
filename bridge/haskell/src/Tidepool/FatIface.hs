@@ -27,6 +27,8 @@ import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
 import GHC.Types.Var (Id, isId, isLocalId)
+import GHC.Types.Id (isFCallId, isPrimOpId_maybe)
+import Data.Maybe (isJust)
 import GHC.Types.Var (varName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Var.Env (emptyVarEnv, extendVarEnv, lookupVarEnv)
@@ -353,7 +355,14 @@ indexOriginalBindings version coreBinds =
       , Just dependency <- [localBinderOrdinal identifier] ]
     localBinderOrdinal identifier = case lookupVarEnv ordinalByIdentifier identifier of
       Just ordinal -> Just ordinal
-      Nothing -> error "fat interface contains a private free Id outside its original binder census"
+      Nothing -> error ("fat interface contains a private free Id outside its original binder census: owner="
+        ++ showSDocUnsafe (ppr (fatOriginalOwner version))
+        ++ "; identifier=" ++ showSDocUnsafe (ppr identifier)
+        ++ "; name=" ++ showSDocUnsafe (ppr (varName identifier))
+        ++ "; local=" ++ show (isLocalId identifier)
+        ++ "; external-name=" ++ show (isExternalName (varName identifier))
+        ++ "; foreign-call=" ++ show (isFCallId identifier)
+        ++ "; primop=" ++ show (isJust (isPrimOpId_maybe identifier)))
     privateDependencies = IntMap.map Set.toAscList localDependencySets
     rosters = map Set.toAscList $ Shared.privateComponents
       (Map.fromList (IntMap.toAscList localDependencySets))
