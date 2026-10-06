@@ -4600,6 +4600,7 @@ def declare_haskell_components():
         name = "prepared_recovery_test_bin",
         srcs = {
         "Main.hs": "test-prepared-stg/PreparedRecoveryTest.hs",
+        "CompilerExecutionTest.hs": "test-prepared-stg/CompilerExecutionTest.hs",
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
         deps = [

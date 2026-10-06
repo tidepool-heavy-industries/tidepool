@@ -5,16 +5,19 @@
 module Tidepool.CompilerExecution
   ( CompilerExecutionGrant, compilerExecutionGrant, serialCompilerExecutionGrant
   , compilerModuleJobs
-  , CompilerExecutor, withCompilerExecutor, runCompilerTasks
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, dependencyClosedReuse
   ) where
 
 import Control.Concurrent (forkFinally, killThread)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
   (MVar, newMVar, newEmptyMVar, modifyMVar, modifyMVar_, putMVar, readMVar, tryPutMVar)
-import Control.Exception (SomeException, AsyncException(ThreadKilled), bracket, mask, throwIO, toException, try)
-import Control.Monad (forM_, replicateM, when)
+import Control.Exception
+  (SomeException, SomeAsyncException, AsyncException(ThreadKilled), bracket, mask
+  , fromException, onException, throwIO, toException, try)
+import Control.Monad (forM_, when)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 -- | Positive, explicitly admitted module jobs. Ordinary callers stay serial
 -- until the enclosing owner supplies a qualified allocation.
@@ -54,7 +57,11 @@ withCompilerExecutor grant use = mask $ \restore -> do
         forM_ pending ($ toException ThreadKilled)
         forM_ workers (killThread . fst)
         forM_ workers (readMVar . snd)
-  bracket (replicateM (compilerModuleJobs grant) start) stop
+      spawn 0 known = pure known
+      spawn remaining known = do
+        worker' <- start `onException` stop known
+        spawn (remaining - 1) (worker' : known)
+  bracket (spawn (compilerModuleJobs grant) []) stop
     (const (restore (use executor)))
 
 -- | Run task bodies on the shared allowance. Completion callbacks run on the
@@ -79,6 +86,11 @@ runCompilerTasks (CompilerExecutor queue state) action completed inputs = mask $
       modifyMVar_ state $ \(ExecutorState closed next pending) ->
         pure (ExecutorState closed next (Map.delete key pending))
       settle outcome
+      -- A shutdown signal must leave the worker loop after settling its task.
+      -- Consuming it here would strand teardown waiting for an idle worker.
+      case outcome of
+        Left failure | Just async <- (fromException failure :: Maybe SomeAsyncException) -> throwIO async
+        _ -> pure ()
   let collect 0 outputs = pure (Map.elems outputs)
       collect remaining outputs = do
         (ordinal, input, outcome) <- restore (readChan events)
@@ -86,3 +98,16 @@ runCompilerTasks (CompilerExecutor queue state) action completed inputs = mask $
         restore (completed input output)
         collect (remaining - 1) (Map.insert ordinal output outputs)
   collect (length inputs) Map.empty
+
+-- | Greatest dependency-closed subset of independently valid owners. Native
+-- cycles may survive together; an invalid or absent dependency removes every
+-- dependent, independent of the order in which jobs finish.
+dependencyClosedReuse :: Ord owner => Map.Map owner (Set.Set owner)
+  -> Set.Set owner -> Set.Set owner
+dependencyClosedReuse graph = close
+  where
+    close owners =
+      let next = Set.filter (\owner -> case Map.lookup owner graph of
+            Nothing -> False
+            Just dependencies -> Set.delete owner dependencies `Set.isSubsetOf` owners) owners
+      in if next == owners then owners else close next
