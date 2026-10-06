@@ -2,7 +2,8 @@
 -- compiler worker. The worker receives domain fields, not command-line
 -- options; CLI compatibility is owned by the launcher layer.
 module Tidepool.ExtractRequest
-  ( RequestField(..)
+  ( CompileWorkload(..)
+  , RequestField(..)
   , InspectionRequest(..)
   , StructuredInspection(..)
   , StructuredNameScope(..)
@@ -25,6 +26,8 @@ import Data.Bits ((.|.), shiftL, shiftR)
 import Data.Char (digitToInt, isHexDigit)
 import Data.Word (Word32, Word64, Word8)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+
+data CompileWorkload = Foreground | Preparation deriving (Eq, Show)
 
 data RequestField
   = Input FilePath
@@ -73,7 +76,10 @@ data RequestField
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
 -- domain request; the executable never reconstructs or parses CLI syntax.
 data WorkerRequest = WorkerRequest
-  { requestOutDir :: Maybe FilePath
+  { requestWorkload :: CompileWorkload
+  , requestCompilerJobs :: Int
+  , requestCompilerCapabilities :: Int
+  , requestOutDir :: Maybe FilePath
   , requestTarget :: Maybe String
   , requestTargets :: [String]
   , requestTargetModuleOnly :: Bool
@@ -162,7 +168,10 @@ validateRequestShape args
 
 emptyWorkerRequest :: WorkerRequest
 emptyWorkerRequest = WorkerRequest
-  { requestOutDir = Nothing
+  { requestWorkload = Foreground
+  , requestCompilerJobs = 1
+  , requestCompilerCapabilities = 1
+  , requestOutDir = Nothing
   , requestTarget = Nothing
   , requestTargets = []
   , requestTargetModuleOnly = False
@@ -300,7 +309,7 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       InspectionStrict -> request { requestInspectionStrict = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v17"
+workerRequestFlag = "--worker-request-v18"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -312,9 +321,11 @@ workerRequestFromArgv [] = Right Nothing
 workerRequestFromArgv [flag] | flag == workerRequestFlag = Left (workerRequestFlag ++ ": payload is required")
 workerRequestFromArgv [flag, payload]
   | flag == workerRequestFlag = do
-      fields <- decodeHex payload >>= decodeRequest
+      (workload, jobs, capabilities, fields) <- decodeHex payload >>= decodeRequest
       validateCertificationFields fields
-      pure (Just (requestFromFields fields))
+      pure (Just ((requestFromFields fields)
+        { requestWorkload = workload, requestCompilerJobs = jobs
+        , requestCompilerCapabilities = capabilities }))
 workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 
 -- Certification produces original products for the whole home graph. A
@@ -343,20 +354,30 @@ validateCertificationFields fields
 
 type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 
-decodeRequest :: BS.ByteString -> Either String [RequestField]
+decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ017"
+  if magic /= "TPREQ018"
     then Left "worker request: unsupported magic or version"
     else do
-      (count, rest) <- pWord32 body
+      (workloadTag, afterWorkload) <- pWord8 body
+      workload <- case workloadTag of
+        0 -> Right Foreground
+        1 -> Right Preparation
+        _ -> Left "worker request: invalid workload"
+      (jobs, afterJobs) <- pWord32 afterWorkload
+      (capabilities, afterCapabilities) <- pWord32 afterJobs
+      if jobs == 0 || capabilities == 0
+        then Left "worker request: execution grant must be positive"
+        else pure ()
+      (count, rest) <- pWord32 afterCapabilities
       (fields, trailing) <- pN (fromIntegral count) pField rest
       if BS.null trailing
-        then Right fields
+        then Right (workload, fromIntegral jobs, fromIntegral capabilities, fields)
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ017" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ018" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of

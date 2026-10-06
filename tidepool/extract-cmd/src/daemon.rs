@@ -11,7 +11,7 @@
 //! identity  ::= "TPDPI003" producer[32] consumed_worker[32] boot_epoch[32]
 //! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
-//! transaction ::= "TPDTR002" expected_epoch[32]
+//! transaction ::= "TPDTR003" expected_epoch[32]
 //!                 (request-tag request)* end-tag
 //! stop      ::= "TPDST001"
 //! stop_ack  ::= 1u8
@@ -41,7 +41,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -50,7 +50,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 use crate::frontend::{DaemonConfig, FrontendError, PreparedWorker};
-use crate::ExtractRequest;
+use crate::request::ExecutionGrant;
+use crate::{CompileWorkload, ExtractRequest};
 
 /// Bound on the daemon round-trip's I/O (connect itself is local and
 /// near-instant over a UNIX domain socket, so this bounds the READ side — a
@@ -74,7 +75,7 @@ const REQUEST: &[u8; 8] = b"TPDRQ002";
 /// explicit `REJECTED` and may safely rebind.
 const STOP: &[u8; 8] = b"TPDST001";
 const STOP_ACK: u8 = 1;
-pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR002";
+pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR003";
 pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR001";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
@@ -630,9 +631,24 @@ pub(crate) fn begin_transaction(
     begin_transaction_with_cancellation(socket_path, epoch, None)
 }
 
+#[cfg(test)]
 pub(crate) fn begin_transaction_with_cancellation(
     socket_path: &Path,
     epoch: &[u8; 32],
+    cancellation: Option<&crate::CompilerTransactionCancellation>,
+) -> Result<DaemonTransaction, DaemonError> {
+    begin_transaction_for_workload(
+        socket_path,
+        epoch,
+        CompileWorkload::Foreground,
+        cancellation,
+    )
+}
+
+pub(crate) fn begin_transaction_for_workload(
+    socket_path: &Path,
+    epoch: &[u8; 32],
+    workload: CompileWorkload,
     cancellation: Option<&crate::CompilerTransactionCancellation>,
 ) -> Result<DaemonTransaction, DaemonError> {
     let deadline = Instant::now() + IO_TIMEOUT;
@@ -644,7 +660,7 @@ pub(crate) fn begin_transaction_with_cancellation(
         if remaining.is_zero() {
             return Err(DaemonError::Busy);
         }
-        let result = begin_transaction_once(socket_path, epoch, remaining, cancellation);
+        let result = begin_transaction_once(socket_path, epoch, workload, remaining, cancellation);
         match result {
             Err(DaemonError::Busy) => {
                 if let Some(cancellation) = cancellation {
@@ -666,6 +682,7 @@ pub(crate) fn begin_transaction_with_cancellation(
 fn begin_transaction_once(
     socket_path: &Path,
     epoch: &[u8; 32],
+    workload: CompileWorkload,
     admission_timeout: Duration,
     cancellation: Option<&crate::CompilerTransactionCancellation>,
 ) -> Result<DaemonTransaction, DaemonError> {
@@ -682,6 +699,7 @@ fn begin_transaction_once(
     if let Err(error) = stream
         .write_all(TRANSACTION)
         .and_then(|()| stream.write_all(epoch))
+        .and_then(|()| stream.write_all(&[workload.wire_tag()]))
         .and_then(|()| stream.flush())
     {
         return Err(explicit_refusal(&mut stream).unwrap_or_else(|| {
@@ -1343,6 +1361,7 @@ struct PendingJob {
     job: Job,
     accepted: std::sync::mpsc::Receiver<()>,
     permit: Option<AdmissionPermit>,
+    resource_permit: ResourcePermit,
 }
 
 struct AdmissionPermit(std::sync::Arc<AtomicBool>);
@@ -1353,17 +1372,212 @@ impl Drop for AdmissionPermit {
     }
 }
 
+/// Allocation is held from before ACCEPTED through transaction cleanup. The
+/// existing worker pool owns its release, including failed acceptance and panic.
+#[derive(Default)]
+struct ResourceUsage {
+    jobs: usize,
+    preparation: usize,
+    foreground: usize,
+    cpus: usize,
+    slots: Vec<usize>,
+}
+
+struct ResourceAdmission {
+    usage: Mutex<ResourceUsage>,
+    worker_rss: Vec<AtomicU64>,
+    alive: Vec<AtomicBool>,
+    memory_budget_mb: u64,
+}
+
+struct ResourcePermit {
+    owner: std::sync::Arc<ResourceAdmission>,
+    workload: CompileWorkload,
+    grant: ExecutionGrant,
+    slot: usize,
+}
+
+impl Drop for ResourcePermit {
+    fn drop(&mut self) {
+        let mut usage = self.owner.usage.lock().unwrap_or_else(|p| p.into_inner());
+        usage.jobs -= 1;
+        usage.slots[self.slot] -= 1;
+        usage.cpus -= self.grant.capabilities as usize;
+        match self.workload {
+            CompileWorkload::Foreground => usage.foreground -= 1,
+            CompileWorkload::Preparation => usage.preparation -= 1,
+        }
+    }
+}
+
+impl ResourceAdmission {
+    fn new(workers: usize, memory_budget_mb: u64) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            usage: Mutex::new(ResourceUsage {
+                slots: vec![0; workers],
+                ..ResourceUsage::default()
+            }),
+            worker_rss: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+            alive: (0..workers).map(|_| AtomicBool::new(true)).collect(),
+            memory_budget_mb,
+        })
+    }
+
+    fn acquire_with_capacity(
+        self: &std::sync::Arc<Self>,
+        workload: CompileWorkload,
+        capacity: crate::resources::ResourceCapacity,
+    ) -> Option<ResourcePermit> {
+        let mut usage = self.usage.lock().unwrap_or_else(|p| p.into_inner());
+        let workers = self.worker_rss.len();
+        let live = |slot: usize| self.alive[slot].load(Ordering::Acquire);
+        let reserved_slot = (0..workers).find(|&slot| live(slot))?;
+        let live_workers = (0..workers).filter(|&slot| live(slot)).count();
+        // Reserve one real worker and its warm footprint even while preparation
+        // has spare CPU. A queued foreground job may use the existing pending slot.
+        if workload == CompileWorkload::Preparation
+            && usage.preparation >= live_workers.saturating_sub(1)
+        {
+            return None;
+        }
+        if usage.jobs >= live_workers + 1 {
+            return None;
+        }
+        let slot = match workload {
+            CompileWorkload::Foreground => {
+                if usage.slots[reserved_slot] == 0 {
+                    reserved_slot
+                } else if let Some(slot) = (0..workers)
+                    .find(|&slot| live(slot) && slot != reserved_slot && usage.slots[slot] == 0)
+                {
+                    slot
+                } else if usage.slots[reserved_slot] == 1 {
+                    reserved_slot
+                } else {
+                    return None;
+                }
+            }
+            CompileWorkload::Preparation => (0..workers)
+                .find(|&slot| live(slot) && slot != reserved_slot && usage.slots[slot] == 0)?,
+        };
+        let resident: u64 = self
+            .worker_rss
+            .iter()
+            .map(|rss| rss.load(Ordering::Acquire))
+            .sum();
+        let projected: u64 = self
+            .worker_rss
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| live(*slot))
+            .map(|(_, rss)| rss.load(Ordering::Acquire).max(WARM_WORKER_MB))
+            .sum();
+        // Count idle residents as well as active work. Live cgroup remaining
+        // includes other workloads/build commitments; RSS rotation is separate.
+        if projected > self.memory_budget_mb
+            || projected > capacity.memory_mb.saturating_add(resident)
+        {
+            return None;
+        }
+        let foreground_cpus = capacity.cpus.min(2);
+        let reserved =
+            if workload == CompileWorkload::Preparation && usage.slots[reserved_slot] == 0 {
+                foreground_cpus
+            } else {
+                0
+            };
+        let available = capacity
+            .cpus
+            .saturating_sub(usage.cpus)
+            .saturating_sub(reserved);
+        let cpus = available.min(match workload {
+            CompileWorkload::Foreground => 2,
+            CompileWorkload::Preparation => 16,
+        });
+        if cpus == 0 {
+            return None;
+        }
+        let grant = ExecutionGrant {
+            jobs: cpus as u32,
+            capabilities: cpus as u32,
+        };
+        usage.jobs += 1;
+        usage.slots[slot] += 1;
+        usage.cpus += cpus;
+        match workload {
+            CompileWorkload::Foreground => usage.foreground += 1,
+            CompileWorkload::Preparation => usage.preparation += 1,
+        }
+        Some(ResourcePermit {
+            owner: std::sync::Arc::clone(self),
+            workload,
+            grant,
+            slot,
+        })
+    }
+}
+
+fn grant_worker_argv(
+    argv: &[OsString],
+    workload: CompileWorkload,
+    grant: ExecutionGrant,
+) -> Result<Vec<OsString>, crate::ProtocolError> {
+    let mut request = ExtractRequest::decode_worker_argv(argv)?;
+    if request.workload() != workload {
+        return Err(crate::ProtocolError::InvalidExecutionGrant);
+    }
+    request.set_execution_grant(grant);
+    Ok(request.worker_argv())
+}
+
+struct ResidentSlot {
+    resources: std::sync::Arc<ResourceAdmission>,
+    slot: usize,
+}
+
+impl Drop for ResidentSlot {
+    fn drop(&mut self) {
+        self.resources.alive[self.slot].store(false, Ordering::Release);
+        self.resources.worker_rss[self.slot].store(0, Ordering::Release);
+    }
+}
+
 enum Admission {
     Continue,
     NoWorkers,
 }
 
 fn admit_job(
-    sender: &std::sync::mpsc::SyncSender<PendingJob>,
+    senders: &[std::sync::mpsc::SyncSender<PendingJob>],
     ordinary_busy: Option<&std::sync::Arc<AtomicBool>>,
+    resources: &std::sync::Arc<ResourceAdmission>,
+    workload: CompileWorkload,
     job: Job,
     connection: &mut UnixStream,
     next_admission_id: &mut AdmissionId,
+) -> Admission {
+    admit_job_observed(
+        senders,
+        ordinary_busy,
+        resources,
+        workload,
+        job,
+        connection,
+        next_admission_id,
+        crate::resources::capacity(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_job_observed(
+    senders: &[std::sync::mpsc::SyncSender<PendingJob>],
+    ordinary_busy: Option<&std::sync::Arc<AtomicBool>>,
+    resources: &std::sync::Arc<ResourceAdmission>,
+    workload: CompileWorkload,
+    job: Job,
+    connection: &mut UnixStream,
+    next_admission_id: &mut AdmissionId,
+    capacity: crate::resources::ResourceCapacity,
 ) -> Admission {
     let permit = if let Some(busy) = ordinary_busy {
         if busy
@@ -1377,6 +1591,10 @@ fn admit_job(
     } else {
         None
     };
+    let Some(resource_permit) = resources.acquire_with_capacity(workload, capacity) else {
+        write_busy(connection).ok();
+        return Admission::Continue;
+    };
     let Some(next) = next_admission_id.0.checked_add(1) else {
         write_rejected(connection, "compiler admission identity exhausted").ok();
         return Admission::NoWorkers;
@@ -1384,12 +1602,16 @@ fn admit_job(
     let admission_id = AdmissionId(next);
     *next_admission_id = admission_id;
     let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
-    match sender.try_send(PendingJob {
+    tracing::info!(workload = ?workload, worker_slot = resource_permit.slot,
+        compiler_jobs = resource_permit.grant.jobs, compiler_capabilities = resource_permit.grant.capabilities,
+        "compiler resources reserved");
+    match senders[resource_permit.slot].try_send(PendingJob {
         admission_id,
         queued_at: Instant::now(),
         job,
         accepted: accepted_rx,
         permit,
+        resource_permit,
     }) {
         Ok(()) => {}
         Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -1441,20 +1663,27 @@ fn serve_workers(
 ) -> Result<u8, FrontendError> {
     let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
-    // A single ordinary worker owns at most one accepted job. Persistent
-    // mode admits one pending job beyond its occupied worker slots.
-    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<PendingJob>(1);
-    let job_rx = std::sync::Arc::new(Mutex::new(job_rx));
+    // The accept owner routes to the existing pool's bounded slot queues.
+    // Slot zero retains foreground context and never receives preparation.
+    // Resource permits allow at most one pending foreground job globally.
+    let (job_txs, job_rxs): (Vec<_>, Vec<_>) = (0..worker_count)
+        .map(|_| std::sync::mpsc::sync_channel::<PendingJob>(1))
+        .unzip();
     let ordinary_busy = (!config.persistent).then(|| std::sync::Arc::new(AtomicBool::new(false)));
     let retire = AtomicBool::new(false);
+    let resources = ResourceAdmission::new(
+        worker_count,
+        (worker_count as u64).saturating_mul(rss_ceiling_mb.max(WARM_WORKER_MB)),
+    );
     std::thread::scope(|scope| -> Result<u8, FrontendError> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let mut slots = Vec::with_capacity(worker_count);
-        for slot in 0..worker_count {
-            let job_rx = std::sync::Arc::clone(&job_rx);
+        for (slot, job_rx) in job_rxs.into_iter().enumerate() {
             let retire = &retire;
             let ready_tx = ready_tx.clone();
+            let resources = std::sync::Arc::clone(&resources);
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
+                let _resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot };
                 let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
                 tracing::info!(
                     run_id,
@@ -1464,6 +1693,7 @@ fn serve_workers(
                     worker_slot = slot,
                     "compiler worker ready"
                 );
+                resources.worker_rss[slot].store(worker_rss_mb(worker.child.id()).unwrap_or(0), Ordering::Release);
                 ready_tx.send(()).ok();
                 let mut served = 0u64;
                 // The first request this slot ever serves is cold, exactly
@@ -1473,14 +1703,14 @@ fn serve_workers(
                 // fresh worker's memo before it warmed up.
                 let mut early_replacements = 0u64;
                 loop {
-                    let pending = {
-                        let receiver = job_rx.lock().unwrap_or_else(|poison| poison.into_inner());
-                        receiver.recv()
-                    };
+                    let pending = job_rx.recv();
                     let Ok(pending) = pending else {
                         break;
                     };
                     let _permit = pending.permit;
+                    let resource_permit = pending.resource_permit;
+                    let workload = resource_permit.workload;
+                    let grant = resource_permit.grant;
                     // The accept thread reserves the slot before writing the
                     // acceptance marker. A failed write drops this sender and
                     // the worker must not execute that unacknowledged job.
@@ -1534,9 +1764,10 @@ fn serve_workers(
                                             }
                                         };
                                         match normalize_worker_argv(argv) {
-                                            Ok(argv) => {
-                                                RequestStep::Request(cwd, argv)
-                                            }
+                                            Ok(argv) => match grant_worker_argv(&argv, workload, grant) {
+                                                Ok(argv) => RequestStep::Request(cwd, argv),
+                                                Err(_) => RequestStep::Malformed,
+                                            },
                                             Err(error) => {
                                                 tracing::warn!(run_id, %error, "compiler transaction request was invalid");
                                                 RequestStep::Malformed
@@ -1554,12 +1785,17 @@ fn serve_workers(
                                 }
                             } else {
                                 match first_request.take() {
-                                    Some((cwd, argv)) => RequestStep::Request(cwd, argv),
+                                    Some((cwd, argv)) => match grant_worker_argv(&argv, workload, grant) {
+                                        Ok(argv) => RequestStep::Request(cwd, argv),
+                                        Err(_) => RequestStep::Malformed,
+                                    },
                                     None => RequestStep::End,
                                 }
                             }
                         },
                     );
+                    resources.worker_rss[slot].store(worker_rss_mb(worker.child.id()).unwrap_or(0), Ordering::Release);
+                    drop(resource_permit);
                     match outcome {
                         Ok(ConnectionOutcome::Continue) => {}
                         Ok(ConnectionOutcome::Retire) => {
@@ -1582,7 +1818,6 @@ fn serve_workers(
                 Ok(())
             }));
         }
-        drop(job_rx);
         drop(ready_tx);
 
         // Do not advertise the endpoint before at least one worker has started.
@@ -1675,6 +1910,16 @@ fn serve_workers(
                         break 'accept Err(error);
                     }
                 }
+                let workload = match read_exact_or_crash(&mut connection, 1)
+                    .ok()
+                    .and_then(|bytes| CompileWorkload::from_wire(bytes[0]).ok())
+                {
+                    Some(workload) => workload,
+                    None => {
+                        write_rejected(&mut connection, "invalid compiler workload").ok();
+                        continue;
+                    }
+                };
                 log_send_failure(
                     run_id,
                     "transaction read timeout",
@@ -1683,8 +1928,10 @@ fn serve_workers(
                 let worker_connection = connection.try_clone().map_err(FrontendError::Io)?;
                 if matches!(
                     admit_job(
-                        &job_tx,
+                        &job_txs,
                         ordinary_busy.as_ref(),
+                        &resources,
+                        workload,
                         Job::Transaction(worker_connection),
                         &mut connection,
                         &mut next_admission_id,
@@ -1765,8 +2012,12 @@ fn serve_workers(
             let worker_connection = connection.try_clone().map_err(FrontendError::Io)?;
             if matches!(
                 admit_job(
-                    &job_tx,
+                    &job_txs,
                     ordinary_busy.as_ref(),
+                    &resources,
+                    ExtractRequest::decode_worker_argv(&worker_argv)
+                        .expect("normalized request")
+                        .workload(),
                     Job::Request(worker_connection, cwd, worker_argv),
                     &mut connection,
                     &mut next_admission_id,
@@ -1778,7 +2029,7 @@ fn serve_workers(
         };
 
         // Accepted jobs finish before the listener backlog is drained.
-        drop(job_tx);
+        drop(job_txs);
         let mut first_error = outcome.err();
         for slot in slots {
             match slot.join() {
@@ -2642,6 +2893,198 @@ fn path_from_bytes(bytes: Vec<u8>) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admission_capacity(cpus: usize, memory_mb: u64) -> crate::resources::ResourceCapacity {
+        crate::resources::ResourceCapacity { cpus, memory_mb }
+    }
+
+    #[test]
+    fn preparation_reserves_stable_warm_foreground_slot_and_aggregate_cpus() {
+        let resources = ResourceAdmission::new(3, 3 * WARM_WORKER_MB);
+        let capacity = admission_capacity(32, 3 * WARM_WORKER_MB);
+        let first = resources
+            .acquire_with_capacity(CompileWorkload::Preparation, capacity)
+            .unwrap();
+        let second = resources
+            .acquire_with_capacity(CompileWorkload::Preparation, capacity)
+            .unwrap();
+        assert_eq!((first.slot, second.slot), (1, 2));
+        assert_eq!((first.grant.jobs, second.grant.jobs), (16, 14));
+        assert!(resources
+            .acquire_with_capacity(CompileWorkload::Preparation, capacity)
+            .is_none());
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(foreground.slot, 0);
+        assert_eq!(foreground.grant.capabilities, 2);
+        assert_eq!(resources.usage.lock().unwrap().cpus, 32);
+        drop(foreground);
+        assert!(resources
+            .acquire_with_capacity(CompileWorkload::Preparation, capacity)
+            .is_none());
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(foreground.slot, 0);
+        drop((first, second, foreground));
+        assert_eq!(resources.usage.lock().unwrap().cpus, 0);
+    }
+
+    #[test]
+    fn live_memory_accounts_for_idle_residents_and_preserves_real_limits() {
+        let resources = ResourceAdmission::new(3, 3 * WARM_WORKER_MB);
+        assert!(resources
+            .acquire_with_capacity(
+                CompileWorkload::Foreground,
+                admission_capacity(8, 3 * WARM_WORKER_MB - 1)
+            )
+            .is_none());
+        for rss in &resources.worker_rss {
+            rss.store(WARM_WORKER_MB, Ordering::Release);
+        }
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, admission_capacity(8, 0))
+            .unwrap();
+        drop(foreground);
+        // A retained oversized idle context consumes its own footprint and does
+        // not become free memory because no request is currently using it.
+        resources.worker_rss[2].store(2 * WARM_WORKER_MB, Ordering::Release);
+        assert!(resources
+            .acquire_with_capacity(
+                CompileWorkload::Preparation,
+                admission_capacity(8, 10 * WARM_WORKER_MB)
+            )
+            .is_none());
+        assert!(resources
+            .acquire_with_capacity(
+                CompileWorkload::Foreground,
+                admission_capacity(0, 10 * WARM_WORKER_MB)
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn admission_histories_never_loan_foreground_or_exceed_cpu_capacity() {
+        // Independent history oracle derives usage from live permit values,
+        // rather than from the admission owner's mutable counters.
+        for cpus in 1..=32 {
+            for seed in 0..16u64 {
+                let resources = ResourceAdmission::new(4, 4 * WARM_WORKER_MB);
+                let capacity = admission_capacity(cpus, 4 * WARM_WORKER_MB);
+                let mut held: Vec<ResourcePermit> = Vec::new();
+                let mut choice = seed;
+                for _ in 0..100 {
+                    choice = choice.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    if choice % 3 == 0 && !held.is_empty() {
+                        let index = (choice as usize) % held.len();
+                        held.remove(index);
+                    } else {
+                        let workload = if choice % 2 == 0 {
+                            CompileWorkload::Foreground
+                        } else {
+                            CompileWorkload::Preparation
+                        };
+                        if let Some(permit) = resources.acquire_with_capacity(workload, capacity) {
+                            held.push(permit);
+                        }
+                    }
+                    let used: usize = held
+                        .iter()
+                        .map(|permit| permit.grant.capabilities as usize)
+                        .sum();
+                    assert!(used <= cpus);
+                    assert!(held
+                        .iter()
+                        .filter(|permit| permit.workload == CompileWorkload::Preparation)
+                        .all(|permit| permit.slot != 0));
+                    if !held.iter().any(|permit| permit.slot == 0) {
+                        assert!(
+                            used <= cpus.saturating_sub(cpus.min(2)),
+                            "background consumed foreground capacity"
+                        );
+                    }
+                    let actual = resources.usage.lock().unwrap();
+                    assert_eq!(actual.cpus, used);
+                    assert_eq!(actual.jobs, held.len());
+                    assert_eq!(actual.slots.iter().sum::<usize>(), held.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_acceptance_releases_slot_and_grant_without_worker_execution() {
+        let resources = ResourceAdmission::new(1, WARM_WORKER_MB);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let (mut connection, peer) = UnixStream::pair().unwrap();
+        let worker_connection = connection.try_clone().unwrap();
+        drop(peer);
+        let mut identity = AdmissionId(0);
+        assert!(matches!(
+            admit_job_observed(
+                &[sender],
+                None,
+                &resources,
+                CompileWorkload::Foreground,
+                Job::Transaction(worker_connection),
+                &mut connection,
+                &mut identity,
+                admission_capacity(4, WARM_WORKER_MB)
+            ),
+            Admission::Continue
+        ));
+        let pending = receiver.recv().unwrap();
+        assert_eq!(pending.resource_permit.slot, 0);
+        assert!(pending.accepted.recv().is_err());
+        assert_eq!(resources.usage.lock().unwrap().jobs, 1);
+        drop(pending);
+        assert_eq!(resources.usage.lock().unwrap().jobs, 0);
+        assert!(resources
+            .acquire_with_capacity(
+                CompileWorkload::Foreground,
+                admission_capacity(4, WARM_WORKER_MB)
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn worker_receives_owner_grant_and_refuses_transaction_class_switch() {
+        let mut request = ExtractRequest::default();
+        request.set_workload(CompileWorkload::Preparation);
+        request.set_execution_grant(ExecutionGrant {
+            jobs: 99,
+            capabilities: 99,
+        });
+        request.input("Source.hs");
+        let argv = grant_worker_argv(
+            &request.worker_argv(),
+            CompileWorkload::Preparation,
+            ExecutionGrant {
+                jobs: 4,
+                capabilities: 4,
+            },
+        )
+        .unwrap();
+        let granted = ExtractRequest::decode_worker_argv(&argv).unwrap();
+        assert_eq!(
+            granted.execution_grant(),
+            ExecutionGrant {
+                jobs: 4,
+                capabilities: 4
+            }
+        );
+        assert_eq!(granted.cli_argv(), request.cli_argv());
+        assert!(grant_worker_argv(
+            &argv,
+            CompileWorkload::Foreground,
+            ExecutionGrant {
+                jobs: 4,
+                capabilities: 4
+            }
+        )
+        .is_err());
+    }
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
 
@@ -3654,6 +4097,9 @@ tidepool-target phase=desugar module=Execute\n",
             let mut header = [0u8; 40];
             connection.read_exact(&mut header).unwrap();
             assert_eq!(&header[..8], TRANSACTION);
+            let mut workload = [0];
+            connection.read_exact(&mut workload).unwrap();
+            assert_eq!(workload, [0]);
             assert_eq!(&header[8..], &[3; 32]);
             connection.write_all(&[ACCEPTED]).unwrap();
             connection.write_all(&1u64.to_le_bytes()).unwrap();
@@ -3910,6 +4356,9 @@ tidepool-target phase=desugar module=Execute\n",
             let mut header = [0; 40];
             stream.read_exact(&mut header).unwrap();
             assert_eq!(&header[..8], TRANSACTION);
+            let mut workload = [0];
+            stream.read_exact(&mut workload).unwrap();
+            assert_eq!(workload, [0]);
             stream.write_all(&[ACCEPTED]).unwrap();
             stream.write_all(&81u64.to_le_bytes()).unwrap();
             let mut command = [0];
