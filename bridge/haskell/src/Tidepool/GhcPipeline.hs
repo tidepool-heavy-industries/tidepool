@@ -3674,6 +3674,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     result <- finish selection
     liftIO $ do
       emitReuseComplete timing reuseContext SourceFrontend
+      emitReuseComplete timing reuseContext Interface
       emitReuseComplete timing reuseContext FinalizedCore
       case preparation of
         PrepareStg | isNothing (completionFactoryFor selection) ->

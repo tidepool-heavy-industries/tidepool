@@ -3720,6 +3720,19 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         , line == "tidepool-canonical-frontend module=MetadataOwner"
           || line == "tidepool-checked module=MetadataOwner target=False"]
       isInt checked = maybe False (`eqType` intTy) (crResultType checked)
+      interfaceEvents diagnostics =
+        [line | line <- lines diagnostics
+        , "tidepool-reuse {" `isPrefixOf` line
+        , "\"stage\":\"interface\"" `isInfixOf` line]
+      isComplete = isInfixOf "\"decision\":\"complete\""
+      requireInterfaceComplete label diagnostics = case interfaceEvents diagnostics of
+        [] -> fail (label ++ " omitted interface observation")
+        events -> do
+          let closures = filter isComplete events
+              context = fst . T.breakOn ",\"stage\":" . T.pack
+          unless (length closures == 1 && isComplete (last events)
+              && all ((== context (last events)) . context) events) $
+            fail (label ++ " did not close exactly one interface cycle after its decisions")
   installOwner
   copyFile (fixture "MetadataTarget.hs") target
   scopePath <- writeGenuineEmptyMetadataScope work
@@ -3735,10 +3748,12 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       (cold,coldDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt cold && frontends coldDiagnostics == 1) $
         fail "cold exact transaction did not compile its real source dependency"
+      requireInterfaceComplete "cold check" coldDiagnostics
       (warm,warmDiagnostics) <- captureDiagnostics (check relocated)
       unless (isInt warm && frontends warmDiagnostics == 0
           && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
         fail "identical empty exact scopes repeated a dependency frontend"
+      requireInterfaceComplete "warm check" warmDiagnostics
       (native,nativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing
@@ -3747,17 +3762,22 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           && counterValues "transaction_reused_source_products" nativeDiagnostics == [1]
           && Map.member (mkModuleName "MetadataOwner") (pprFinalizedModules native)) $
         fail "check to native preparation replayed its dependency or lost original42"
+      requireInterfaceComplete "native preparation" nativeDiagnostics
       copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
-      changed <- sourceFailureDiagnostics (check scope)
+      (changed,refusalDiagnostics) <- captureDiagnostics (sourceFailureDiagnostics (check scope))
       case changed of
         Left diagnostics | any (\diagnostic -> sourceDiagnosticAt target
             "No instance for" diagnostic && "Available Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
         Left diagnostics -> fail ("changed dependency failed for another reason: " ++ show diagnostics)
         Right _ -> fail "warm exact transaction borrowed a removed instance"
+      unless (not (null (interfaceEvents refusalDiagnostics))
+          && not (any isComplete (interfaceEvents refusalDiagnostics))) $
+        fail "refused check fabricated an interface completion or omitted partial work"
       installOwner
       (recovered,recoveryDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt recovered && frontends recoveryDiagnostics == 1) $
         fail "synchronous refusal retained partial compiler products"
+      requireInterfaceComplete "recovered check" recoveryDiagnostics
     runRequest (pure ()) $ \compile -> do
       (next,nextDiagnostics) <- captureDiagnostics $
         compile CheckedEnvironment Set.empty GeneralCompile (Just relocated)
@@ -3765,6 +3785,7 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       unless (isInt next && frontends nextDiagnostics == 1
           && counterValues "transaction_reused_source_products" nextDiagnostics == [0]) $
         fail "source compiler products survived their transaction"
+      requireInterfaceComplete "new transaction check" nextDiagnostics
   putStrLn "exact transaction reuse: check/check and check/native skip dependency work; instance drift, refusal recovery and transaction close passed"
 
 -- Current candidate admission is dependency evidence for fresh importers;
