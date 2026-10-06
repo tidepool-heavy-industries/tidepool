@@ -332,10 +332,18 @@ recoveredSubsetScope owner bindings =
 -- | Exact versions and consumed site facts authorize completed-body reuse.
 -- Canonical pure units are coalesced separately from typed site batches.
 data PreparedBodyCache = PreparedBodyCache
-  { cachedExactBodies :: MVar (Map Module (Map [[Word64]] [PreparedModule]))
+  { cachedExactBodies :: MVar (Map Module (Map PreparedBodyKey [PreparedModule]))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
   , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule))
   }
+
+-- Defining-context wrappers retain their exact binder census. Canonical fat
+-- selections additionally seal the original body version, so identical Names
+-- and consumed site facts cannot admit another version's prepared batch.
+data PreparedBodyKey
+  = ContextBodyKey [[Word64]]
+  | FatBodyKey FatOriginalVersion [[Word64]]
+  deriving (Eq, Ord)
 
 newPreparedBodyCache :: IO PreparedBodyCache
 newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty <*> newMVar Map.empty <*> newMVar Map.empty
@@ -457,10 +465,12 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
               (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
-preparedBodyKey :: [CoreBind] -> [[Word64]]
-preparedBodyKey bindings =
-  [map (getKey . varUnique) (bindersOf binding) | binding <- bindings]
+preparedBodyKey :: Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
+preparedBodyKey version bindings = case version of
+  Nothing -> ContextBodyKey census
+  Just original -> FatBodyKey original census
   where
+    census = [map (getKey . varUnique) (bindersOf binding) | binding <- bindings]
     bindersOf (NonRec binder _) = [binder]
     bindersOf (Rec pairs) = map fst pairs
 
@@ -526,7 +536,7 @@ newPreparedComponentTaskPreparer env owners stable = do
         -- supplies checked rebasing, all selected site units form one typed
         -- batch; pure-unit reuse remains independent of that batch's growth.
         siteTask <- if null siteBearing then pure (Right Nothing) else
-          fmap (fmap Just) (acquireSiteBatch owner (IntMap.elems (IntMap.unions
+          fmap (fmap Just) (acquireSiteBatch (Just version) owner (IntMap.elems (IntMap.unions
             (map fatComponentBindings siteBearing))))
         case (sequence [fmap ((,) pair) task | (pair,task) <- acquired], siteTask) of
           (Left failure, _) -> pure (Left failure)
@@ -638,16 +648,17 @@ newPreparedBodyTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCach
   -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedBodyTaskPreparer env owners bodyCache = do
   environment <- resolvePreparedSiteEnvironment env
-  newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache
+  acquire <- newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache
+  pure (acquire Nothing)
 
 newPreparedBodyTaskPreparerWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv
   -> OwnerInterfaceCache -> PreparedBodyCache
-  -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
+  -> IO (Maybe FatOriginalVersion -> Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache = do
   scoped <- newMVar Map.empty
-  pure $ \owner bindings -> do
+  pure $ \version owner bindings -> do
     let stable = cachedExactBodies bodyCache
-        key = preparedBodyKey bindings
+        key = preparedBodyKey version bindings
     stableHit <- lookupOwnerEntry owner key <$> readMVar stable
     scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
     let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
