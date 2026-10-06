@@ -5,7 +5,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import Control.Concurrent (ThreadId, forkFinally, killThread, yield)
 import Control.Concurrent.MVar
   ( MVar, newEmptyMVar, putMVar, readMVar, takeMVar )
-import Control.Exception (SomeException, bracket, finally, throwIO)
+import Control.Exception (SomeException, bracket, finally, throwIO, evaluate)
 import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Bits (shiftL, testBit)
@@ -35,6 +35,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (callProcess, readProcess)
 import System.Timeout (timeout)
+import System.Mem.StableName (makeStableName)
 import Tidepool.FatIface
   ( FatIfaceLookup(..)
   , FatIfaceMissing(..)
@@ -55,7 +56,9 @@ import Tidepool.FatIface.Internal
   )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
-import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies, pmBindings)
+import Tidepool.PreparedStg
+  (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
+  , newPreparedComponentTaskPreparer, runPreparedBodyTask, selectPreparedBodyCaches)
 import Tidepool.ExecutionProjection (topBinders)
 
 assert :: Bool -> String -> IO ()
@@ -152,6 +155,7 @@ scenario = do
           names = map greName (globalRdrEnvElts (tcg_rdr_env tcEnv))
           fatIdentityName = findName "FatFixture" "fatIdentity" names
           privateCallerName = findName "FatFixture" "privateCaller" names
+          privateDiamondName = findName "FatFixture" "privateDiamond" names
           recAName = findName "FatFixture" "recA" names
           recBName = findName "FatFixture" "recB" names
           thinIdentityName = findName "ThinFixture" "thinIdentity" names
@@ -209,6 +213,42 @@ scenario = do
       privateBodies <- liftIO newPreparedBodyCache
       privatePrepared <- liftIO $ prepareRecoveredBodies hsc privateOwners privateBodies
         privateOwner privateGroups >>= either (fail . show) pure
+      liftIO $ do
+        componentCache <- newPreparedBodyCache
+        acquireComponents <- newPreparedComponentTaskPreparer hsc privateOwners componentCache
+        let prepare roots = do
+              selected <- lookupFatIfaceComponents hsc cache privateOwner roots >>= \case
+                FatIfaceComponents selection -> pure selection
+                _ -> fail "canonical package growth lost its genuine interface selection"
+              task <- acquireComponents selected >>= either (fail . show) pure
+              runPreparedBodyTask task >>= either (fail . show) pure
+            physicalBindings prepared = fmap Map.fromList $ fmap concat $ forM (pmBindings prepared) $ \(binding,_) -> do
+              identity <- evaluate binding >>= makeStableName
+              pure [(varName binder,identity) | binder <- topBinders binding]
+        first <- prepare [privateCallerName]
+        firstBindings <- physicalBindings first
+        grown <- prepare [privateCallerName,fatIdentityName,privateDiamondName]
+        grownBindings <- physicalBindings grown
+        assert (all (\(name,identity) -> Map.lookup name grownBindings == Just identity)
+          (Map.toList firstBindings))
+          "package demand growth re-lowered a completed private component"
+        assert (all (\(name,spelling) -> Map.lookup name (pmStableTopSpellings grown) == Just spelling)
+          (Map.toList (pmStableTopSpellings first)))
+          "package demand growth renamed an already prepared private top"
+        shuffled <- prepare [privateDiamondName,fatIdentityName,privateCallerName,privateCallerName]
+        shuffledBindings <- physicalBindings shuffled
+        assert (grownBindings == shuffledBindings && pmStableTopSpellings grown == pmStableTopSpellings shuffled)
+          "root permutation or duplication changed canonical prepared component identities"
+        selectedCache <- selectPreparedBodyCaches [(componentCache,Set.singleton privateOwner)]
+        acquireSelected <- newPreparedComponentTaskPreparer hsc privateOwners selectedCache
+        selected <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
+          FatIfaceComponents selection -> pure selection
+          _ -> fail "selected cache fixture lost its exact component"
+        selectedTask <- acquireSelected selected >>= either (fail . show) pure
+        selectedPrepared <- runPreparedBodyTask selectedTask >>= either (fail . show) pure
+        selectedBindings <- physicalBindings selectedPrepared
+        assert (selectedBindings == firstBindings)
+          "owner-indexed completed cache selection discarded a prepared private unit"
       privateOwnerClone <- liftIO (copyOwnerInterfaceCache privateOwners)
       privateOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
       liftIO (assert (maybe False (const True) privateOwnerContext)
