@@ -8735,10 +8735,13 @@ pub(super) mod tests {
             let PreparedSettlement::Done { value } = resumed.settlement else {
                 panic!("resume returns Done answer")
             };
-            assert_eq!(
-                engine.machine.observe_handle(program, value, 100).unwrap(),
-                HaskellValue::Con(DataConId(105), vec![])
-            );
+            let HaskellValue::Con(identity, fields) =
+                engine.machine.observe_handle(program, value, 100).unwrap()
+            else {
+                panic!("resumed answer is a Null constructor")
+            };
+            assert_eq!(identity, DataConId(105));
+            assert!(fields.is_empty());
             assert_eq!(engine.parked_count(), 0);
             if borrowed {
                 assert!(engine.release(answer));
@@ -8792,10 +8795,7 @@ pub(super) mod tests {
             let CodegenPreparedOuter::Constructor { identity, fields } = engine
                 .machine
                 .inspect_outer(*returned, RealmId::ROOT)
-                .unwrap()
-            else {
-                panic!("native Field constructor")
-            };
+                .unwrap();
             assert_eq!(identity, tidepool_repr::DataConId(980));
             assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
             assert!(engine.release(*returned));

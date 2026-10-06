@@ -717,6 +717,7 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_fns::RuntimeError;
 
     fn admitted_gc_request(
         ms: &crate::machine_state::MachineState,
