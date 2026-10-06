@@ -11,6 +11,7 @@ import Control.Exception (bracket, evaluate, finally, try)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Maybe (isJust)
 import System.Mem.StableName (makeStableName)
 import Data.Map.Strict qualified as Map
@@ -25,6 +26,8 @@ import GHC.Driver.Session (updOptLevel)
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
 import GHC.Types.Id (mkVanillaGlobal, setIdType, isDataConWorkId_maybe)
+import GHC.StgToCmm.Closure (importedIdLFInfo)
+import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -56,7 +59,7 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), WireProgram(..) )
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
-  , FatIfaceComponentLookup(..), fatSelectionComponents
+  , FatIfaceComponentLookup(..), fatSelectionComponents, fatComponentBindings
   , readExactInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..) )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
@@ -67,7 +70,8 @@ import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
-  , newPreparedBodyCache, prepareModule, newPreparedComponentTaskPreparer, runPreparedBodyTask )
+  , newPreparedBodyCache, prepareModule, newPreparedComponentTaskPreparer, runPreparedBodyTask
+  , preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 
 assert :: Bool -> String -> IO ()
@@ -162,9 +166,52 @@ scenario = do
     liftIO $ growing_original_packages hsc context home hidden hiddenClosure closure
     queueOwner <- findModule (mkModuleName "Data.FTCQueue") Nothing
     liftIO $ constructor_component_recovery hsc context queueOwner root source
+    typeableOwner <- findModule (mkModuleName "GHC.Internal.Data.Typeable.Internal") Nothing
+    liftIO $ evaluated_constructor_component hsc context typeableOwner
     liftIO $ retainedProjectionBoundary hsc context modules
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
+    evaluated_constructor_component hsc context owner = do
+      let root = SymbolIdentity (Text.pack (unitString (moduleUnit owner)))
+            (Text.pack (moduleNameString (moduleName owner))) "value" "mkTrCon11" Nothing
+          selectedContext = context { projectionEntry = root }
+      (identifier,_) <- resolvePackageGlobal hsc root >>= either fail pure
+      cache <- newFatIfaceCache
+      owners <- newOwnerInterfaceCache
+      bodies <- newPreparedBodyCache
+      selection <- lookupFatIfaceComponents hsc cache owner [varName identifier] >>= \case
+        FatIfaceComponents selected -> pure selected
+        _ -> fail "Typeable constructor entry has no genuine original component"
+      let originals = concatMap (concatMap groupBinders . IntMap.elems . fatComponentBindings)
+            (fatSelectionComponents selection)
+          names = map (occNameString . nameOccName . varName) originals
+      assert ("mkTrCon11" `elem` names && "$WTrType" `elem` names)
+        "strict constructor entry lost its same-owner tag dependency"
+      acquire <- newPreparedComponentTaskPreparer hsc owners bodies
+      task <- acquire selection >>= either (fail . show) pure
+      prepared <- runPreparedBodyTask task >>= either (fail . show) pure
+      let canonical = [original | (binding,_) <- pmBindings prepared, binder <- topBinders binding
+            , varName binder == varName identifier, Just original <- [preparedExpectedEntry prepared binder]]
+          canonicalConstructor = case canonical of
+            [original] -> case importedIdLFInfo original of
+              LFCon{} -> True
+              _ -> False
+            _ -> False
+      assert canonicalConstructor
+        "Typeable regression lacks a canonical evaluated constructor entry"
+      program <- either (fail . show) pure (projectPreparedTarget selectedContext [prepared])
+      let constructors = [identity | group <- programBindings program
+            , TopBinding identity (HeapBinding _ Constructor{}) <- case group of
+                NonRecursive top -> [top]; Recursive tops -> tops]
+      assert (root `elem` constructors)
+        "canonical evaluated Typeable entry became a thunk during subset preparation"
+      where
+        groupBinders (NonRec binder _) = [binder]
+        groupBinders (Rec pairs) = map fst pairs
+        topBinders (Stg.StgTopLifted (Stg.StgNonRec binder _)) = [binder]
+        topBinders (Stg.StgTopLifted (Stg.StgRec pairs)) = map fst pairs
+        topBinders (Stg.StgTopStringLit binder _) = [binder]
+
     constructor_component_recovery hsc context owner root source = do
       let symbol occurrence = SymbolIdentity
             (Text.pack (unitString (moduleUnit owner))) (Text.pack (moduleNameString (moduleName owner)))

@@ -21,13 +21,15 @@ module Tidepool.FatIface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
-import GHC.Core (CoreBind, Bind(..))
+import GHC.Core (CoreBind, Bind(..), Expr(..))
+import GHC.Core.DataCon (dataConRepStrictness, dataConUnivAndExTyCoVars, isMarkedStrict)
+import GHC.Core.Utils (getIdFromTrivialExpr_maybe)
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
-import GHC.Types.Var (Id, isId, isLocalId)
-import GHC.Types.Id (isFCallId, isPrimOpId_maybe)
+import GHC.Types.Var (Id, isId, isLocalId, isTyVar, isCoVar)
+import GHC.Types.Id (isFCallId, isPrimOpId_maybe, isDataConWorkId_maybe)
 import Data.Maybe (isJust)
 import GHC.Types.Var (varName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
@@ -339,17 +341,61 @@ indexOriginalBindings version coreBinds =
     dependencies = IntMap.map Set.toAscList legacyDependencySets
     localDependencySets = privateOriginalDependencies (fatOriginalOwner version) groups
     privateDependencies = IntMap.map Set.toAscList localDependencySets
+    preparationDependencies = IntMap.unionWith Set.union localDependencySets
+      (constructorTagDependencies groups)
     rosters = map Set.toAscList $ Shared.privateComponents
-      (Map.fromList (IntMap.toAscList localDependencySets))
+      (Map.fromList (IntMap.toAscList preparationDependencies))
     componentOrdinals = IntMap.fromList
       [ (ordinal, componentOrdinal)
       | roster@(componentOrdinal:_) <- rosters
       , ordinal <- roster ]
-    componentOf = validateCrossComponentEdges localDependencySets componentOrdinals `seq` componentOrdinals
+    componentOf = validateCrossComponentEdges preparationDependencies componentOrdinals `seq` componentOrdinals
     components = IntMap.fromList
       [ (componentOrdinal, FatIfaceComponent version roster
           (IntMap.restrictKeys groups (IntSet.fromList roster)) allBinders)
       | roster@(componentOrdinal:_) <- rosters ]
+
+-- GHC's tag rewrite expects all same-owner strict-field arguments in its
+-- binder map. A saturated top constructor RHS therefore shares preparation
+-- with the original definitions supplying its strict-field closures. These
+-- are preparation edges only: public dependency demand remains independent.
+-- Actual tag facts are recomputed from those bodies, including unknown/thunk
+-- arguments; decoded IdInfo may have had interface pragmas stripped.
+-- Only exposed worker applications contribute edges; Core is never unfolded
+-- or rewritten here, and prepared entries retain their interface validation.
+constructorTagDependencies :: IntMap.IntMap CoreBind -> IntMap.IntMap (Set.Set Int)
+constructorTagDependencies groups = IntMap.map dependencies groups
+  where
+    census = Map.fromList [(varName identifier, (ordinal,identifier))
+      | (ordinal,binding) <- IntMap.toAscList groups, identifier <- groupBinders binding]
+    dependencies binding = Set.fromList
+      [ ordinal
+      | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+      , (Var worker,arguments) <- [constructorApplication (stripTop rhs)]
+      , Just constructor <- [isDataConWorkId_maybe worker]
+      , let quantifiers = dataConUnivAndExTyCoVars constructor
+            (instantiation,fields) = splitAt (length quantifiers) arguments
+            marks = dataConRepStrictness constructor
+      , length instantiation == length quantifiers
+      , and (zipWith matchesQuantifier quantifiers instantiation)
+      , length fields == length marks
+      , (argument,mark) <- zip fields marks
+      , isMarkedStrict mark
+      , Just reference <- [getIdFromTrivialExpr_maybe argument]
+      , Just (ordinal,_) <- [Map.lookup (varName reference) census] ]
+    constructorApplication = collect []
+      where
+        collect arguments (App function argument) = collect (argument:arguments) function
+        collect arguments (Cast body _) = collect arguments body
+        collect arguments (Tick _ body) = collect arguments body
+        collect arguments function = (function,arguments)
+    stripTop (Lam binder body) | isTyVar binder = stripTop body
+    stripTop (Cast body _) = stripTop body
+    stripTop (Tick _ body) = stripTop body
+    stripTop body = body
+    matchesQuantifier binder Type{} = isTyVar binder
+    matchesQuantifier binder Coercion{} = isCoVar binder
+    matchesQuantifier _ _ = False
 
 -- | Private scope edges from actual original Ids. The result carries no Core
 -- admission: callers still need the owning decoded original/version. Operation
