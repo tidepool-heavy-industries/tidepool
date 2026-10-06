@@ -1899,18 +1899,6 @@ frontFacts front = pure ModuleFacts
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
 
--- | One compile cycle in an already-open 'Ghc' session. Loaded sources
--- finalize in the typed phase hooks; deferred sources finalize in dependency
--- order before their importers. The caller owns session bootstrap and decides
--- whether the immutable module memo survives this cycle.
---
--- 'CycleState' carries immutable completed versions from its universe owner.
--- Each attempt has a private EPS/finder/home view and selects only versions
--- validated against the current source and exact imported environment.
--- 'sessionT0' includes bootstrap only for standalone compilation.
---
--- 'retained' is the immutable per-request index used by both the plugin's
--- recompilation fingerprint and the prepared memo's module validity check.
 -- GHC downsweep indexes every retained summary by its source path. Exact
 -- lexical/linker nodes have no source and belong only to their admitted graph.
 -- CPP summaries also need fresh preprocessing to observe changed includes.
@@ -1924,6 +1912,19 @@ depanalSourceModules excluded = do
   setSession env {hsc_mod_graph = mkModuleGraph
     (filter sourceSummary (mgModSummaries' (hsc_mod_graph env)))}
   depanal excluded False
+
+-- | One compile cycle in an already-open 'Ghc' session. Loaded sources
+-- finalize in the typed phase hooks; deferred sources finalize in dependency
+-- order before their importers. The caller owns session bootstrap and decides
+-- whether the immutable module memo survives this cycle.
+--
+-- 'CycleState' carries immutable completed versions from its universe owner.
+-- Each attempt has a private EPS/finder/home view and selects only versions
+-- validated against the current source and exact imported environment.
+-- 'sessionT0' includes bootstrap only for standalone compilation.
+--
+-- 'retained' is the immutable per-request index used by both the plugin's
+-- recompilation fingerprint and the prepared memo's module validity check.
 
 runCompileCycle
   :: PipelineSelection result -> CycleState
