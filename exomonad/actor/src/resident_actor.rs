@@ -8138,15 +8138,16 @@ where
             self.environment.source_layers.as_ref(),
         )
         .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-        let application_workbench = self
-            .environment
-            .runner
-            .application_workbench()
-            .with_intrinsic_effect_support(self.environment.intrinsic_effect_support())
-            .with_compilation_authority(authority);
+        let application_workbench = Arc::new(
+            self.environment
+                .runner
+                .application_workbench()
+                .with_intrinsic_effect_support(self.environment.intrinsic_effect_support())
+                .with_compilation_authority(authority),
+        );
         let compiled_tools = application_workbench
             .prepare_tools(
-                compile_context,
+                compile_context.clone(),
                 self.spec_installs,
                 self.descriptor.effective_role().effect_keys().to_vec(),
             )
@@ -8160,6 +8161,25 @@ where
             "agent spec preparation"
         );
         let compiled_tools = Arc::new(compiled_tools?);
+        if self.descriptor.effective_role().role() == crate::ActorRole::Root {
+            for row in application_workbench.preparation_rows() {
+                let row = row.clone();
+                let workbench = Arc::clone(&application_workbench);
+                let context = compile_context.clone();
+                tokio::spawn(async move {
+                    let outcome = workbench
+                        .prepare_toolset_only(
+                            context,
+                            tidepool_toolchain::artifacts::CompileWorkload::Preparation,
+                            row,
+                        )
+                        .await;
+                    if let Err(error) = outcome {
+                        tracing::info!(%error, "optional configured toolset preparation did not complete");
+                    }
+                });
+            }
+        }
         #[cfg(test)]
         if let Some(observer) = &self.activation_preview_observer {
             observer(

@@ -3379,6 +3379,13 @@ fn compile_root(
     let context_support = vec![exomonad_tool::ToolEffectKey::ContextReadWrite];
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_toolset_support_roots(toolset_support)
+        .with_preparation_roles(match &config.workspace_inputs {
+            Some(inputs) => inputs
+                .config()?
+                .preparation
+                .selected_roles(config.research_policy)?,
+            None => Vec::new(),
+        })
         .with_installed_effect_support(context_support)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")

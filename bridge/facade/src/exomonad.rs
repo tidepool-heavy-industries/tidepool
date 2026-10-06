@@ -232,6 +232,8 @@ pub(crate) struct ExomonadConfig {
     #[serde(default)]
     pub(crate) models: std::collections::BTreeMap<String, String>,
     #[serde(default)]
+    pub(crate) preparation: PreparationConfig,
+    #[serde(default)]
     pub(crate) haskell: workspace::HaskellConfig,
     #[serde(default)]
     pub(crate) prompts: workspace::PromptConfig,
@@ -254,11 +256,48 @@ pub(crate) fn write_fixture_project_config(
         },
         research: exomonad_actor::ResearchPolicy::default(),
         models: std::collections::BTreeMap::new(),
+        preparation: PreparationConfig::default(),
         haskell: workspace::HaskellConfig::default(),
         prompts: workspace::PromptConfig::default(),
     };
     configure(&mut config);
     write_fixture_config(authored, &config);
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparationConfig {
+    #[serde(default)]
+    pub(crate) roles: Vec<exomonad_actor::ActorRole>,
+}
+
+impl PreparationConfig {
+    pub(crate) fn selected_roles(
+        &self,
+        policy: exomonad_actor::ResearchPolicy,
+    ) -> Result<Vec<exomonad_actor::EffectiveRole>, Box<dyn std::error::Error>> {
+        use exomonad_actor::{ActorRole, EffectiveRole};
+        let mut selected = vec![EffectiveRole::root().with_research_policy(policy)];
+        for role in &self.roles {
+            let selected_role = match role {
+                ActorRole::Root => continue,
+                ActorRole::Research => EffectiveRole::research(),
+                ActorRole::Coding => EffectiveRole::coding(),
+                ActorRole::Scaffolding => EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
+                    maximum_depth: 0,
+                    maximum_active_children: Some(0),
+                }),
+                ActorRole::Integration => EffectiveRole::integration(),
+                ActorRole::Inherited => return Err(runtime_error(
+                    "preparation.roles requires a concrete role; inherited has no standalone effect row",
+                )),
+            }.with_research_policy(policy);
+            if !selected.iter().any(|selected| selected.role() == *role) {
+                selected.push(selected_role);
+            }
+        }
+        Ok(selected)
+    }
 }
 
 #[cfg(test)]
@@ -704,6 +743,7 @@ fn parse_project_config(
         ))
     })?;
     config.launch.validate()?;
+    config.preparation.selected_roles(config.research)?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
         runtime_error(format!(
@@ -988,8 +1028,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         ))
     })?;
     record_run_backend(&run_root, &run_id, selected_backend)?;
-    let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
-    crate::actor_host::validate_workspace_program(&selected, &run_root)?;
+    // The source owner freezes the inputs here. The root's required installer
+    // preparation validates this exact closure before publishing readiness.
+    workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     if options.recreate {
         let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
             runtime_error(format!(
@@ -3103,6 +3144,44 @@ mod tests {
                 effort: ExomonadEffort::High,
             }
         );
+    }
+
+    #[test]
+    fn preparation_config_selects_root_then_only_named_concrete_roles() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(EXOMONAD_CONFIG);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let base = "[defaults]\nmodel = \"test-model\"\neffort = \"low\"\n";
+        for (configured, expected) in [
+            ("", vec![exomonad_actor::ActorRole::Root]),
+            (
+                "[preparation]\nroles = [\"coding\", \"root\", \"research\", \"coding\"]\n",
+                vec![
+                    exomonad_actor::ActorRole::Root,
+                    exomonad_actor::ActorRole::Coding,
+                    exomonad_actor::ActorRole::Research,
+                ],
+            ),
+        ] {
+            std::fs::write(&path, format!("{base}{configured}")).unwrap();
+            let config = read_project_config(workspace.path()).unwrap().0;
+            let selected = config.preparation.selected_roles(config.research).unwrap();
+            assert_eq!(
+                selected
+                    .iter()
+                    .map(exomonad_actor::EffectiveRole::role)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        for role in ["inherited", "administrator"] {
+            std::fs::write(
+                &path,
+                format!("{base}[preparation]\nroles = [\"{role}\"]\n"),
+            )
+            .unwrap();
+            assert!(read_project_config(workspace.path()).is_err());
+        }
     }
 
     #[test]

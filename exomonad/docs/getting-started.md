@@ -127,6 +127,19 @@ worker may reach 10 GiB, and the enclosing systemd slice remains the aggregate
 memory limit. The compiler trace records daemon epoch, daemon/worker PIDs,
 queue wait, service time and worker RSS so rotation is visible in measurements.
 
+The root prepares its selected source toolset before becoming ready. Optional
+common role rows can then warm in the background:
+
+```toml
+[preparation]
+roles = ["research", "coding"]
+```
+
+Only the listed roles are prepared, with the actual grants and installed handler
+support. Later actors execute fresh installations from the shared immutable code.
+With one compiler worker, optional warming may be refused so foreground work can
+proceed; a later required installation still prepares its row in the foreground.
+
 Child agents are launched from committed checkouts. Commit the package before
 you ask an agent to delegate.
 

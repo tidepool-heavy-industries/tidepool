@@ -382,6 +382,7 @@ pub struct ActorWorkbenchSource {
     request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     toolset_support: Arc<[PathBuf]>,
     toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+    preparation_rows: Arc<[Vec<crate::ActorEffectKey>]>,
 }
 
 /// Immutable installer readiness. It owns source and native code, while each
@@ -521,6 +522,7 @@ impl ActorWorkbenchSource {
             request_evidence: None,
             request_helper_recipe: Default::default(),
             toolset_preparation: Default::default(),
+            preparation_rows: Arc::from([]),
         }
     }
 
@@ -529,6 +531,24 @@ impl ActorWorkbenchSource {
     #[must_use]
     pub fn with_toolset_support_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.toolset_support = roots.into();
+        self
+    }
+
+    /// Exact common role grants to warm after the root's required installer.
+    #[must_use]
+    pub fn with_preparation_roles(
+        mut self,
+        roles: impl IntoIterator<Item = crate::EffectiveRole>,
+    ) -> Self {
+        let mut rows = Vec::new();
+        for role in roles {
+            if role.role() != crate::ActorRole::Root
+                && !rows.iter().any(|row| row == role.effect_keys())
+            {
+                rows.push(role.effect_keys().to_vec());
+            }
+        }
+        self.preparation_rows = rows.into();
         self
     }
 
@@ -4220,15 +4240,58 @@ where
         crate::agent_spec::resolve(roots, self.access.source.spec.as_deref())
     }
 
-    /// Compile one spec and keep both of its products.
-    ///
-    /// One fragment produces the declarations — read out of the
-    /// `AgentToolsInstallWith` suspension — and the retained dispatcher, kept
-    /// as an `Arc<RootCustody>` heap root, which covers ordinary tool calls
-    /// and every slot the spec fills. They are two products of one compile of
-    /// one module against one include list, so a schema can never advertise a
-    /// handler from another revision, and a slot can never be a revision ahead
-    /// of the tools beside it.
+    /// Prepare immutable source/native code against actual assembled support.
+    pub(crate) async fn prepare_toolset_only(
+        &self,
+        context: crate::ActorSessionContext,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        granted_effects: Vec<crate::ActorEffectKey>,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        let source_support = self.access.source.installed_effect_support().to_vec();
+        let observer = self.access.handler_effect_support.clone();
+        let admitted_support = self
+            .access
+            .with_machine(context, move |session, _, _| {
+                let mut support = source_support;
+                for key in observer(session.handlers()) {
+                    if !support.contains(&key) {
+                        support.push(key);
+                    }
+                }
+                Ok(support)
+            })
+            .await?;
+        let authority = self.compilation_authority.as_ref().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "tool installation requires its admitted source authority".into(),
+            )
+        })?;
+        let toolset_source = authority
+            .toolset_source()
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let registry = self
+            .access
+            .image_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
+        self.access
+            .source
+            .prepare_source_toolset(
+                workload,
+                toolset_source,
+                &granted_effects,
+                &admitted_support,
+                registry,
+            )
+            .await
+    }
+
+    pub(crate) fn preparation_rows(&self) -> &[Vec<crate::ActorEffectKey>] {
+        &self.access.source.preparation_rows
+    }
+
+    /// Execute one prepared installer in an actor-owned lexical scope. Its
+    /// declarations and dispatcher come from the same installation suspension.
     pub(crate) fn prepare_tools<'a>(
         &'a self,
         context: crate::ActorSessionContext,
@@ -4240,35 +4303,10 @@ where
     > {
         let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
         Box::pin(async move {
-            let source_support = self.access.source.installed_effect_support().to_vec();
-            let observer = self.access.handler_effect_support.clone();
-            let admitted_support = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    let mut support = source_support;
-                    for key in observer(session.handlers()) {
-                        if !support.contains(&key) {
-                            support.push(key);
-                        }
-                    }
-                    Ok(support)
-                })
-                .await?;
-            let authority = self.compilation_authority.as_ref().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installation requires its admitted source authority".into(),
-                )
-            })?;
-            let toolset_source = authority.toolset_source()
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            let registry = self.access.image_registry.clone()
-                .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
-            let ready = self.access.source.prepare_source_toolset(
+            let ready = self.prepare_toolset_only(
+                context.clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                toolset_source,
-                &granted_effects,
-                &admitted_support,
-                registry,
+                granted_effects.clone(),
             ).await?;
             let admitted_base = ready.effects;
             let prepared = ready.prepared;
@@ -14911,15 +14949,30 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
+        let warmed = workbench
+            .prepare_toolset_only(
+                context.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let warm_executions =
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
         let first = workbench
             .prepare_tools(context.clone(), 1, vec![])
             .await
             .unwrap();
+        assert!(Arc::ptr_eq(&warmed.prepared, &first._prepared));
         let completed_executions =
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
         assert!(
             !completed_executions.is_empty(),
             "the original compiler executes the actual local quoter"
+        );
+        assert_eq!(
+            completed_executions, warm_executions,
+            "the actual installation reuses immutable readiness without another compiler turn"
         );
         let proof = first
             ._prepared
