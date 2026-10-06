@@ -1781,12 +1781,15 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
                     .then_some((directory, stderr))
             })
             .collect::<Vec<_>>();
-        assert_eq!(relevant.len(), 1, "one physical whole-cell compiler request");
+        assert_eq!(
+            relevant.len(),
+            1,
+            "one physical whole-cell compiler request"
+        );
         let (directory, stderr) = &relevant[0];
-        let request = ExtractRequest::decode(
-            &std::fs::read(directory.join("compiler-request.bin")).unwrap(),
-        )
-        .unwrap();
+        let request =
+            ExtractRequest::decode(&std::fs::read(directory.join("compiler-request.bin")).unwrap())
+                .unwrap();
         assert!(
             request.retained_generations().keys().any(|identity| {
                 identity.module.starts_with("Tidepool.Session.Val.")

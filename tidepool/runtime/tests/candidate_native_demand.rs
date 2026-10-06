@@ -124,7 +124,9 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     let original = compile(WARMER, "CandidateDemandWarmer");
     require_validation_only(&original, "OptionalSupport");
     assert_eq!(
-        evaluator.run_target(&original, "result", frunk::HNil).json(),
+        evaluator
+            .run_target(&original, "result", frunk::HNil)
+            .json(),
         ghc_result(work.path(), "CandidateDemandWarmer", WARMER)
     );
     assert!(
