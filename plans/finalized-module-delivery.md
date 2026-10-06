@@ -41,6 +41,13 @@ establish that any gate ran or passed.
   dependency graph alongside canonical interfaces and native implementations.
 - Core companions use bounded captured-file descriptors. The ordinary exact
   type-interface reader continues to reject defining Core.
+- Complete compiler inventories use an explicit 4 GiB raw-input policy and one
+  shared 4 GiB decode-work budget. Keep standalone programs at 16 MiB,
+  module/group decoding at 64 MiB and durable module records at 32 MiB through
+  their distinct readers. Complete catalog/original-entry inventory cannot use
+  the optional 128-candidate cap or omit owners. Optional cache overflow preserves
+  the valid closed subset and withholds excess acceleration; it does not relax
+  advertised evidence validation.
 - Request helper selection is request-local and explicit: none, or actor reply
   helpers. Native signatures carry authority; printed types carry presentation.
 - GHC make consumes request-owned interface views. Executable demand attaches
@@ -49,9 +56,14 @@ establish that any gate ran or passed.
   loaded linkable when restoring the canonical skinny interface, and retain
   views through deferred checking. Durable artifact paths never become make
   scratch paths.
-- The NoLink compiler request boundary retires prior home execution symbols
-  through GHC's loader. Immutable interface/Core/bytecode caches remain separate
-  from loaded symbols, so reuse cannot execute a previous source version.
+- The compiler owner selects a compatible interpreter epoch before GHC make;
+  `NoLink` does not unconditionally retire prior home symbols. Same-owner
+  executable replacement invalidates that owner and its reverse dependents.
+  Compatible bytecode uses GHC unload/relink; stale native/foreign object symbols
+  or uncertain interpreter mutation require epoch retirement. Completed pure
+  interface/Core products survive, while required remote-pointer bytecode is
+  reissued from its retained finalized Core in the new epoch. Retained code never
+  authorizes replaying or skipping newly requested TH effects.
 - Retained compiler execution closes over canonical dependency seals, including
   authenticated interface/Core owners without native products. `HomeProducts`
   supplies checked Core attachment for durable and transaction-local owners;
@@ -59,6 +71,11 @@ establish that any gate ran or passed.
   Missing executable Core refuses demand. Current authored imports, lexical
   visibility, instances, families and fresh provider compilation retain their
   separate admission checks; loading old code cannot publish hidden names.
+- Typed compiler purpose controls retained-generation inputs. A pure activation
+  preview uses only its mounted input, rejects explicit retained heap generations
+  and does not inherit runtime demands from its native support inventory.
+  Executable requests preserve certified generation demands; type/native support
+  does not itself authorize a live runtime value.
 - The matched execution schema carries explicit constructor reply evidence.
   `Static` identifies an ordinary reply type; only `AtSite` interprets the
   constructor's first field as an erased `RequestSite`. Its input and reply
@@ -74,13 +91,16 @@ establish that any gate ran or passed.
 
 ## Qualification owners
 
-The coordinator owns the joined revision, GHC frontend/finalization and the
-single compiler-backed build/test lane. Owning crates qualify canonical
+The coordinator owns the joined revision, GHC frontend/finalization and heavy
+source capture/build admission. Owning crates qualify canonical
 inventory and source selection, native request/reply routing, atomic publication,
 explicit display, progress type safety and host composition. Repair stale
 callers at their owners instead of restoring removed compatibility paths.
-Source work may proceed in parallel; do not start another expensive compiler
-lane or multiply resident compiler heaps to fill worker slots.
+Source work and admitted independent native cases may proceed in parallel.
+Coordinate actual combined peaks, cgroups and host availability, retaining roughly
+20 GiB headroom and interactive access. Do not add enclosing slice limits as if
+they were independent physical capacity or multiply resident heaps merely to
+fill worker slots.
 
 ## Required acceptance
 
@@ -101,11 +121,14 @@ lane or multiply resident compiler heaps to fill worker slots.
    and a later correct publication. Execute explicit-display pagination,
    settlement and Store-backed startup checks: expansion cannot compile or
    replay effects, and cancellation cannot rewrite a delivered reply.
-3. Execute the M2 cohort selected by the frozen bundle descriptor; its exact
+3. Freeze one matched pinned frontend, worker, harness and browser bundle at its
+   canonical final path; retain source/profile, artifact hashes and deployment
+   manifest. Execute the M2 cohort selected by that frozen descriptor; its exact
    roster, count and per-case deadlines are owned by the
    [package qualification guide](../build/package/README.md). This plan
-   summarizes the four deterministic provider scenarios below, plus complete-cell
-   preflight and checkpoint release. Use the native no-Codex selection in
+   requires all seven cases: the four deterministic provider scenarios below,
+   complete-cell preflight, checkpoint release and the selected coding child.
+   Use the native no-Codex selection in
    [embedded-gates.md](../bridge/facade/tests/embedded-gates.md) and retain exact
    operation/publication/cleanup evidence. Only `ResponsesTransport` is mocked
    in the four provider scenarios; Engine, Scheduler, Store, dispatcher, actor,
@@ -124,42 +147,59 @@ lane or multiply resident compiler heaps to fill worker slots.
    compiler work.
    Checkpoint release is idempotent, refuses new admission after release and
    preserves an already admitted child's context; typed cleanup confirms the
-   known owners. The historical descendant test is gated out of this native
+   known owners. The selected coding child consumes the shipped `Project.Work`
+   task with its narrower effect row and original typed reply. The historical
+   descendant test is gated out of this native
    profile; a zero-match selection cannot substitute for live recursion.
 4. Run the structural prepared corpus and validate all seven registered embedded
    artifacts in
    [embedded-fixtures.json](../bridge/haskell/test-prepared-stg/embedded-fixtures.json).
+   Use the same matched compiler/resource closure, not a historical cohort.
    Regenerate artifacts through their declared producer when required by the
    schema/ABI migration; never edit version bytes. Retain the corpus and artifact
    checks separately from linking and test discovery.
-5. Build fresh matched pinned frontend, worker, harness and browser outputs.
-   Freeze their paths, source revision and deployment manifest. Execute the M1
-   browser gate with its declared browser closure and an explicit nonzero count,
-   covering real Haskell output, reload/retry, active interrupt, continuation and
+5. Execute the M1 browser gate with the same frozen descriptor, its declared
+   browser closure and an explicit nonzero count, covering real Haskell output,
+   reload/retry, active interrupt, continuation and
    root retirement. Follow the bounded commands and environment requirements in
    [embedded-gates.md](../bridge/facade/tests/embedded-gates.md).
-6. Start a fresh matched Tailscale-accessible custom TUI run with a Sol 6.1 root
-   and recursive Luna workers. Demonstrate root -> child -> grandchild creation,
-   typed requests/results through the tree and confirmed typed cleanup. Retain
+6. After the full frozen seven-case M2 cohort, M1 and corpus pass, start a new
+   workspace with a fresh matched Tailscale-accessible custom TUI on port 8082,
+   using a Sol 6.1 root and recursive Luna workers. Demonstrate
+   root -> child -> grandchild creation, typed requests/results through the tree
+   and confirmed typed cleanup. Retain
    actual descendant identities, model selections, replies and cleanup outcomes,
    exercise the deployed TUI and provide its URL. Deterministic M2 covers creator
    failure and private capture reuse; live parent-failure choreography is not an
    additional delivery gate. Retain the previous host until the fresh smoke
-   succeeds.
+   succeeds. Correctness-qualified servers may run while the remaining compiler
+   performance campaign finishes; live availability does not close those gates.
 
 For each gate record the joined source OID, exact command, executed count, exit
 status and evidence location. Keep source review, compilation, execution and
 deployment evidence distinct. Stop at the first failing action and repair its
 owner before repeating the affected check; do not broaden to every target.
 
-## Measurements and deferred work
+## Measurements and conditional work
 
 Measure cold finalization and warm A,A,B,A separately with frontend counts,
 GHC profiling, allocations, GC, retained memory, artifact size and elapsed phase
 boundaries. Keep compiler work, provider latency, scheduler delay and cleanup
 separate. Observe cache preservation using normalized provider requests and
-actual usage, with bounded private traces. These measurements inform later
-optimization; no timing, allocation or cache threshold is a release gate.
+actual usage, with bounded private traces. Complete the linked
+[retained compiler performance gates](retained-parallel-compiler.md): an actual
+native 50-cell ordinary `TIDEPOOL_TIMING=0`/instrumented `TIDEPOOL_TIMING=1` pair,
+first cold preparation, A,A,B,A, 20 prepared child setups, five fresh-process
+prepared startups, real foreground/background contention and representative CPU
+allocation comparisons. A correctness-qualified live trial may precede those
+measurements; full compiler delivery may not.
+
+Keep the optional retained scope-input-fact optimization held until the six
+previously accepted M2 cases are restored, then execute its affected semantic and
+measurement controls. A data-only parcel lifetime proposal remains a hypothesis
+until a maintained test against a recorded source revision proves the actual
+typed request, suspension, capture and retirement history. That test precedes
+any production lifetime change.
 
 Distinct-machine and restart qualification are deferred. They require their own
 environment, retained artifacts and acceptance evidence and do not extend this

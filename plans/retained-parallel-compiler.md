@@ -17,10 +17,13 @@ Performance gates, excluding provider inference and authored tool execution:
 | Same-toolset child setup | p95 < 1 second | Shared installer/native images; fresh actor state |
 | First preparation | Report separately | Required products prepared once; graph parallelism |
 
-Include CLI preflight, admission and native compilation in startup accounting.
+Include CLI preflight, daemon readiness, admission and native compilation in
+startup accounting.
 Measure warm cells while background preparation is running. First preparation
 must not disappear outside the reported timeline. The completed delivery also
-requires the real M2 worker/capture scenario, not only compiler benchmarks.
+requires all seven frozen M2 scenarios, M1 and the prepared corpus. A server
+qualified through those correctness gates can run while performance qualification
+finishes; an accessible trial does not complete the performance gates.
 
 ## Shared contracts and owners
 
@@ -97,6 +100,15 @@ publication stage, keeping pre/post mutable-source observations distinct.
 Admission validates immutable products once; activation selects retained owners.
 Do not add another registry, replay authority, fixture format or compiler.
 
+Complete compiler inventories require an explicit 4 GiB raw-input policy and one
+shared 4 GiB decode-work budget across the inventory. Keep the independent
+16 MiB standalone-program, 64 MiB module/group and 32 MiB durable-record policies
+at their own readers. Decode work is an aggregate traversal/copy bound, not a
+memory reservation. A complete catalog or original-entry inventory cannot inherit
+the optional cache's 128-candidate cap or silently crop owners. Optional cache
+overflow withholds excess acceleration while preserving the valid closed subset;
+it must not weaken evidence validation or permit an incomplete exact acquisition.
+
 Transfer a newly produced original once. If the receiving artifact owner already
 retains that exact executable version, use the existing exact/candidate reference
 path rather than emitting its complete payload again. Keep reusable products
@@ -161,9 +173,12 @@ fresh heap, dispatcher, grants and lifetime. Losing one waiter does not cancel a
 shared preparation. Reload prepares a frozen replacement and swaps under existing
 source/installation fences; stale completion cannot replace current tools.
 
-Add exomonad prepare for root/configured worker entries. Init prepares root first,
-starts it, then prepares configured common worker specializations in background.
-Check remains check-only; do not enumerate all effect subsets.
+Exomonad prepare prepares the root first and the explicitly configured common
+worker entries. Qualified init requires that completed deployment and creates a
+fresh run; selected missing or invalid entries refuse without source fallback.
+Configured worker preparation uses its actual ordered supported/granted effect
+row. Uncovered roles retain explicit owned on-demand compilation. Check remains
+check-only; do not enumerate all effect subsets.
 
 Prepared workspace and installer artifacts retain an immutable source deployment
 independent of live run identity. Multiple fresh processes/runs may select the
@@ -172,6 +187,19 @@ stand in for an exact completed TH output or bypass replay eligibility. Carry
 source-owner manifests through ready lookup instead of rereading immutable roots
 for every actor. Launch environment assembly consumes the selections already
 verified during that acquisition; independent acquisitions still verify inputs.
+
+Compiler purpose selects retained-generation policy through typed admission.
+Pure activation previews observe only their mounted input and reject explicit
+retained heap generations; they do not inherit heap demands from native support
+groups. Executable requests preserve certified retained-generation demands.
+Interface/native support evidence and live runtime-value authority remain separate.
+
+Treat a proposed data-only parcel lifetime change as a hypothesis. First retain
+a maintained test against a recorded source revision through the real typed
+request, suspension, capture and retirement owners, with independent
+settlement/lifetime observations.
+Do not change production ownership because a data-only representation appears to
+contain no executable work.
 
 ### Resource admission
 
@@ -189,6 +217,13 @@ measured aggregate peaks. RSS rotation is not live memory admission. Change
 grants only at settled transaction boundaries. Background cannot borrow the
 foreground reservation through a non-preemptible load.
 
+The central owner coordinates source capture and heavy builds. Independent native
+cases and performance work may run concurrently when actual combined process
+peaks, enclosing cgroups and host availability support them. Preserve roughly
+20 GiB host headroom and interactive access; build, user and Nix limits do not add
+up to physical memory capacity. A fixed single-heavy-lane rule is not acceptance
+evidence, and additional compiler heaps need measured admission.
+
 ## Application order
 
 1. Integrate reviewed correctness repairs: stale interface selection, genuine
@@ -203,9 +238,16 @@ foreground reservation through a non-preemptible load.
 4. Integrate regularly on main. One owner schedules heavy builds/qualification
    from the provisioned checkout; source worktrees do not start Buck. Preserve
    other workers' changes and source-only evidence.
-5. Freeze one matched bundle, run correctness/corpus/M2/performance gates and
-   deploy a fresh browser trial. A coherent earlier build can support human
-   tests; the complete delivery remains open until all gates are measured.
+5. Freeze one matched bundle and execute the catalog gate, all seven descriptor-
+   owned M2 cases, M1 and the full prepared corpus. Restore the six previously
+   accepted M2 scenarios before integrating the held scope-input-fact reuse
+   optimization. Qualify that optimization through its affected semantic and
+   measurement gates after the hold clears.
+6. From the correctness-qualified bundle, start a new workspace and a fresh
+   Tailscale-accessible custom TUI on port 8082 with a Sol 6.1 root and Luna
+   children/grandchildren. Retain old servers until this run and browser smoke
+   succeed. Performance qualification proceeds concurrently when admitted; the
+   complete delivery remains open until all required outcomes are measured.
 
 ## Acceptance
 
@@ -227,8 +269,19 @@ or baked wire versions. Property suites belong in the repository.
 - M2: A parks/B publishes/A resumes without erasing B; two children use a capture
   before parent completion and survive later parent failure. Fresh Sol root/Luna
   worker TUI exercise, messaging and cancellation in a new workspace.
-- At least 20 distinct warm cells and child setups, five fresh-process prepared
-  startups. Include background contention and actual task-overlap evidence.
+- Run the native 50-distinct-cell workload with genuinely ordinary
+  `TIDEPOOL_TIMING=0` and instrumented `TIDEPOOL_TIMING=1` conditions on the same
+  matched closure. Prove the ordinary run emits no timing instrumentation.
+  Report first cold preparation and A,A,B,A separately, with actual reused work
+  and invalidation rather than identical-request hits.
+- Execute at least 20 same-host prepared child setups and five fresh-process
+  prepared startups. Prove shared code/native images, fresh actor state and zero
+  driver/installer source compilation. Include real concurrent background
+  preparation and admitted foreground reservation, queue/service intervals and
+  aggregate memory evidence; an idle daemon is not contention.
+- Compare CPU allocations on representative native source and postload graphs,
+  not only tiny-cell smoke tests. Retain actual task overlap and the admitted
+  physical-core/SMT choices alongside the 2/4/8/16/effective-CPU sweep.
 - Retain source/artifact hashes, commands/counts/results, queue/service times,
   actual frontend/finalization/projection work, bytes read/written/decoded,
   native hits, CPU/allocation/GC and aggregate peaks. Use existing codegen detail
