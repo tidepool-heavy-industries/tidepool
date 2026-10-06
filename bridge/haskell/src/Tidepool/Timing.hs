@@ -54,7 +54,7 @@ data ReuseReason = Matched | Absent | ChangedSource | ChangedDependency
   | StageComplete deriving (Eq, Show)
 data ReuseVersionKind = SourceFingerprint | CanonicalSeal | PreparedIdentity
   | InterfaceFingerprint | ImageIdentity deriving (Eq, Show)
-data ReuseModule = ReuseModule String String ReuseVersionKind String
+data ReuseModule = ReuseModule String String ReuseVersionKind String | ReuseImage String
 data ReuseContext = ReuseContext Word64 String
 
 reuseStageName :: ReuseStage -> String
@@ -94,6 +94,8 @@ emitReuse True (ReuseContext cycleId purpose) stage decision reason owner items 
         Just (ReuseModule unit modul kind version) ->
           [("unit",jsonString unit),("module",jsonString modul)
           ,("version_kind",jsonString (reuseVersionName kind)),("version",jsonString version)]
+        Just (ReuseImage version) -> [("unit","null"),("module","null")
+          ,("version_kind",jsonString "image_identity"),("version",jsonString version)]
       fields = [("schema","1"),("cycle",show cycleId),("purpose",jsonString purpose)
         ,("stage",jsonString (reuseStageName stage)),("decision",jsonString (reuseDecisionName decision))
         ,("reason",jsonString (reuseReasonName reason)),("items",show items)
