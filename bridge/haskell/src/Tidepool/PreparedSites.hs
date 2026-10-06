@@ -210,7 +210,7 @@ data PreparedSiteEnvironment = PreparedSiteEnvironment
   , environmentRecoveredSiblings :: Map String (Maybe Id, DependencyFact)
   , environmentInterfaceSiblings :: Map String Id
   , environmentVersions :: Map Module Fingerprint
-  , environmentSignatureOwner :: Module
+  , environmentSignatureContext :: HscEnv
   }
 
 -- | An immutable query recipe and its exact observations. Keeping original
@@ -270,8 +270,7 @@ resolvePreparedSiteEnvironment env = do
       authority = SiteAuthority (tycon RequestCarrier) (tycon ResponseWrapper) (tycon ProgressWrapper)
         (Set.fromList (map key (raw ++ sited))) (Set.fromList (map key (raw ++ sited ++ sources)))
   pure (PreparedSiteEnvironment authority declarations recovered
-    (resolvePreparedInterfaceSiblings env) versions
-    (mkHomeModule (hsc_home_unit env) (mkModuleName "Tidepool.CheckedAnnotation")))
+    (resolvePreparedInterfaceSiblings env) versions env)
   where
     resolveAuthority role = do
       let (owner, occurrence, nominal) = authorityDeclaration role
@@ -384,7 +383,9 @@ resolveDeclaration env spelling occurrence nominal = do
 observeDependency :: PreparedSiteEnvironment -> Map String Id -> Map String Id
   -> DependencyQuery -> DependencyFact
 observeDependency environment owned imported query = case query of
-  SignatureOwnerQuery -> SignatureOwnerFact (environmentSignatureOwner environment)
+  SignatureOwnerQuery -> SignatureOwnerFact
+    (mkHomeModule (hsc_home_unit (environmentSignatureContext environment))
+      (mkModuleName "Tidepool.CheckedAnnotation"))
   NominalQuery declaration -> snd (environmentDeclarations environment Map.! declaration)
   ProtectedQuery name -> membership (protectedProgressIds authority) name
     progressDeclarations
@@ -483,10 +484,10 @@ data SiteRejection = SiteRejection
 -- bottoming before this pass replaces the call.
 -- | The queried objects and this witness come from the same elaboration. The
 -- caller cannot supply a dependency census or replace the resolved authority.
-elaboratePreparedSitesWithDependencies :: HscEnv -> PreparedSiteEnvironment
+elaboratePreparedSitesWithDependencies :: PreparedSiteEnvironment
   -> Map String Id -> Map String Id -> [CoreBind]
   -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection], PreparedSiteDependencies)
-elaboratePreparedSitesWithDependencies env environment owned imported bindings = do
+elaboratePreparedSitesWithDependencies environment owned imported bindings = do
   let IntrinsicCensus _ _ surfaces = censusPreparedIntrinsics [] bindings
       recovered = Map.fromList
         [(vsName spec, sibling)
@@ -497,7 +498,8 @@ elaboratePreparedSitesWithDependencies env environment owned imported bindings =
         , moduleUnit surfaceOwner == moduleUnit siblingOwner]
       siblings = Map.unions [owned, imported, environmentInterfaceSiblings environment, recovered]
   (rewritten, yields, issued, graph, failures, queries) <-
-    elaboratePreparedSitesTracked env (environmentAuthority environment) siblings bindings
+    elaboratePreparedSitesTracked (environmentSignatureContext environment)
+      (environmentAuthority environment) siblings bindings
   let facts = Map.fromSet (observeDependency environment owned imported) queries
   pure (rewritten, yields, issued, graph, failures, PreparedSiteDependencies owned facts)
 

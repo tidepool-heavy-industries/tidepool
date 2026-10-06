@@ -304,7 +304,7 @@ acquireTypedBindingsWithSiteEnvironment selected coverage env owner location tyc
       environment <- maybe (timePhase timing "prepared_site_authority" (resolvePreparedSiteEnvironment env))
         pure selected
       (bodies, yields, issued, types, failures, evidence) <- timePhase timing "prepared_sites"
-        (elaboratePreparedSitesWithDependencies env environment ownedSiblings imported bindings)
+        (elaboratePreparedSitesWithDependencies environment ownedSiblings imported bindings)
       pure (bodies, yields, issued, types, failures, Sites.preparedSiteRequestAuthority environment, Just evidence)
   let subset = case coverage of
         CompleteSourceModule -> []
