@@ -113,7 +113,10 @@
                 enableNativeBignum = true;
               }).overrideAttrs
                 (old: {
-                  patches = (old.patches or [ ]) ++ [ ./nix/ghc-make-cache-filter.patch ];
+                  patches = (old.patches or [ ]) ++ [
+                    ./nix/ghc-make-cache-filter.patch
+                    ./nix/ghc-stg-external-scope.patch
+                  ];
                   # Append complete settings as individual argv elements. Nixpkgs
                   # initializes this array in preConfigure and quotes it at Hadrian
                   # invocation. Source OPTIONS_GHC still supplies module-specific flags.

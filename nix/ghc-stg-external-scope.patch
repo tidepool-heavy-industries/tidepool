@@ -1,0 +1,257 @@
+--- a/compiler/GHC/Stg/InferTags/Rewrite.hs
++++ b/compiler/GHC/Stg/InferTags/Rewrite.hs
+@@ -7,7 +7,7 @@
+ {-# LANGUAGE GADTs                      #-}
+ {-# LANGUAGE TypeFamilies               #-}
+
+-module GHC.Stg.InferTags.Rewrite (rewriteTopBinds, rewriteOpApp)
++module GHC.Stg.InferTags.Rewrite (rewriteTopBinds, rewriteTopBindsWithExternalScope, rewriteOpApp)
+ where
+
+ import GHC.Prelude
+@@ -305,9 +305,27 @@
+
+ rewriteTopBinds :: Module -> UniqSupply -> [GenStgTopBinding 'InferTaggedBinders] -> [TgStgTopBinding]
+ rewriteTopBinds mod us binds =
++    rewriteTopBindsWithExternalScope mod [] us binds
++
++-- | Seed only exact omitted original tag facts. Actual binders retain their
++-- inferred signatures even when the supplied scope also contains their Names.
++rewriteTopBindsWithExternalScope :: Module -> [(Id, TagSig)] -> UniqSupply
++                                -> [InferStgTopBinding] -> [TgStgTopBinding]
++rewriteTopBindsWithExternalScope mod external_sigs us binds =
+     let doBinds = mapM rewriteTop binds
+-
+-    in evalState (unRM doBinds) (mempty, us, mod, mempty)
++        local_binders = mkVarSet (concatMap topBinders binds)
++        external_tags = listToUFM
++            [ (v, sig)
++            | (v, sig) <- external_sigs
++            , isExternalName (idName v)
++            , nameModule_maybe (idName v) == Just mod
++            , not (v `elemVarSet` local_binders) ]
++        topBinders :: InferStgTopBinding -> [Id]
++        topBinders (StgTopStringLit v _) = [v]
++        topBinders (StgTopLifted (StgNonRec (v,_) _)) = [v]
++        topBinders (StgTopLifted (StgRec pairs)) = map (fst . fst) pairs
++
++    in evalState (unRM doBinds) (external_tags, us, mod, mempty)
+
+ rewriteTop :: InferStgTopBinding -> RM TgStgTopBinding
+ rewriteTop (StgTopStringLit v s) = return $! (StgTopStringLit v s)
+--- a/compiler/GHC/Stg/InferTags/Types.hs
++++ b/compiler/GHC/Stg/InferTags/Types.hs
+@@ -48,6 +48,7 @@
+
+ type TagSigEnv = IdEnv TagSig
+ data TagEnv p = TE { te_env :: TagSigEnv
++                   , te_external :: IdEnv Id
+                    , te_get :: BinderP p -> Id
+                    , te_bytecode :: !Bool
+                    }
+@@ -64,6 +65,7 @@
+
+ initEnv :: Bool -> TagEnv 'CodeGen
+ initEnv for_bytecode = TE { te_env = emptyVarEnv
++             , te_external = emptyVarEnv
+              , te_get = \x -> x
+              , te_bytecode = for_bytecode }
+
+@@ -71,6 +73,7 @@
+ -- with no other changes.
+ makeTagged :: TagEnv p -> TagEnv 'InferTaggedBinders
+ makeTagged env = TE { te_env = te_env env
++                    , te_external = te_external env
+                     , te_get = fst
+                     , te_bytecode = te_bytecode env }
+
+@@ -84,6 +87,17 @@
+ -- | Look up a sig in the given env
+ lookupSig :: TagEnv p -> Id -> Maybe TagSig
+ lookupSig env fun = lookupVarEnv (te_env env) fun
++
++-- Omitted definitions retain their exact original arity and demand metadata
++-- even when occurrences were decoded without interface pragmas.
++initEnvWithExternalScope :: Bool -> [(Id, TagSig)] -> TagEnv 'CodeGen
++initEnvWithExternalScope for_bytecode sigs =
++    (extendSigEnv (initEnv for_bytecode) sigs)
++        { te_external = if for_bytecode then emptyVarEnv
++                        else mkVarEnv [(v, v) | (v, _) <- sigs] }
++
++lookupExternalId :: TagEnv p -> Id -> Maybe Id
++lookupExternalId env fun = lookupVarEnv (te_external env) fun
+
+ -- | Look up a sig in the env or derive it from information
+ -- in the arg itself.
+--- a/compiler/GHC/Stg/InferTags.hs
++++ b/compiler/GHC/Stg/InferTags.hs
+@@ -5,7 +5,7 @@
+  -- To permit: type instance XLet 'InferTaggedBinders = XLet 'SomePass
+
+ {-# OPTIONS_GHC -Wname-shadowing #-}
+-module GHC.Stg.InferTags ( inferTags ) where
++module GHC.Stg.InferTags ( inferTags, inferTagsWithExternalScope ) where
+
+ import GHC.Prelude hiding (id)
+
+@@ -19,13 +19,16 @@
+ import GHC.Types.Demand (isDeadEndAppSig)
+ import GHC.Types.Unique.Supply (mkSplitUniqSupply)
+ import GHC.Types.RepType (dataConRuntimeRepStrictness)
++import GHC.Types.Var.Set (mkVarSet, elemVarSet)
++import GHC.StgToCmm.Types (LambdaFormInfo(..))
++import GHC.StgToCmm.Closure (importedIdLFInfo)
+ import GHC.Core (AltCon(..))
+ import Data.List (mapAccumL)
+ import GHC.Utils.Outputable
+ import GHC.Utils.Misc( zipWithEqual, zipEqual, notNull )
+
+ import GHC.Stg.InferTags.Types
+-import GHC.Stg.InferTags.Rewrite (rewriteTopBinds)
++import GHC.Stg.InferTags.Rewrite (rewriteTopBindsWithExternalScope)
+ import Data.Maybe
+ import GHC.Types.Name.Env (mkNameEnv, NameEnv)
+ import GHC.Driver.DynFlags
+@@ -241,20 +244,53 @@
+ ********************************************************************* -}
+
+ inferTags :: StgPprOpts -> Bool -> Logger -> (GHC.Unit.Types.Module) -> [CgStgTopBinding] -> IO ([TgStgTopBinding], NameEnv TagSig)
+-inferTags ppr_opts !for_bytecode logger this_mod stg_binds = do
++inferTags ppr_opts !for_bytecode logger this_mod stg_binds =
++    inferTagsWithExternalScope ppr_opts for_bytecode logger this_mod [] stg_binds
++
++-- Exact omitted definitions retain the defining module's original tag facts.
++-- A function's LFInfo alone does not imply any fact about its result.
++inferTagsWithExternalScope :: StgPprOpts -> Bool -> Logger -> GHC.Unit.Types.Module
++                          -> [Id] -> [CgStgTopBinding]
++                          -> IO ([TgStgTopBinding], NameEnv TagSig)
++inferTagsWithExternalScope ppr_opts !for_bytecode logger this_mod external_ids stg_binds = do
+     -- pprTraceM "inferTags for " (ppr this_mod <> text " bytecode:" <> ppr for_bytecode)
+     -- Annotate binders with tag information.
+-    let (!stg_binds_w_tags) = {-# SCC "StgTagFields" #-}
+-                                        inferTagsAnal for_bytecode stg_binds
++    let local_binders = mkVarSet (concatMap topBinders stg_binds)
++        external_sigs =
++            [ (v, if for_bytecode then TagSig TagDunno else originalTagSig v)
++            | v <- external_ids
++            , isExternalName (idName v)
++            , nameModule_maybe (idName v) == Just this_mod
++            , not (v `elemVarSet` local_binders) ]
++        topBinders :: CgStgTopBinding -> [Id]
++        topBinders (StgTopStringLit v _) = [v]
++        topBinders (StgTopLifted (StgNonRec v _)) = [v]
++        topBinders (StgTopLifted (StgRec pairs)) = map fst pairs
++        (!stg_binds_w_tags) = {-# SCC "StgTagFields" #-}
++            inferTagsAnal for_bytecode external_sigs stg_binds
+     putDumpFileMaybe logger Opt_D_dump_stg_tags "CodeGenAnal STG:" FormatSTG (pprGenStgTopBindings ppr_opts stg_binds_w_tags)
+
+     let export_tag_info = collectExportInfo stg_binds_w_tags
+
+     -- Rewrite STG to uphold the strict field invariant
+     us_t <- mkSplitUniqSupply 't'
+-    let rewritten_binds = {-# SCC "StgTagRewrite" #-} rewriteTopBinds this_mod us_t stg_binds_w_tags :: [TgStgTopBinding]
++    let rewritten_binds = {-# SCC "StgTagRewrite" #-} rewriteTopBindsWithExternalScope this_mod external_sigs us_t stg_binds_w_tags :: [TgStgTopBinding]
+
+     return (rewritten_binds,export_tag_info)
++
++-- Reproduce the defining module's local map rather than cross-module
++-- imported-value optimizations. A function's LFReEntrant says its closure is
++-- evaluated, but its local TagSig describes its result; missing result facts
++-- must stay conservative. Exact LFCon also covers nullary constructor workers,
++-- whose implicit top-level constructor binding has no exported TagSig.
++originalTagSig :: Id -> TagSig
++originalTagSig v = case importedIdLFInfo v of
++    LFCon {} -> TagSig TagProper
++    LFReEntrant {} -> fromMaybe (TagSig TagDunno) (idTagSig_maybe v)
++    LFUnlifted {} -> TagSig TagProper
++    LFThunk {} -> TagSig TagDunno
++    LFUnknown {} -> TagSig TagDunno
++    LFLetNoEscape {} -> TagSig TagDunno
+
+ {- *********************************************************************
+ *                                                                      *
+@@ -274,10 +310,10 @@
+                     , XLetNoEscape i ~ XLetNoEscape 'InferTaggedBinders
+                     , XRhsClosure i ~ XRhsClosure 'InferTaggedBinders)
+
+-inferTagsAnal :: Bool -> [GenStgTopBinding 'CodeGen] -> [GenStgTopBinding 'InferTaggedBinders]
+-inferTagsAnal for_bytecode binds =
++inferTagsAnal :: Bool -> [(Id, TagSig)] -> [GenStgTopBinding 'CodeGen] -> [GenStgTopBinding 'InferTaggedBinders]
++inferTagsAnal for_bytecode external_sigs binds =
+   -- pprTrace "Binds" (pprGenStgTopBindings shortStgPprOpts $ binds) $
+-  snd (mapAccumL inferTagTopBind (initEnv for_bytecode) binds)
++  snd (mapAccumL inferTagTopBind (initEnvWithExternalScope for_bytecode external_sigs) binds)
+
+ -----------------------
+ inferTagTopBind :: TagEnv 'CodeGen -> GenStgTopBinding 'CodeGen
+@@ -301,17 +337,18 @@
+       -- )
+     (info, StgApp fun args)
+   where
+-    !fun_arity = idArity fun
++    original_fun = fromMaybe fun (lookupExternalId env fun)
++    !fun_arity = idArity original_fun
+     info
+          -- It's important that we check for bottoms before all else.
+          -- See Note [Bottom functions are TagTagged] and #24806 for why.
+-         | isDeadEndAppSig (idDmdSig fun) (length args)
++         | isDeadEndAppSig (idDmdSig original_fun) (length args)
+          = TagTagged
+
+          | fun_arity == 0 -- Unknown arity => Thunk or unknown call
+          = TagDunno
+
+-         | Just (TagSig res_info) <- tagSigInfo (idInfo fun)
++         | Just (TagSig res_info) <- tagSigInfo (idInfo original_fun)
+          , fun_arity == length args  -- Saturated
+          = res_info
+
+--- a/compiler/GHC/Stg/Pipeline.hs
++++ b/compiler/GHC/Stg/Pipeline.hs
+@@ -13,6 +13,7 @@
+   ( StgPipelineOpts (..)
+   , StgToDo (..)
+   , stg2stg
++  , stg2stgWithExternalScope
+   , StgCgInfos
+   ) where
+
+@@ -43,7 +44,7 @@
+ import Control.Monad.IO.Class
+ import Control.Monad.Trans.Reader
+ import GHC.Settings (Platform)
+-import GHC.Stg.InferTags (inferTags)
++import GHC.Stg.InferTags (inferTagsWithExternalScope)
+ import GHC.Stg.InferTags.TagSig ( StgCgInfos )
+
+ data StgPipelineOpts = StgPipelineOpts
+@@ -80,7 +81,19 @@
+         -> Module                    -- ^ module being compiled
+         -> [StgTopBinding]           -- ^ input program
+         -> IO ([(CgStgTopBinding,IdSet)], StgCgInfos) -- output program
+-stg2stg logger extra_vars opts this_mod binds
++stg2stg logger extra_vars opts this_mod binds =
++    stg2stgWithExternalScope logger extra_vars [] opts this_mod binds
++
++-- | Lower a module subset whose omitted same-module definitions are supplied
++-- as exact external interface Ids. Scope does not supply executable bindings.
++stg2stgWithExternalScope :: Logger
++                        -> [Var]
++                        -> [Id]
++                        -> StgPipelineOpts
++                        -> Module
++                        -> [StgTopBinding]
++                        -> IO ([(CgStgTopBinding,IdSet)], StgCgInfos)
++stg2stgWithExternalScope logger extra_vars external_ids opts this_mod binds
+   = do  { dump_when Opt_D_dump_stg_from_core "Initial STG:" binds
+         ; stg_linter False "StgFromCore" binds
+         ; showPass logger "Stg2Stg"
+@@ -100,7 +113,7 @@
+           -- annotations (which is used by code generator to compute offsets into closures)
+         ; let (binds_sorted_with_fvs, imp_fvs) = unzip (depSortWithAnnotStgPgm this_mod binds')
+         -- See Note [Tag inference for interactive contexts]
+-        ; (cg_binds, cg_infos) <- inferTags (stgPipeline_pprOpts opts) (stgPipeline_forBytecode opts) logger this_mod binds_sorted_with_fvs
++        ; (cg_binds, cg_infos) <- inferTagsWithExternalScope (stgPipeline_pprOpts opts) (stgPipeline_forBytecode opts) logger this_mod external_ids binds_sorted_with_fvs
+         ; stg_linter False "StgCodeGen" cg_binds
+         ; pure (zip cg_binds imp_fvs, cg_infos)
+    }
