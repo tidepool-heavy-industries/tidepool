@@ -406,6 +406,7 @@ def declare_haskell_components():
         "-Wall",
         "-Werror=missing-fields",
         "-threaded",
+        "-rtsopts",
         "-with-rtsopts=-T"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -434,6 +435,7 @@ def declare_haskell_components():
         "-Wall",
         "-Werror=missing-fields",
         "-threaded",
+        "-rtsopts",
         "-with-rtsopts=-T"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -463,6 +465,7 @@ def declare_haskell_components():
         "-Wall",
         "-Werror=missing-fields",
         "-threaded",
+        "-rtsopts",
         "-with-rtsopts=-T",
         "-g3",
         "-fexpose-internal-symbols",
@@ -494,6 +497,7 @@ def declare_haskell_components():
         "-Wall",
         "-Werror=missing-fields",
         "-threaded",
+        "-rtsopts",
         "-with-rtsopts=-T"
     ], dynamic = True),
         visibility = ["PUBLIC"],
