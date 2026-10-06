@@ -43,7 +43,7 @@ import Tidepool.ExecutionProjection
   , prepareProjection, prepareProjectionWithReachability, projectSelected
   , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
   , admitReachFacts, emptyPreparedReachability, reachedUniques
-  , preparedTargetReferences, preparedRootIdentity )
+  , preparedTargetReferences, preparedRootIdentity, resolveTextPackageUnit )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
@@ -92,6 +92,7 @@ scenario = do
     setTargets [target, hiddenTarget]
     _ <- load LoadAllTargets
     hsc <- getSession
+    selectedText <- liftIO (resolveTextPackageUnit hsc)
     home <- prepareNamed hsc "RecoveryHome"
     caller <- prepareNamed hsc "RecoveryCaller"
     hidden <- prepareNamed hsc "RecoveryHiddenText"
@@ -108,7 +109,7 @@ scenario = do
           , projectionFormattingAuthority = Nothing
           , projectionTimeAuthority = Nothing
           , projectionJsonAuthority = Nothing
-          , projectionTextUnit = Nothing
+          , projectionTextUnit = selectedText
           }
     closure <- liftIO $ do
       cache <- newFatIfaceCache

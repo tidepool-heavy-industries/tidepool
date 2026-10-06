@@ -7,8 +7,9 @@ import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import GHC
 import GHC.Core (Bind(..), maybeUnfoldingTemplate)
+import GHC.Driver.Env (HscEnv)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
-import GHC.Types.Id (realIdUnfolding)
+import GHC.Types.Id (Id, realIdUnfolding)
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
@@ -29,8 +30,10 @@ import Tidepool.FatIface
   , FatIfaceMissing(..)
   , lookupFatIfaceExact
   , newFatIfaceCache
+  , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface
   )
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
+import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -89,9 +92,6 @@ scenario = do
       missingId <- lookupName missingIdentityName >>= \case
         Just (AnId identifier) -> pure identifier
         _ -> fail "missing-interface identity has no genuine exported Id"
-      liftIO $ mapM_ (\identifier -> case maybeUnfoldingTemplate (realIdUnfolding identifier) of
-        Just _ -> pure ()
-        Nothing -> fail "INLINE absence control has no optimizer unfolding") [thinId, missingId]
       cache <- liftIO newFatIfaceCache
       localResult <- liftIO (lookupFatIfaceExact hsc cache
         (mkSystemName (mkUnique 'v' 983450) (mkVarOcc "localOnly")))
@@ -110,13 +110,15 @@ scenario = do
       -- dependency. Restore this deliberately thin fixture before testing the
       -- raw-reader outcome; the fat cache has already observed its artifact.
       liftIO (compileFixture ghc work [] thinSource)
+      (thinDeclaring, missingDeclaring) <- liftIO $ (,)
+        <$> declaringId hsc thinId <*> declaringId hsc missingId
       thinResult <- liftIO (lookupFatIfaceExact hsc cache thinIdentityName)
       liftIO (assert (isNoExtra thinResult)
         "thin interface was not distinguished from an absent binding")
       thinCachedResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn thinIdentityName))
       liftIO (assert (isNoExtra thinCachedResult)
         "typed no-extra outcome was not retained in the cache")
-      thinRecovery <- liftIO (recoverExactBody hsc cache thinId)
+      thinRecovery <- liftIO (recoverExactBody hsc cache thinDeclaring)
       liftIO $ case thinRecovery of
         MissingExactBody name NoExtraDeclarations -> assert (name == thinIdentityName)
           "thin recovery refusal changed the exact defining identity"
@@ -126,7 +128,7 @@ scenario = do
       liftIO (assertLoadFailure "MissingFixture" missingResult)
       missingCachedResult <- liftIO (lookupFatIfaceExact hsc cache missingIdentityName)
       liftIO (assertLoadFailure "MissingFixture" missingCachedResult)
-      missingRecovery <- liftIO (recoverExactBody hsc cache missingId)
+      missingRecovery <- liftIO (recoverExactBody hsc cache missingDeclaring)
       liftIO $ case missingRecovery of
         BodyInterfaceFailure owner reason -> do
           assert (Just owner == nameModule_maybe missingIdentityName)
@@ -134,6 +136,25 @@ scenario = do
           assert (not (null reason)) "read failure lost its reason"
         _ -> fail "optimizer unfolding bypassed an unreadable defining interface"
       pure ()
+
+-- Use the production defining-interface loader rather than a use-site Id
+-- whose optimization metadata the frontend may have omitted.
+declaringId :: HscEnv -> Id -> IO Id
+declaringId env requested = do
+  owner <- maybe (fail "INLINE fixture has no defining owner") pure
+    (nameModule_maybe (varName requested))
+  owners <- newOwnerInterfaceCache
+  bodies <- newPreparedBodyCache
+  _ <- prepareRecoveredBodies env owners bodies owner [] >>= either (fail . show) pure
+  context <- lookupOwnerInterface owners owner
+  original <- case [identifier | Just defining <- [context]
+      , identifier <- ownerInterfaceEntries defining
+      , varName identifier == varName requested] of
+    [identifier] -> pure identifier
+    _ -> fail "INLINE fixture lost its genuine defining Id"
+  case maybeUnfoldingTemplate (realIdUnfolding original) of
+    Just _ -> pure original
+    Nothing -> fail "INLINE defining-interface control has no optimizer unfolding"
 
 copyFixture :: FilePath -> FilePath -> FilePath -> IO ()
 copyFixture fixtures work name = readFile (fixtures </> name) >>= writeFile (work </> name)
