@@ -114,7 +114,10 @@ import Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
-import Tidepool.PreparedStg (newPreparedBodyCache, pmSitedSiblings)
+import Tidepool.PreparedStg
+  ( newPreparedBodyCache, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
+  , runPreparedModuleTask, copyPreparedBodyCache, selectPreparedBodyCaches
+  , preparedSiteDependenciesEquivalent )
 import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
 import Tidepool.Timing (ReuseContext(..))
 import Tidepool.CompilerExecution (withCompilerExecutor, serialCompilerExecutionGrant)
@@ -2740,7 +2743,7 @@ candidateSitedSiblingsAt work = do
   createDirectoryIfMissing True replyDir
   createDirectoryIfMissing True (work </> "Tidepool/Internal")
   copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
-  copyFile "test-source-boot/fixtures/HydratedChildOwner.hs" owner
+  copyFile "test-source-boot/fixtures/HydratedChildOwnerWithAlternative.hs" owner
   copyFile "test-source-boot/fixtures/HydratedReplyOwner.hs" (replyDir </> "Internal.hs")
   copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
@@ -2774,6 +2777,57 @@ candidateSitedSiblingsAt work = do
   case filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused) of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
+  -- Full original recovery consumes the genuine canonical Core certificate,
+  -- independently of the source memo and exact-subset preparation caches.
+  fullFixture <- capturePreparedFixture work reused
+  fullScopePath <- writeGenuineCandidateLexicalScope []
+    (owners ++ ["HydratedChildTarget"]) work fullFixture
+  fullScope <- readExactScope fullScopePath >>= either fail pure
+  fullBodies <- newPreparedBodyCache
+  let fullOwner = mkModule (stringToUnit "main") (mkModuleName "HydratedChildTarget")
+      fullEnv = prHscEnv (pprPipelineResult reused)
+      siblingsA = Map.unions (map pmSitedSiblings (pprModules reused))
+      acquireFull cache siblings = do
+        prepare <- newPreparedOriginalModuleTaskPreparer fullEnv cache fullScope
+        prepare siblings fullOwner >>= \case
+          Nothing -> fail "authenticated full original site owner became unavailable"
+          Just (_,hit,task) -> do
+            prepared <- runPreparedModuleTask task
+            unless (length (pmYieldSites prepared) == 1 && null (pmSiteRejections prepared)) $
+              fail "full original cache control lost its genuine typed suspension site"
+            stable <- makeStableName prepared
+            pure (hit,stable,prepared)
+  alternative <- case [binder | prepared <- pprModules reused
+      , moduleNameString (moduleName (pmModule prepared)) == "Tidepool.Actors.Unfold"
+      , (binding,_) <- pmBindings prepared, binder <- topBinders binding
+      , getOccString binder == "childAlternativeSited"] of
+    [binder] -> pure binder
+    _ -> fail "full original cache control lacks its compiled alternate typed helper"
+  let siblingsB = Map.insert "child" alternative siblingsA
+  (coldHit,coldIdentity,cold) <- acquireFull fullBodies siblingsA
+  (warmHit,warmIdentity,_) <- acquireFull fullBodies siblingsA
+  (changedHit,changedIdentity,changed) <- acquireFull fullBodies siblingsB
+  (changedAgainHit,changedAgainIdentity,_) <- acquireFull fullBodies siblingsB
+  (restoredHit,restoredIdentity,_) <- acquireFull fullBodies siblingsA
+  unless (not coldHit && warmHit && coldIdentity == warmIdentity
+      && not changedHit && changedAgainHit && changedIdentity == changedAgainIdentity
+      && coldIdentity /= changedIdentity && restoredHit && coldIdentity == restoredIdentity
+      && not (preparedSiteDependenciesEquivalent cold changed)) $
+    fail "canonical original site cache rebuilt a retained A/B/A view or reused a changed helper"
+  fullRaw <- newOriginalProjectionCollector
+  fullContext <- prepareCompilerProjectionContext reused Map.empty fullOwner "result" [] Nothing
+  let rawFor prepared = projectCachedOriginalHomeModuleProducts fullRaw fullEnv
+        (pprProductInterfaces reused) fullContext prepared
+  (coldRawHit,_) <- rawFor cold
+  (changedRawHit,_) <- rawFor changed
+  (restoredRawHit,_) <- rawFor cold
+  unless (not coldRawHit && not changedRawHit && restoredRawHit) $
+    fail "canonical original A/B/A views lost their completed raw projection handles"
+  copiedBodies <- copyPreparedBodyCache fullBodies
+  selectedBodies <- selectPreparedBodyCaches [(copiedBodies,Set.singleton fullOwner)]
+  (selectedHit,selectedIdentity,_) <- acquireFull selectedBodies siblingsA
+  unless (selectedHit && selectedIdentity == coldIdentity) $
+    fail "completed original owner selection discarded its older matching site view"
   retainedScope <- readExactScope capturedPath >>= either fail pure
   unless (Set.fromList (map (snd . fst) (scopeLexical retainedScope)) == Set.fromList owners
       && null (scopeProducts retainedScope) && null (scopeExecutionOwners retainedScope)) $
