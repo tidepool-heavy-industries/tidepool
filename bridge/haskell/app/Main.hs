@@ -41,9 +41,9 @@ import qualified Data.Text.Encoding as TE
 import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 
 import Tidepool.Binders
-  ( extractBindersNamed
-  , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags, templateParserFlags
-  , analyzeCell, analyzeOrderedCell, analyzeOrderedCellWithFlags, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
+  ( extractBindersNamedGhc
+  , classifyWithFlags, exportItemName, templateParserFlags
+  , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
@@ -51,13 +51,13 @@ import Tidepool.Binders
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
   )
+import Tidepool.CompilerExecution (CompilerExecutor)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , retainProgramSourceImports, withProgramSourceImports
   , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
-  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
-  , captureCompilerProducerIdentity, runPipelineSessionSelectedWithProducer
+  , CompilerScope(..), CompilerRecoveryCaches(..), withResidentCompilerScopes, withScopedExactInterfaceTransaction
   , checkCellInstances, cellGeneratedInstanceRecipe
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, generatedScaffoldRecipe, activationPreviewInputType )
@@ -77,8 +77,7 @@ import Tidepool.ExecutionSchema
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
-  ( pmModule, pmYieldSites, PreparedBodyCache, newPreparedBodyCache
-  , evictPreparedBodyMatching )
+  ( pmModule, pmYieldSites )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
   , preparedRecoveryClosure, growPreparedRecovery )
@@ -115,7 +114,7 @@ import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
 import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
-import Tidepool.Introspection (encodeInspectionResults, runInspection)
+import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
@@ -141,8 +140,7 @@ import Tidepool.Session
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , sessionHiPath, sessionModuleString )
 import Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching, readExactInterface
-  , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
+  ( readExactInterface )
 import Tidepool.SessionArtifacts
   ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
   , emitHostBindingInterface )
@@ -181,24 +179,15 @@ type Compiler =
   -> Maybe FilePath
   -> IO result
 
--- | Compiler-owned recovery caches. The resident pipeline invokes their
--- transaction owns these GHC values; one-shot compilation owns fresh caches
--- for its invocation.
+-- Recovery values share their completed resolution context's lifetime.
+-- Acquire after compilation, when the current context has been selected.
 data RecoveryCaches = RecoveryCaches
-  { rcFatIface :: FatIfaceCache
-  , rcOwnerIface :: OwnerInterfaceCache
-  , rcPreparedBodies :: PreparedBodyCache
+  { acquireRecoveryCaches :: IO CompilerRecoveryCaches
+  , recoveryExecutor :: Maybe CompilerExecutor
   }
 
-freshRecoveryCaches :: IO RecoveryCaches
-freshRecoveryCaches = RecoveryCaches
-  <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
-
-clearRecoveryCaches :: RecoveryCaches -> IO ()
-clearRecoveryCaches caches = do
-  evictFatIfaceMatching (rcFatIface caches) (const True)
-  evictOwnerInterfaceMatching (rcOwnerIface caches) (const True)
-  evictPreparedBodyMatching (rcPreparedBodies caches) (const True)
+scopeRecoveryCaches :: CompilerScope -> RecoveryCaches
+scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
 -- stderr is the human-readable channel.
@@ -211,36 +200,35 @@ main = do
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
-      withResidentPipelineSelectedRequests [] $ \runRequest ->
-        WorkerServer.runWorkerLoop $ \serveTransaction -> do
-          caches <- freshRecoveryCaches
-          runRequest (clearRecoveryCaches caches) $ \compiler ->
+      withResidentCompilerScopes [] $ \runRequest ->
+        WorkerServer.runWorkerLoop $ \serveTransaction ->
+          runRequest (pure ()) $ \scope ->
             serveTransaction (\cwd argv ->
-              setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
+              setCurrentDirectory cwd >> runWorkerInvocation scope (scopeRecoveryCaches scope) argv)
     else do
       hSetEncoding stdout utf8
-      -- One-shot path: 'main' runs this branch exactly once per process, so
-      -- a cache created here is already "fresh per invocation".
-      caches <- freshRecoveryCaches
-      producer <- captureCompilerProducerIdentity
-      runWorkerInvocation (runPipelineSessionSelectedWithProducer producer) caches rawWorkerRequest >>= exitWith
+      -- Direct transport boots the same compiler owner once for all helpers.
+      result <- withResidentCompilerScopes [] $ \runRequest ->
+        runRequest (pure ()) $ \scope ->
+          runWorkerInvocation scope (scopeRecoveryCaches scope) rawWorkerRequest
+      exitWith result
 
 -- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.
 runWorkerInvocation
-  :: Compiler -> RecoveryCaches -> [String] -> IO ExitCode
-runWorkerInvocation compiler caches rawWorkerRequest = do
+  :: CompilerScope -> RecoveryCaches -> [String] -> IO ExitCode
+runWorkerInvocation compilerScope caches rawWorkerRequest = do
   parsedWorkerRequest <- case workerRequestFromArgv rawWorkerRequest of
     Left err -> hPutStrLn stderr err >> pure Nothing
     Right (Just request) -> pure (Just request)
     Right Nothing -> hPutStrLn stderr "worker requires a versioned request" >> pure Nothing
   case parsedWorkerRequest of
     Nothing -> pure (ExitFailure 2)
-    Just request -> runParsedInvocation compiler caches request
+    Just request -> runParsedInvocation compilerScope caches request
 
 runParsedInvocation
-  :: Compiler -> RecoveryCaches -> WorkerRequest -> IO ExitCode
-runParsedInvocation compiler caches parsedWorkerRequest = do
+  :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
+runParsedInvocation compilerScope caches parsedWorkerRequest = do
   -- Read once per invocation (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there.
@@ -253,12 +241,12 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
   args <- if requestHarnessProfile parsedWorkerRequest && not (requestCheckSource parsedWorkerRequest)
             then spliceHarnessProfilePragma parsedWorkerRequest
             else pure parsedWorkerRequest
-  dispatch compiler caches timing args
+  dispatch compilerScope caches timing args
 
 -- | Dispatch one decoded worker request.
 dispatch
-  :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
-dispatch compiler caches timing args = do
+  :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
+dispatch compilerScope caches timing args = do
   admitted <- trySynchronous $ do
     case validateRequestShape args of
       Left InvalidSourceCheckShape -> fail "source checking cannot carry product or notebook authority"
@@ -302,11 +290,12 @@ dispatch compiler caches timing args = do
   case admitted of
     Left failure -> reportDiags (Left failure)
     Right () -> case requestDeclarationJoin args of
-      Just manifest -> runDeclarationOperation args manifest
-      Nothing -> dispatchSource compiler caches timing args
+      Just manifest -> runDeclarationOperation compilerScope args manifest
+      Nothing -> dispatchSource compilerScope caches timing args
 
-dispatchSource :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
-dispatchSource compiler caches timing args =
+dispatchSource :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
+dispatchSource compilerScope caches timing args =
+  let compiler = scopedCompile compilerScope in
   case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
@@ -316,12 +305,12 @@ dispatchSource compiler caches timing args =
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
         | requestActivationPreview args          -> runActivationPreviewMode compiler caches args file
         | requestCheckSource args                 -> runSourceCheckMode compiler args file
-        | requestCellPlan args                    -> runCellPlanMode args file
-        | requestCell args                        -> runCellMode compiler caches args file
-        | requestClassify args                    -> runClassifyMode timing args
-        | not (null (requestInspections args))    -> runInspectionMode compiler args file
+        | requestCellPlan args                    -> runCellPlanMode (scopedParserFlags compilerScope) args file
+        | requestCell args                        -> runCellMode compilerScope caches args file
+        | requestClassify args                    -> runClassifyMode (scopedParserFlags compilerScope) timing args
+        | not (null (requestInspections args))    -> runInspectionMode compilerScope args file
         -- A turn may also carry session fields, so it precedes session dispatch.
-        | requestTurn args                        -> runTurnMode compiler caches args file
+        | requestTurn args                        -> runTurnMode compilerScope caches args file
         -- Multi-target compilation may also carry a stable-value scope.
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
         -- Normal one-shot extraction.
@@ -427,13 +416,13 @@ runSourceCheckMode compiler args path = do
     pure (crWarnings compiled)
   reportDiagsWithWarnings checked
 
-runDeclarationOperation :: WorkerRequest -> FilePath -> IO ExitCode
-runDeclarationOperation args manifest = do
+runDeclarationOperation :: CompilerScope -> WorkerRequest -> FilePath -> IO ExitCode
+runDeclarationOperation compilerScope args manifest = do
   result <- trySynchronous $ do
     out <- maybe (fail "declaration operation requires an output path") pure
       (requestDeclarationJoinOut args)
     operation <- readDeclarationOperation manifest
-    withExactInterfaceTransaction (requestIncludes args) $ \env ->
+    withScopedExactInterfaceTransaction compilerScope (requestIncludes args) $ \env ->
       case operation of
         InspectInventory artifacts -> renderDeclarationInventoryOutcome
           <$> inspectDeclarationArtifacts env artifacts >>= writeFile out
@@ -462,18 +451,19 @@ runDeclarationOperation args manifest = do
             <> encodeBindingInterfacePurpose issuedPurpose)
   reportDiags result
 
-runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
-runInspectionMode compiler args _path = do
+runInspectionMode :: CompilerScope -> WorkerRequest -> FilePath -> IO ExitCode
+runInspectionMode compilerScope args _path = do
+  let compiler = scopedCompile compilerScope
   res <- trySynchronous $ do
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
         compile purpose path = compiler CheckedEnvironment Set.empty purpose scope path
           (requestIncludes args) (requestBuildProductsDir args)
-        inspect successful = runInspection
+        inspect successful requests = scopedRunGhc compilerScope $ runInspectionGhc
           (crHscEnv successful)
           (crTargetTcGblEnv successful)
           (crTargetRdrEnv successful)
-          (crInspectionProbes successful)
+          (crInspectionProbes successful) requests
     results <- runInspectionRequests args compile inspect
     BS.writeFile out (encodeInspectionResults results)
   reportDiags res
@@ -570,6 +560,7 @@ prepareArtifactsWithProjection
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
 prepareArtifactsWithProjection _ _ _ _ [] _ _ _ = pure ([], Nothing)
 prepareArtifactsWithProjection project originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
+  recoveryCaches <- acquireRecoveryCaches caches
   timing <- readTimingEnabled
   let result = pprPipelineResult prepared
       hscEnv = prHscEnv result
@@ -610,8 +601,8 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-  recover <- newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) originalModules []
+  recover <- newPreparedRecoveryWithPackageRoots hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
+    (compilerPreparedBodies recoveryCaches) certifiedHomes (contextFor firstTarget) originalModules []
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Package roots grow only from the finite exact original-group inventory.
@@ -764,8 +755,9 @@ reportRecoveryResiduals target failures =
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runTurnMode compiler caches args path = do
+runTurnMode :: CompilerScope -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runTurnMode compilerScope caches args path = do
+  let compiler = scopedCompile compilerScope
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   lastAttempt <- newIORef Nothing
@@ -778,7 +770,7 @@ runTurnMode compiler caches args path = do
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
-    parserFlags <- defaultParserDynFlags
+    let parserFlags = scopedParserFlags compilerScope
     sb <- case mVerdict of
       Just verdict -> pure verdict
       Nothing -> timePhase timing "classify"
@@ -800,7 +792,7 @@ runTurnMode compiler caches args path = do
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule outDir lastAttempt spliced
-        items <- timePhase timing "declaration_binders" $ extractBindersNamed modulePath (requestIncludes args) modName
+        items <- timePhase timing "declaration_binders" $ scopedRunGhc compilerScope (extractBindersNamedGhc modulePath (requestIncludes args) modName)
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
@@ -1080,23 +1072,20 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     pure (CompiledTurnOutput turn prepared originalProducts owner)
 
 -- | Block classify mode (@--classify@):
--- classify EVERY positional file in 'requestFiles' with ONE GHC session boot
--- ('classifyBlock'), in argv order, and write the verdicts to
+-- Classify every input using the capability's retained parser defaults and
+-- write the verdicts in argv order to
 -- @--classify-out@. Serves @tidepool-repl@'s block runner, which segments a
 -- block into decl runs before compiling any item and so needs every verdict
 -- up front — one spawn for the whole block instead of one classify spawn per
 -- item.
-runClassifyMode :: Bool -> WorkerRequest -> IO ExitCode
-runClassifyMode timing args =
-  -- No live GHC session exists in this parse-only mode, so the caught
-  -- exception below always takes 'reportDiags''s 'Nothing' branch (never a
-  -- 'SourceError' to distinguish).
+runClassifyMode :: DynFlags -> Bool -> WorkerRequest -> IO ExitCode
+runClassifyMode parserFlags timing args =
   timePhase timing "total" $
     try
       ( do
           out      <- requireArg "--classify-out" (requestClassifyOut args)
           srcs     <- mapM readFile (requestFiles args)
-          verdicts <- classifyBlock timing srcs
+          verdicts <- timePhase timing "classify" (mapM (evaluate . classifyWithFlags parserFlags) srcs)
           writeFile out (renderVerdictsJson verdicts)
           hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
       )
@@ -1107,8 +1096,8 @@ runClassifyMode timing args =
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
 -- Parsing chooses execution ordinals before runtime reserves original owners.
 -- The emitted receipt contains no checked pins, prepared bodies or live values.
-runCellPlanMode :: WorkerRequest -> FilePath -> IO ExitCode
-runCellPlanMode args cellPath = do
+runCellPlanMode :: DynFlags -> WorkerRequest -> FilePath -> IO ExitCode
+runCellPlanMode parserFlags args cellPath = do
   result <- trySynchronous $ do
     source <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
@@ -1116,7 +1105,7 @@ runCellPlanMode args cellPath = do
     templates <- forM (requestTurnTemplates args) $ \(kind,path) -> do
       bytes <- BS.readFile path
       pure (kind, shaHex bytes)
-    plan <- analyzeOrderedCell template source >>= either throwCellSplitError pure
+    plan <- analyzeOrderedCellWithFlags parserFlags template source >>= either throwCellSplitError pure
     let text = encodeString . T.pack
         observation = encodeCellOut plan [] [] ""
         receipt = encodeListLen 7 <> text "TPCELLPLAN2"
@@ -1133,15 +1122,15 @@ runCellPlanMode args cellPath = do
     BS.writeFile out (toStrictByteString receipt)
   reportDiags result
 
-runCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runCellMode compiler caches args cellPath = do
+runCellMode :: CompilerScope -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runCellMode compilerScope caches args cellPath = do
   exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
   case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
-    Just (scope, planned) -> runCellProgramMode compiler caches args cellPath scope planned
-    Nothing -> runLegacyCellMode compiler caches args cellPath
+    Just (scope, planned) -> runCellProgramMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches args cellPath scope planned
+    Nothing -> runLegacyCellMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches args cellPath
 
-runLegacyCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runLegacyCellMode compiler caches args cellPath = do
+runLegacyCellMode :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runLegacyCellMode parserFlags compiler caches args cellPath = do
   provisionalOutput <- newIORef Nothing
   res <- trySynchronous $ do
     cellSource <- readFile cellPath
@@ -1155,7 +1144,7 @@ runLegacyCellMode compiler caches args cellPath = do
       Nothing -> pure template
       Just _ -> either (throwIO . InvalidCheckingWrapper) pure
         (replaceTemplateModuleHeader "module CellCheck where" template)
-    initialPlan <- analyzeCell template cellSource >>= either throwCellSplitError pure
+    initialPlan <- analyzeCellWithFlags parserFlags template cellSource >>= either throwCellSplitError pure
     initialSource <- either fail pure (renderCellCheckSource checkingTemplate initialPlan)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
@@ -1226,9 +1215,9 @@ runLegacyCellMode compiler caches args cellPath = do
 
 -- The worker owns all GHC passes of a cell. Interfaces produced here are
 -- type evidence; no value or effect is evaluated by this transaction.
-runCellProgramMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath
+runCellProgramMode :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> FilePath
   -> ExactScope -> PlannedCellAdmission -> IO ExitCode
-runCellProgramMode compiler caches args cellPath exact planned = do
+runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
   timing <- readTimingEnabled
   attempted <- trySynchronous $ do
     source <- readFile cellPath
@@ -1240,7 +1229,6 @@ runCellProgramMode compiler caches args cellPath exact planned = do
     unless (shaHex parserBytes == plannedParserSha256 planned
         && plannedReservationDigest planned == checkedAdmissionDigest admission)
       (fail "compiled cell parser or reservation changed")
-    parserFlags <- defaultParserDynFlags
     initial <- analyzeOrderedCellWithFlags parserFlags template source >>= either throwCellSplitError pure
     unless (length (cellPlanItems initial) == length (plannedSlots planned))
       (fail "compiled cell reservation count differs from parser")
