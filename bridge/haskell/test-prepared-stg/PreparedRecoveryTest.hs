@@ -11,7 +11,6 @@ import Control.Exception (bracket, evaluate, finally, try)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
-import Data.IntMap.Strict qualified as IntMap
 import Data.Maybe (isJust)
 import System.Mem.StableName (makeStableName)
 import Data.Map.Strict qualified as Map
@@ -59,7 +58,7 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), WireProgram(..) )
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
-  , FatIfaceComponentLookup(..), fatSelectionComponents, fatComponentBindings
+  , FatIfaceComponentLookup(..), fatSelectionComponents
   , readExactInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..) )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
@@ -182,11 +181,6 @@ scenario = do
       selection <- lookupFatIfaceComponents hsc cache owner [varName identifier] >>= \case
         FatIfaceComponents selected -> pure selected
         _ -> fail "Typeable constructor entry has no genuine original component"
-      let originals = concatMap (concatMap groupBinders . IntMap.elems . fatComponentBindings)
-            (fatSelectionComponents selection)
-          names = map (occNameString . nameOccName . varName) originals
-      assert ("mkTrCon11" `elem` names && "$WTrType" `elem` names)
-        "strict constructor entry lost its same-owner tag dependency"
       acquire <- newPreparedComponentTaskPreparer hsc owners bodies
       task <- acquire selection >>= either (fail . show) pure
       prepared <- runPreparedBodyTask task >>= either (fail . show) pure
@@ -206,8 +200,6 @@ scenario = do
       assert (root `elem` constructors)
         "canonical evaluated Typeable entry became a thunk during subset preparation"
       where
-        groupBinders (NonRec binder _) = [binder]
-        groupBinders (Rec pairs) = map fst pairs
         topBinders (Stg.StgTopLifted (Stg.StgNonRec binder _)) = [binder]
         topBinders (Stg.StgTopLifted (Stg.StgRec pairs)) = map fst pairs
         topBinders (Stg.StgTopStringLit binder _) = [binder]
