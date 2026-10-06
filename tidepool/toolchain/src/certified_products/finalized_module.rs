@@ -8,7 +8,6 @@ use std::path::Component;
 pub(crate) const FINALIZATION_PROFILE: &str = "tidepool-ghc-finalized-module-v1";
 pub(crate) const FINALIZATION_ENVELOPE_PROFILE: &str = "tidepool-ghc-finalized-module-v2";
 const CORE_LIMIT: u64 = 32 << 20;
-const FINALIZATION_PAYLOAD_LIMIT: usize = 128 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CanonicalSourceImport {
@@ -180,23 +179,18 @@ impl FinalizationEnvelope {
     fn validate_structure(&self) -> CertResult<()> {
         if self.profile != FINALIZATION_ENVELOPE_PROFILE
             || self.home_units.is_empty()
-            || self.home_units.len() > MODULE_LIMIT
             || self.home_units.iter().any(String::is_empty)
-            || self.modules.len() > MODULE_LIMIT
-            || self.value_interfaces.len() > MODULE_LIMIT
         {
             return Err(CertificationError::Receipt(
                 "finalization inventory bounds/profile",
             ));
         }
         let mut paths = BTreeSet::new();
-        let mut total = 0u64;
         for (key, module) in &self.modules {
             if key != &(module.unit.clone(), module.module.clone())
                 || !self.home_units.contains(&module.unit)
                 || module.module.is_empty()
                 || module.source_sha256 == [0; 32]
-                || module.interface_requirements.len() > MODULE_LIMIT
                 || module
                     .interface_requirements
                     .iter()
@@ -232,12 +226,6 @@ impl FinalizationEnvelope {
                         "captured artifact seal/path/bounds",
                     ));
                 }
-                total = total
-                    .checked_add(artifact.bytes)
-                    .ok_or(CertificationError::Receipt("finalization payload budget"))?;
-                if total > FINALIZATION_PAYLOAD_LIMIT as u64 {
-                    return Err(CertificationError::Receipt("finalization payload budget"));
-                }
             }
         }
         for (key, value) in &self.value_interfaces {
@@ -250,7 +238,6 @@ impl FinalizationEnvelope {
                         && owner.gen.0 != 0
                         && owner.module_name() == key.1
                 })
-                || value.interface_requirements.len() > MODULE_LIMIT
                 || value.interface_requirements.iter().any(|(owner, seal)| {
                     owner == key
                         || !self.home_units.contains(&owner.0)
@@ -279,12 +266,6 @@ impl FinalizationEnvelope {
                     return Err(CertificationError::Receipt(
                         "captured value payload seal/path/bounds",
                     ));
-                }
-                total = total
-                    .checked_add(artifact.bytes)
-                    .ok_or(CertificationError::Receipt("finalization payload budget"))?;
-                if total > FINALIZATION_PAYLOAD_LIMIT as u64 {
-                    return Err(CertificationError::Receipt("finalization payload budget"));
                 }
             }
         }
@@ -369,14 +350,23 @@ fn descriptor(
     })
 }
 
+#[cfg(test)]
 pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope> {
+    decode_envelope_with_operation(value, &InventoryOperation::new(Default::default()))
+}
+
+pub(super) fn decode_envelope_with_operation(
+    value: &Value,
+    operation: &InventoryOperation,
+) -> CertResult<FinalizationEnvelope> {
+    operation.charge_value_copies(value, 3)?;
     let row = sized(value, 4)?;
     let profile = string(&row[0])?.to_owned();
     if profile != FINALIZATION_ENVELOPE_PROFILE {
         return Err(CertificationError::Receipt("finalization profile"));
     }
     let units = array(&row[1])?;
-    if units.is_empty() || units.len() > MODULE_LIMIT {
+    if units.is_empty() {
         return Err(CertificationError::Receipt("complete home unit count"));
     }
     let mut home_units = BTreeSet::new();
@@ -390,13 +380,9 @@ pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope>
         home_units.insert(unit);
     }
     let rows = array(&row[2])?;
-    if rows.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("finalized module count"));
-    }
     let mut modules = BTreeMap::new();
     let mut previous = None;
     let mut paths = BTreeSet::new();
-    let mut payload_bytes = 0usize;
     for value in rows {
         let row = sized(value, 11)?;
         let unit = string(&row[0])?.to_owned();
@@ -428,12 +414,10 @@ pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope>
             if !paths.insert(item.relative_path.clone()) {
                 return Err(CertificationError::Receipt("aliased finalization payload"));
             }
-            payload_bytes = payload_bytes
-                .checked_add(item.bytes as usize)
-                .ok_or(CertificationError::Receipt("finalization payload budget"))?;
-            if payload_bytes > FINALIZATION_PAYLOAD_LIMIT {
-                return Err(CertificationError::Receipt("finalization payload budget"));
-            }
+            operation.charge(
+                usize::try_from(item.bytes)
+                    .map_err(|_| CertificationError::Receipt("finalization payload budget"))?,
+            )?;
         }
         let interface_requirements = decode_interface_requirements(&row[10])?;
         if interface_requirements.contains_key(&key)
@@ -459,9 +443,6 @@ pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope>
         );
     }
     let rows = array(&row[3])?;
-    if rows.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("captured value count"));
-    }
     let mut value_interfaces = BTreeMap::new();
     let mut previous = None;
     for value in rows {
@@ -944,14 +925,10 @@ pub(super) fn recover_interface(
     if certificate.len() > RECEIPT_LIMIT {
         return Err(CertificationError::Receipt("finalized certificate size"));
     }
-    let mut cursor = std::io::Cursor::new(&certificate);
-    let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
-        .map_err(|_| CertificationError::Receipt("finalized certificate encoding"))?;
-    if cursor.position() != certificate.len() as u64 {
-        return Err(CertificationError::Receipt(
-            "finalized certificate trailing bytes",
-        ));
-    }
+    let value = validation
+        .inventory
+        .decode_value(&certificate, RECEIPT_LIMIT)?;
+    validation.inventory.charge_value_copies(&value, 3)?;
     let row = sized(&value, 13)?;
     if string(&row[0])? != "TPFINALMODULE"
         || number(&row[1])? != 3
@@ -989,12 +966,15 @@ pub(super) fn recover_interface(
         core_row,
         row[11].clone(),
     ]);
-    let envelope = decode_envelope(&value_array([
-        value_text(FINALIZATION_ENVELOPE_PROFILE),
-        row[4].clone(),
-        value_array([descriptor_row]),
-        value_array([]),
-    ]))?;
+    let envelope = decode_envelope_with_operation(
+        &value_array([
+            value_text(FINALIZATION_ENVELOPE_PROFILE),
+            row[4].clone(),
+            value_array([descriptor_row]),
+            value_array([]),
+        ]),
+        &validation.inventory,
+    )?;
     let receipt = envelope
         .modules
         .into_values()

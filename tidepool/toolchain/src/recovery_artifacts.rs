@@ -486,6 +486,8 @@ pub struct VerifiedRecoveryJoin {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
+    #[error("inventory accounting: {0}")]
+    InventoryAccounting(#[from] tidepool_repr::execution_schema::ParseError),
     #[error("invalid recovery artifact reference")]
     InvalidReference,
     #[error("execution source producer differs for {unit}:{module}")]
@@ -534,7 +536,7 @@ fn hex(digest: &[u8; 32]) -> String {
 const PACKAGE_IMPORTS_LIMIT: u64 = 4 * 1024 * 1024;
 const PACKAGE_IMPORT_ROOT_LIMIT: usize = 16_384;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
-const CERTIFICATION_LIMIT: u64 = 4 * 1024 * 1024;
+const CERTIFICATION_LIMIT: u64 = 32 * 1024 * 1024;
 
 // Captures belong to one validation stage, never to a later filesystem check.
 // Limit retained bytes without rejecting an otherwise valid large closure:
@@ -618,8 +620,8 @@ pub(crate) fn package_interface_io() -> (u64, u64) {
     PACKAGE_INTERFACE_IO.with(std::cell::Cell::get)
 }
 
-#[derive(Default)]
 pub(crate) struct PackageInterfaceValidation {
+    pub(crate) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
     retained_bytes: usize,
     hash_bytes: u64,
@@ -632,12 +634,37 @@ pub(crate) struct PackageInterfaceValidation {
         BTreeMap<PathBuf, Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
 
+impl Default for PackageInterfaceValidation {
+    fn default() -> Self {
+        Self::with_inventory(Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        ))
+    }
+}
+
 struct CapturedPackageInterface {
     _bytes: Vec<u8>,
     sha256: [u8; 32],
 }
 
 impl PackageInterfaceValidation {
+    pub(crate) fn with_inventory(
+        inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Self {
+        Self {
+            inventory,
+            captured: BTreeMap::new(),
+            retained_bytes: 0,
+            hash_bytes: 0,
+            read_bytes: 0,
+            written_bytes: 0,
+            decoded_bytes: 0,
+            #[cfg(test)]
+            home_witness_validations: 0,
+            execution_sources: BTreeMap::new(),
+        }
+    }
+
     pub(crate) fn work(&self) -> RecoveryArtifactWork {
         RecoveryArtifactWork {
             hash_bytes: self.hash_bytes,
@@ -704,8 +731,9 @@ impl PackageInterfaceValidation {
                 path.to_path_buf(),
             ));
         }
+        self.inventory.charge(metadata.len() as usize + 1)?;
         let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-        file.take(PACKAGE_INTERFACE_LIMIT + 1)
+        file.take(metadata.len() + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| RecoveryArtifactError::Unreadable {
                 path: path.to_path_buf(),
@@ -717,7 +745,7 @@ impl PackageInterfaceValidation {
             work.set((opens, read_bytes + bytes.len() as u64));
         });
         self.read_bytes += bytes.len() as u64;
-        if bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
+        if bytes.len() as u64 != metadata.len() {
             return Err(RecoveryArtifactError::InvalidPackageImports(
                 path.to_path_buf(),
             ));
@@ -871,13 +899,7 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    let bytes = fs::read(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            RecoveryArtifactError::CertifiedOwnersUnavailable(path.to_path_buf())
-        } else {
-            RecoveryArtifactError::Io(error)
-        }
-    })?;
+    let bytes = read_admission_bytes(path, CERTIFICATION_LIMIT, validation)?;
     validation.read_bytes += bytes.len() as u64;
     if bytes.len() as u64 > CERTIFICATION_LIMIT {
         return Err(RecoveryArtifactError::InvalidCertifiedOwners(
@@ -921,13 +943,7 @@ fn read_package_imports(
             path.to_path_buf(),
         ));
     }
-    let bytes = fs::read(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            RecoveryArtifactError::Unavailable(path.to_path_buf())
-        } else {
-            RecoveryArtifactError::Io(error)
-        }
-    })?;
+    let bytes = read_admission_bytes(path, PACKAGE_IMPORTS_LIMIT, validation)?;
     validation.read_bytes += bytes.len() as u64;
     if bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
         return Err(RecoveryArtifactError::InvalidPackageImports(
@@ -1015,7 +1031,9 @@ pub(crate) fn validate_package_import_evidence_with_validation(
 
     let invalid = || RecoveryArtifactError::InvalidPackageImports(sidecar_path.to_path_buf());
     validation.decoded_bytes += bytes.len() as u64;
-    let witness: Value = ciborium::de::from_reader(bytes).map_err(|_| invalid())?;
+    let witness: Value = validation.inventory.decode_value(bytes, 32 << 20)?;
+    validation.inventory.charge_value_copies(&witness, 2)?;
+    validation.inventory.charge(bytes.len())?;
     let mut canonical = Vec::new();
     ciborium::ser::into_writer(&witness, &mut canonical).map_err(|_| invalid())?;
     if canonical != bytes {
@@ -1201,18 +1219,44 @@ fn classify_certification_path_error(error: RecoveryArtifactError) -> RecoveryAr
     }
 }
 
+fn read_admission_bytes(
+    path: &Path,
+    limit: u64,
+    validation: &PackageInterfaceValidation,
+) -> Result<Vec<u8>, RecoveryArtifactError> {
+    let file = File::open(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            RecoveryArtifactError::Unavailable(path.to_path_buf())
+        } else {
+            RecoveryArtifactError::Unreadable {
+                path: path.to_path_buf(),
+                error,
+            }
+        }
+    })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(RecoveryArtifactError::InvalidCapturedPayload(
+            path.to_path_buf(),
+        ));
+    }
+    validation.inventory.charge(metadata.len() as usize + 1)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+    file.take(metadata.len() + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(RecoveryArtifactError::InvalidCapturedPayload(
+            path.to_path_buf(),
+        ));
+    }
+    Ok(bytes)
+}
+
 fn read_checked(
     path: &Path,
     expected: &[u8; 32],
     validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(RecoveryArtifactError::Unavailable(path.to_path_buf()));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let bytes = read_admission_bytes(path, 32 << 20, validation)?;
     validation.read_bytes += bytes.len() as u64;
     if &validation.digest(&bytes) != expected {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
@@ -1583,15 +1627,16 @@ pub(crate) fn capture_module_payload(
     {
         return Err(RecoveryArtifactError::InvalidCapturedPayload(path));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(limit + 1)
+    validation.inventory.charge(metadata.len() as usize + 1)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+    file.take(metadata.len() + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| RecoveryArtifactError::Unreadable {
             path: path.clone(),
             error,
         })?;
     validation.read_bytes += bytes.len() as u64;
-    if bytes.len() as u64 > limit
+    if bytes.len() as u64 != metadata.len()
         || size.is_some_and(|size| size != bytes.len() as u64)
         || validation.digest(&bytes) != *expected
     {

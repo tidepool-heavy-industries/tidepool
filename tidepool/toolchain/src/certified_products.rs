@@ -9,8 +9,9 @@ use std::sync::Arc;
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
-    parse_module_products, CachedHomeOwner, GlobalDecl, ModuleVersion, PreparedProgram,
-    ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
+    parse_module_products, CachedHomeOwner, GlobalDecl, InventoryOperation, ModuleVersion,
+    PreparedProgram, ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature,
+    SymbolIdentity,
 };
 
 mod finalized_module;
@@ -27,14 +28,15 @@ use crate::cache::{CompletedSourceEvidence, DependencyEvidence, ProductAvailabil
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 
-const RECEIPT_LIMIT: usize = 4 << 20;
-const MODULE_LIMIT: usize = 128;
+const RECEIPT_LIMIT: usize = 32 << 20;
+#[cfg(test)]
 const GROUP_LIMIT: usize = 8192;
-const GLOBAL_LIMIT: usize = 65536;
 // Dictionary references retain full witnesses after decoding. Bound both the
 // number of references and their expanded canonical bytes independently of
 // the compact encoded receipt, so sharing cannot hide unbounded allocation.
+#[cfg(test)]
 const GLOBAL_REFERENCE_LIMIT: usize = 65536;
+#[cfg(test)]
 const EXPANDED_GLOBAL_BYTES_LIMIT: usize = 16 << 20;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
@@ -705,7 +707,20 @@ pub(crate) fn decode_receipt_in(
     bytes: &[u8],
     output_dir: Option<&Path>,
 ) -> CertResult<CertifiedReceipt> {
-    decode_receipt_packet_in(bytes, output_dir).map(|decoded| decoded.receipt)
+    decode_receipt_with_operation(
+        bytes,
+        output_dir,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+
+pub(crate) fn decode_receipt_with_operation(
+    bytes: &[u8],
+    output_dir: Option<&Path>,
+    operation: &InventoryOperation,
+) -> CertResult<CertifiedReceipt> {
+    decode_receipt_packet_with_operation(bytes, output_dir, operation)
+        .map(|decoded| decoded.receipt)
 }
 
 struct DecodedReceiptPacket {
@@ -764,29 +779,40 @@ pub(crate) fn fixture_decoded_receipt(
     Ok((decoded.receipt, decoded.globals, references, global_sha256))
 }
 
+#[cfg(test)]
 fn decode_receipt_packet_in(
     bytes: &[u8],
     output_dir: Option<&Path>,
 ) -> CertResult<DecodedReceiptPacket> {
-    if bytes.len() > RECEIPT_LIMIT {
+    decode_receipt_packet_with_operation(
+        bytes,
+        output_dir,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+
+fn decode_receipt_packet_with_operation(
+    bytes: &[u8],
+    output_dir: Option<&Path>,
+    operation: &InventoryOperation,
+) -> CertResult<DecodedReceiptPacket> {
+    let limit = operation.limits().max_bytes;
+    if bytes.len() > limit {
         return Err(CertificationError::SizeLimit {
             format: CertificationFormat::ProductReceipt,
             actual: bytes.len(),
-            limit: RECEIPT_LIMIT,
+            limit,
         });
     }
-    let mut cursor = std::io::Cursor::new(bytes);
-    let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
-        .map_err(|_| CertificationError::Receipt("CBOR"))?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(CertificationError::Receipt("trailing bytes"));
-    }
-    decode_receipt_value_in(&value, output_dir)
+    let value = operation.decode_value(bytes, limit)?;
+    operation.charge_value_copies(&value, 3)?;
+    decode_receipt_value_in(&value, output_dir, operation)
 }
 
 fn decode_receipt_value_in(
     value: &Value,
     output_dir: Option<&Path>,
+    operation: &InventoryOperation,
 ) -> CertResult<DecodedReceiptPacket> {
     let header = array(value)?;
     if header.len() < 2 || string(&header[0])? != "TPCERT" {
@@ -804,18 +830,13 @@ fn decode_receipt_value_in(
         return Err(CertificationError::Receipt("receipt header"));
     }
     let mut coordinates = OwnerCoordinates::decode(&header[8])?;
-    let mut dictionary = GlobalDictionary::decode(&header[5], &mut coordinates)?;
+    let mut dictionary =
+        GlobalDictionary::decode_with_operation(&header[5], &mut coordinates, operation)?;
     let mut read_globals = |value: &Value| {
         let globals = array(value)?;
-        if globals.len() > GLOBAL_LIMIT {
-            return Err(CertificationError::Receipt("global count"));
-        }
-        dictionary.resolve(globals)
+        dictionary.resolve_with_operation(globals, operation)
     };
     let modules = array(&header[2])?;
-    if modules.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("module count"));
-    }
     let modules = modules
         .iter()
         .map(|module| {
@@ -827,9 +848,6 @@ fn decode_receipt_value_in(
                 _ => return Err(CertificationError::Receipt("product origin")),
             };
             let groups = array(&row[8])?;
-            if groups.len() > GROUP_LIMIT {
-                return Err(CertificationError::Receipt("group count"));
-            }
             let groups = groups
                 .iter()
                 .map(|group| {
@@ -856,9 +874,6 @@ fn decode_receipt_value_in(
         })
         .collect::<CertResult<Vec<_>>>()?;
     let target_rows = array(&header[3])?;
-    if target_rows.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("target count"));
-    }
     let mut targets = BTreeMap::new();
     for target in target_rows {
         let row = sized(target, 2)?;
@@ -867,9 +882,6 @@ fn decode_receipt_value_in(
             return Err(CertificationError::Receipt("empty target name"));
         }
         let globals = array(&row[1])?;
-        if globals.len() > GLOBAL_LIMIT {
-            return Err(CertificationError::Receipt("target global count"));
-        }
         if targets.insert(name, read_globals(&row[1])?).is_some() {
             return Err(CertificationError::Receipt("duplicate target"));
         }
@@ -947,7 +959,7 @@ fn decode_receipt_value_in(
         }
         _ => return Err(CertificationError::Receipt("source recipe result")),
     };
-    let finalization = finalized_module::decode_envelope(&header[6])?;
+    let finalization = finalized_module::decode_envelope_with_operation(&header[6], operation)?;
     finalization.validate_owners(&modules, &packages)?;
     Ok(DecodedReceiptPacket {
         receipt: CertifiedReceipt {
@@ -990,9 +1002,6 @@ struct OwnerCoordinates {
 impl OwnerCoordinates {
     fn decode(value: &Value) -> CertResult<Self> {
         let values = array(value)?;
-        if values.len() > GLOBAL_LIMIT {
-            return Err(CertificationError::Receipt("owner coordinate count"));
-        }
         let mut unique = BTreeSet::new();
         let rows = values
             .iter()
@@ -1103,18 +1112,24 @@ impl OwnerCoordinates {
 struct GlobalDictionary {
     rows: Vec<(AcceptedGlobal, usize)>,
     used: BTreeSet<usize>,
-    references: usize,
-    expanded_bytes: usize,
 }
 
 impl GlobalDictionary {
+    #[cfg(test)]
     fn decode(value: &Value, coordinates: &mut OwnerCoordinates) -> CertResult<Self> {
+        Self::decode_with_operation(
+            value,
+            coordinates,
+            &InventoryOperation::new(Default::default()),
+        )
+    }
+    fn decode_with_operation(
+        value: &Value,
+        coordinates: &mut OwnerCoordinates,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
         let rows = array(value)?;
-        if rows.len() > GLOBAL_LIMIT {
-            return Err(CertificationError::Receipt("global dictionary count"));
-        }
         let mut unique = BTreeSet::new();
-        let mut dictionary_bytes = 0;
         let rows = rows
             .iter()
             .map(|value| {
@@ -1127,16 +1142,14 @@ impl GlobalDictionary {
                     entry_signature: signature(&row[2])?,
                     required_evaluated: boolean(&row[3])?,
                 };
-                let mut canonical = Vec::new();
-                ciborium::ser::into_writer(&value_global(&global), &mut canonical)
+                charge_global(operation, &global)?;
+                let encoded = value_global(&global);
+                operation.charge_value_copies(&encoded, 1)?;
+                let length = encoded_size(&encoded)?;
+                operation.charge(length)?;
+                let mut canonical = Vec::with_capacity(length);
+                ciborium::ser::into_writer(&encoded, &mut canonical)
                     .map_err(|_| CertificationError::Receipt("global dictionary encoding"))?;
-                let length = canonical.len();
-                if length > RECEIPT_LIMIT - dictionary_bytes {
-                    return Err(CertificationError::Receipt(
-                        "expanded global dictionary bytes",
-                    ));
-                }
-                dictionary_bytes += length;
                 if !unique.insert(canonical) {
                     return Err(CertificationError::Receipt(
                         "duplicate global dictionary row",
@@ -1148,16 +1161,21 @@ impl GlobalDictionary {
         Ok(Self {
             rows,
             used: BTreeSet::new(),
-            references: 0,
-            expanded_bytes: 0,
         })
     }
 
+    #[cfg(test)]
     fn resolve(&mut self, indices: &[Value]) -> CertResult<Vec<AcceptedGlobal>> {
-        if indices.len() > GLOBAL_REFERENCE_LIMIT - self.references {
-            return Err(CertificationError::Receipt("expanded global count"));
-        }
-        let selected = indices
+        self.resolve_with_operation(indices, &InventoryOperation::new(Default::default()))
+    }
+
+    fn resolve_with_operation(
+        &mut self,
+        indices: &[Value],
+        operation: &InventoryOperation,
+    ) -> CertResult<Vec<AcceptedGlobal>> {
+        operation.reserve::<AcceptedGlobal>(indices.len())?;
+        indices
             .iter()
             .map(|value| {
                 let index = usize::try_from(number(value)?)
@@ -1166,24 +1184,75 @@ impl GlobalDictionary {
                     .rows
                     .get(index)
                     .ok_or(CertificationError::Receipt("global dictionary index"))?;
-                if *length > EXPANDED_GLOBAL_BYTES_LIMIT - self.expanded_bytes {
-                    return Err(CertificationError::Receipt("expanded global bytes"));
-                }
-                self.expanded_bytes += length;
+                // Canonical bytes account payload expansion; reserve structural
+                // slots separately before cloning the witness and its owner.
+                operation.charge(
+                    length
+                        .checked_mul(4)
+                        .ok_or(CertificationError::Receipt("expanded global bytes"))?,
+                )?;
+                operation.reserve::<(usize, usize, usize)>(1)?;
                 self.used.insert(index);
                 Ok(global.clone())
             })
-            .collect::<CertResult<_>>()?;
-        self.references += indices.len();
-        Ok(selected)
+            .collect()
     }
+}
+
+struct EncodingSize(usize);
+impl std::io::Write for EncodingSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoding size overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn encoded_size(value: &Value) -> CertResult<usize> {
+    let mut size = EncodingSize(0);
+    ciborium::ser::into_writer(value, &mut size)
+        .map_err(|_| CertificationError::Receipt("encoding size"))?;
+    Ok(size.0)
+}
+
+fn encode_value_with_operation(
+    value: &Value,
+    format: CertificationFormat,
+    limit: usize,
+    operation: &InventoryOperation,
+) -> CertResult<Vec<u8>> {
+    let size = encoded_size(value)?;
+    if size > limit {
+        return Err(CertificationError::SizeLimit {
+            format,
+            actual: size,
+            limit,
+        });
+    }
+    operation.charge(
+        size.checked_mul(2)
+            .ok_or(CertificationError::Receipt("encoding work"))?,
+    )?;
+    let mut bytes = Vec::with_capacity(size);
+    ciborium::ser::into_writer(value, &mut bytes)
+        .map_err(|_| CertificationError::Receipt("encoding"))?;
+    Ok(bytes)
 }
 
 fn sha(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn read_bounded(path: &Path, limit: u64) -> CertResult<Vec<u8>> {
+pub(crate) fn read_bounded_with_operation(
+    path: &Path,
+    limit: u64,
+    operation: &InventoryOperation,
+) -> CertResult<Vec<u8>> {
+    use std::io::Read;
     if !path.is_absolute() {
         return Err(CertificationError::StaleEvidence);
     }
@@ -1191,8 +1260,13 @@ fn read_bounded(path: &Path, limit: u64) -> CertResult<Vec<u8>> {
     if !metadata.is_file() || metadata.len() > limit {
         return Err(CertificationError::StaleEvidence);
     }
-    let bytes = std::fs::read(path).map_err(|_| CertificationError::StaleEvidence)?;
-    if bytes.len() as u64 > limit {
+    operation.charge(metadata.len() as usize + 1)?;
+    let file = std::fs::File::open(path).map_err(|_| CertificationError::StaleEvidence)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+    file.take(metadata.len() + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CertificationError::StaleEvidence)?;
+    if bytes.len() as u64 != metadata.len() {
         return Err(CertificationError::StaleEvidence);
     }
     Ok(bytes)
@@ -1546,9 +1620,6 @@ fn decode_interface_requirements(
     value: &Value,
 ) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
     let rows = array(value)?;
-    if rows.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("interface owner count"));
-    }
     let mut requirements = BTreeMap::new();
     let mut previous = None;
     for row in rows {
@@ -1732,6 +1803,118 @@ fn value_global(global: &AcceptedGlobal) -> Value {
     ])
 }
 fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
+    encode_home_witness_with_operation(witness, &InventoryOperation::new(Default::default()))
+}
+
+fn charge_symbol(operation: &InventoryOperation, symbol: &SymbolIdentity) -> CertResult<()> {
+    operation.reserve::<Value>(8)?;
+    for text in [
+        &symbol.unit,
+        &symbol.module,
+        &symbol.namespace,
+        &symbol.occurrence,
+    ]
+    .into_iter()
+    .chain(symbol.record_parent.iter())
+    {
+        operation.charge(text.len())?;
+    }
+    Ok(())
+}
+fn charge_global(operation: &InventoryOperation, global: &AcceptedGlobal) -> CertResult<()> {
+    charge_symbol(operation, &global.identity)?;
+    operation.reserve::<Value>(16)?;
+    match &global.owner {
+        ReceiptImportOwner::Source {
+            unit,
+            module,
+            binder,
+            ..
+        }
+        | ReceiptImportOwner::Package {
+            unit,
+            module,
+            binder,
+            ..
+        }
+        | ReceiptImportOwner::RetainedPackage {
+            unit,
+            module,
+            binder,
+            ..
+        } => {
+            operation.charge(
+                unit.len()
+                    .checked_add(module.len())
+                    .ok_or(CertificationError::Receipt("owner size"))?,
+            )?;
+            charge_symbol(operation, binder)?;
+        }
+        ReceiptImportOwner::Retained { identity, .. } => charge_symbol(operation, identity)?,
+    }
+    if let Some(signature) = &global.entry_signature {
+        operation.reserve::<Value>(
+            signature
+                .arguments
+                .len()
+                .checked_mul(8)
+                .ok_or(CertificationError::Receipt("signature size"))?,
+        )?;
+        operation.reserve::<Value>(
+            signature
+                .results
+                .returned_reps()
+                .map_or(0, |reps| reps.len())
+                .checked_mul(8)
+                .ok_or(CertificationError::Receipt("result size"))?,
+        )?;
+    }
+    Ok(())
+}
+fn encode_home_witness_with_operation(
+    witness: &HomeCertification,
+    operation: &InventoryOperation,
+) -> CertResult<Vec<u8>> {
+    operation.reserve::<Value>(32)?;
+    for (_, binders, globals) in &witness.groups {
+        operation.reserve::<Value>(8)?;
+        for binder in binders {
+            charge_symbol(operation, binder)?;
+        }
+        for global in globals {
+            charge_global(operation, global)?;
+        }
+    }
+    for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
+        operation.reserve::<Value>(16)?;
+        operation.charge(
+            owner
+                .unit
+                .len()
+                .checked_add(owner.module.len())
+                .and_then(|size| size.checked_add(256))
+                .ok_or(CertificationError::Receipt("home size"))?,
+        )?;
+    }
+    for ((unit, module), package) in &witness.packages {
+        operation.reserve::<Value>(8)?;
+        operation.charge(
+            unit.len()
+                .checked_add(module.len())
+                .and_then(|size| size.checked_add(package.selected_path.as_os_str().len()))
+                .and_then(|size| size.checked_add(64))
+                .ok_or(CertificationError::Receipt("package size"))?,
+        )?;
+    }
+    for (unit, module) in witness.interface_requirements.keys() {
+        operation.reserve::<Value>(8)?;
+        operation.charge(
+            unit.len()
+                .checked_add(module.len())
+                .and_then(|size| size.checked_add(64))
+                .ok_or(CertificationError::Receipt("interface size"))?,
+        )?;
+    }
     let mut fields = vec![
         value_text("TPHOMEOWNERS"),
         Value::Integer(5.into()),
@@ -1779,35 +1962,33 @@ fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
             .map_or(Value::Null, |digest| value_text(hex(&digest))),
     );
     let value = value_array(fields);
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&value, &mut bytes)
-        .map_err(|_| CertificationError::Receipt("home witness encoding"))?;
-    if bytes.len() > RECEIPT_LIMIT {
-        return Err(CertificationError::SizeLimit {
-            format: CertificationFormat::HomeOwners,
-            actual: bytes.len(),
-            limit: RECEIPT_LIMIT,
-        });
-    }
-    Ok(bytes)
+    encode_value_with_operation(
+        &value,
+        CertificationFormat::HomeOwners,
+        RECEIPT_LIMIT.min(operation.limits().max_module_bytes),
+        operation,
+    )
 }
 
 fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
+    decode_home_witness_with_operation(bytes, &InventoryOperation::new(Default::default()))
+}
+fn decode_home_witness_with_operation(
+    bytes: &[u8],
+    operation: &InventoryOperation,
+) -> CertResult<HomeCertification> {
     #[cfg(test)]
     HOME_CERTIFICATION_DECODES.with(|count| count.set(count.get() + 1));
-    if bytes.len() > RECEIPT_LIMIT {
+    let limit = RECEIPT_LIMIT.min(operation.limits().max_module_bytes);
+    if bytes.len() > limit {
         return Err(CertificationError::SizeLimit {
             format: CertificationFormat::HomeOwners,
             actual: bytes.len(),
-            limit: RECEIPT_LIMIT,
+            limit,
         });
     }
-    let mut cursor = std::io::Cursor::new(bytes);
-    let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
-        .map_err(|_| CertificationError::Receipt("home witness encoding"))?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(CertificationError::Receipt("trailing bytes"));
-    }
+    let value = operation.decode_value(bytes, limit)?;
+    operation.charge_value_copies(&value, 3)?;
     let row = array(&value)?;
     if row.len() < 2 {
         return Err(CertificationError::Receipt("home witness header"));
@@ -1849,12 +2030,8 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         return Err(CertificationError::Receipt("self interface requirement"));
     }
     let groups = array(&row[3])?;
-    if groups.len() > GROUP_LIMIT {
-        return Err(CertificationError::Receipt("group count"));
-    }
     let mut ordinals = BTreeSet::new();
     let mut binders_seen = BTreeSet::new();
-    let mut globals_count = 0;
     let groups = groups
         .iter()
         .map(|group| {
@@ -1878,10 +2055,6 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
                 return Err(CertificationError::Receipt("home witness binders"));
             }
             let globals = array(&group[2])?;
-            globals_count += globals.len();
-            if globals_count > GLOBAL_LIMIT {
-                return Err(CertificationError::Receipt("global count"));
-            }
             Ok((
                 ordinal,
                 binders,
@@ -1893,9 +2066,6 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         })
         .collect::<CertResult<Vec<_>>>()?;
     let mut sources = BTreeMap::new();
-    if array(&row[4])?.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("source owner count"));
-    }
     for source in array(&row[4])? {
         let source = home_owner(source)?;
         if sources
@@ -2000,7 +2170,7 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         packages,
     };
     validate_home_witness_structure(&witness)?;
-    if encode_home_witness(&witness)? != bytes {
+    if encode_home_witness_with_operation(&witness, operation)? != bytes {
         return Err(CertificationError::Receipt("noncanonical home witness"));
     }
     Ok(witness)
@@ -2013,12 +2183,8 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
     if witness.execution_source_sha256 == Some([0; 32]) {
         return Err(CertificationError::Receipt("empty execution source digest"));
     }
-    if witness.groups.len() > GROUP_LIMIT {
-        return Err(CertificationError::Receipt("group count"));
-    }
     let mut ordinals = BTreeSet::new();
     let mut binders_seen = BTreeSet::new();
-    let mut globals_count = 0;
     for (ordinal, binders, globals) in &witness.groups {
         if !ordinals.insert(*ordinal) {
             return Err(CertificationError::Receipt("duplicate group ordinal"));
@@ -2032,13 +2198,6 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
         {
             return Err(CertificationError::Receipt("home witness binders"));
         }
-        globals_count += globals.len();
-        if globals_count > GLOBAL_LIMIT {
-            return Err(CertificationError::Receipt("global count"));
-        }
-    }
-    if witness.sources.len() > MODULE_LIMIT {
-        return Err(CertificationError::Receipt("source owner count"));
     }
     for ((unit, module), source) in &witness.sources {
         if unit.is_empty() || module.is_empty() || unit != &source.unit || module != &source.module
@@ -2055,7 +2214,6 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
         }
     }
     if witness.finalized_module_sha256 == Some([0; 32])
-        || witness.interface_requirements.len() > MODULE_LIMIT
         || witness
             .interface_requirements
             .iter()
@@ -2596,7 +2754,7 @@ fn verify_home_witness_with_validation(
     {
         validation.home_witness_validations += 1;
     }
-    let witness = decode_home_witness(bytes)?;
+    let witness = decode_home_witness_with_operation(bytes, &validation.inventory)?;
     if &witness.owner != owner {
         return Err(CertificationError::Mismatch("home certification owner"));
     }
@@ -3181,11 +3339,9 @@ fn capture_original_product_with_validation(
     }
     #[cfg(test)]
     ORIGINAL_PRODUCT_DECODES.with(|count| count.set(count.get() + 1));
-    let mut products = parse_module_products(
-        product_bytes,
-        requirements,
-        crate::module_candidates::product_decode_limits(),
-    )?;
+    let mut products = validation
+        .inventory
+        .parse_module_products(product_bytes, requirements)?;
     if products.len() != 1 {
         return Err(CertificationError::Mismatch("inherited per-module product"));
     }
@@ -3535,6 +3691,7 @@ fn certify_inherited_inventory_with_validation(
 /// Keeping construction private prevents pairing a different inventory with a
 /// valid sidecar and makes a second decode/equality check unnecessary.
 pub(crate) struct ParsedModuleProducts<'a> {
+    operation: Arc<InventoryOperation>,
     bytes: &'a [u8],
     products: Vec<RawModuleProduct>,
     sidecars: Vec<Vec<u8>>,
@@ -3543,17 +3700,29 @@ pub(crate) struct ParsedModuleProducts<'a> {
 
 impl<'a> ParsedModuleProducts<'a> {
     pub(crate) fn decode(bytes: &'a [u8], package_bundle: &[u8]) -> CertResult<Self> {
+        Self::decode_with_operation(
+            bytes,
+            package_bundle,
+            Arc::new(InventoryOperation::new(Default::default())),
+        )
+    }
+    pub(crate) fn operation(&self) -> &Arc<InventoryOperation> {
+        &self.operation
+    }
+    pub(crate) fn decode_with_operation(
+        bytes: &'a [u8],
+        package_bundle: &[u8],
+        operation: Arc<InventoryOperation>,
+    ) -> CertResult<Self> {
         let requirements = crate::prepared_artifact::production_requirements()
             .map_err(|_| CertificationError::Mismatch("production requirements"))?;
         let (products, sidecars) =
-            tidepool_repr::execution_schema::parse_module_products_with_framing(
-                bytes,
-                &requirements,
-                crate::module_candidates::product_decode_limits(),
-            )?;
+            operation.parse_module_products_with_framing(bytes, &requirements)?;
+        operation.charge(package_bundle.len())?;
         let package_imports =
             crate::module_candidates::split_package_imports(package_bundle, &products);
         Ok(Self {
+            operation,
             bytes,
             products,
             sidecars,
@@ -3940,7 +4109,7 @@ pub(crate) fn certify_products(
         exact,
         authored,
         &[],
-        &mut PackageInterfaceValidation::default(),
+        &mut PackageInterfaceValidation::with_inventory(fresh_products.operation().clone()),
     )
 }
 
@@ -3960,6 +4129,9 @@ pub(crate) fn certify_products_with_validation(
     selected_session_values: &[tidepool_repr::SessionModule],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedProducts> {
+    if !Arc::ptr_eq(&validation.inventory, fresh_products.operation()) {
+        return Err(CertificationError::Mismatch("inventory accounting owner"));
+    }
     receipt
         .finalization
         .validate_owners(&receipt.modules, &receipt.packages)?;
@@ -4252,15 +4424,29 @@ pub(crate) fn certify_products_with_validation(
                         module: key.1.clone(),
                         failure: Box::new(failure),
                     })?;
-                if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
-                    || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
-                        != accepted.skinny_iface_sha256
-                    || hex(&sha(&read_bounded(&bundle.package_imports_path, 4 << 20)?))
-                        != bundle.package_imports_sha256
+                if sha(&read_bounded_with_operation(
+                    &bundle.source,
+                    SOURCE_LIMIT,
+                    &validation.inventory,
+                )?) != accepted.source_sha256
+                    || sha(&read_bounded_with_operation(
+                        &bundle.iface_path,
+                        PACKAGE_INTERFACE_LIMIT,
+                        &validation.inventory,
+                    )?) != accepted.skinny_iface_sha256
+                    || hex(&sha(&read_bounded_with_operation(
+                        &bundle.package_imports_path,
+                        32 << 20,
+                        &validation.inventory,
+                    )?)) != bundle.package_imports_sha256
                 {
                     return Err(CertificationError::StaleEvidence);
                 }
-                let sidecar = read_bounded(&bundle.package_imports_path, 4 << 20)?;
+                let sidecar = read_bounded_with_operation(
+                    &bundle.package_imports_path,
+                    32 << 20,
+                    &validation.inventory,
+                )?;
                 if sidecar != bundle.package_imports_bytes {
                     return Err(CertificationError::StaleEvidence);
                 }
@@ -4905,7 +5091,7 @@ pub(crate) fn certify_products_with_validation(
                     Some(sha(canonical_interface.certificate_bytes())),
                     validation,
                 )?;
-                let certification = encode_home_witness(&witness)?;
+                let certification = encode_home_witness_with_operation(&witness, &validation.inventory)?;
                 let binding = validate_module_binding(&witness, canonical_interface, &interface, &package_bytes, Some(source_sha))?;
                 let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
                     owner, product_bytes, certification, binding,

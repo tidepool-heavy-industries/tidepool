@@ -2351,18 +2351,27 @@ fn seal_turn_outputs_with_validation(
     }
     let read_sidecar = |name: &str| {
         let path = output_dir.join(name);
-        std::fs::read(&path).map_err(|error| {
-            CompileError::ExtractFailed(format!("turn sidecar {}: {error}", path.display()))
-        })
+        let limit = if matches!(name, "module-products.cbor" | "certified-products.cbor") {
+            validation.inventory.limits().max_bytes
+        } else {
+            32 << 20
+        };
+        certified_products::read_bounded_with_operation(&path, limit as u64, &validation.inventory)
+            .map_err(|error| {
+                CompileError::ExtractFailed(format!("turn sidecar {}: {error}", path.display()))
+            })
     };
     let product_bytes = read_sidecar("module-products.cbor")?;
     let package_bundle_bytes = read_sidecar("module-package-imports.cbor")?;
     let evidence_bytes = read_sidecar("dependencies.json")?;
     let receipt_bytes = read_sidecar("certified-products.cbor")?;
     let product_decode_start = Instant::now();
-    let fresh_products =
-        certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
+        &product_bytes,
+        &package_bundle_bytes,
+        validation.inventory.clone(),
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2403,8 +2412,12 @@ fn seal_turn_outputs_with_validation(
         return Ok(None);
     }
     let receipt_decode_start = Instant::now();
-    let receipt = certified_products::decode_receipt_in(&receipt_bytes, Some(output_dir))
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let receipt = certified_products::decode_receipt_with_operation(
+        &receipt_bytes,
+        Some(output_dir),
+        &validation.inventory,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -3512,22 +3525,32 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let (meta_bytes, raw, product_bytes) = extracted.map_err(|error| match &policy {
-        CompilationPolicy::BuildAction {
-            export: BuildActionExport::PreparedFixture { .. },
-            ..
-        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        CompilationPolicy::BuildAction { .. } => error,
-        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-    })?;
+    let (meta_bytes, raw, product_bytes, inventory_operation) =
+        extracted.map_err(|error| match &policy {
+            CompilationPolicy::BuildAction {
+                export: BuildActionExport::PreparedFixture { .. },
+                ..
+            } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+            CompilationPolicy::BuildAction { .. } => error,
+            _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
+        })?;
 
     // Store only what DESERIALIZED, so a malformed artifact set is never
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
-        let evidence_bytes = std::fs::read(output_owner.path().join("dependencies.json"))?;
-        let package_bundle_bytes =
-            std::fs::read(output_owner.path().join("module-package-imports.cbor"))?;
+        let evidence_bytes = certified_products::read_bounded_with_operation(
+            &output_owner.path().join("dependencies.json"),
+            32 << 20,
+            &inventory_operation,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let package_bundle_bytes = certified_products::read_bounded_with_operation(
+            &output_owner.path().join("module-package-imports.cbor"),
+            inventory_operation.limits().max_bytes as u64,
+            &inventory_operation,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
@@ -3558,7 +3581,15 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
-        let receipt_bytes = std::fs::read(output_owner.path().join("certified-products.cbor"))?;
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+            inventory_operation.clone(),
+        );
+        let receipt_bytes = certified_products::read_bounded_with_operation(
+            &output_owner.path().join("certified-products.cbor"),
+            validation.inventory.limits().max_bytes as u64,
+            &validation.inventory,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         if receipt_bytes.is_empty() {
             if inventory_export.is_some() {
                 return Err(CompileError::ExtractFailed(
@@ -3602,12 +3633,18 @@ fn compile_invocation_inner(
             ensure_no_uncertified_globals(&artifacts)?;
             return Ok(artifacts);
         }
-        let receipt =
-            certified_products::decode_receipt_in(&receipt_bytes, Some(output_owner.path()))
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let fresh_products =
-            certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let receipt = certified_products::decode_receipt_with_operation(
+            &receipt_bytes,
+            Some(output_owner.path()),
+            &validation.inventory,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
+            &product_bytes,
+            &package_bundle_bytes,
+            validation.inventory.clone(),
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let valid_evidence = evidence
             .as_ref()
             .filter(|value| value.revalidate(inv.source).is_ok());
@@ -3616,7 +3653,6 @@ fn compile_invocation_inner(
             .iter()
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
-        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
@@ -4274,7 +4310,18 @@ pub(crate) fn extract_and_read(
     multi: bool,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
-) -> Result<(Vec<u8>, Vec<RawTargetOutput>, Vec<u8>), CompileError> {
+) -> Result<
+    (
+        Vec<u8>,
+        Vec<RawTargetOutput>,
+        Vec<u8>,
+        Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ),
+    CompileError,
+> {
+    let inventory_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+        Default::default(),
+    ));
     on_stage(timing::STAGE_EXTRACT_SPAWN, run.elapsed, 0);
 
     let stderr = run.stderr_lossy();
@@ -4314,13 +4361,15 @@ pub(crate) fn extract_and_read(
     }
     let meta_bytes = std::fs::read(&meta_path)?;
     let products_path = temp_dir.join("module-products.cbor");
-    let product_bytes = std::fs::read(&products_path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            CompileError::MissingOutput(products_path)
-        } else {
-            CompileError::Io(error)
-        }
-    })?;
+    if !products_path.exists() {
+        return Err(CompileError::MissingOutput(products_path));
+    }
+    let product_bytes = certified_products::read_bounded_with_operation(
+        &products_path,
+        inventory_operation.limits().max_bytes as u64,
+        &inventory_operation,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
 
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
@@ -4346,7 +4395,7 @@ pub(crate) fn extract_and_read(
         cbor_read_start.elapsed(),
         total_bytes(&meta_bytes, &raw, &product_bytes),
     );
-    Ok((meta_bytes, raw, product_bytes))
+    Ok((meta_bytes, raw, product_bytes, inventory_operation))
 }
 
 /// A prepared program's constructor declaration RESOLVES in the accompanying
