@@ -1450,14 +1450,11 @@ impl InventoryOperation {
             max_bytes,
             ..self.limits.program
         };
-        codec::decode_value(
-            bytes,
-            limits,
-            &mut self
-                .budget
-                .lock()
-                .map_err(|_| ParseError::LimitExceeded("accounting owner"))?,
-        )
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
+        codec::decode_value(bytes, limits, &mut *budget)
     }
 
     pub fn parse_module_products(
@@ -1465,16 +1462,13 @@ impl InventoryOperation {
         bytes: &[u8],
         requirements: &ProgramRequirements,
     ) -> Result<Vec<RawModuleProduct>, ParseError> {
-        parse_module_products_inner(
-            bytes,
-            requirements,
-            self.limits,
-            &mut self
-                .budget
-                .lock()
-                .map_err(|_| ParseError::LimitExceeded("accounting owner"))?,
-            |_, _, _| Ok(()),
-        )
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
+        parse_module_products_inner(bytes, requirements, self.limits, &mut *budget, |_, _, _| {
+            Ok(())
+        })
     }
 
     pub fn parse_module_products_with_framing(
@@ -1483,14 +1477,15 @@ impl InventoryOperation {
         requirements: &ProgramRequirements,
     ) -> Result<(Vec<RawModuleProduct>, Vec<Vec<u8>>), ParseError> {
         let mut sidecars = Vec::new();
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
         let products = parse_module_products_inner(
             bytes,
             requirements,
             self.limits,
-            &mut self
-                .budget
-                .lock()
-                .map_err(|_| ParseError::LimitExceeded("accounting owner"))?,
+            &mut *budget,
             |row, size, budget| {
                 budget.charge(size)?;
                 budget.reserve::<Vec<u8>>(1)?;
