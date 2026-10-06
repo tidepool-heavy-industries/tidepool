@@ -96,7 +96,7 @@ import Tidepool.HomeProducts
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing
-  ( readTimingEnabled, timePhase, timeDetailPhase, emitCount
+  ( readTimingEnabled, timePhase, timeDetailPhase, timeModuleDetailPhase, emitCount
   , ReuseContext, ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
   , ReuseVersionKind(..), emitReuse, emitReuseComplete )
 
@@ -399,7 +399,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
               pure ready
           prepare siblings owner
       lower selected prepared = do
-        (hit,raw) <- projectCachedOriginalHomeModuleProducts completedRaw env selected context prepared
+        (hit,raw) <- timeModuleDetailPhase timing "prepared_graph" "raw_projection_task_service"
+          (pmModule prepared) $
+          projectCachedOriginalHomeModuleProducts completedRaw env selected context prepared
         let version = ownerVersion selected (pmModule prepared)
         report RawProjection (if hit then ReuseHit else ReuseMiss)
           (if hit then Matched else Recovery) version (if hit then Just 0 else Nothing)

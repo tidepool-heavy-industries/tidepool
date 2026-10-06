@@ -93,7 +93,7 @@ import Tidepool.HomeProducts
   ( OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
-import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase, emitCount)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeModuleDetailPhase, emitCount)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
@@ -819,7 +819,5 @@ acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons op
           , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
           , preparedExpectedEntries = Map.empty
           }
-  pure $ PreparedModuleTask $ do
-    (prepared, serviceMs) <- timeSection lower
-    emitDetailPhase timing "prepared_graph" "prepared_stg_task_service" serviceMs
-    pure prepared
+  pure $ PreparedModuleTask $
+    timeModuleDetailPhase timing "prepared_graph" "prepared_stg_task_service" thisModule lower

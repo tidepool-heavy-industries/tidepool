@@ -6,6 +6,7 @@ module Tidepool.Timing
   ( readTimingEnabled
   , timePhase
   , timeDetailPhase
+  , timeModuleDetailPhase
   , ResourceTimingStart
   , beginResourceTiming
   , endResourceTiming
@@ -35,6 +36,8 @@ import Data.List (intercalate)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTime, getMonotonicTimeNSec)
 import GHC.Fingerprint.Type (Fingerprint)
+import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Types (unitString)
 import qualified GHC.Stats as RTS
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
@@ -135,6 +138,17 @@ timeDetailPhase True parent name act = do
   endResourceTiming start parent name
   pure result
 
+-- | Bracket a task using its actual compiler owner. The enclosing transport
+-- identifies the physical invocation; module identity distinguishes concurrent
+-- tasks without interpreting logger delivery order as execution order.
+timeModuleDetailPhase :: MonadIO m => Bool -> String -> String -> Module -> m a -> m a
+timeModuleDetailPhase False _ _ _ act = act
+timeModuleDetailPhase True parent name owner act = do
+  start <- beginResourceTiming True
+  result <- act
+  endResourceTimingWithOwner start parent name (Just owner)
+  pure result
+
 -- A token brackets existing wall timers whose setup spans several statements.
 -- Keep its constructor private so all resource spans use the same clock and
 -- counter ordering. Nothing performs no counter reads when timing is disabled.
@@ -149,8 +163,11 @@ beginResourceTiming True = do
   pure (Just (ResourceTimingStart wall0 cpu0 rts0))
 
 endResourceTiming :: MonadIO m => Maybe ResourceTimingStart -> String -> String -> m ()
-endResourceTiming Nothing _ _ = pure ()
-endResourceTiming (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name = do
+endResourceTiming start parent name = endResourceTimingWithOwner start parent name Nothing
+
+endResourceTimingWithOwner :: MonadIO m => Maybe ResourceTimingStart -> String -> String -> Maybe Module -> m ()
+endResourceTimingWithOwner Nothing _ _ _ = pure ()
+endResourceTimingWithOwner (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name owner = do
   rts1 <- liftIO readRtsStats
   cpu1 <- liftIO getCPUTime
   wall1 <- liftIO getMonotonicTimeNSec
@@ -160,6 +177,8 @@ endResourceTiming (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name = do
     ++ " start_ns=" ++ show wall0 ++ " end_ns=" ++ show wall1
     ++ " wall_ns=" ++ show (delta wall0 wall1)
     ++ " cpu_ns=" ++ show ((cpu1 - cpu0) `div` 1000)
+    ++ maybe "" (\actual -> " owner_unit=" ++ unitString (moduleUnit actual)
+      ++ " owner_module=" ++ moduleNameString (moduleName actual)) owner
     ++ renderRtsDelta rts0 rts1)
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
