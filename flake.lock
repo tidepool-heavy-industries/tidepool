@@ -37,17 +37,17 @@
     "harnessWeb": {
       "flake": false,
       "locked": {
-        "lastModified": 1791026042,
-        "narHash": "sha256-C53p7em+B7f/K1JkXxM+QEksz3ca1GntH5JYSP25q0g=",
+        "lastModified": 1791320543,
+        "narHash": "sha256-mXPENg7KtBLJk/D0CoI1bImATRoExZotwmvhy5MyOl8=",
         "owner": "tidepool-heavy-industries",
         "repo": "exomonad-harness",
-        "rev": "2aa685129aa4da4b3ec637abcf17666f087b93c8",
+        "rev": "62aa050822358290dfef425675db0b215dc0bd49",
         "type": "github"
       },
       "original": {
         "owner": "tidepool-heavy-industries",
         "repo": "exomonad-harness",
-        "rev": "2aa685129aa4da4b3ec637abcf17666f087b93c8",
+        "rev": "62aa050822358290dfef425675db0b215dc0bd49",
         "type": "github"
       }
     },
@@ -68,7 +68,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
+    "nixpkgs": {
       "locked": {
         "lastModified": 1771008912,
         "narHash": "sha256-gf2AmWVTs8lEq7z/3ZAsgnZDhWIckkb+ZnAo5RzSxJg=",
@@ -90,11 +90,11 @@
         "harnessNixpkgs": "harnessNixpkgs",
         "harnessWeb": "harnessWeb",
         "jev-dsl": "jev-dsl",
-        "nixpkgs": "nixpkgs_2",
-        "rust-overlay": "rust-overlay_2"
+        "nixpkgs": "nixpkgs",
+        "rust-overlay": "rust-overlay"
       }
     },
-    "rust-overlay_2": {
+    "rust-overlay": {
       "inputs": {
         "nixpkgs": [
           "nixpkgs"
