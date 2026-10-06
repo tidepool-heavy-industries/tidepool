@@ -298,7 +298,11 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
             arguments: ToolArguments::Raw("import qualified AgentSpec\nAgentSpec.answer (AgentSpec.Probe 40) >>= inspectFull".into()),
         }).await.unwrap();
         assert!(
-            source_cell.to_string().contains("240"),
+            source_cell["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["output"] == "240"),
             "new source is active together with its handlers: {source_cell}"
         );
         assert!(
