@@ -1428,8 +1428,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       checked <- compile (PreparedProducts Nothing) Set.empty wrapped (Just hidden) generatedPath [] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $
         fail ("generated " ++ name ++ " lost its settled result or ExactScope wrapper")
-    requireUserError "scope omits its required native product"
-      "exact interface evidence is incomplete or lacks native module proof" $
+    requireSourceSelectionInput "scope omits its required native product"
+      "generated scaffold lacks one paired original native owner" $
       compile (PreparedProducts Nothing) Set.empty
         (ExactScopeCompile purpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
     let alteredOwner product' = product' {originalIfaceSha256=replicate 64 'f'}
