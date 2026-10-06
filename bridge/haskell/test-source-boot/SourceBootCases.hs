@@ -95,11 +95,14 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
-  , requireOriginalExecutableGlobals, certifiedExecutionSource )
+  , requireOriginalExecutableGlobals, certifiedExecutionSource
+  , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
+  , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts)
+import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
@@ -2478,6 +2481,46 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (requireOriginalExecutableGlobals pairedEnv (availableOf completeProducts)
       (programGlobals badProgram) == Right ()) $
     fail "successfully projected original did not satisfy the emitted home demand"
+  -- The compiler issuer supplies the same native originals to projection and
+  -- publication. A current support owner becomes a source import, while the
+  -- actual entry's whole recursive group remains inline.
+  let captureDirectory = work </> "current-original-products"
+      entry = SymbolIdentity "main" "ProjectionConsumer" "value" "usesGood" Nothing
+  createDirectory captureDirectory
+  currentInterfaces <- newOriginalInterfaceArtifacts pairedEnv (pprFinalizedModules paired)
+    (retainedOriginalInterfaces paired) captureDirectory
+  currentContext <- prepareCompilerProjectionContext paired Map.empty (pmModule consumer)
+    "usesGood" [] Nothing
+  (currentModules,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
+    currentContext Set.empty (pprModules paired)
+  issuedContext <- admitCurrentOriginalProducts currentInterfaces captureDirectory paired rawContext
+  issued <- maybe (fail "genuine original issuer did not return its inventory") pure
+    (preparedCurrentOriginalInventory issuedContext)
+  let importedNames = currentOriginalBindingsExcept issued (Set.singleton entry)
+      importedSymbols = Set.fromList (Map.elems importedNames)
+      currentProjection = currentContext {projectionCurrentOriginals = importedNames}
+  unless (known `Set.member` importedSymbols && entry `Set.notMember` importedSymbols
+      && importedSymbols `Set.isSubsetOf` currentOriginalBinders issued) $
+    fail "current original boundary lost supported names or imported its own entry"
+  currentProgram <- either (fail . show) pure (projectPrepared currentProjection currentModules)
+  let currentGlobals = [global | global <- programGlobals currentProgram
+        , globalIdentity global `Set.member` importedSymbols]
+      currentDefinitions = Set.fromList [identity' | group <- programBindings currentProgram
+        , TopBinding identity' _ <- case group of
+            NonRecursive binding -> [binding]
+            Recursive bindings -> bindings]
+  unless (any ((== known) . globalIdentity) currentGlobals
+      && all ((== Nothing) . globalRequiredGeneration) currentGlobals
+      && Set.null (currentDefinitions `Set.intersection` importedSymbols)
+      && entry `Set.member` currentDefinitions) $
+    fail "target duplicated a current support group or assigned a retained generation"
+  currentCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    captureDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
+        , let (_,_,_,groups) = moduleProductInput product'
+        , group <- groups, binder <- projectedBinders group]
+  unless (emittedBinders == currentOriginalBinders issued) $
+    fail "writer changed the compiler-issued original availability boundary"
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
   case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
       (programGlobals badProgram) of
