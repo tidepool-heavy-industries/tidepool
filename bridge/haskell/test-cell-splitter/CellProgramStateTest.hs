@@ -13,12 +13,12 @@ import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.ExactScope (ExactScope(..), ExactScopePurpose(..))
+import Tidepool.ExactScope (ExactScope(..), emptyScopeInputs, ExactScopePurpose(..))
 
 cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
   let prologue = SourcePrologue [] [] emptyCompilerDefaultRecipe
-      exact = ExactScope "" "" "" "" [] Map.empty [] [] [] []
+      exact = ExactScope "" "" "" "" emptyScopeInputs [] [] [] []
         NoCheckedPurpose Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)

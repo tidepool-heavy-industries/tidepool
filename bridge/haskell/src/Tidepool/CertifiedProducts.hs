@@ -49,7 +49,7 @@ import Tidepool.ExecutionSchema
   , ResultContract(..), RuntimeRep(..), Signature(..), SignatureId(..)
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( ExactScope(..), scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256 )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )

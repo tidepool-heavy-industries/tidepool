@@ -122,7 +122,7 @@ withScratch = bracket acquire removeDirectoryRecursive
 
 receiptChecks :: FilePath -> CheckedItemAdmission -> IO ()
 receiptChecks root item = do
-  let scope = ExactScope "manifest" "request" "producer" "semantic" [] Map.empty [] [] [] []
+  let scope = ExactScope "manifest" "request" "producer" "semantic" emptyScopeInputs [] [] [] []
         NoCheckedPurpose Nothing Set.empty
       source = "recipe λ"
   writeCheckedItemReceipt root scope item source

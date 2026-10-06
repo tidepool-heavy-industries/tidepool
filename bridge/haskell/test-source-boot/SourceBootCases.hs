@@ -117,7 +117,10 @@ import Tidepool.CompilerProducts
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
+import Tidepool.FinalizedModuleArtifacts
+  ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
+  , localFinalizedCore, revalidateLocalFinalizedAdmissionWith )
+import Tidepool.BoundedRead (withFileObservations, observeFile)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
 import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
@@ -191,14 +194,14 @@ import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterface
   , DeclarationOperation(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactScope(..), scopeInterfaces, scopeInterfaceEvidence, extendExactScopeInputs, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
-  , originalGroupFromCandidate
+  , originalGroupFromCandidate, normalizeInterfaceEvidence
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
@@ -679,7 +682,38 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     Nothing owner includes Nothing
   originalFixture <- capturePreparedFixture work original
   scopePath <- writeGenuineMetadataScope work ["CanonicalSource","CanonicalDependency"] originalFixture
-  base <- readExactScope scopePath >>= either fail pure
+  (base,admissionDiagnostics) <- captureDiagnostics (readExactScope scopePath >>= either fail pure)
+  unless (counterTotal "exact_scope.certificate_decodes" admissionDiagnostics
+        == fromIntegral (Map.size (scopeModuleInterfaceProofs base))
+      && counterTotal "package_proof.sidecar_decodes" admissionDiagnostics
+        == fromIntegral (length (scopeInterfaces base))) $
+    fail "canonical scope did not decode each admitted certificate and sidecar once"
+  forM_ [1::Int .. 3] $ \_ -> do
+    (verdict,diagnostics) <- captureDiagnostics (revalidateExactScope (prHscEnv (pprPipelineResult original)) base)
+    either fail pure verdict
+    unless (counterTotal "exact_scope.certificate_decodes" diagnostics == 0
+        && counterTotal "package_proof.sidecar_decodes" diagnostics == 0
+        && counterTotal "package_proof.union_extensions" diagnostics == 0
+        && counterTotal "package_proof.authenticated_sidecars" diagnostics
+          == fromIntegral (length (scopeInterfaces base))) $
+      fail "current proof redecoded admitted facts or skipped sidecar authentication"
+  let batchDirectory = work </> "scope-input-batch"
+      originalInputs = [(row,ModuleInterfaceEvidence proof) | row <- scopeInterfaces base
+        , let (iface,_,_) = row
+        , Just proof <- [Map.lookup (exactUnit iface,exactModule iface) (scopeModuleInterfaceProofs base)]]
+  createDirectory batchDirectory
+  emptyPath <- writeGenuineEmptyMetadataScope batchDirectory
+  empty <- readExactScope emptyPath >>= either fail pure
+  nonTopological <- extendExactScopeInputs empty (reverse originalInputs) >>= either fail pure
+  unless (scopeInterfaces nonTopological == reverse (scopeInterfaces base)) $
+    fail "batched canonical input extension changed offered row order"
+  dependent <- case [(row,evidence) | (row@(iface,_,_),evidence) <- originalInputs
+      , not (null (exactRequirements iface))] of
+    value:_ -> pure value
+    [] -> fail "canonical input fixture lacks its real cross-owner dependency"
+  missingClosure <- extendExactScopeInputs empty [dependent]
+  unless (either (const True) (const False) missingClosure) $
+    fail "canonical input extension admitted an incomplete required owner closure"
   unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
     fail "canonical current-source fixture unexpectedly retained native execution authority"
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
@@ -732,11 +766,9 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         (canonicalSourceImports localProof)) $
       fail "captured original lost its exact retained-home import receipt"
     let row = localFinalizedInterface localAdmission
-        selectedScope = inherited
-          { scopeInterfaces = scopeInterfaces inherited ++ [row]
-          , scopeInterfaceEvidence = Map.insert localOwner (ModuleInterfaceEvidence localProof)
-              (scopeInterfaceEvidence inherited)
-          , scopeLexical = scopeLexical inherited ++ [(localOwner,[("main","CanonicalDependency")])] }
+        localLexical = scopeLexical inherited ++ [(localOwner,[("main","CanonicalDependency")])]
+    selectedScope <- extendExactScopeInputs (inherited {scopeLexical=localLexical})
+      [(row,ModuleInterfaceEvidence localProof)] >>= either fail pure
     completedImports <- retainProgramSourceImports Nothing captured
       (certifiedFinalizedArtifacts emitted) selectedScope
     unless (isNothing completedImports)
@@ -756,21 +788,41 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       (canonicalCertificateSha256 localProof) ((\core -> (canonicalCorePath core,canonicalCoreSha256 core))
         <$> canonicalCoreArtifact localProof) >>= either fail pure
     unless (canonicalCertificateSha256 relocated == canonicalCertificateSha256 localProof
-        && canonicalSourceImports relocated == canonicalSourceImports localProof) $
+        && canonicalSourceImports relocated == canonicalSourceImports localProof
+        && normalizeInterfaceEvidence (ModuleInterfaceEvidence relocated)
+          == normalizeInterfaceEvidence (ModuleInterfaceEvidence localProof)) $
       fail "canonical source identity depends on its capture/persistence locator"
-    _ <- checkLocal selectedScope {scopeInterfaceEvidence = Map.insert localOwner
-      (ModuleInterfaceEvidence relocated) (scopeInterfaceEvidence selectedScope)}
+    relocatedScope <- extendExactScopeInputs (inherited {scopeLexical=localLexical})
+      [(row,ModuleInterfaceEvidence relocated)] >>= either fail pure
+    _ <- checkLocal relocatedScope
     let wrongOwner = ("main","CanonicalWrongOwner")
-        (localIface,_,_) = row
-        wrongOwnerScope = selectedScope {scopeInterfaces =
-          [(if (exactUnit artifact,exactModule artifact) == localOwner
-              then localIface {exactModule=snd wrongOwner} else artifact,packages,seal)
-          | (artifact,packages,seal) <- scopeInterfaces selectedScope]}
-    wrongOwnerProof <- validateCanonicalInterfaceProof wrongOwnerScope wrongOwner
-      copiedCertificate (canonicalCertificateSha256 localProof)
-      ((\core -> (canonicalCorePath core,canonicalCoreSha256 core)) <$> canonicalCoreArtifact localProof)
+        (localIface,packages,seal) = row
+    wrongOwnerProof <- extendExactScopeInputs inherited
+      [((localIface {exactModule=snd wrongOwner},packages,seal),ModuleInterfaceEvidence relocated)]
     unless (either (const True) (const False) wrongOwnerProof) $
       fail "captured source original authorized another exact module owner"
+    -- Typed facts survive only while their actual sealed files still match.
+    forM_ [canonicalCertificatePath localProof,exactPath localIface,packages] $ \path ->
+      bracket (BS.readFile path) (BS.writeFile path) $ \_ -> do
+        BS.writeFile path "changed admitted input bytes"
+        refused <- revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope
+        unless (either (const True) (const False) refused) $
+          fail "retained parsed input facts admitted changed certificate/interface/sidecar bytes"
+    revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
+    case localFinalizedCore localAdmission of
+      Nothing -> fail "completed local fixture lacks its Core length/seal control"
+      Just (corePath,_) -> do
+        let validateLocal = withFileObservations $ \observations -> do
+              _ <- observeFile observations (exactPath localIface) (Just (32 * 1024 * 1024))
+              revalidateLocalFinalizedAdmissionWith observations localAdmission
+        validateLocal >>= either fail pure
+        bracket (BS.readFile corePath) (BS.writeFile corePath) $ \bytes ->
+          forM_ [BS.take (max 0 (BS.length bytes - 1)) bytes,bytes <> BS.singleton 0] $ \changed -> do
+            BS.writeFile corePath changed
+            refused <- validateLocal
+            unless (either (const True) (const False) refused) $
+              fail "shared file observation bypassed captured local Core exact length"
+        validateLocal >>= either fail pure
     copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
     requireOriginalSourceBytesChanged "captured source retained import closure"
       ("main","CanonicalDependency") (work </> "CanonicalDependency.hs") (digest dependencyBytes) recheckLocal
@@ -882,11 +934,9 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
       proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 admitted) interfaces candidate
         >>= either fail pure
       pure ((candidateUnit candidate,candidateModule candidate),proof)
-    let retained = admitted
-          { scopeInterfaces = interfaces
-          , scopeInterfaceEvidence = Map.map ModuleInterfaceEvidence
-              (Map.union proofs (Map.fromList cachedProofs))
-          , scopeLexical = [(key,lexical) | (key,_,lexical) <- allRows] }
+    let allProofs = Map.union proofs (Map.fromList cachedProofs)
+    retained <- extendExactScopeInputs (admitted {scopeLexical=[(key,lexical) | (key,_,lexical) <- allRows]})
+      [(row,ModuleInterfaceEvidence (allProofs Map.! key)) | (key,row,_) <- allRows] >>= either fail pure
     when reuseCandidate $ do
       unaccepted <- retainProgramSourceImports Nothing (completed {pprAcceptedCandidates=[]})
         (certifiedFinalizedArtifacts certified) retained
@@ -1044,10 +1094,8 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
             (Map.lookup key admissions)
           lexical <- either fail pure (preparedHomeRequirements prepared (fst key) (snd key))
           pure (key,localFinalizedInterface capture,lexical)
-        let retained = admitted
-              { scopeInterfaces = [row | (_,row,_) <- rows]
-              , scopeInterfaceEvidence = Map.map ModuleInterfaceEvidence proofs
-              , scopeLexical = [(key,lexical) | (key,_,lexical) <- rows] }
+        retained <- extendExactScopeInputs (admitted {scopeLexical=[(key,lexical) | (key,_,lexical) <- rows]})
+          [(row,ModuleInterfaceEvidence (proofs Map.! key)) | (key,row,_) <- rows] >>= either fail pure
         pure (prepared,certifiedFinalizedArtifacts certified,retained)
   (first,captureA,scopeA) <- prepare 41
   (second,captureB,scopeB) <- prepare 42
@@ -3937,21 +3985,10 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionSourceProspectiveReferences [legacy]
       [reference {executionRefGraph=replicate 64 'b'}] [] of Left _ -> True; _ -> False) $
     fail "unsupported prospective recipe hid corrupt inherited advertised proof"
-  let original = ExactProduct "main" "Support" sha sha sha "" []
-      scope = ExactScope "" sha sha sha
-        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] Map.empty [] [original]
-        [] [] NoCheckedPurpose Nothing Set.empty
-      oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
+  let oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   unless (case decodeExecutionSourceGraph (executionGraphSha256 graph)
       (executionGraphBytes oversized) of Left _ -> True; _ -> False) $
     fail "direct graph decoder admitted an oversized byte envelope"
-  bounded <- either (fail . show) pure
-    (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
-  unless (isNothing bounded && case extendExactExecutionSources [oversized] [reference] scope of
-      Left _ -> True; _ -> False) $ fail "optional/advertised aggregate budget policies diverged"
-  unless (case extendExactExecutionSourcesWithinBudget [oversized]
-      [reference {executionRefGraph=replicate 64 'b'}] scope of Left _ -> True; _ -> False) $
-    fail "aggregate budget withholding hid corrupt advertised graph"
   putStrLn "fresh execution recipe: issuer, original lineage, shared negative contexts and strict/optional budget controls passed"
 
 finalizedFrontendOnce :: IO ()
@@ -5259,6 +5296,61 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   firstWitness <- case fanout of
     first:_ -> pure first
     _ -> fail "package proof lost its fanout owner fixtures"
+  scopePath <- writeGenuineEmptyMetadataScope work
+  empty <- readExactScope scopePath >>= either fail pure
+  (admitted,admissionDiagnostics) <- captureDiagnostics
+    (extendExactScopeInputs empty [(firstWitness,LexicalJoinEvidence)] >>= either fail pure)
+  unless (count "package_proof.sidecar_decodes" admissionDiagnostics == 1) $
+    fail "input extension did not decode its new authenticated sidecar once"
+  let (firstArtifact,firstSidecar,firstSidecarSha) = firstWitness
+      inspected = admitted {scopePurpose=ExactInspectionPurpose [firstArtifact] [work]}
+  forM_ [1::Int .. 3] $ \_ -> do
+    writeIORef resolverCalls 0
+    (result,diagnostics) <- captureDiagnostics (revalidateExactScope environment inspected)
+    requireRight "admitted input snapshot" result
+    calls <- readIORef resolverCalls
+    unless (calls == 1 && count "package_proof.sidecar_decodes" diagnostics == 0
+        && count "exact_scope.certificate_decodes" diagnostics == 0
+        && count "package_proof.union_extensions" diagnostics == 0
+        && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 firstArtifact) diagnostics) == 1
+        && length (counterValues ("hash_bytes.observed_file." ++ firstSidecarSha) diagnostics) == 1) $
+      fail "required proof redecoded facts, reread checked interface or skipped current Finder"
+  -- Add a second real compiled owner and a previously absent installed root.
+  secondInterface <- maybe (fail "snapshot extension lacks its compiled support interface") pure
+    (Map.lookup (mkModuleName "OptionalSupport") (pprProductInterfaces prepared))
+  let secondOwner = mi_module secondInterface
+      secondPath = work </> "package-proof-new-owner.hi"
+  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression secondPath secondInterface
+  secondBytes <- BS.readFile secondPath
+  let secondArtifact = ExactIfaceArtifact (unitString (moduleUnit secondOwner))
+        (moduleNameString (moduleName secondOwner)) secondPath (digest secondBytes) []
+  secondRoot <- case roots of
+    _:value:_ -> pure value
+    _ -> fail "snapshot extension lacks its second installed root"
+  secondWitness <- sidecar "new-owner" secondArtifact [secondRoot]
+  (extended,extensionDiagnostics) <- captureDiagnostics
+    (extendExactScopeInputs admitted [(secondWitness,LexicalJoinEvidence)] >>= either fail pure)
+  unless (scopeInterfaces extended == [firstWitness,secondWitness]
+      && count "package_proof.sidecar_decodes" extensionDiagnostics == 1) $
+    fail "input extension reordered old rows or redecoded old sidecars"
+  writeIORef resolverCalls 0
+  revalidateExactScope environment extended >>= requireRight "extended root union"
+  readIORef resolverCalls >>= \calls -> unless (calls == 2) (fail "extension omitted its new installed root")
+  conflictWitness <- sidecar "new-owner-conflict" secondArtifact [firstRoot {packagePath=ownerPath}]
+  conflictResult <- extendExactScopeInputs admitted [(conflictWitness,LexicalJoinEvidence)]
+  unless (either (const True) (const False) conflictResult) (fail "extension admitted conflicting root union")
+  revalidateExactScope environment admitted >>= requireRight "old snapshot after failed extension"
+  forM_ [exactPath firstArtifact,firstSidecar,packagePath firstRoot] $ \path ->
+    bracket (BS.readFile path) (BS.writeFile path) $ \_ -> do
+      BS.writeFile path "changed after input admission"
+      revalidateExactScope environment admitted >>= requireLeft "snapshot byte mutation"
+  let snapshotAlternate = work </> "snapshot-alternate.hi"
+      snapshotOwner = mkModule (stringToUnit (packageUnit firstRoot)) (mkModuleName (packageModule firstRoot))
+  BS.writeFile snapshotAlternate rootBytes
+  addModuleToFinder finder (GWIB snapshotOwner NotBoot) (location {ml_hi_file=snapshotAlternate})
+  revalidateExactScope environment admitted >>= requireLeft "snapshot current Finder selection"
+  addModuleToFinder finder (GWIB snapshotOwner NotBoot) location
+  revalidateExactScope environment admitted >>= requireRight "snapshot restored current Finder"
   forM_ [1,8,64] $ \size -> do
     writeIORef resolverCalls 0
     (result, diagnostics) <- captureDiagnostics (revalidatePackageImports environment (take size fanout))

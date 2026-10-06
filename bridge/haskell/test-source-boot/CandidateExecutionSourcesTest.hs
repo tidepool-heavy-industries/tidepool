@@ -5,6 +5,7 @@ import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (bracket, evaluate, finally)
 import Control.Monad (forM_, unless)
+import Data.Maybe (isNothing)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Set qualified as Set
@@ -49,6 +50,22 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   originalFixture <- capturePreparedFixture work original
   sourceScopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
   originalScope <- readExactScope sourceScopePath >>= either fail pure
+  -- Budget policies consume genuinely admitted original owners. Alter only
+  -- the graph envelope; no synthetic interface/Core authority is constructed.
+  case scopeExecutionGraphs originalScope of
+    graph:_ -> do
+      let oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
+          overBudget = originalScope {scopeExecutionGraphs=
+            oversized : tail (scopeExecutionGraphs originalScope)}
+      bounded <- either (fail . show) pure (extendExactExecutionSourcesWithinBudget [] [] overBudget)
+      unless (isNothing bounded && case extendExactExecutionSources [] [] overBudget of
+          Left _ -> True; _ -> False) $ fail "optional/advertised aggregate budget policies diverged"
+      case scopeExecutionOwners originalScope of
+        reference:_ -> unless (case extendExactExecutionSourcesWithinBudget []
+            [reference {executionRefGraph=replicate 64 'b'}] overBudget of Left _ -> True; _ -> False) $
+          fail "aggregate budget withholding hid corrupt advertised graph"
+        [] -> fail "budget fixture lacks its admitted original references"
+    [] -> fail "budget fixture lacks its admitted original graph"
   executionScopeDescriptorChecks sourceScopePath
   writeManifestFor owners work originalFixture
   offered <- readModuleCandidates candidatePath >>= either fail pure

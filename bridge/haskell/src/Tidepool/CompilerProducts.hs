@@ -50,7 +50,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionCaptures )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
+  ( ExactScope(..), scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
   , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals )
 import Tidepool.ExecutionEncode

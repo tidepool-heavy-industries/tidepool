@@ -241,10 +241,10 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, writeCheckedExactCompilation, scopeValueInterfaces
+  ( ExactScope(..), scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, writeCheckedExactCompilation, scopeValueInterfaces
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
-  , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
+  , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin, normalizeInterfaceEvidence )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
@@ -1067,14 +1067,6 @@ exactReuseAdmission scope session
   where
     requested = maybe [] (map renderSessionModule . ssValIfaces) session
     admitted = Set.fromList (map exactModule (scopeValueInterfaces scope))
-
--- Paths acquire bytes on each request. Completed nodes use only the immutable
--- interface, package, Core and dependency seals, never their materialization path.
-normalizeInterfaceEvidence :: ExactInterfaceEvidence -> ExactInterfaceEvidence
-normalizeInterfaceEvidence (ModuleInterfaceEvidence proof) = ModuleInterfaceEvidence (proof
-  { canonicalCertificatePath=""
-  , canonicalCoreArtifact=(\core -> core {canonicalCorePath=""}) <$> canonicalCoreArtifact proof })
-normalizeInterfaceEvidence evidence = evidence
 
 data CompilerRecoveryCaches = CompilerRecoveryCaches
   { compilerFatIface :: FatIfaceCache

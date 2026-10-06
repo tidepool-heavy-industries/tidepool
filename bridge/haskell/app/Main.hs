@@ -124,7 +124,8 @@ import Tidepool.ExactScope
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256
-  , readExactScope, revalidateExactScope, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
+  , readExactScope, revalidateExactScope, scopeInterfaces, scopeInterfaceEvidence, extendExactScopeInputs
+  , extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (encodeCheckedSignature
@@ -1497,13 +1498,10 @@ addProgramValue root generation binders@(firstBinder:_) state = do
     ExactCellPurpose admission paths -> pure (ExactCellPurpose
       (admission { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }) paths)
     _ -> fail "compiled cell lost admission"
-  let
-      extended = exact { scopePurpose = extendedPurpose
-        , scopeInterfaces = scopeInterfaces exact ++ [(artifact,path ++ ".packages",shaHex packages)]
-        , scopeInterfaceEvidence = Map.insert ("main",bbModule firstBinder)
-            CheckedValueEvidence (scopeInterfaceEvidence exact)
-        , scopeLexical = scopeLexical exact ++ [(("main",bbModule firstBinder),lexicalRequirements)] }
-      retained = foldr (\binder -> Map.insert
+  extended <- extendExactScopeInputs (exact {scopePurpose=extendedPurpose,
+      scopeLexical=scopeLexical exact ++ [(("main",bbModule firstBinder),lexicalRequirements)]})
+    [((artifact,path ++ ".packages",shaHex packages),CheckedValueEvidence)] >>= either fail pure
+  let retained = foldr (\binder -> Map.insert
           (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
         (programRetained state) binders
   pure state { programExact = extended, programValues = programValues state ++ [selection]
@@ -1582,17 +1580,15 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         (exactProgramProductVersion exact unit reserved (plannedSource original) interfaceBytes originalBytes packageBytes)
         (shaHex interfaceBytes) (shaHex originalBytes) productPath
         (map originalGroupFromProjected originalGroups')
-      extended = supportScope
-        { scopeProducts = scopeProducts supportScope ++ [originalProduct]
-        , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, packagesSha)]
-        , scopeInterfaceEvidence = Map.insert (unit,reserved) (LocalNativeDeclarationEvidence nativeEvidence)
-            (scopeInterfaceEvidence supportScope)
-        , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), lexicalRequirements)] }
       text = encodeString . T.pack
       receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
         <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
         <> text (shaHex interfaceBytes) <> text (renderPlannedDeclarationInventory inventory)
         <> text "planned-declaration"
+  extended <- extendExactScopeInputs (supportScope
+    { scopeProducts=scopeProducts supportScope ++ [originalProduct]
+    , scopeLexical=scopeLexical supportScope ++ [((unit,reserved),lexicalRequirements)] })
+    [((interface,packagesPath,packagesSha),LocalNativeDeclarationEvidence nativeEvidence)] >>= either fail pure
   BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
   pure (finalized, original, inventory, extended, (prepared,certified))
   where
@@ -1612,9 +1608,10 @@ retainProgramProducts
 retainProgramProducts directory prepared certified target initial = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
-  finalized <- foldM retainInterface selected (Map.toAscList localInterfaces)
-  cached <- foldM retainCached finalized (zip [0::Int ..] (pprAcceptedCandidates prepared))
-  promoted <- foldM retain cached (zip [0::Int ..] products)
+  finalized <- foldM retainInterface (selected,[]) (Map.toAscList localInterfaces)
+  (cached,additions) <- foldM retainCached finalized (zip [0::Int ..] (pprAcceptedCandidates prepared))
+  admitted <- extendExactScopeInputs cached additions >>= either fail pure
+  promoted <- foldM retain admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
     (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted)
@@ -1638,29 +1635,26 @@ retainProgramProducts directory prepared certified target initial = do
     supportOwners = [(candidateUnit candidate,candidateModule candidate)
       | candidate <- pprAcceptedCandidates prepared]
       ++ Map.keys localInterfaces
-    retainInterface scope (key,proof) = do
+    retainInterface (scope,additions) (key,proof) = do
       canonical <- maybe (fail "supporting source original lacks complete canonical proof") pure
         (Map.lookup key (certifiedSourceOriginals certified))
       let row@(interface,_,packagesSha) = localFinalizedInterface proof
-          existing = [current | current@(artifact,_,_) <- scopeInterfaces scope
+          existing = [current | current@(artifact,_,_) <- selectedInterfacesOf scope additions
             , (exactUnit artifact,exactModule artifact) == key]
       lexicalRequirements <- programSourceRequirements prepared (fst key) (snd key)
         >>= programLexicalRequirements scope supportOwners
       case existing of
-        [] -> pure scope
-          { scopeInterfaces = scopeInterfaces scope ++ [row]
-          , scopeInterfaceEvidence = Map.insert key (ModuleInterfaceEvidence canonical)
-              (scopeInterfaceEvidence scope)
-          , scopeLexical = scopeLexical scope ++ [(key,lexicalRequirements)] }
+        [] -> pure (scope {scopeLexical=scopeLexical scope ++ [(key,lexicalRequirements)]},
+          additions ++ [(row,ModuleInterfaceEvidence canonical)])
         [(old,_,oldPackagesSha)]
           | exactSha256 old == exactSha256 interface
           , exactRequirements old == exactRequirements interface
           , oldPackagesSha == packagesSha
           , lookup key (scopeLexical scope) == Just lexicalRequirements
-          , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (scopeInterfaceEvidence scope)
-          , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure scope
+          , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (selectedEvidenceOf scope additions)
+          , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions)
         _ -> fail "fresh finalization conflicts with an admitted original owner"
-    retainCached scope (index, candidate) = do
+    retainCached (scope,additions) (index, candidate) = do
       let unit = candidateUnit candidate
           owner = candidateModule candidate
           key = (unit,owner)
@@ -1671,7 +1665,7 @@ retainProgramProducts directory prepared certified target initial = do
           && shaHex packageBytes == candidatePackageImportsSha256 candidate
           && shaHex productBytes == candidateProductSha256 candidate) $
         fail "accepted cached supporting original changed before retention"
-      selectedInterfaces <- foldM selectCandidateInterface (scopeInterfaces scope)
+      selectedInterfaces <- foldM selectCandidateInterface (selectedInterfacesOf scope additions)
         (pprAcceptedCandidates prepared)
       proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope)
         selectedInterfaces candidate >>= either fail pure
@@ -1679,7 +1673,7 @@ retainProgramProducts directory prepared certified target initial = do
       lexicalRequirements <- programSourceRequirements prepared unit owner >>= programLexicalRequirements scope supportOwners
       let groups = map originalGroupFromCandidate (candidateGroups candidate)
           existingInterfaces = [(artifact,packages,sha)
-            | (artifact,packages,sha) <- scopeInterfaces scope
+            | (artifact,packages,sha) <- selectedInterfacesOf scope additions
             , (exactUnit artifact,exactModule artifact) == key]
           existingProducts = [original | original <- scopeProducts scope
             , (originalUnit original,originalModule original) == key]
@@ -1698,11 +1692,9 @@ retainProgramProducts directory prepared certified target initial = do
           BS.writeFile interfacePath interfaceBytes
           BS.writeFile packagesPath packageBytes
           BS.writeFile productPath productBytes
-          pure scope { scopeProducts = scopeProducts scope ++ [original]
-            , scopeInterfaces = scopeInterfaces scope ++ [(interface,packagesPath,candidatePackageImportsSha256 candidate)]
-            , scopeInterfaceEvidence = Map.insert key (ModuleInterfaceEvidence proof)
-                (scopeInterfaceEvidence scope)
-            , scopeLexical = scopeLexical scope ++ [(key,lexicalRequirements)] }
+          pure (scope {scopeProducts=scopeProducts scope ++ [original],
+            scopeLexical=scopeLexical scope ++ [(key,lexicalRequirements)]},
+            additions ++ [((interface,packagesPath,candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence proof)])
         ([(interface,packagesPath,packagesSha)],[original])
           | lookup key (scopeLexical scope) == Just lexicalRequirements
           , exactRequirements interface == requirements
@@ -1718,11 +1710,15 @@ retainProgramProducts directory prepared certified target initial = do
               unless (currentInterface == interfaceBytes && currentPackages == packageBytes
                   && currentProduct == productBytes) $
                 fail "retained cached supporting original changed between cell slots"
-              case Map.lookup key (scopeInterfaceEvidence scope) of
+              case Map.lookup key (selectedEvidenceOf scope additions) of
                 Just (ModuleInterfaceEvidence retained)
-                  | canonicalCertificateSha256 retained == canonicalCertificateSha256 proof -> pure scope
+                  | canonicalCertificateSha256 retained == canonicalCertificateSha256 proof -> pure (scope,additions)
                 _ -> fail "cached source product conflicts with retained canonical evidence"
         _ -> fail "cached source product conflicts with an admitted original owner"
+    selectedInterfacesOf scope additions = scopeInterfaces scope ++ map fst additions
+    selectedEvidenceOf scope additions = Map.union
+      (Map.fromList [((exactUnit interface,exactModule interface),evidence)
+        | ((interface,_,_),evidence) <- additions]) (scopeInterfaceEvidence scope)
     selectCandidateInterface interfaces candidate = do
       let key = (candidateUnit candidate,candidateModule candidate)
           row = (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)

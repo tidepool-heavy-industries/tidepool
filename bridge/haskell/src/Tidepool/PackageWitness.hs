@@ -3,6 +3,8 @@ module Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..)
   , emptyPackageImports, encodeCompilerProvidedImport, packageImportRoot, validatePackageImportRoot
   , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports, decodeCapturedPackageImports
+  , AdmittedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImports
+  , revalidateAdmittedPackageImports
   , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
@@ -30,12 +32,13 @@ import GHC.Unit.Module (Module, moduleUnit, moduleName, moduleNameString, mkModu
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
-import System.Directory (getFileSize, removeFile)
+import System.Directory (removeFile)
 import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
+import Tidepool.BoundedRead (FileObservations, FileObservation(..), observeFile, withFileObservations, readFileAtMost)
 
 -- Directness is certified by the authored import evidence owner. This witness
 -- authenticates the actual selected package interface, including unused imports.
@@ -55,6 +58,59 @@ data PackageImportEvidence = PackageImportEvidence
 emptyPackageImports :: PackageImportEvidence
 emptyPackageImports = PackageImportEvidence [] []
 
+-- Issued only from authenticated canonical sidecars. Extensions append exact
+-- owners; each current proof still resolves and hashes all selected roots.
+data AdmittedPackageImports = AdmittedPackageImports
+  (Map.Map (String,String) PackageImportRoot) Integer Int deriving (Eq, Show)
+
+emptyAdmittedPackageImports :: AdmittedPackageImports
+emptyAdmittedPackageImports = AdmittedPackageImports Map.empty 0 0
+
+extendAdmittedPackageImports :: AdmittedPackageImports
+  -> [(ExactIfaceArtifact, FilePath, String)] -> IO (Either String AdmittedPackageImports)
+extendAdmittedPackageImports initial witnesses = do
+  result <- foldM authenticate (Right initial) witnesses
+  case result of
+    Right _ | not (null witnesses) -> do
+      timing <- readTimingEnabled
+      emitCount timing "package_proof.union_extensions" 1
+    _ -> pure ()
+  pure result
+  where
+    authenticate (Left reason) _ = pure (Left reason)
+    authenticate (Right (AdmittedPackageImports selected references count)) (iface,path,sha) = do
+      authenticated <- readAuthenticatedPackageImports path sha iface
+      pure $ do
+        evidence <- authenticated
+        staged <- foldM insertRoot selected (packageInterfaces evidence)
+        let total = references + fromIntegral (length (packageInterfaces evidence))
+        total `seq` pure (AdmittedPackageImports staged total (count + 1))
+    insertRoot selected root = case Map.lookup (packageUnit root,packageModule root) selected of
+      Just previous | previous /= root -> Left "conflicting package import witnesses for one owner"
+                    | otherwise -> Right selected
+      Nothing -> Right (Map.insert (packageUnit root,packageModule root) root selected)
+
+revalidateAdmittedPackageImports :: FileObservations -> HscEnv
+  -> AdmittedPackageImports -> IO (Either String ())
+revalidateAdmittedPackageImports observations env (AdmittedPackageImports roots references count) = do
+  timing <- readTimingEnabled
+  emitCount timing "package_proof.authenticated_sidecars" (fromIntegral count)
+  emitCount timing "package_proof.staged_references" references
+  emitCount timing "package_proof.staged_full_witnesses" (fromIntegral (Map.size roots))
+  foldM (validate timing) (Right ()) (Map.elems roots)
+  where
+    validate _ (Left reason) _ = pure (Left reason)
+    validate timing (Right ()) expected = timeDetailPhase timing "package_imports" "root" $ do
+      let owner = mkModule (stringToUnit (packageUnit expected)) (mkModuleName (packageModule expected))
+      selected <- selectedPackageInterface env owner
+      case selected of
+        Right path | path == packagePath expected -> do
+          captured <- try (observeFile observations path Nothing) :: IO (Either IOException FileObservation)
+          pure $ case captured of
+            Right actual | observedSha256 actual == packageSha256 expected -> Right ()
+            _ -> Left "package selection or interface bytes differ from the certified import root"
+        _ -> pure (Left "package selection or interface bytes differ from the certified import root")
+
 encodeCompilerProvidedImport :: CompilerProvidedImport -> Encoding
 encodeCompilerProvidedImport CompilerPrimitive = encodeListLen 3
   <> encodeString (T.pack "primitive")
@@ -69,12 +125,9 @@ packageImportRoot env owner
       timeDetailPhase timing "package_imports" "root" (resolve timing)
  where
   resolve timing = do
-    found <- findExactModule (hsc_FC env) (initFinderOpts (hsc_dflags env))
-      (fmap (initFinderOpts . homeUnitEnv_dflags) (hsc_HUG env))
-      (hsc_units env) (hsc_home_unit_maybe env) (toUnitId <$> owner)
-    case found of
-      InstalledFound location _ -> do
-        let path = ml_hi_file location
+    selected <- selectedPackageInterface env owner
+    case selected of
+      Right path -> do
         captured <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
         case captured of
           Left _ -> pure (Left "selected package interface is unavailable")
@@ -82,7 +135,18 @@ packageImportRoot env owner
             sha <- measuredDigest timing "package_root" bytes
             pure (Right (PackageImportRoot (unitString (moduleUnit owner))
               (moduleNameString (moduleName owner)) path sha))
-      _ -> pure (Left "package interface does not resolve in the matched compiler")
+      Left reason -> pure (Left reason)
+
+selectedPackageInterface :: HscEnv -> Module -> IO (Either String FilePath)
+selectedPackageInterface env owner
+  | isHomeUnit (hsc_home_unit env) (moduleUnit owner) = pure (Left "package root refers to the home unit")
+  | otherwise = do
+      found <- findExactModule (hsc_FC env) (initFinderOpts (hsc_dflags env))
+        (fmap (initFinderOpts . homeUnitEnv_dflags) (hsc_HUG env))
+        (hsc_units env) (hsc_home_unit_maybe env) (toUnitId <$> owner)
+      pure $ case found of
+        InstalledFound location _ -> Right (ml_hi_file location)
+        _ -> Left "package interface does not resolve in the matched compiler"
 
 validatePackageImportRoot :: HscEnv -> PackageImportRoot -> IO (Either String ())
 validatePackageImportRoot env expected = do
@@ -124,41 +188,15 @@ readPackageImports path expectedDigest iface = do
 -- | One exact-scope proof authenticates every owning interface and sidecar,
 -- then observes each distinct package owner once through the current resolver.
 -- Matching the complete resolved witness proves both the expected path bytes
--- and the current selection. Nothing is retained across proof barriers.
+-- and the current selection. No current byte observation survives a proof.
 revalidatePackageImports
   :: HscEnv -> [(ExactIfaceArtifact, FilePath, String)] -> IO (Either String ())
 revalidatePackageImports env witnesses = do
-  selected <- foldM authenticate (Right (Map.empty, 0 :: Integer)) witnesses
-  case selected of
+  admitted <- extendAdmittedPackageImports emptyAdmittedPackageImports witnesses
+  case admitted of
     Left reason -> pure (Left reason)
-    Right (roots, references) -> do
-      timing <- readTimingEnabled
-      emitCount timing "package_proof.authenticated_sidecars" (fromIntegral (length witnesses))
-      emitCount timing "package_proof.staged_references" references
-      emitCount timing "package_proof.staged_full_witnesses" (fromIntegral (Map.size roots))
-      foldM validate (Right ()) (Map.elems roots)
-  where
-    authenticate (Left reason) _ = pure (Left reason)
-    authenticate (Right (selected, references)) (iface, path, sha) = do
-      authenticated <- readAuthenticatedPackageImports path sha iface
-      pure $ do
-        evidence <- authenticated
-        staged <- foldM insertRoot selected (packageInterfaces evidence)
-        let count = references + fromIntegral (length (packageInterfaces evidence))
-        count `seq` pure (staged, count)
-    insertRoot selected root = case Map.lookup (packageUnit root, packageModule root) selected of
-      Just previous
-        | previous /= root -> Left "conflicting package import witnesses for one owner"
-        | otherwise -> Right selected
-      Nothing -> let staged = Map.insert (packageUnit root, packageModule root) root selected
-                 in staged `seq` Right staged
-    validate (Left reason) _ = pure (Left reason)
-    validate (Right ()) expected = do
-      checked <- validatePackageImportRoot env expected
-      -- Force the validation verdict before returning a successful proof.
-      case checked of
-        Left reason -> pure (Left reason)
-        Right () -> pure (Right ())
+    Right roots -> withFileObservations (\observations ->
+      revalidateAdmittedPackageImports observations env roots)
 
 -- Private authentication deliberately grants no current package-byte proof.
 -- Standalone readers also check recorded paths; collective proofs resolve and
@@ -174,10 +212,10 @@ readAuthenticatedPackageImports path expectedDigest iface = do
     if timing then evaluate result else pure result
   where
     readEvidence timing = do
-      captured <- try $ do
-        size <- getFileSize path
-        when (size > 4 * 1024 * 1024) (fail "package import evidence exceeds four MiB")
-        (,) <$> BS.readFile path <*> BS.readFile (exactPath iface)
+      captured <- try (do
+        bytes <- readFileAtMost path (4 * 1024 * 1024 + 1)
+        when (BS.length bytes > 4 * 1024 * 1024) (fail "package import evidence exceeds four MiB")
+        (,) bytes <$> BS.readFile (exactPath iface))
         :: IO (Either IOException (BS.ByteString, BS.ByteString))
       case captured of
         Left (_ :: IOException) -> pure (Left "sealed package import evidence is unavailable")
@@ -186,12 +224,14 @@ readAuthenticatedPackageImports path expectedDigest iface = do
           ifaceSha <- measuredDigest timing "owning_iface" ifaceBytes
           if evidenceSha /= expectedDigest || ifaceSha /= exactSha256 iface
             then pure (Left "sealed package import evidence or owning interface bytes changed")
-            else case deserialiseFromBytes decodeRoots (BL.fromStrict bytes) of
-              Left _ -> pure (Left "invalid sealed package import evidence")
-              Right (remaining, (owner, roots))
-                | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
-                    || encodeRoots iface roots /= bytes -> pure (Left "package import evidence has a different owner or encoding")
-                | otherwise -> pure (Right roots)
+            else do
+              emitCount timing "package_proof.sidecar_decodes" 1
+              pure $ case deserialiseFromBytes decodeRoots (BL.fromStrict bytes) of
+                Left _ -> Left "invalid sealed package import evidence"
+                Right (remaining, (owner, roots))
+                  | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
+                      || encodeRoots iface roots /= bytes -> Left "package import evidence has a different owner or encoding"
+                  | otherwise -> Right roots
 
 -- Authenticate an already captured sidecar against its selected interface.
 -- Current package resolution remains the collective proof's responsibility.

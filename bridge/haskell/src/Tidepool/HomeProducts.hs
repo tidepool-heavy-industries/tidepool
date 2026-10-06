@@ -77,7 +77,7 @@ import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
-  ( ExactScope(..), CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
+  ( ExactScope(..), scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
   , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, revalidateExactScope )

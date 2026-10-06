@@ -9,6 +9,7 @@ module Tidepool.FinalizedModuleArtifacts
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
   , localFinalizedRequirements, localFinalizedCore, revalidateLocalFinalizedAdmission
+  , revalidateLocalFinalizedAdmissionWith
   , matchesCapturedFinalization ) where
 
 import Codec.CBOR.Decoding qualified as D
@@ -31,10 +32,10 @@ import GHC.Unit.Types (unitIdString, unitString, stringToUnit)
 import Numeric (showHex)
 import System.Directory (makeAbsolute)
 import System.FilePath ((</>), normalise, isAbsolute)
-import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.Mem.StableName (StableName, makeStableName)
 
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
+import Tidepool.BoundedRead (FileObservations, FileObservation(..), withFileObservations, observeFile)
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces )
 import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
@@ -272,7 +273,11 @@ matchesCapturedFinalization (LocalFinalizedAdmission _ _
 -- Hash one bounded read of each captured file. Size/stat metadata is not proof;
 -- substitutions, truncation and growth all refuse the local admission.
 revalidateLocalFinalizedAdmission :: LocalFinalizedAdmission -> IO (Either String ())
-revalidateLocalFinalizedAdmission (LocalFinalizedAdmission _ directory
+revalidateLocalFinalizedAdmission admission =
+  withFileObservations (\observations -> revalidateLocalFinalizedAdmissionWith observations admission)
+
+revalidateLocalFinalizedAdmissionWith :: FileObservations -> LocalFinalizedAdmission -> IO (Either String ())
+revalidateLocalFinalizedAdmissionWith observations (LocalFinalizedAdmission _ directory
     (CapturedModule _ _ _ interface package core _ _)) = do
   checked <- mapM validate ((interfaceLimit,interface):(packageLimit,package)
     : maybe [] (\payload -> [(coreLimit,payload)]) core)
@@ -281,13 +286,13 @@ revalidateLocalFinalizedAdmission (LocalFinalizedAdmission _ directory
     validate (limit,payload@(CapturedPayload _ sha count))
       | count <= 0 || count > limit = pure (Left "invalid captured finalized payload length")
       | otherwise = do
-          captured <- try (withBinaryFile (payloadPath directory payload) ReadMode
-            (\handle -> BS.hGet handle (count + 1))) :: IO (Either IOException BS.ByteString)
+          captured <- try (observeFile observations (payloadPath directory payload) (Just count))
+            :: IO (Either IOException FileObservation)
           pure $ case captured of
             Left _ -> Left "captured finalized payload is unavailable"
-            Right bytes
-              | BS.length bytes /= count -> Left "captured finalized payload length changed"
-              | digest bytes /= sha -> Left "captured finalized payload bytes changed"
+            Right observed
+              | observedByteCount observed /= count -> Left "captured finalized payload length changed"
+              | observedSha256 observed /= T.unpack sha -> Left "captured finalized payload bytes changed"
               | otherwise -> Right ()
 
 capturedRows :: FinalizedModuleArtifacts -> [CapturedModule]

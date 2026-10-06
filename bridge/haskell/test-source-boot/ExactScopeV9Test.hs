@@ -276,15 +276,15 @@ candidateCanonicalChecks manifest candidateManifest = do
         (candidateInterface candidate) (candidateInterfaceSha256 candidate)
         (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
         candidatePackageImportsSha256 candidate) | candidate <- candidates]
-      selected = scope {scopeInterfaces = candidateInterfaces ++
+      selected = candidateInterfaces ++
         [(iface,path,seal) | (iface,path,seal) <- scopeInterfaces scope
-          , (exactUnit iface,exactModule iface) `Set.notMember` keys]}
-      refusePromotion candidate = validateCandidateCanonicalInterfaceProof (scopeProducerSha256 selected) (scopeInterfaces selected) candidate >>= \result ->
+          , (exactUnit iface,exactModule iface) `Set.notMember` keys]
+      refusePromotion candidate = validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope) selected candidate >>= \result ->
         case result of
           Left _ -> pure ()
           Right _ -> fail "candidate promotion admitted changed source or interface evidence"
   forM_ candidates $ \candidate -> do
-    proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 selected) (scopeInterfaces selected) candidate >>= either fail pure
+    proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope) selected candidate >>= either fail pure
     let descriptor = candidateModuleInterface candidate
     unless (Map.keys (canonicalRequirements proof) == candidateInterfaceRequirements candidate
         && canonicalCertificatePath proof == candidateCertificatePath descriptor

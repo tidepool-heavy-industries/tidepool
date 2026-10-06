@@ -58,7 +58,7 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
   , newOriginalInterfaceArtifacts )
 import Tidepool.ExactScope
-  ( ExactScope(..), readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
+  ( ExactScope(..), scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
 import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes)

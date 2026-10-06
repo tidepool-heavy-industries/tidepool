@@ -61,7 +61,7 @@ import Tidepool.FinalizedCore
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
-  , ExactScope(..), readExactScope, scopeModuleInterfaceProofs
+  , ExactScope(..), scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificateSha256 )
 import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)

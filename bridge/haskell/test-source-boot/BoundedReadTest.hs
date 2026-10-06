@@ -5,7 +5,7 @@ import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (hClose, hIsClosed, openBinaryTempFile, IOMode(ReadMode), withBinaryFile)
-import Tidepool.BoundedRead (hGetAtMost, readFileAtMost)
+import Tidepool.BoundedRead (hGetAtMost, readFileAtMost, FileObservation(..), withFileObservations, observeFile)
 
 boundedReadChecks :: IO ()
 boundedReadChecks = do
@@ -41,3 +41,27 @@ boundedReadChecks = do
       case failure of
         Left _ -> pure ()
         Right _ -> fail "bounded read deferred a closed-handle error beyond its IO action"
+
+      BS.writeFile path payload
+      withFileObservations $ \observations -> do
+        original <- observeFile observations path (Just (BS.length payload))
+        unless (observedByteCount original == BS.length payload)
+          (fail "file observation lost its exact byte count")
+        -- The same proof can impose a stricter role bound on its observation.
+        tooSmall <- try (observeFile observations path (Just (BS.length payload - 1)))
+          :: IO (Either IOException FileObservation)
+        unless (either (const True) (const False) tooSmall)
+          (fail "shared observation bypassed a stricter bound")
+        BS.writeFile path (BS.pack [1,2,3])
+        repeated <- observeFile observations path Nothing
+        unless (repeated == original) (fail "one read-only proof observed its path twice")
+        withFileObservations $ \next -> do
+          changed <- observeFile next path Nothing
+          unless (changed /= original) (fail "file observation survived into the next proof")
+      BS.writeFile path payload
+      withFileObservations $ \observations -> do
+        refused <- try (observeFile observations path (Just 1)) :: IO (Either IOException FileObservation)
+        unless (either (const True) (const False) refused) (fail "bounded observation admitted a truncated prefix")
+        restored <- observeFile observations path Nothing
+        unless (observedByteCount restored == BS.length payload)
+          (fail "failed bounded read published a partial observation")
