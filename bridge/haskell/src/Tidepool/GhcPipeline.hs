@@ -4249,7 +4249,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
             interrupted <- newIORef False
             interpreterAttempt <- newIORef InterpreterConfirmed
             operationPurpose <- newIORef "request"
-            requestIdentity <- newTimingRequestIdentity
+            operationIdentity <- newTimingRequestIdentity >>= newIORef
             let runGuarded :: forall result. IO result -> IO result
                 runGuarded operation = mask $ \restore -> do
                   caller <- myThreadId
@@ -4280,7 +4280,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
                           (mutation == InterpreterMutationPending)
                         when (mutation == InterpreterMutationPending) $ do
                           purpose <- readIORef operationPurpose
-                          emitReuse timing (ReuseContext requestIdentity purpose)
+                          identity <- readIORef operationIdentity
+                          emitReuse timing (ReuseContext identity purpose)
                             NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing
                         restoreBase
                         writeIORef phase CompilerReady
@@ -4291,12 +4292,16 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   pure result
                 compile :: ResidentCompiler
                 compile selection retained purpose mscope path includes products = runGuarded $ do
+                  requestIdentity <- newTimingRequestIdentity
+                  writeIORef operationIdentity requestIdentity
                   writeIORef operationPurpose (compilePurposeLabel purpose)
                   reflectGhc
                     (residentCompileOne producer selection retained universe active interpreterAttempt baseEnv baseFlags
                       timing requestIdentity purpose mscope path includes products) session
                 runOperation :: forall result. Ghc result -> IO result
                 runOperation operation = runGuarded $ do
+                  requestIdentity <- newTimingRequestIdentity
+                  writeIORef operationIdentity requestIdentity
                   writeIORef operationPurpose "helper"
                   -- This capability admits arbitrary Ghc operations. A refusal
                   -- cannot prove that opaque loading left the interpreter intact.
@@ -4335,7 +4340,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   when cancelled $ do
                     recoverCompilerInterpreter interpreter baseEnv True
                     purpose <- readIORef operationPurpose
-                    emitReuse timing (ReuseContext requestIdentity purpose)
+                    identity <- readIORef operationIdentity
+                    emitReuse timing (ReuseContext identity purpose)
                       NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing
                     writeIORef availability ResidentBusy
                   writeIORef active Nothing
