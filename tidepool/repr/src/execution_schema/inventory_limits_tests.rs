@@ -26,7 +26,8 @@ fn row(unit: &str, module: &str, interface: &[u8], groups: &[Vec<u8>]) -> Value 
 
 fn inventory(rows: Vec<Value>) -> Vec<u8> {
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&("TPMOD", 1u64, rows), &mut bytes).unwrap();
+    ciborium::ser::into_writer(&("TPMOD", super::MODULE_PRODUCTS_VERSION, rows), &mut bytes)
+        .unwrap();
     bytes
 }
 
