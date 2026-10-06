@@ -511,9 +511,27 @@ fn read_failure_end(
     deadline: Instant,
     cancelled: impl Fn() -> bool,
 ) -> io::Result<Option<CompilerFrontendCloseReport>> {
+    let accept_eof = || {
+        if cancelled() {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "compiler close cancelled",
+            ))
+        } else if Instant::now() >= deadline {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "compiler close deadline exceeded",
+            ))
+        } else {
+            Ok(())
+        }
+    };
     let mut magic = [0u8; 8];
     match process::read_exact_until(reader, &mut magic[..1], deadline, &cancelled) {
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            accept_eof()?;
+            return Ok(None);
+        }
         result => result?,
     }
     process::read_exact_until(reader, &mut magic[1..], deadline, &cancelled)?;
@@ -532,8 +550,11 @@ fn read_failure_end(
     process::read_exact_until(reader, &mut body, deadline, &cancelled)?;
     let report = decode_failure_end(&body)?;
     let mut trailing = [0u8; 1];
-    match process::read_exact_until(reader, &mut trailing, deadline, cancelled) {
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(Some(report)),
+    match process::read_exact_until(reader, &mut trailing, deadline, &cancelled) {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            accept_eof()?;
+            Ok(Some(report))
+        }
         Err(error) => Err(error),
         Ok(()) => Err(invalid_close("trailing bytes after compiler failure END")),
     }
@@ -2189,6 +2210,35 @@ mod tests {
         // Keep the writer alive: valid frame bytes alone cannot prove close.
         let error = read_failure_end(
             &mut reader,
+            Instant::now() + Duration::from_millis(50),
+            || false,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn empty_close_eof_after_deadline_cannot_confirm_success() {
+        struct DelayedEof(UnixStream);
+        impl std::os::fd::AsRawFd for DelayedEof {
+            fn as_raw_fd(&self) -> std::os::fd::RawFd {
+                self.0.as_raw_fd()
+            }
+        }
+        impl Read for DelayedEof {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "deterministic delayed EOF observation"
+                )]
+                std::thread::sleep(Duration::from_millis(75));
+                self.0.read(bytes)
+            }
+        }
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+        let error = read_failure_end(
+            &mut DelayedEof(reader),
             Instant::now() + Duration::from_millis(50),
             || false,
         )
