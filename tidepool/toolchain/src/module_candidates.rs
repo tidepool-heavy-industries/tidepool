@@ -2010,10 +2010,10 @@ fn select_records_inner(
             continue;
         }
         if let Some(digest) = record.execution_source_sha256 {
-            let recovered = if let Some(graph) = record.execution_source.take() {
-                Some(graph)
+            let graph = if let Some(graph) = record.execution_source.take() {
+                graph
             } else if let Some(graph) = recovered_graphs.get(&digest) {
-                Some(Arc::clone(graph))
+                Arc::clone(graph)
             } else {
                 let path = graph_path(&record_dir(endpoint_identity), &digest);
                 let metadata_len = match fs::metadata(&path) {
@@ -2150,19 +2150,7 @@ fn select_records_inner(
                     }
                 };
                 graph_bytes = next_graph_bytes;
-                Some(graph)
-            };
-            let Some(graph) = recovered else {
-                if omit_or_refuse_candidate(
-                    &origin,
-                    &mut selection_omissions,
-                    &record.unit,
-                    &record.module,
-                    CacheOfferOmission::ReadBudget,
-                ) {
-                    return None;
-                }
-                continue;
+                graph
             };
             if validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
                 .is_none()
@@ -4455,9 +4443,10 @@ mod tests {
             .as_mut()
             .unwrap()
             .certificate_path = PathBuf::from("../invalid-certificate");
+        let include = record.include.clone();
         let selected = select_records_inner(
             b"endpoint",
-            &record.include,
+            &include,
             scratch.path(),
             vec![(
                 record,
