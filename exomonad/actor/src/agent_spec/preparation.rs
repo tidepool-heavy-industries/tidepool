@@ -124,6 +124,12 @@ struct PreparationState {
 
 const RETAINED_TOOLSETS: usize = 16;
 
+#[derive(Clone, Copy)]
+enum OriginalAcquisition {
+    CompileIfAbsent,
+    LoadCompleted,
+}
+
 impl ToolsetPreparation {
     fn lookup(&self, recipe: &InstallerRecipe) -> (Arc<PreparationTask>, bool) {
         let mut state = self.state.lock();
@@ -183,6 +189,11 @@ impl ToolsetPreparation {
                     }
                 }
             };
+            let acquisition = if completed_original {
+                OriginalAcquisition::LoadCompleted
+            } else {
+                OriginalAcquisition::CompileIfAbsent
+            };
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
             let key = recipe.clone();
@@ -192,10 +203,10 @@ impl ToolsetPreparation {
                 let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
                     if let Some((ticket, cancellation)) = compiler_work {
                         ticket.run_for_workload(workload, cancellation, || {
-                            compile_installer(recipe, resolved, source, registry)
+                            compile_installer(recipe, resolved, source, registry, acquisition)
                         })
                     } else {
-                        compile_installer(recipe, resolved, source, registry)
+                        compile_installer(recipe, resolved, source, registry, acquisition)
                     }
                 })
                 .await
@@ -385,6 +396,7 @@ fn compile_installer(
     resolved: ResolvedSpec,
     source: crate::CheckpointSourceLayer,
     registry: Arc<ImageRegistry>,
+    acquisition: OriginalAcquisition,
 ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
     let installation = super::installation_expression(&recipe.entry, &recipe.effects);
     let dispatcher_effects = format!(
@@ -407,7 +419,7 @@ fn compile_installer(
             &installation.expression,
             &[],
         );
-        retained_installer(&recipe, storage, &wrapper)?
+        retained_installer(&recipe, storage, &wrapper, acquisition)?
     } else {
         (
             compile_unprepared_installer(&recipe, &templates, &installation.expression)?,
@@ -531,6 +543,7 @@ fn retained_installer(
     recipe: &InstallerRecipe,
     storage: &crate::SourceEntryStorage,
     wrapper: &str,
+    acquisition: OriginalAcquisition,
 ) -> Result<(CompiledTurn, Option<CompletedInstallerSelection>), PreparationFailure> {
     use tidepool_toolchain::artifacts::{
         load_selected_production_entry, prepare_frozen_production_entry, FrozenEntrySources,
@@ -577,6 +590,11 @@ fn retained_installer(
     let source_path = original.join(format!("{module}.hs"));
     let output = original.join("entry");
     let completed = entry_path_present(&output)?;
+    if !completed && matches!(acquisition, OriginalAcquisition::LoadCompleted) {
+        return Err(PreparationFailure::Source(
+            "selected completed original disappeared before acquisition".into(),
+        ));
+    }
     if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
         match std::fs::symlink_metadata(&source_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
