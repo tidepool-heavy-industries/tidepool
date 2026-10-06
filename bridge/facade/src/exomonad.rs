@@ -232,6 +232,8 @@ pub(crate) struct ExomonadConfig {
     #[serde(default)]
     pub(crate) models: std::collections::BTreeMap<String, String>,
     #[serde(default)]
+    pub(crate) preparation: PreparationConfig,
+    #[serde(default)]
     pub(crate) haskell: workspace::HaskellConfig,
     #[serde(default)]
     pub(crate) prompts: workspace::PromptConfig,
@@ -254,11 +256,48 @@ pub(crate) fn write_fixture_project_config(
         },
         research: exomonad_actor::ResearchPolicy::default(),
         models: std::collections::BTreeMap::new(),
+        preparation: PreparationConfig::default(),
         haskell: workspace::HaskellConfig::default(),
         prompts: workspace::PromptConfig::default(),
     };
     configure(&mut config);
     write_fixture_config(authored, &config);
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparationConfig {
+    #[serde(default)]
+    pub(crate) roles: Vec<exomonad_actor::ActorRole>,
+}
+
+impl PreparationConfig {
+    pub(crate) fn selected_roles(
+        &self,
+        policy: exomonad_actor::ResearchPolicy,
+    ) -> Result<Vec<exomonad_actor::EffectiveRole>, Box<dyn std::error::Error>> {
+        use exomonad_actor::{ActorRole, EffectiveRole};
+        let mut selected = vec![EffectiveRole::root().with_research_policy(policy)];
+        for role in &self.roles {
+            let selected_role = match role {
+                ActorRole::Root => continue,
+                ActorRole::Research => EffectiveRole::research(),
+                ActorRole::Coding => EffectiveRole::coding(),
+                ActorRole::Scaffolding => EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
+                    maximum_depth: 0,
+                    maximum_active_children: Some(0),
+                }),
+                ActorRole::Integration => EffectiveRole::integration(),
+                ActorRole::Inherited => return Err(runtime_error(
+                    "preparation.roles requires a concrete role; inherited has no standalone effect row",
+                )),
+            }.with_research_policy(policy);
+            if !selected.iter().any(|selected| selected.role() == *role) {
+                selected.push(selected_role);
+            }
+        }
+        Ok(selected)
+    }
 }
 
 #[cfg(test)]
@@ -704,6 +743,7 @@ fn parse_project_config(
         ))
     })?;
     config.launch.validate()?;
+    config.preparation.selected_roles(config.research)?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
         runtime_error(format!(
@@ -988,8 +1028,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         ))
     })?;
     record_run_backend(&run_root, &run_id, selected_backend)?;
-    let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
-    crate::actor_host::validate_workspace_program(&selected, &run_root)?;
+    // The source owner freezes the inputs here. The root's required installer
+    // preparation validates this exact closure before publishing readiness.
+    workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     if options.recreate {
         let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
             runtime_error(format!(
@@ -2276,6 +2317,7 @@ fn retain_run_executable(run_root: &Path, name: &str, source: &Path) -> std::io:
 
 const DEPLOYMENT_ENV_NAMES: &[&str] = &[
     "EXOMONAD_EMBEDDED_ASSET_ROOT",
+    "TIDEPOOL_PREPARED_ROOT_ENTRY",
     tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT,
     tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
 ];
@@ -3105,6 +3147,44 @@ mod tests {
     }
 
     #[test]
+    fn preparation_config_selects_root_then_only_named_concrete_roles() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(EXOMONAD_CONFIG);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let base = "[defaults]\nmodel = \"test-model\"\neffort = \"low\"\n";
+        for (configured, expected) in [
+            ("", vec![exomonad_actor::ActorRole::Root]),
+            (
+                "[preparation]\nroles = [\"coding\", \"root\", \"research\", \"coding\"]\n",
+                vec![
+                    exomonad_actor::ActorRole::Root,
+                    exomonad_actor::ActorRole::Coding,
+                    exomonad_actor::ActorRole::Research,
+                ],
+            ),
+        ] {
+            std::fs::write(&path, format!("{base}{configured}")).unwrap();
+            let config = read_project_config(workspace.path()).unwrap().0;
+            let selected = config.preparation.selected_roles(config.research).unwrap();
+            assert_eq!(
+                selected
+                    .iter()
+                    .map(exomonad_actor::EffectiveRole::role)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        for role in ["inherited", "administrator"] {
+            std::fs::write(
+                &path,
+                format!("{base}[preparation]\nroles = [\"{role}\"]\n"),
+            )
+            .unwrap();
+            assert!(read_project_config(workspace.path()).is_err());
+        }
+    }
+
+    #[test]
     fn research_policy_is_optional_configured_and_validated_at_load() {
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join(EXOMONAD_CONFIG);
@@ -3601,10 +3681,12 @@ mod tests {
         let deployment = tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT;
         let modules = tidepool_toolchain::toolchain::ENV_COMPILER_MODULES;
         let assets = "EXOMONAD_EMBEDDED_ASSET_ROOT";
+        let entry = "TIDEPOOL_PREPARED_ROOT_ENTRY";
         for selected in [
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::from([(deployment.to_owned(), "compiler.json".to_owned())]),
             std::collections::BTreeMap::from([(modules.to_owned(), "catalog.json".to_owned())]),
+            std::collections::BTreeMap::from([(entry.to_owned(), "/bundle/root-entry".to_owned())]),
             std::collections::BTreeMap::from([(
                 assets.to_owned(),
                 "/nix/store/matched-web".to_owned(),
@@ -3613,15 +3695,25 @@ mod tests {
                 (deployment.to_owned(), "compiler.json".to_owned()),
                 (modules.to_owned(), "catalog.json".to_owned()),
                 (assets.to_owned(), "/nix/store/matched-web".to_owned()),
+                (entry.to_owned(), "/bundle/root-entry".to_owned()),
             ]),
         ] {
             let environment = pane_environment_from(|name| selected.get(name).cloned());
             assert_eq!(environment, selected);
             let unset = deployment_environment_unsets(&environment);
-            for name in [deployment, modules, assets] {
+            for name in [deployment, modules, assets, entry] {
                 assert_eq!(unset.contains(name), !selected.contains_key(name));
             }
             assert!(unset.iter().all(|name| !environment.contains_key(name)));
+            let mut stale = std::collections::BTreeMap::from([(
+                entry.to_owned(),
+                "/previous-bundle/root-entry".to_owned(),
+            )]);
+            for name in unset {
+                stale.remove(&name);
+            }
+            stale.extend(environment);
+            assert_eq!(stale.get(entry), selected.get(entry));
         }
     }
 

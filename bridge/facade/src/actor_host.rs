@@ -1881,7 +1881,14 @@ async fn run_owned(
             "root startup requires its installed executable entry",
         ));
     };
-    let bootstrap_identity = entry.compile_input_identity().to_owned();
+    let bootstrap_identity = entry
+        .compile_input_identity()
+        .ok_or_else(|| {
+            runtime_error(
+                "durable root bootstrap requires replay-eligible compiler input continuity",
+            )
+        })?
+        .to_owned();
     let worktree_admission = fork_workspace_admission(
         worktrees.clone(),
         worktree_authority.clone(),
@@ -2712,24 +2719,17 @@ fn runtime_namespace(run_root: &Path) -> String {
 struct CompiledExomonadDriver {
     preamble: String,
     include: Vec<PathBuf>,
-    compiled: tidepool_runtime::session::CompiledTurn,
+    toolset_support: Vec<PathBuf>,
+    compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+    prepared: Arc<tidepool_runtime::session::PreparedSourceEntry>,
 }
 
-/// Compile the exact selected driver and imports without launching an actor.
-/// Initialization uses this before replacing a live swarm; admission uses the
-/// same compiler path and the toolchain owner's content-addressed cache.
+/// Typecheck the frozen workspace without producing or discarding native code.
 pub(crate) fn validate_workspace_program(
     inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    compile_driver(
-        inputs.runtime_actors().as_path(),
-        Some(inputs),
-        run_root,
-        None,
-        DriverCompilePurpose::ValidateWorkspace,
-    )?;
-    Ok(())
+    typecheck_candidate_revision(inputs, run_root, &inputs.runtime_actors(), &[], false, &[])
 }
 
 /// One configured launchable role: the label diagnostics name it by, and the
@@ -2786,13 +2786,15 @@ pub(crate) fn spec_effect_preflight(
     )?;
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core");
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Contract");
+    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Reply.Internal");
+    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch.Internal");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
     for (label, role) in LAUNCHABLE_ROLES {
         let installation =
             exomonad_actor::agent_spec::installation_expression(entry, role().effect_keys());
         let dispatcher_effects = format!(
-            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {})",
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
             installation.effect_row
         );
         let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
@@ -2956,11 +2958,11 @@ struct DriverSources {
     bootstrap_preamble: String,
     workbench_preamble: String,
     include: Vec<PathBuf>,
+    toolset_support: Vec<PathBuf>,
 }
 
 enum DriverCompilePurpose {
     Bootstrap,
-    ValidateWorkspace,
 }
 
 fn driver_sources(
@@ -3005,6 +3007,7 @@ fn driver_sources(
         DRIVER_MODULE,
     );
     let bootstrap_preamble = preamble.clone();
+    let toolset_support = include.clone();
     if let Some(inputs) = inputs {
         // The live source layer goes AHEAD of the run's frozen capture, so a
         // reloaded module shadows the copy the run started from. The frozen
@@ -3052,6 +3055,7 @@ fn driver_sources(
         bootstrap_preamble,
         workbench_preamble: preamble,
         include,
+        toolset_support,
     })
 }
 
@@ -3071,44 +3075,73 @@ fn compile_driver(
         bootstrap_preamble,
         workbench_preamble,
         include,
+        toolset_support,
     } = driver_sources(haskell_root, inputs, run_root, candidate)?;
-    let preamble = match purpose {
-        DriverCompilePurpose::Bootstrap => &bootstrap_preamble,
-        DriverCompilePurpose::ValidateWorkspace => &workbench_preamble,
-    };
+    let DriverCompilePurpose::Bootstrap = purpose;
+    let preamble = &bootstrap_preamble;
     let templates = resident_workbench_templates(preamble, DRIVER_EFFECTS, "");
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let session_root = run_root.join("haskell-session");
     std::fs::create_dir_all(&session_root)?;
-    let compiled = match run_turn(HaskellTurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: DRIVER_ENTRY,
-        templates: &templates,
-        include: &include_refs,
-        session_root: &session_root,
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        // The driver is the session's first turn, so there is nothing
-        // retained to link against yet.
-        retained_imports: &[],
-    })
-    .map_err(render_root_compile_failure)?
-    {
-        TurnResult::Expr { compiled, .. } => compiled,
-        other => {
-            return Err(runtime_error(format!(
-                "root interactive driver is not an expression: {other:?}"
-            )))
+    let compiled = if let Some(path) = std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY") {
+        let configuration =
+            tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::from_env()?;
+        let tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::Configured(authority) =
+            configuration
+        else {
+            return Err(runtime_error(
+                "prepared root entry requires configured compiler deployment authority",
+            ));
+        };
+        let selection = tidepool_toolchain::toolchain::configured_module_source_selection()?
+            .ok_or_else(|| {
+                runtime_error("prepared root entry requires the retained native source selection")
+            })?;
+        let entry = tidepool_toolchain::artifacts::load_production_entry(
+            &PathBuf::from(path),
+            &authority,
+            &selection,
+        )?;
+        tidepool_runtime::session::CompiledTurn::from_production_entry(&entry)?
+    } else {
+        match run_turn(HaskellTurnRequest {
+            exact_context: None,
+            session_id: None,
+            turn_text: DRIVER_ENTRY,
+            templates: &templates,
+            include: &include_refs,
+            session_root: &session_root,
+            inject_modules: &[],
+            gen: 1,
+            verdict: None,
+            target: None,
+            // The driver is the session's first turn, so there is nothing
+            // retained to link against yet.
+            retained_imports: &[],
+        })
+        .map_err(render_root_compile_failure)?
+        {
+            TurnResult::Expr { compiled, .. } => compiled,
+            other => {
+                return Err(runtime_error(format!(
+                    "root interactive driver is not an expression: {other:?}"
+                )))
+            }
         }
     };
+    let compiled = Arc::new(compiled);
+    let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+    let prepared = Arc::new(tidepool_runtime::session::PreparedSourceEntry::prepare(
+        Arc::clone(&compiled),
+        registry,
+    )?);
 
     Ok(CompiledExomonadDriver {
         preamble: workbench_preamble,
         include,
+        toolset_support,
         compiled,
+        prepared,
     })
 }
 
@@ -3144,7 +3177,9 @@ fn compile_root(
     let CompiledExomonadDriver {
         preamble,
         include,
+        toolset_support,
         compiled,
+        prepared,
     } = compile_driver(
         &config.haskell_root,
         config.workspace_inputs.as_ref(),
@@ -3225,11 +3260,15 @@ fn compile_root(
     // session's engine, root and child alike, including each session's
     // bootstrap install (`PersistentSession::set_image_registry` holds it
     // for the first turn).
-    let image_registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+    let image_registry = Arc::clone(prepared.image_registry());
+    let child_prepared_driver = Arc::clone(&prepared);
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
         CapturedOutput,
     > = Arc::new(move |child_session_id, source_layer| {
+        // The source owner retains native images between fresh child installs;
+        // the registry itself continues to hold only weak references.
+        let _native_driver = &child_prepared_driver;
         let child_declarations = exomonad_effect_declarations();
         let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
             &child_declarations,
@@ -3340,6 +3379,14 @@ fn compile_root(
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let context_support = vec![exomonad_tool::ToolEffectKey::ContextReadWrite];
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
+        .with_toolset_support_roots(toolset_support)
+        .with_preparation_roles(match &config.workspace_inputs {
+            Some(inputs) => inputs
+                .config()?
+                .preparation
+                .selected_roles(config.research_policy)?,
+            None => Vec::new(),
+        })
         .with_installed_effect_support(context_support)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
@@ -3375,7 +3422,7 @@ fn compile_root(
                     .unwrap_or_default(),
             ),
         ResidentActorRoot::pending(descriptor, machine, entry),
-        Arc::new(compiled),
+        compiled,
         child_session_factory,
         image_registry,
     ))

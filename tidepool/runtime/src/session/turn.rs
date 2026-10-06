@@ -1650,8 +1650,8 @@ pub struct CompiledTurn {
 #[derive(Clone, Debug)]
 pub struct TurnCertification {
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
-    pub(crate) compile_input_identity:
-        Option<Arc<tidepool_toolchain::artifacts::SealedCompileInputIdentity>>,
+    pub(crate) original_compile_input:
+        Option<Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>>,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
     pub package_interfaces:
@@ -1728,7 +1728,7 @@ impl Default for TurnCertification {
         Self {
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
-            compile_input_identity: None,
+            original_compile_input: None,
             groups: Arc::from([]),
             target_owners: Vec::new(),
             package_interfaces: Default::default(),
@@ -1869,6 +1869,40 @@ pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
 }
 
 impl CompiledTurn {
+    /// Reconstruct a fresh runtime installation from a complete original entry.
+    /// Its original custody is checked by the toolchain loader; mutable runtime
+    /// state is created only when this turn is installed in a session.
+    pub fn from_production_entry(
+        entry: &tidepool_toolchain::artifacts::ProductionEntryOutput,
+    ) -> Result<Self, CompileError> {
+        compiled_native_output(
+            entry.table(),
+            entry.warnings(),
+            entry.yield_sites().to_vec(),
+            entry.target_owned(),
+            Some(entry.products()),
+            None,
+        )
+    }
+
+    /// Completed-original custody, independent of new source replay eligibility.
+    pub fn original_compile_input(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>> {
+        self.certification.as_ref()?.original_compile_input.as_ref()
+    }
+
+    /// Exact original artifact identities retained by this compiler output.
+    pub fn source_artifacts(
+        &self,
+    ) -> Vec<tidepool_toolchain::artifact_inventory::ArtifactDescriptor> {
+        self.certification
+            .as_ref()
+            .map_or_else(Vec::new, |certification| {
+                certification.artifact_view.descriptors()
+            })
+    }
+
     /// Borrow immutable inputs when the caller will reuse this artifact.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
@@ -2940,7 +2974,7 @@ fn decode_cell_program_turn(
     let prepared = prepared.ok_or_else(missing)?;
     let certification = TurnCertification {
         artifact_view: products.artifact_view.clone(),
-        compile_input_identity: None,
+        original_compile_input: None,
         groups: products.certified_groups.clone(),
         target_owners: products.pending_imports.clone(),
         package_interfaces: products.package_interfaces.clone(),
@@ -3265,7 +3299,7 @@ fn run_turn_with_admission(
             }),
     })?;
     let compile_identity = match &run {
-        TurnCompilerOutput::Admitted(run) => run.compile_input_identity(),
+        TurnCompilerOutput::Admitted(run) => run.original_compile_input(),
         TurnCompilerOutput::Direct(_) => None,
     };
     if let Some(identity) = compile_identity {
@@ -3294,7 +3328,7 @@ fn run_turn_with_admission(
             )
             .into());
         }
-        certification.compile_input_identity = Some(Arc::clone(identity));
+        certification.original_compile_input = Some(Arc::clone(identity));
     }
     if checked.is_some() {
         let compiled = match &result {
@@ -3416,17 +3450,34 @@ fn retained_compiled_turn(
             "admitted native source differs from observation".into(),
         ));
     }
-    let compiled = CompiledTurn {
-        table: native.table().clone(),
-        warnings: native.warnings().clone(),
+    compiled_native_output(
+        native.table(),
+        native.warnings(),
         asks,
-        prepared: native.target_owned(),
-        certification: native
-            .products()
+        native.target_owned(),
+        native.products(),
+        admission,
+    )
+}
+
+fn compiled_native_output(
+    table: &DataConTable,
+    warnings: &MetaWarnings,
+    asks: Vec<YieldSite>,
+    prepared: Arc<PreparedProgram>,
+    products: Option<&tidepool_toolchain::artifacts::SealedTurnProducts>,
+    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
+) -> Result<CompiledTurn, CompileError> {
+    let compiled = CompiledTurn {
+        table: table.clone(),
+        warnings: warnings.clone(),
+        asks,
+        prepared,
+        certification: products
             .map(|products| -> Result<_, CompileError> {
                 Ok(TurnCertification {
                     artifact_view: products.artifact_view.clone(),
-                    compile_input_identity: products.compile_input_identity.clone(),
+                    original_compile_input: products.original_compile_input.clone(),
                     groups: products.certified_groups.clone(),
                     target_owners: products.pending_imports.clone(),
                     package_interfaces: products.package_interfaces.clone(),
@@ -3554,7 +3605,7 @@ fn read_compiled_turn(
             .map(|sealed| -> Result<_, CompileError> {
                 Ok(TurnCertification {
                     artifact_view: sealed.artifact_view,
-                    compile_input_identity: sealed.compile_input_identity,
+                    original_compile_input: sealed.original_compile_input,
                     groups: sealed.certified_groups,
                     target_owners: sealed.pending_imports,
                     package_interfaces: sealed.package_interfaces,

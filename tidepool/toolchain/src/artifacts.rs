@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub use crate::compile_input::SealedCompileInputIdentity;
+pub use crate::compile_input::{SealedOriginalCompileInput, SourceReplayEligibility};
 pub use crate::turn_observations::{decode_turn_nominal_heads, decode_turn_yield_sites};
 use serde::Deserialize;
 use tempfile::TempDir;
@@ -36,7 +36,13 @@ use crate::{
 mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
+mod production_entry;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
+pub use production_entry::{
+    build_production_entry, load_production_entry, load_selected_production_entry,
+    prepare_frozen_production_entry, FrozenEntrySources, ProductionEntryOutput,
+    ProductionEntrySources,
+};
 
 static HOST_BINDING_INTERFACE_REQUESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -852,6 +858,7 @@ impl ModuleCandidateOffer {
             "__prepared",
             issue_identity.then_some((&table, sites.as_slice())),
             None,
+            OriginalOutputPublication::Transaction,
         )?
         .map(Arc::new);
         Ok((
@@ -1916,6 +1923,7 @@ impl ModuleCandidateOffer {
             "__result",
             None,
             Some(&authored),
+            OriginalOutputPublication::Transaction,
         )?
         .ok_or_else(fail)?;
         let products = sealed
@@ -2112,7 +2120,7 @@ pub struct SealedTurnProducts {
     // items cannot enlarge an earlier item's original instance environment.
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
-    pub compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
+    pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
@@ -2191,11 +2199,11 @@ impl AdmittedTurnOutput {
     pub fn elapsed(&self) -> Duration {
         self.run.elapsed
     }
-    pub fn compile_input_identity(&self) -> Option<&Arc<SealedCompileInputIdentity>> {
+    pub fn original_compile_input(&self) -> Option<&Arc<SealedOriginalCompileInput>> {
         self.native
             .as_ref()?
             .products()?
-            .compile_input_identity
+            .original_compile_input
             .as_ref()
     }
     pub fn native_output(&self) -> Option<&NativeTurnOutput> {
@@ -2226,7 +2234,14 @@ pub fn seal_turn_outputs(
         target,
         None,
         None,
+        OriginalOutputPublication::Transaction,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OriginalOutputPublication {
+    Transaction,
+    RetainedEntry,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2239,6 +2254,7 @@ fn seal_turn_outputs_inner(
     target: &str,
     identity_metadata: Option<(&DataConTable, &[YieldSite])>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
+    publication: OriginalOutputPublication,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
@@ -2369,11 +2385,14 @@ fn seal_turn_outputs_inner(
         0,
         receipt.targets.len(),
     );
-    module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
-    if offer
-        .exact
-        .as_ref()
-        .is_none_or(|exact| empty_exact_context(&exact.context))
+    if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
+    }
+    if publication == OriginalOutputPublication::Transaction
+        && offer
+            .exact
+            .as_ref()
+            .is_none_or(|exact| empty_exact_context(&exact.context))
     {
         let (_, publication) = module_candidates::prepare_publication(
             &offer.producer,
@@ -2390,7 +2409,7 @@ fn seal_turn_outputs_inner(
             &certified.recovery_products,
         );
         module_candidates::publish_prepared(publication);
-    } else {
+    } else if publication == OriginalOutputPublication::Transaction {
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
@@ -2403,7 +2422,7 @@ fn seal_turn_outputs_inner(
             .as_ref()
             .map(|admission| admission.request.context.as_ref()),
     )?;
-    let compile_input_identity =
+    let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
                 &output_dir.join("compiler-inputs.cbor"),
@@ -2436,7 +2455,7 @@ fn seal_turn_outputs_inner(
         };
     let original_execution = match exact.as_ref() {
         Some(admission) => Some(admission.original_execution_context(&artifact_view)?),
-        None => compile_input_identity
+        None => original_compile_input
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
     };
@@ -2491,7 +2510,7 @@ fn seal_turn_outputs_inner(
     Ok(Some(SealedTurnProducts {
         artifact_view,
         original_execution,
-        compile_input_identity,
+        original_compile_input,
         checked,
         certified_groups,
         pending_imports,
@@ -2766,6 +2785,12 @@ fn prepare_deployment_module_action(
 #[derive(Clone)]
 enum CompilationPolicy<'a> {
     Runtime,
+    RetainedEntry {
+        source_path: &'a Path,
+        scratch: &'a Path,
+        output: &'a Path,
+        sources: &'a ProductionEntrySources,
+    },
     Exact {
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
     },
@@ -2793,6 +2818,10 @@ enum BuildActionExport<'a> {
     CatalogInventory {
         output_root: &'a Path,
         source_selection: &'a module_candidates::deployment::NativeCatalogSourceSelection,
+    },
+    ProductionEntry {
+        output_root: &'a Path,
+        source_selection: &'a ProductionEntrySources,
     },
 }
 
@@ -2955,9 +2984,12 @@ fn compile_invocation_inner(
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
         CompilationPolicy::Runtime
+        | CompilationPolicy::RetainedEntry { .. }
         | CompilationPolicy::BuildAction {
             export:
-                BuildActionExport::PreparedFixture { .. } | BuildActionExport::CatalogInventory { .. },
+                BuildActionExport::PreparedFixture { .. }
+                | BuildActionExport::CatalogInventory { .. }
+                | BuildActionExport::ProductionEntry { .. },
             ..
         } => (None, None, None, None),
         CompilationPolicy::Exact { context } => (None, Some(context), None, None),
@@ -3001,7 +3033,8 @@ fn compile_invocation_inner(
             std::fs::create_dir(&raw)?;
             TempDir::new_in(raw)?
         }
-        CompilationPolicy::BuildAction { scratch, .. } => TempDir::new_in(scratch)?,
+        CompilationPolicy::BuildAction { scratch, .. }
+        | CompilationPolicy::RetainedEntry { scratch, .. } => TempDir::new_in(scratch)?,
         _ => compiler_scratch_directory()?,
     };
     if inventory_export.is_some() {
@@ -3013,7 +3046,8 @@ fn compile_invocation_inner(
     let module =
         extract_module_name(inv.source).unwrap_or_else(|| inv.fallback_module_name.to_string());
     let input_path = match &policy {
-        CompilationPolicy::BuildAction { source_path, .. } => source_path.to_path_buf(),
+        CompilationPolicy::BuildAction { source_path, .. }
+        | CompilationPolicy::RetainedEntry { source_path, .. } => source_path.to_path_buf(),
         _ => {
             let path = temp_dir.path().join(format!("{module}.hs"));
             std::fs::write(&path, inv.source)?;
@@ -3029,7 +3063,17 @@ fn compile_invocation_inner(
     if let Some(root) = session_root {
         cmd.session_root(root).certify_home_products();
     }
-    if deployment_export.is_some() || inventory_export.is_some() {
+    if matches!(&policy, CompilationPolicy::RetainedEntry { .. })
+        || deployment_export.is_some()
+        || inventory_export.is_some()
+        || matches!(
+            &policy,
+            CompilationPolicy::BuildAction {
+                export: BuildActionExport::ProductionEntry { .. },
+                ..
+            }
+        )
+    {
         cmd.certify_home_products();
     }
     let exact_request = if let Some(context) = exact_context {
@@ -3406,34 +3450,33 @@ fn compile_invocation_inner(
             })
             .collect::<Result<_, _>>()?;
         let fresh_count = fresh_products.products().len();
-        let (fresh_products, publication) =
-            if (!matches!(&policy, CompilationPolicy::BuildAction { .. })
-                || deployment_export.is_some())
-                && (exact_request.is_none() || deployment_export.is_some())
-                && evidence.is_some()
-            {
-                let (products, publication) = module_candidates::prepare_publication(
-                    &producer,
-                    inv.include,
-                    evidence.as_ref().ok_or_else(|| {
-                        CompileError::ExtractFailed(
-                            "candidate publication evidence unavailable".into(),
-                        )
-                    })?,
-                    fresh_products,
-                    inv.source,
-                    exact.as_ref().map_or(
-                        module_candidates::CandidateVersionOrigin::Ordinary,
-                        |admission| module_candidates::CandidateVersionOrigin::Exact {
-                            semantic_sha256: admission.request.semantic_sha256,
-                        },
-                    ),
-                    &certified.recovery_products,
-                );
-                (products, Some(publication))
-            } else {
-                (fresh_products.into_products(), None)
-            };
+        let (fresh_products, publication) = if (!matches!(
+            &policy,
+            CompilationPolicy::BuildAction { .. } | CompilationPolicy::RetainedEntry { .. }
+        ) || deployment_export.is_some())
+            && (exact_request.is_none() || deployment_export.is_some())
+            && evidence.is_some()
+        {
+            let (products, publication) = module_candidates::prepare_publication(
+                &producer,
+                inv.include,
+                evidence.as_ref().ok_or_else(|| {
+                    CompileError::ExtractFailed("candidate publication evidence unavailable".into())
+                })?,
+                fresh_products,
+                inv.source,
+                exact.as_ref().map_or(
+                    module_candidates::CandidateVersionOrigin::Ordinary,
+                    |admission| module_candidates::CandidateVersionOrigin::Exact {
+                        semantic_sha256: admission.request.semantic_sha256,
+                    },
+                ),
+                &certified.recovery_products,
+            );
+            (products, Some(publication))
+        } else {
+            (fresh_products.into_products(), None)
+        };
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
@@ -3511,7 +3554,12 @@ fn compile_invocation_inner(
                 publication,
             )?;
         }
-        if exact_request.is_none() && !matches!(&policy, CompilationPolicy::BuildAction { .. }) {
+        if exact_request.is_none()
+            && !matches!(
+                &policy,
+                CompilationPolicy::BuildAction { .. } | CompilationPolicy::RetainedEntry { .. }
+            )
+        {
             if let Some(publication) = publication {
                 module_candidates::publish_prepared(publication);
             }
@@ -3564,6 +3612,41 @@ fn compile_invocation_inner(
                 &target.asks_bytes,
             )?;
         }
+    }
+    if let CompilationPolicy::BuildAction {
+        source_path,
+        export:
+            BuildActionExport::ProductionEntry {
+                output_root,
+                source_selection,
+            },
+        ..
+    } = &policy
+    {
+        production_entry::export(
+            temp_dir.path(),
+            output_root,
+            source_path,
+            source_selection,
+            &deployment,
+            inv.targets,
+        )?;
+    }
+    if let CompilationPolicy::RetainedEntry {
+        source_path,
+        output,
+        sources,
+        ..
+    } = &policy
+    {
+        production_entry::export(
+            temp_dir.path(),
+            output,
+            source_path,
+            sources,
+            &deployment,
+            inv.targets,
+        )?;
     }
     Ok(artifacts)
 }
@@ -5406,6 +5489,114 @@ mod module_product_tests {
             package.catalog_identity(),
             cohort.len(),
             cached.len()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn retained_complete_entries_load_original_quotations_without_compiler_or_source_replay() {
+        use crate::toolchain::CompilerDeploymentConfiguration;
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let input = root.path().join("quote-input");
+        let counter = root.path().join("quote-input.executions");
+        std::fs::write(&input, "37").unwrap();
+        std::fs::write(
+            authored.join("QuotedProvider.hs"),
+            include_str!("../tests/fixtures/completed-source/QuotedProvider.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            authored.join("QuotedOriginal.hs"),
+            include_str!("../tests/fixtures/completed-source/QuotedOriginal.hs")
+                .replace("QUOTE_INPUT_PATH", input.to_str().unwrap()),
+        )
+        .unwrap();
+        let source = authored.join("PreparedOriginal.hs");
+        std::fs::write(
+            &source,
+            include_str!("../tests/fixtures/completed-source/PreparedOriginal.hs"),
+        )
+        .unwrap();
+        let sources = FrozenEntrySources::capture(&[authored.clone()], &source).unwrap();
+        let output = root.path().join("entry");
+        prepare_frozen_production_entry(&sources, root.path(), &output).unwrap();
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("native entry qualification requires configured matched compiler authority")
+        };
+        let first = load_selected_production_entry(
+            &output,
+            &authority,
+            &ProductionEntrySources::FrozenWorkspace(sources.clone()),
+        )
+        .unwrap();
+        let proof = first.products().original_compile_input.as_ref().unwrap();
+        assert!(proof.replay_eligible_identity().is_none());
+        let compiled_executions = std::fs::read_to_string(&counter).unwrap();
+        let _restore = RestoreEnvironment(
+            ["TIDEPOOL_EXTRACT", tidepool_extract_cmd::DAEMON_SOCKET_ENV]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        unsafe {
+            std::env::set_var("TIDEPOOL_EXTRACT", root.path().join("unavailable-compiler"));
+            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        }
+        std::fs::write(&input, "91").unwrap();
+        let selected = ProductionEntrySources::FrozenWorkspace(sources.clone());
+        let retained = load_selected_production_entry(&output, &authority, &selected).unwrap();
+        assert_eq!(first.target_owned(), retained.target_owned());
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap(),
+            compiled_executions,
+            "loading completed original custody cannot execute untracked source inputs"
+        );
+        let moved = root.path().join("moved-entry");
+        std::fs::rename(&output, &moved).unwrap();
+        assert!(
+            load_selected_production_entry(&moved, &authority, &selected).is_ok(),
+            "complete output container can move while original snapshot paths remain retained"
+        );
+        let manifest_path = moved.join("entry.json");
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+        let mut obsolete: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+        obsolete["schema"] = 1.into();
+        std::fs::write(&manifest_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        assert!(load_selected_production_entry(&moved, &authority, &selected).is_err());
+        for field in ["producer", "worker"] {
+            let mut mismatched: serde_json::Value =
+                serde_json::from_slice(&original_manifest).unwrap();
+            let original_byte = mismatched[field][0].as_u64().unwrap();
+            mismatched[field][0] = ((original_byte + 1) % 256).into();
+            std::fs::write(&manifest_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+            assert!(load_selected_production_entry(&moved, &authority, &selected).is_err());
+        }
+        std::fs::write(manifest_path, original_manifest).unwrap();
+        let metadata = moved.join("raw/meta.cbor");
+        let original = std::fs::read(&metadata).unwrap();
+        std::fs::write(&metadata, b"changed").unwrap();
+        assert!(load_selected_production_entry(&moved, &authority, &selected).is_err());
+        std::fs::write(metadata, original).unwrap();
+        let native_products = moved.join("raw/module-products.cbor");
+        let original = std::fs::read(&native_products).unwrap();
+        std::fs::remove_file(&native_products).unwrap();
+        assert!(
+            load_selected_production_entry(&moved, &authority, &selected).is_err(),
+            "missing original native products cannot produce a ready entry"
+        );
+        std::fs::write(native_products, original).unwrap();
+        std::fs::write(
+            &source,
+            "module PreparedOriginal where\n__prepared = (92 :: Int)\n",
+        )
+        .unwrap();
+        assert!(
+            load_selected_production_entry(&moved, &authority, &selected).is_err(),
+            "mutable original wrapper changes cannot become consumed snapshot authority"
         );
     }
 

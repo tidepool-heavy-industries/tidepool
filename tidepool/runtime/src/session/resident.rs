@@ -981,19 +981,19 @@ pub struct PreparedStartupEntry {
 
 #[derive(Debug)]
 enum StartupCompileIdentity {
-    Issued(Arc<tidepool_toolchain::artifacts::SealedCompileInputIdentity>),
+    Issued(Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>),
     #[cfg(test)]
     Fixture,
 }
 
 impl PreparedStartupEntry {
-    /// Stable compiler input identity for journal continuity. Native admission
-    /// still depends on this capsule's original installed program and owners.
-    pub fn compile_input_identity(&self) -> &str {
+    /// Replay-eligible input observation for journal continuity. Completed
+    /// originals with untracked inputs can execute without this observation.
+    pub fn compile_input_identity(&self) -> Option<&str> {
         match &self.compile_identity {
-            StartupCompileIdentity::Issued(identity) => identity.compile_input_identity(),
+            StartupCompileIdentity::Issued(identity) => identity.replay_eligible_identity(),
             #[cfg(test)]
-            StartupCompileIdentity::Fixture => "test-startup-fixture",
+            StartupCompileIdentity::Fixture => Some("test-startup-fixture"),
         }
     }
 }
@@ -5380,7 +5380,7 @@ where
                     Some(proof.original_interface_context(&code.prepared, &code.table, &code.sites))
                 }
                 TurnPurpose::Ordinary => {
-                    certification.compile_input_identity.as_ref().map(|proof| {
+                    certification.original_compile_input.as_ref().map(|proof| {
                         proof.original_interface_context(
                             &code.prepared,
                             &certification.groups,
@@ -5406,7 +5406,7 @@ where
                     Some(proof.original_execution_context(&code.prepared, &code.table, &code.sites))
                 }
                 TurnPurpose::Ordinary => {
-                    certification.compile_input_identity.as_ref().map(|proof| {
+                    certification.original_compile_input.as_ref().map(|proof| {
                         proof.original_execution_context(
                             &code.prepared,
                             &certification.groups,
@@ -5878,7 +5878,7 @@ where
             .as_ref()
             .ok_or(ResidentError::UnsealedStartupEntry)?;
         let proof = certification
-            .compile_input_identity
+            .original_compile_input
             .as_ref()
             .ok_or(ResidentError::UnsealedStartupEntry)?;
         if !proof.matches_bundle(

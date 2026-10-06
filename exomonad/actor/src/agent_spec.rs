@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub(crate) mod preparation;
+
 /// The two names the whole convention consists of: the module, and the value
 /// it exports.
 pub(crate) const SPEC_MODULE: &str = "AgentSpec";
@@ -57,6 +59,14 @@ pub struct ResolvedSpec {
 }
 
 impl ResolvedSpec {
+    /// Identity of every ordered root available to the source-defined installer.
+    pub(crate) fn source_closure_revision(&self) -> Result<String, String> {
+        tidepool_toolchain::cache::source_roots_identity(
+            b"exomonad-agent-spec-ordered-source-closure-v1",
+            &self.searched,
+        )
+        .map_err(|error| error.to_string())
+    }
     /// Revision of the module that supplies this entry, using the same first
     /// matching include root GHC will read. Configured entries have no
     /// discovery file, so their module path must be resolved here too.
@@ -179,7 +189,13 @@ pub fn installation_expression(
         "'[{}]",
         effects
             .iter()
-            .map(|effect| effect.haskell_name())
+            .map(|effect| match effect {
+                crate::ActorEffectKey::Replies =>
+                    "Tidepool.Agent.Reply.Internal.Replies".to_owned(),
+                crate::ActorEffectKey::Watches =>
+                    "Tidepool.Agent.Watch.Internal.Watches".to_owned(),
+                effect => format!("Tidepool.Effects.Core.{}", effect.haskell_name()),
+            })
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -202,10 +218,13 @@ mod tests {
                 crate::ActorEffectKey::Journal,
             ],
         );
-        assert_eq!(installation.effect_row, "'[Commands, Journal]");
+        assert_eq!(
+            installation.effect_row,
+            "'[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal]"
+        );
         assert_eq!(
             installation.expression,
-            "_ <- Tidepool.Agent.Contract.installSpec @('[Commands, Journal]) AgentSpec.agentSpec"
+            "_ <- Tidepool.Agent.Contract.installSpec @('[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal]) AgentSpec.agentSpec"
         );
     }
 
@@ -262,7 +281,67 @@ mod tests {
         )
         .unwrap();
         std::os::unix::fs::symlink("revisions/revision-one", root.path().join("active")).unwrap();
-        let resolved = resolve(vec![root.path().join("active/0")], None);
+        let resolved = resolve(
+            vec![root.path().join("active/0")],
+            Some("Project.Tools.agentSpec"),
+        );
         assert_eq!(resolved.source_revision().as_deref(), Some("revision-one"));
+    }
+
+    #[test]
+    fn installer_revision_covers_instances_and_order_across_all_roots() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(
+            first.path().join("AgentSpec.hs"),
+            "module AgentSpec where\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("Instances.hs"),
+            "module Instances where\n",
+        )
+        .unwrap();
+        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        let original = resolve(roots.clone(), None)
+            .source_closure_revision()
+            .unwrap();
+        std::fs::write(
+            second.path().join("Instances.hs"),
+            "module Instances where\ninstance Eq Int\n",
+        )
+        .unwrap();
+        let edited = resolve(roots.clone(), None)
+            .source_closure_revision()
+            .unwrap();
+        assert_ne!(original, edited);
+        let mut reversed = roots;
+        reversed.reverse();
+        assert_ne!(
+            edited,
+            resolve(reversed, None).source_closure_revision().unwrap()
+        );
+    }
+
+    #[test]
+    fn installer_effect_order_is_part_of_the_source_specialization() {
+        let forward = installation_expression(
+            "AgentSpec.agentSpec",
+            &[
+                crate::ActorEffectKey::Replies,
+                crate::ActorEffectKey::Commands,
+            ],
+        );
+        let reversed = installation_expression(
+            "AgentSpec.agentSpec",
+            &[
+                crate::ActorEffectKey::Commands,
+                crate::ActorEffectKey::Replies,
+            ],
+        );
+        assert_ne!(forward, reversed);
+        assert!(forward
+            .effect_row
+            .contains("Tidepool.Agent.Reply.Internal.Replies"));
     }
 }

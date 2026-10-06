@@ -72,6 +72,40 @@ impl Eq for ActorSourceImports {}
 pub trait RetainedSourceLayer: Send + Sync {
     fn identities(&self) -> &[String];
     fn include_paths(&self) -> &[PathBuf];
+
+    /// Complete ordered manifests acquired by the immutable source owner.
+    /// Unprepared/developer owners may omit them and retain fresh inspection.
+    fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+        None
+    }
+
+    fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
+        None
+    }
+}
+
+/// Retained storage selected by the source owner. A recipe key is only a
+/// location: complete original compiler custody is required when loading it.
+#[derive(Clone, Debug)]
+pub enum SourceEntryStorage {
+    FreshCompilation {
+        directory: PathBuf,
+        preparation: uuid::Uuid,
+    },
+    CompletedOriginal {
+        directory: PathBuf,
+        selections: std::collections::BTreeMap<String, uuid::Uuid>,
+    },
+}
+
+impl SourceEntryStorage {
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        match self {
+            Self::FreshCompilation { directory, .. }
+            | Self::CompletedOriginal { directory, .. } => directory,
+        }
+    }
 }
 
 /// Issuing authority belonging to one configured host source service.
@@ -145,6 +179,16 @@ impl CheckpointSourceLayer {
     }
 
     #[must_use]
+    pub fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+        self.retained.as_ref()?._owner.source_manifests()
+    }
+
+    #[must_use]
+    pub fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
+        self.retained.as_ref()?._owner.prepared_entries()
+    }
+
+    #[must_use]
     pub fn is_owned(&self) -> bool {
         self.retained.is_some()
     }
@@ -183,6 +227,23 @@ impl CheckpointSourceLayer {
             frame(&(source.include_paths.len() as u64).to_le_bytes());
             for path in &source.include_paths {
                 frame(path.as_os_str().as_encoded_bytes());
+            }
+            if let Some(entries) = source._owner.prepared_entries() {
+                frame(entries.directory().as_os_str().as_encoded_bytes());
+                match entries {
+                    SourceEntryStorage::FreshCompilation { preparation, .. } => {
+                        frame(b"fresh-source");
+                        frame(preparation.as_bytes());
+                    }
+                    SourceEntryStorage::CompletedOriginal { selections, .. } => {
+                        frame(b"selected-original-output");
+                        frame(&(selections.len() as u64).to_le_bytes());
+                        for (recipe, original) in selections {
+                            frame(recipe.as_bytes());
+                            frame(original.as_bytes());
+                        }
+                    }
+                }
             }
         } else {
             frame(b"unowned-empty");
@@ -294,6 +355,36 @@ impl ActorSourceImports {
 /// remains in the shared graph; a checkout's historical package is not
 /// included automatically.
 pub trait ActorSourceLayers: Send + Sync {
+    /// Freeze the published toolset source graph independently of notebook helpers.
+    /// The source owner must return direct immutable revision paths.
+    fn freeze_toolset_layer(&self, _actor: PrincipalId) -> Result<CheckpointSourceLayer, String> {
+        Ok(CheckpointSourceLayer::default())
+    }
+
+    /// Select the run toolset from an already admitted immutable source graph.
+    fn toolset_layer_from(
+        &self,
+        source: &CheckpointSourceLayer,
+    ) -> Result<CheckpointSourceLayer, String> {
+        self.validate_source_authority(source)?;
+        if source.is_owned() {
+            Err("source owner does not expose its published toolset graph".into())
+        } else {
+            Ok(CheckpointSourceLayer::default())
+        }
+    }
+
+    /// Admit an uncovered installer specialization for an already admitted
+    /// immutable source graph. Optional prepared coverage is not a role grant.
+    /// A selected original that fails validation must never reach this method.
+    fn fresh_toolset_layer_from(
+        &self,
+        source: &CheckpointSourceLayer,
+    ) -> Result<CheckpointSourceLayer, String> {
+        self.validate_source_authority(source)?;
+        Err("source owner did not admit fresh installer compilation".into())
+    }
+
     /// Validate opaque source ownership at cell/checkpoint admission. A host
     /// that issues no source authority can admit only the empty default.
     fn validate_source_authority(&self, source: &CheckpointSourceLayer) -> Result<(), String> {

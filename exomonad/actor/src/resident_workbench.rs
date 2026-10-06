@@ -481,6 +481,41 @@ pub struct ActorWorkbenchSource {
     installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
     request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
     request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+    toolset_support: Arc<[PathBuf]>,
+    toolset_support_manifests:
+        Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
+    toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+    preparation_rows: Arc<[Vec<crate::ActorEffectKey>]>,
+}
+
+/// Immutable installer readiness. It owns source and native code, while each
+/// actor still executes its own installation in a fresh lexical scope.
+#[derive(Clone)]
+pub struct PreparedSourceToolset {
+    prepared: Arc<crate::agent_spec::preparation::PreparedToolset>,
+    effects: Vec<crate::ActorEffectKey>,
+}
+
+impl PreparedSourceToolset {
+    #[must_use]
+    pub fn source_revision(&self) -> &str {
+        &self.prepared.source_revision
+    }
+
+    #[must_use]
+    pub fn effects(&self) -> &[crate::ActorEffectKey] {
+        &self.effects
+    }
+
+    /// Exact completed output selected after full native readiness. This is
+    /// retained-source metadata; loading still validates original custody.
+    #[must_use]
+    pub fn completed_entry_selection(&self) -> Option<(&str, uuid::Uuid)> {
+        self.prepared
+            .completed_selection
+            .as_ref()
+            .map(|(recipe, original)| (recipe.as_str(), *original))
+    }
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -494,6 +529,121 @@ struct WorkbenchCompilation {
 }
 
 impl ActorWorkbenchSource {
+    /// Prepare one exact granted and supported row from an owned immutable run
+    /// source graph. Preparation does not install tools or borrow actor heaps.
+    /// The caller selects urgency; required startup is foreground and optional
+    /// warming is preparation work.
+    pub async fn prepare_source_toolset(
+        &self,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        source: crate::CheckpointSourceLayer,
+        granted_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+        registry: Arc<tidepool_runtime::session::ImageRegistry>,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        let mut effects = Vec::new();
+        for key in granted_effects {
+            if supported_effects.contains(&exomonad_tool::ToolEffectKey::Actor(*key))
+                && !effects.contains(key)
+            {
+                effects.push(*key);
+            }
+        }
+        let mut roots = self.toolset_support.to_vec();
+        roots.extend(source.include_paths().iter().cloned());
+        let roots = roots
+            .into_iter()
+            .map(std::fs::canonicalize)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let resolved = crate::agent_spec::resolve(roots.clone(), self.spec.as_deref());
+        let source_revision = if let Some(manifests) = source.source_manifests() {
+            if manifests.len() != source.include_paths().len() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "source owner's ordered manifest count differs from its roots".into(),
+                ));
+            }
+            if self.toolset_support_manifests.get().is_none() {
+                let captured = self
+                    .toolset_support
+                    .iter()
+                    .map(|root| {
+                        let files = tidepool_toolchain::cache::source_root_manifest(root)
+                            .map_err(|error| error.to_string())?;
+                        tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                // A failed acquisition is retryable. Concurrent successful
+                // acquisitions observe the same immutable deployment roots.
+                let _ = self.toolset_support_manifests.set(captured);
+            }
+            let support = self
+                .toolset_support_manifests
+                .get()
+                .expect("support acquired");
+            let ordered = support.iter().chain(manifests).cloned().collect::<Vec<_>>();
+            tidepool_toolchain::cache::source_manifests_identity(
+                b"exomonad-agent-spec-ordered-source-closure-v1",
+                &ordered,
+            )
+        } else {
+            resolved
+                .source_closure_revision()
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+        };
+        let entry = resolved.entry.clone().unwrap_or_else(|| {
+            if supported_effects.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
+                "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
+            } else {
+                "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
+            }
+        });
+        let mut imports = self.workbench_imports.clone();
+        if let Some((module, _)) = entry.rsplit_once('.') {
+            imports.extend_text(&format!("qualified {module}"));
+        }
+        imports.extend_text("qualified Tidepool.Agent.Contract");
+        imports.extend_text("qualified Tidepool.Effects.Core");
+        imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
+        imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+        let prepared = self
+            .toolset_preparation
+            .prepare(
+                workload,
+                crate::agent_spec::preparation::InstallerRecipe {
+                    source_authority: source.semantic_digest(),
+                    source_revision,
+                    roots,
+                    preamble: self.preamble.to_string(),
+                    imports: imports.template_text(),
+                    entry,
+                    effects: effects.clone(),
+                },
+                resolved,
+                source,
+                registry,
+            )
+            .await
+            .map_err(|failure| match failure {
+                crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => {
+                    ResidentActorWorkbenchError::PreparedEntryAbsent { recipe }
+                }
+                crate::agent_spec::preparation::PreparationFailure::Admission(error) => {
+                    ResidentActorWorkbenchError::PreparationAdmission(error)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) => {
+                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Source(detail)
+                | crate::agent_spec::preparation::PreparationFailure::Native(detail) => {
+                    ResidentActorWorkbenchError::ActorProtocol(detail)
+                }
+            })?;
+        Ok(PreparedSourceToolset { prepared, effects })
+    }
+
     fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
         WorkbenchCompilation {
             preamble: scope.shadow_preamble(&hide_preamble_exports(
@@ -511,6 +661,8 @@ impl ActorWorkbenchSource {
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
             preamble: preamble.into(),
+            toolset_support: base_include.clone().into(),
+            toolset_support_manifests: Default::default(),
             base_include: base_include.into(),
             workbench_imports: SourceImports::from_specs([
                 "qualified Data.Set as Set",
@@ -523,7 +675,36 @@ impl ActorWorkbenchSource {
             installed_effect_support: Arc::from([]),
             request_evidence: None,
             request_helper_recipe: Default::default(),
+            toolset_preparation: Default::default(),
+            preparation_rows: Arc::from([]),
         }
+    }
+
+    /// Deployment-owned support roots, ahead of the source owner's published
+    /// toolset graph. Notebook/helper roots do not enter installer construction.
+    #[must_use]
+    pub fn with_toolset_support_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.toolset_support = roots.into();
+        self.toolset_support_manifests = Default::default();
+        self
+    }
+
+    /// Exact common role grants to warm after the root's required installer.
+    #[must_use]
+    pub fn with_preparation_roles(
+        mut self,
+        roles: impl IntoIterator<Item = crate::EffectiveRole>,
+    ) -> Self {
+        let mut rows = Vec::new();
+        for role in roles {
+            if role.role() != crate::ActorRole::Root
+                && !rows.iter().any(|row| row == role.effect_keys())
+            {
+                rows.push(role.effect_keys().to_vec());
+            }
+        }
+        self.preparation_rows = rows.into();
+        self
     }
 
     /// Capture support from the actual assembled interpreter instances and
@@ -621,6 +802,7 @@ pub(crate) struct ResidentWorkbenchTools {
     /// Installer source roots belong to the installed implementation, not the
     /// actor's published declaration and value surface.
     _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    _prepared: Arc<crate::agent_spec::preparation::PreparedToolset>,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
@@ -3653,6 +3835,13 @@ pub enum ResidentActorWorkbenchError {
     CellCheck(tidepool_runtime::session::CellCheckFailure),
     #[error("resident workbench compiler infrastructure failed:\n{0}")]
     CompileInfrastructure(tidepool_toolchain::failclass::FailureEnvelope),
+    /// The immutable deployment did not prepare this specialization. This
+    /// permits the admitted source owner to issue a fresh compilation; an
+    /// invalid selected original is a different failure and never falls back.
+    #[error("prepared deployment has no completed installer for recipe {recipe}")]
+    PreparedEntryAbsent { recipe: String },
+    #[error("source preparation compiler admission refused: {0}")]
+    PreparationAdmission(#[source] Arc<ResidentActorWorkbenchError>),
     #[error("resident workbench execution failed: {0}")]
     Resident(#[from] ResidentError),
     /// The response that answers a boundary's effect was already handed to
@@ -4244,15 +4433,77 @@ where
         crate::agent_spec::resolve(roots, self.access.source.spec.as_deref())
     }
 
-    /// Compile one spec and keep both of its products.
-    ///
-    /// One fragment produces the declarations — read out of the
-    /// `AgentToolsInstallWith` suspension — and the retained dispatcher, kept
-    /// as an `Arc<RootCustody>` heap root, which covers ordinary tool calls
-    /// and every slot the spec fills. They are two products of one compile of
-    /// one module against one include list, so a schema can never advertise a
-    /// handler from another revision, and a slot can never be a revision ahead
-    /// of the tools beside it.
+    /// Prepare immutable source/native code against actual assembled support.
+    pub(crate) async fn prepare_toolset_only(
+        &self,
+        context: crate::ActorSessionContext,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        granted_effects: Vec<crate::ActorEffectKey>,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        let source_support = self.access.source.installed_effect_support().to_vec();
+        let observer = self.access.handler_effect_support.clone();
+        let admitted_support = self
+            .access
+            .with_machine(context, move |session, _, _| {
+                let mut support = source_support;
+                for key in observer(session.handlers()) {
+                    if !support.contains(&key) {
+                        support.push(key);
+                    }
+                }
+                Ok(support)
+            })
+            .await?;
+        let authority = self.compilation_authority.as_ref().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "tool installation requires its admitted source authority".into(),
+            )
+        })?;
+        let toolset_source = authority
+            .toolset_source()
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let registry = self
+            .access
+            .image_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
+        let selected = self
+            .access
+            .source
+            .prepare_source_toolset(
+                workload,
+                toolset_source.clone(),
+                &granted_effects,
+                &admitted_support,
+                Arc::clone(&registry),
+            )
+            .await;
+        match selected {
+            Err(ResidentActorWorkbenchError::PreparedEntryAbsent { .. }) => {
+                let fresh = authority
+                    .fresh_toolset_source(&toolset_source)
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                self.access
+                    .source
+                    .prepare_source_toolset(
+                        workload,
+                        fresh,
+                        &granted_effects,
+                        &admitted_support,
+                        registry,
+                    )
+                    .await
+            }
+            outcome => outcome,
+        }
+    }
+
+    pub(crate) fn preparation_rows(&self) -> &[Vec<crate::ActorEffectKey>] {
+        &self.access.source.preparation_rows
+    }
+
+    /// Execute one prepared installer in an actor-owned lexical scope. Its
+    /// declarations and dispatcher come from the same installation suspension.
     pub(crate) fn prepare_tools<'a>(
         &'a self,
         context: crate::ActorSessionContext,
@@ -4264,68 +4515,31 @@ where
     > {
         let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
         Box::pin(async move {
-            let source_support = self.access.source.installed_effect_support().to_vec();
-            let observer = self.access.handler_effect_support.clone();
-            let admitted_support = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    let mut support = source_support;
-                    for key in observer(session.handlers()) {
-                        if !support.contains(&key) {
-                            support.push(key);
-                        }
-                    }
-                    Ok(support)
-                })
-                .await?;
-            let admitted_base: Vec<_> = granted_effects
-                .into_iter()
-                .filter(|key| admitted_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
-                .collect();
-            let resolved = self.resolve_spec(&context);
-            let revision = resolved.source_revision();
-            let entry = resolved.entry.clone().unwrap_or_else(|| {
-                if admitted_support.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
-                    "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
-                } else {
-                    "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
-                }
-            });
-            let installation = crate::agent_spec::installation_expression(&entry, &admitted_base);
-            let authored_effects = installation.effect_row;
-            let dispatcher_effects = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
-            let mut source = self.access.source.clone();
-            // A spec found by convention is named by no configured key, so its
-            // module is not in the shared workbench vocabulary; the fragment that
-            // installs it brings its own qualified import.
-            if let Some((module, _)) = entry.rsplit_once('.') {
-                source
-                    .workbench_imports
-                    .extend_text(&format!("qualified {module}"));
-            }
-            source
-                .workbench_imports
-                .extend_text("qualified Tidepool.Agent.Contract");
-            source.preamble =
-                insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
+            let ready = self.prepare_toolset_only(
+                context.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                granted_effects.clone(),
+            ).await?;
+            let admitted_base = ready.effects;
+            let prepared = ready.prepared;
+            let installation = crate::agent_spec::installation_expression(&prepared.entry_name, &admitted_base);
+            let dispatcher_effects = format!(
+                "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
+                installation.effect_row,
+            );
+            let revision = Some(prepared.source_revision.clone());
+            let publication_resolved = prepared.resolved.clone();
             let mut compile_context = context.clone();
             compile_context.haskell_effects_alias = dispatcher_effects.clone();
             let installation_scope = self
                 .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    if let Some(captured) = context.source_imports.inherited_scope()? {
-                        if install == 1 {
-                            session.validate_initial_lexical_scope(
-                                &captured,
-                                context.placement.lexical_scope,
-                            )?;
-                        } else {
-                            session.validate_lexical_scope_lease(captured.scope(), &captured)?;
-                        }
-                    }
-                    session
-                        .retain_lexical_scope(context.placement.lexical_scope)
-                        .map_err(Into::into)
+                .with_machine(context.clone(), move |session, _, _| {
+                    // Each installation has an independent CAF/source domain even
+                    // when actors share the surrounding machine and native images.
+                    let isolated = session.mint_isolated_scope();
+                    let retained = session.retain_lexical_scope(isolated)?;
+                    session.retire_scope(isolated);
+                    Ok(retained)
                 })
                 .await?;
             compile_context.placement.lexical_scope = installation_scope.scope();
@@ -4337,76 +4551,21 @@ where
                 Some(installation_scope.clone()),
             );
             let registration = abort_guard.registration();
-            let block = ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: installation.expression,
-            };
-            let authority = self.compilation_authority.clone().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installation requires its admitted source authority".into(),
-                )
-            })?;
-            let mut installer = ResidentActorWorkbench {
-                access: self.access.sharing(),
-                request_scope: None,
-                json_input: None,
-                compilation_authority: Some(authority.clone()),
-                private_execution: None,
-                #[cfg(test)]
-                activation_preview_observer: None,
-            };
-            installer.access.source = source;
-            let publication_resolved = resolved;
-            let installed_effect_support =
-                installer.access.source.installed_effect_support().to_vec();
+            let installed_effect_support = self.access.source.installed_effect_support().to_vec();
             let handler_effect_support = self.access.handler_effect_support.clone();
-            // Setup uses the existing public scope while the bootstrap owner
-            // retains publication authority. The checked program seals its
-            // captured interfaces and protected templates before native execution.
-            // Box compiler state separately from the tool-preparation future.
-            let (checked, prepared) = Box::pin(installer.prepare_checked_cell(
-                compile_context.clone(),
-                block.source,
-                authority,
-                None,
-                None,
-            ))
-            .await
-            .map_err(|error| {
-                tracing::error!(?error, "agent spec installation check failed");
-                error
-            })?;
-            if checked.items.len() != 1
-                || checked.items[0].verdict.kind != TurnKind::Bind
-                || !checked.items[0].verdict.binders.is_empty()
-            {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installer must be one checked bind without public binders".into(),
-                ));
-            }
-            let PreparedCell {
-                mut items,
-                dependencies,
-            } = prepared;
-            let item = items.pop().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installer checked program has no executable item".into(),
-                )
-            })?;
-            let block = ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: checked.items[0].source.clone(),
-            };
-            // Execution stays inside the registration while its state is boxed.
-            let step = registration
-                .scope(Box::pin(installer.begin_prepared_cell_item(
-                    compile_context.clone(),
-                    block,
-                    item,
-                )))
-                .await?;
+            let prepared_entry = Arc::clone(&prepared);
+            let installer_source = installation.expression;
+            let step = registration.scope(self.access.with_machine(
+                compile_context.clone(), move |session, context, _| {
+                    session.set_image_registry(Arc::clone(prepared_entry.entry.image_registry()));
+                    let entry = session.prepare_startup_entry(prepared_entry.entry.compiled().code())?;
+                    let outcome = session.run_startup_entry(entry);
+                    start_fragment_settlement(
+                        session, context, 1, installer_source, WorkbenchDisplay::Discard,
+                        prepared_entry.entry.compiled().warnings.warnings.clone(), outcome,
+                    )
+                },
+            )).await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {
                     ResidentWorkbenchStep::Rejected(detail) => detail.output,
@@ -4454,6 +4613,14 @@ where
                             if !installed_effect_support.contains(&key) {
                                 installed_effect_support.push(key);
                             }
+                        }
+                        let current_base = granted_effects.iter().copied()
+                            .filter(|key| installed_effect_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
+                            .collect::<Vec<_>>();
+                        if current_base != admitted_base {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "tool interpreter support changed during source preparation".into(),
+                            ));
                         }
                         crate::tool_contract::validate_installation(
                             &tools,
@@ -4505,6 +4672,7 @@ where
                         declarations,
                         dispatch: Arc::new(dispatch),
                         _installation_scope: installation_scope,
+                        _prepared: prepared,
                         dispatcher_effects,
                         slots,
                         resolved: publication_resolved,
@@ -4516,7 +4684,6 @@ where
             if publication.is_ok() {
                 abort_guard.disarm();
             }
-            drop(dependencies);
             publication
         }.instrument(span))
     }
@@ -15224,6 +15391,404 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert!(
             matches!(recovered, ResidentWorkbenchStep::Committed { .. }),
             "fresh compiler work completes after the cancelled lookup settles"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay() {
+        struct Snapshot {
+            _owner: Arc<tempfile::TempDir>,
+            identities: Vec<String>,
+            paths: Vec<PathBuf>,
+            manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
+            entries: crate::SourceEntryStorage,
+        }
+        impl crate::RetainedSourceLayer for Snapshot {
+            fn identities(&self) -> &[String] {
+                &self.identities
+            }
+            fn include_paths(&self) -> &[PathBuf] {
+                &self.paths
+            }
+            fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+                Some(&self.manifests)
+            }
+            fn prepared_entries(&self) -> Option<&crate::SourceEntryStorage> {
+                Some(&self.entries)
+            }
+        }
+        let (_, _, source, _session_root) = host_mount_fixture();
+        let authored = Arc::new(tempfile::tempdir().unwrap());
+        let source_root = authored.path().join("sources");
+        std::fs::create_dir(&source_root).unwrap();
+        let input = authored.path().join("external-input");
+        std::fs::write(&input, "41").unwrap();
+        std::fs::write(
+            source_root.join("QuotedProvider.hs"),
+            include_str!("fixtures/quoted-agent-provider.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            source_root.join("QuotedAgentSpec.hs"),
+            include_str!("fixtures/quoted-agent-spec.hs")
+                .replace("{quotation-input}", input.to_str().unwrap()),
+        )
+        .unwrap();
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(authored.path())
+            .unwrap()
+            .child("entries")
+            .unwrap();
+        let issuer = crate::SourceLayerIssuer::default();
+        let snapshot = |entries| {
+            let paths = vec![source_root.canonicalize().unwrap()];
+            let manifests = paths
+                .iter()
+                .map(|root| {
+                    tidepool_toolchain::cache::SourceRootManifest::from_file_digests(
+                        tidepool_toolchain::cache::source_root_manifest(root).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let revision = tidepool_toolchain::cache::source_manifests_identity(
+                b"test-retained-toolset-owner",
+                &manifests,
+            );
+            issuer.issue(Arc::new(Snapshot {
+                _owner: Arc::clone(&authored),
+                identities: vec![revision],
+                paths,
+                manifests,
+                entries,
+            }))
+        };
+        let mut source = source.with_spec("QuotedAgentSpec.agentSpec");
+        let fresh = with_test_compiler_owner(source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            snapshot(crate::SourceEntryStorage::FreshCompilation {
+                directory: storage.path().to_owned(),
+                preparation: uuid::Uuid::new_v4(),
+            }),
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .unwrap();
+        assert!(fresh
+            .prepared
+            .entry
+            .compiled()
+            .original_compile_input()
+            .unwrap()
+            .replay_eligible_identity()
+            .is_none());
+        std::fs::write(&input, "42").unwrap();
+        let successor = with_test_compiler_owner(source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            snapshot(crate::SourceEntryStorage::FreshCompilation {
+                directory: storage.path().to_owned(),
+                preparation: uuid::Uuid::new_v4(),
+            }),
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .unwrap();
+        assert_ne!(
+            fresh.completed_entry_selection().unwrap().1,
+            successor.completed_entry_selection().unwrap().1
+        );
+        assert_ne!(
+            fresh.prepared.entry.compiled().prepared,
+            successor.prepared.entry.compiled().prepared,
+            "a newly admitted source preparation executes the changed untracked input"
+        );
+        let completed_executions =
+            std::fs::read_to_string(input.with_extension("executions")).unwrap();
+        // Reacquire readiness and native images independently of the old ready
+        // cache. Selection is the completed artifact, not a fresh TH request.
+        source.toolset_preparation = Default::default();
+        source.toolset_support_manifests = Default::default();
+        let selected = snapshot(crate::SourceEntryStorage::CompletedOriginal {
+            directory: storage.path().to_owned(),
+            selections: [fresh
+                .completed_entry_selection()
+                .map(|(recipe, original)| (recipe.to_owned(), original))
+                .unwrap()]
+            .into_iter()
+            .collect(),
+        });
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let loaded = source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                selected.clone(),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
+        assert_eq!(
+            fresh.prepared.entry.compiled().prepared,
+            loaded.prepared.entry.compiled().prepared
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+
+        let (recipe, original) = fresh.completed_entry_selection().unwrap();
+        let retried_source = snapshot(crate::SourceEntryStorage::FreshCompilation {
+            directory: storage.path().to_owned(),
+            preparation: original,
+        });
+        let metadata = storage
+            .path()
+            .join(recipe)
+            .join(original.to_string())
+            .join("entry/raw/meta.cbor");
+        let original_metadata = std::fs::read(&metadata).unwrap();
+        std::fs::write(&metadata, b"post-publication fault").unwrap();
+        source.toolset_preparation = Default::default();
+        assert!(source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                retried_source.clone(),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await
+            .is_err());
+        std::fs::write(&metadata, original_metadata).unwrap();
+        let retried = source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                retried_source,
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retried.completed_entry_selection().unwrap(),
+            (recipe, original)
+        );
+        assert_eq!(
+            retried.prepared.entry.compiled().prepared,
+            fresh.prepared.entry.compiled().prepared
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        assert_eq!(
+            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+            completed_executions
+        );
+        let invalid = snapshot(crate::SourceEntryStorage::CompletedOriginal {
+            directory: storage.path().to_owned(),
+            selections: [(recipe.to_owned(), uuid::Uuid::new_v4())]
+                .into_iter()
+                .collect(),
+        });
+        source.toolset_preparation = Default::default();
+        assert!(
+            source
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    invalid,
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await
+                .is_err(),
+            "a missing owner-selected original cannot fall back to source"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        assert_eq!(
+            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+            completed_executions
+        );
+
+        source.toolset_preparation = Default::default();
+        let uncovered = snapshot(crate::SourceEntryStorage::CompletedOriginal {
+            directory: storage.path().to_owned(),
+            selections: Default::default(),
+        });
+        assert!(matches!(
+            source
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    uncovered,
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await,
+            Err(ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
+        ));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+
+        source.toolset_preparation = Default::default();
+        let missing = snapshot(crate::SourceEntryStorage::CompletedOriginal {
+            directory: authored.path().join("absent-entries"),
+            selections: [fresh
+                .completed_entry_selection()
+                .map(|(recipe, original)| (recipe.to_owned(), original))
+                .unwrap()]
+            .into_iter()
+            .collect(),
+        });
+        assert!(source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                missing,
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .await
+            .is_err());
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+    }
+
+    #[tokio::test]
+    async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
+    ) {
+        let (session, context, source, _session_root) = host_mount_fixture();
+        let authored = tempfile::tempdir().unwrap();
+        let quotation_input = authored.path().join("external-input");
+        std::fs::write(&quotation_input, "41").unwrap();
+        std::fs::write(
+            authored.path().join("QuotedProvider.hs"),
+            include_str!("fixtures/quoted-agent-provider.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            authored.path().join("QuotedAgentSpec.hs"),
+            include_str!("fixtures/quoted-agent-spec.hs")
+                .replace("{quotation-input}", quotation_input.to_str().unwrap()),
+        )
+        .unwrap();
+        let mut roots = source.toolset_support.to_vec();
+        roots.push(authored.path().canonicalize().unwrap());
+        let source = source
+            .with_toolset_support_roots(roots.clone())
+            .with_spec("QuotedAgentSpec.agentSpec");
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None)
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
+        let warmed = workbench
+            .prepare_toolset_only(
+                context.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let warm_executions =
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+        let first = workbench
+            .prepare_tools(context.clone(), 1, vec![])
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&warmed.prepared, &first._prepared));
+        let completed_executions =
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+        assert!(
+            !completed_executions.is_empty(),
+            "the original compiler executes the actual local quoter"
+        );
+        assert_eq!(
+            completed_executions, warm_executions,
+            "the actual installation reuses immutable readiness without another compiler turn"
+        );
+        let proof = first
+            ._prepared
+            .entry
+            .compiled()
+            .original_compile_input()
+            .unwrap();
+        assert!(
+            proof.replay_eligible_identity().is_none(),
+            "quotation remains ineligible for ordinary source replay"
+        );
+        assert_ne!(
+            proof.source_replay_eligibility(),
+            tidepool_toolchain::artifacts::SourceReplayEligibility::Eligible
+        );
+        let second = workbench
+            .prepare_tools(context.clone(), 2, vec![])
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first._prepared, &second._prepared));
+        assert_ne!(
+            first._installation_scope.scope(),
+            second._installation_scope.scope()
+        );
+        assert_eq!(
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+            completed_executions
+        );
+        assert_eq!(first.declarations, second.declarations);
+        crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
+            &first._prepared,
+        ));
+
+        // A new ordinary source request must execute the untracked quoter again.
+        std::fs::write(&quotation_input, "42").unwrap();
+        let installation =
+            crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
+        let templates = [tidepool_runtime::session::TurnTemplate {
+            kind: tidepool_runtime::session::TemplateSelector::BindDiscard,
+            source: proof.original_source().into(),
+        }];
+        let scratch = tempfile::tempdir().unwrap();
+        let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let ordinary =
+            tidepool_runtime::session::run_turn(tidepool_runtime::session::TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: &installation.expression,
+                templates: &templates,
+                include: &include,
+                session_root: scratch.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: Some(tidepool_runtime::session::TurnClassification {
+                    kind: tidepool_runtime::session::TurnKind::Bind,
+                    binders: Vec::new(),
+                    items: Vec::new(),
+                }),
+                target: None,
+                retained_imports: &[],
+            })
+            .unwrap();
+        let tidepool_runtime::session::TurnResult::Bind { compiled, .. } = ordinary else {
+            panic!("ordinary quotation request must complete its actual discarded bind")
+        };
+        let successor = compiled.original_compile_input().unwrap();
+        assert_eq!(
+            proof.original_input_identity(),
+            successor.original_input_identity()
+        );
+        assert_ne!(first._prepared.entry.compiled().prepared, compiled.prepared);
+        assert!(successor.replay_eligible_identity().is_none());
+        workbench.access.with_machine(context, move |session, _, _| {
+            let entry = session.prepare_startup_entry(compiled.code())?;
+            assert!(entry.compile_input_identity().is_none(), "changed untracked quotation output cannot authorize durable successor continuity");
+            Ok(())
+        }).await.unwrap();
+        assert!(
+            std::fs::read_to_string(quotation_input.with_extension("executions"))
+                .unwrap()
+                .lines()
+                .count()
+                > completed_executions.lines().count()
         );
     }
 

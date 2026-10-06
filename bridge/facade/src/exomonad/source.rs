@@ -109,24 +109,70 @@ impl PendingRevision {
 #[derive(Clone, Debug)]
 pub(crate) struct SourceLayer {
     directory: PathBuf,
+    retained_revision: Arc<Mutex<Option<RetainedRevision>>>,
+}
+
+#[derive(Clone, Debug)]
+struct RetainedRevision {
+    identity: String,
+    paths: Vec<PathBuf>,
+    manifests: Arc<[tidepool_toolchain::cache::SourceRootManifest]>,
 }
 
 impl SourceLayer {
     /// Resolve one active publication to its immutable revision directory.
-    fn checkpoint_revision(&self, kind: &str) -> Result<(String, Vec<PathBuf>)> {
+    fn checkpoint_revision(&self, domain: &str) -> Result<RetainedRevision> {
         let record = self
             .read_record()?
             .ok_or("checkpoint source layer has no active revision")?;
         let path = self.revisions().join(&record.identity);
-        Ok((
-            format!("{kind}:{}", record.identity),
-            revision_include_paths(&path, record.roots),
-        ))
+        let mut retained = self.retained_revision.lock();
+        if let Some(revision) = retained.as_ref() {
+            if revision.identity == record.identity {
+                return Ok(revision.clone());
+            }
+        }
+        let paths = revision_include_paths(&path, record.roots)
+            .into_iter()
+            .map(std::fs::canonicalize)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let manifests = paths
+            .iter()
+            .map(|root| {
+                let files = tidepool_toolchain::cache::source_root_manifest(root)?;
+                Ok(tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // The generated resource carries the identity and is not part of its
+        // own input. Every ordered authored root must match the publication.
+        if source_revision(domain, &manifests[..record.roots]).identity != record.identity {
+            return Err("immutable source revision differs from its publication".into());
+        }
+        let resources = manifests[record.roots]
+            .files()
+            .map(|(path, digest)| (path.to_owned(), *digest))
+            .collect::<Vec<_>>();
+        if resources
+            != vec![(
+                PathBuf::from(REVISION_MODULE),
+                blake3::hash(revision_module(&record.identity).as_bytes()),
+            )]
+        {
+            return Err("immutable source revision resource differs from its publication".into());
+        }
+        let revision = RetainedRevision {
+            identity: record.identity,
+            paths,
+            manifests: manifests.into(),
+        };
+        *retained = Some(revision.clone());
+        Ok(revision)
     }
     /// The run's own layer, shared by every actor.
     pub(crate) fn new(run_root: &Path) -> Self {
         Self {
             directory: run_root.join("workspace"),
+            retained_revision: Default::default(),
         }
     }
 
@@ -136,6 +182,7 @@ impl SourceLayer {
     pub(crate) fn helpers(helper_root: &Path, branch: &str) -> Self {
         Self {
             directory: helper_root.join("layers").join(branch),
+            retained_revision: Default::default(),
         }
     }
 
@@ -677,6 +724,8 @@ struct RetainedSourceGraph {
     _root_owner: Arc<SourceRootOwner>,
     identities: Vec<String>,
     include_paths: Vec<PathBuf>,
+    manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
+    entries: exomonad_actor::SourceEntryStorage,
 }
 
 impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
@@ -686,6 +735,14 @@ impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
 
     fn include_paths(&self) -> &[PathBuf] {
         &self.include_paths
+    }
+
+    fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+        Some(&self.manifests)
+    }
+
+    fn prepared_entries(&self) -> Option<&exomonad_actor::SourceEntryStorage> {
+        Some(&self.entries)
     }
 }
 
@@ -698,6 +755,8 @@ impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
 pub(crate) struct ExomonadSourceReload {
     source_issuer: exomonad_actor::SourceLayerIssuer,
     source_owner: Arc<SourceRootOwner>,
+    entry_storage: exomonad_actor::SourceEntryStorage,
+    fresh_entry_storage: exomonad_actor::SourceEntryStorage,
     frozen: FrozenWorkspace,
     workspace: PathBuf,
     run_root: PathBuf,
@@ -728,11 +787,20 @@ impl ExomonadSourceReload {
         owner: SourceRootOwner,
     ) -> Result<Self> {
         owner.validate(&run_root)?;
+        let run_root = std::fs::canonicalize(run_root)?;
+        let entries = tidepool_atomic_write::DirectoryAnchor::open_existing(&run_root)?
+            .child("workspace/entries")?;
+        let fresh_entry_storage = exomonad_actor::SourceEntryStorage::FreshCompilation {
+            directory: entries.path().to_owned(),
+            preparation: uuid::Uuid::new_v4(),
+        };
         let helper_root = run_root.join("helpers");
         let layer = SourceLayer::new(&run_root);
         Ok(Self {
             source_issuer: exomonad_actor::SourceLayerIssuer::default(),
             source_owner: Arc::new(owner),
+            entry_storage: fresh_entry_storage.clone(),
+            fresh_entry_storage,
             frozen,
             workspace,
             run_root,
@@ -821,10 +889,12 @@ impl ExomonadSourceReload {
         self.layer.ensure_active(&self.frozen)?;
         let mut identities = Vec::new();
         let mut include_paths = Vec::new();
+        let mut manifests = Vec::new();
         let mut add = |layer: &SourceLayer, kind: &str| -> Result<()> {
-            let (identity, paths) = layer.checkpoint_revision(kind)?;
-            identities.push(identity);
-            include_paths.extend(paths);
+            let revision = layer.checkpoint_revision(self.frozen.identity())?;
+            identities.push(format!("{kind}:{}", revision.identity));
+            include_paths.extend(revision.paths);
+            manifests.extend(revision.manifests.iter().cloned());
             Ok(())
         };
         add(&self.helper_layer(helper_branch), "helpers")?;
@@ -833,6 +903,8 @@ impl ExomonadSourceReload {
             _root_owner: Arc::clone(&self.source_owner),
             identities,
             include_paths,
+            manifests,
+            entries: self.entry_storage.clone(),
         })))
     }
 
@@ -1661,6 +1733,91 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
 }
 
 impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
+    fn toolset_layer_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> std::result::Result<exomonad_actor::CheckpointSourceLayer, String> {
+        self.validate_source_authority(source)?;
+        let identities = source
+            .identities()
+            .iter()
+            .filter(|identity| identity.starts_with("run:"))
+            .cloned()
+            .collect();
+        let source_manifests = source
+            .source_manifests()
+            .ok_or("owned source graph has no immutable manifests")?;
+        if source_manifests.len() != source.include_paths().len() {
+            return Err("owned source graph manifest count differs from its roots".into());
+        }
+        let mut include_paths = Vec::new();
+        let mut manifests = Vec::new();
+        for (path, manifest) in source.include_paths().iter().zip(source_manifests) {
+            if path.starts_with(self.run_root.join("workspace/revisions")) {
+                include_paths.push(path.clone());
+                manifests.push(manifest.clone());
+            }
+        }
+        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+            _root_owner: Arc::clone(&self.source_owner),
+            identities,
+            include_paths,
+            manifests,
+            entries: source
+                .prepared_entries()
+                .cloned()
+                .unwrap_or_else(|| self.entry_storage.clone()),
+        })))
+    }
+
+    fn fresh_toolset_layer_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> std::result::Result<exomonad_actor::CheckpointSourceLayer, String> {
+        let selected = self.toolset_layer_from(source)?;
+        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+            _root_owner: Arc::clone(&self.source_owner),
+            identities: selected.identities().to_vec(),
+            include_paths: selected.include_paths().to_vec(),
+            manifests: selected
+                .source_manifests()
+                .ok_or("owned toolset graph has no immutable manifests")?
+                .to_vec(),
+            entries: self.fresh_entry_storage.clone(),
+        })))
+    }
+
+    fn freeze_toolset_layer(
+        &self,
+        actor: PrincipalId,
+    ) -> std::result::Result<exomonad_actor::CheckpointSourceLayer, String> {
+        let _one_at_a_time = self.gate.lock();
+        if let ActorSourceScope::Checkpoint(layer) = self.scope(actor) {
+            return self.toolset_layer_from(&layer);
+        }
+        if self
+            .layer
+            .read_record()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            self.layer
+                .ensure_active(&self.frozen)
+                .map_err(|error| error.to_string())?;
+        }
+        let revision = self
+            .layer
+            .checkpoint_revision(self.frozen.identity())
+            .map_err(|error| error.to_string())?;
+        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+            _root_owner: Arc::clone(&self.source_owner),
+            identities: vec![format!("run:{}", revision.identity)],
+            include_paths: revision.paths,
+            manifests: revision.manifests.iter().cloned().collect(),
+            entries: self.entry_storage.clone(),
+        })))
+    }
+
     fn validate_source_authority(
         &self,
         source: &exomonad_actor::CheckpointSourceLayer,
@@ -2016,6 +2173,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_revision_reuses_manifests_and_preserves_original_after_publication() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let layer = SourceLayer::new(run.path());
+        layer.ensure_active(&frozen).unwrap();
+        let original = layer.checkpoint_revision(frozen.identity()).unwrap();
+        let warm = layer
+            .clone()
+            .checkpoint_revision(frozen.identity())
+            .unwrap();
+        assert!(Arc::ptr_eq(&original.manifests, &warm.manifests));
+        assert_eq!(
+            tidepool_toolchain::cache::source_manifests_identity(
+                b"exomonad-agent-spec-ordered-source-closure-v1",
+                &original.manifests,
+            ),
+            tidepool_toolchain::cache::source_roots_identity(
+                b"exomonad-agent-spec-ordered-source-closure-v1",
+                &original.paths,
+            )
+            .unwrap(),
+        );
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork = 2\n",
+        )
+        .unwrap();
+        let pending = layer
+            .capture_from_workspace(&frozen, project.path())
+            .unwrap();
+        layer.publish(pending).unwrap();
+        let changed = layer.checkpoint_revision(frozen.identity()).unwrap();
+        assert_ne!(original.identity, changed.identity);
+        assert!(!Arc::ptr_eq(&original.manifests, &changed.manifests));
+        assert!(original.paths.iter().all(|path| path.exists()));
+
+        let reacquired = SourceLayer::new(run.path());
+        std::fs::write(changed.paths[0].join("Project/Work.hs"), "changed").unwrap();
+        assert!(reacquired.checkpoint_revision(frozen.identity()).is_err());
+    }
+
+    #[test]
     fn checkpoint_paths_pin_revision_and_admission_refuses_source_drift() {
         use exomonad_actor::ActorSourceLayers;
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
@@ -2072,6 +2271,50 @@ mod tests {
             captured,
             "a checkpoint descendant must retain the frozen helper and run graph"
         );
+    }
+
+    #[test]
+    fn uncovered_toolset_requires_the_same_source_owners_fresh_admission() {
+        use exomonad_actor::{ActorSourceLayers, SourceEntryStorage};
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let run = Arc::new(run);
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let mut reload = ExomonadSourceReload::new_owned(
+            frozen.clone(),
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        reload.entry_storage = SourceEntryStorage::CompletedOriginal {
+            directory: reload.entry_storage.directory().to_owned(),
+            selections: Default::default(),
+        };
+        let selected = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
+        assert!(matches!(
+            selected.prepared_entries(),
+            Some(SourceEntryStorage::CompletedOriginal { .. })
+        ));
+        let fresh = reload.fresh_toolset_layer_from(&selected).unwrap();
+        let repeated = reload.fresh_toolset_layer_from(&selected).unwrap();
+        assert_eq!(fresh.identities(), selected.identities());
+        assert_eq!(fresh.include_paths(), selected.include_paths());
+        assert_eq!(fresh.semantic_digest(), repeated.semantic_digest());
+        assert_ne!(fresh.semantic_digest(), selected.semantic_digest());
+        assert!(matches!(
+            fresh.prepared_entries(),
+            Some(SourceEntryStorage::FreshCompilation { .. })
+        ));
+        let other = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(run),
+        )
+        .unwrap();
+        assert!(other.fresh_toolset_layer_from(&selected).is_err());
     }
 
     #[test]
@@ -2680,6 +2923,7 @@ mod tests {
 
         let child = SourceLayer {
             directory: run.path().join("workspace/checkouts/child"),
+            retained_revision: Default::default(),
         };
         let inherited = child.inherit_active_from(&parent, &roots).unwrap();
         assert_eq!(inherited.identity, parent_at_fork.identity);

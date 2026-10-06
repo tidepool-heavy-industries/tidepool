@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::digest::frame;
 
 /// Source snapshot identity, independent from compiler dependency selection.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SourceRootManifest {
     files: Vec<(PathBuf, blake3::Hash)>,
 }

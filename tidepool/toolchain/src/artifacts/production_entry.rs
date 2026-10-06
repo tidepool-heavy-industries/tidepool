@@ -1,0 +1,469 @@
+//! Complete original entries, distinct from source-authority-free fixtures.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::*;
+use crate::module_candidates::deployment::NativeCatalogSourceSelection;
+use crate::toolchain::{
+    AdmittedCompilerDeployment, CompilerDeploymentAuthority, CompilerDeploymentConfiguration,
+};
+
+/// Observations of an existing source owner's immutable ordered snapshot.
+/// These are expected inputs, not compilation authority: loading still requires
+/// the complete original output and the existing original-product validator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenEntrySources {
+    roots: Vec<FrozenEntryRoot>,
+    source: PathBuf,
+    source_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenEntryRoot {
+    path: PathBuf,
+    files: Vec<(PathBuf, String)>,
+}
+
+impl FrozenEntrySources {
+    pub fn capture(roots: &[PathBuf], source: &Path) -> Result<Self, CompileError> {
+        let roots = roots
+            .iter()
+            .map(|root| {
+                let path = std::fs::canonicalize(root)?;
+                Ok(FrozenEntryRoot {
+                    files: crate::cache::source_root_manifest(&path).map_err(invalid)?,
+                    path,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let source = std::fs::canonicalize(source)?;
+        let source_sha256 = hex_sha256(&std::fs::read(&source)?);
+        Ok(Self {
+            roots,
+            source,
+            source_sha256,
+        })
+    }
+
+    fn revalidate(&self) -> Result<(), CompileError> {
+        if Self::capture(&self.include_roots(), &self.source)? != *self {
+            return Err(invalid("frozen original source snapshot changed"));
+        }
+        Ok(())
+    }
+
+    pub fn include_roots(&self) -> Vec<PathBuf> {
+        self.roots.iter().map(|root| root.path.clone()).collect()
+    }
+
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    /// Apply the existing ordered-root identity to these actual observations.
+    /// This comparison does not issue compiler custody or source replay rights.
+    pub fn source_revision(&self, domain: &[u8]) -> Result<String, CompileError> {
+        let manifests = self
+            .roots
+            .iter()
+            .map(|root| {
+                crate::cache::SourceRootManifest::from_file_digests(root.files.iter().cloned())
+                    .map_err(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::cache::source_manifests_identity(domain, &manifests))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "selection", rename_all = "snake_case")]
+pub enum ProductionEntrySources {
+    NativeCatalog(NativeCatalogSourceSelection),
+    FrozenWorkspace(FrozenEntrySources),
+}
+
+impl ProductionEntrySources {
+    fn include_roots(&self) -> Vec<PathBuf> {
+        match self {
+            Self::NativeCatalog(selection) => selection.include_roots(),
+            Self::FrozenWorkspace(selection) => selection.include_roots(),
+        }
+    }
+
+    fn revalidate(&self, source: &Path) -> Result<(), CompileError> {
+        match self {
+            Self::NativeCatalog(selection) => {
+                if NativeCatalogSourceSelection::capture(&selection.snapshot_root)? != *selection
+                    || !selection.contains_source(source)
+                    || !selection
+                        .source_files
+                        .iter()
+                        .any(|file| selection.snapshot_root.join(&file.path) == source)
+                {
+                    return Err(invalid("retained original source selection changed"));
+                }
+            }
+            Self::FrozenWorkspace(selection) => {
+                if source != selection.source() {
+                    return Err(invalid("original frozen wrapper differs"));
+                }
+                selection.revalidate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Owned decoded program and complete original compiler custody. Opening this
+/// entry does not execute source, select runtime candidates, or start a compiler.
+#[derive(Debug)]
+pub struct ProductionEntryOutput {
+    prepared: Arc<PreparedProgram>,
+    table: DataConTable,
+    warnings: MetaWarnings,
+    sites: Vec<YieldSite>,
+    products: Arc<SealedTurnProducts>,
+    source: String,
+}
+
+impl ProductionEntryOutput {
+    pub fn target_owned(&self) -> Arc<PreparedProgram> {
+        Arc::clone(&self.prepared)
+    }
+    pub fn table(&self) -> &DataConTable {
+        &self.table
+    }
+    pub fn warnings(&self) -> &MetaWarnings {
+        &self.warnings
+    }
+    pub fn products(&self) -> &SealedTurnProducts {
+        &self.products
+    }
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn yield_sites(&self) -> &[YieldSite] {
+        &self.sites
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryManifest {
+    schema: u32,
+    purpose: EntryPurpose,
+    producer: [u8; 32],
+    worker: [u8; 32],
+    target: String,
+    source: PathBuf,
+    sources: ProductionEntrySources,
+    files: BTreeMap<PathBuf, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum EntryPurpose {
+    OriginalSource,
+}
+
+const MANIFEST: &str = "entry.json";
+const ENTRY_SCHEMA: u32 = 2;
+const MAX_FILES: usize = 32_768;
+const MAX_FILE_BYTES: u64 = 256 << 20;
+const MAX_CONTAINER_BYTES: u64 = 2 << 30;
+
+fn invalid(detail: impl std::fmt::Display) -> CompileError {
+    CompileError::ExtractFailed(format!("production entry: {detail}"))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").ok();
+            hex
+        })
+}
+
+/// Execute fresh source into one complete retained entry through the runtime
+/// compiler endpoint. Source replay and module candidate caches are unavailable.
+/// The caller durably establishes the output parent before requesting publication.
+pub fn prepare_frozen_production_entry(
+    sources: &FrozenEntrySources,
+    scratch: &Path,
+    output: &Path,
+) -> Result<(), CompileError> {
+    sources.revalidate()?;
+    if output.exists() || !scratch.is_dir() {
+        return Err(invalid(
+            "requires private scratch and an absent entry output",
+        ));
+    }
+    let source = std::fs::read_to_string(sources.source())?;
+    let include = sources.include_roots();
+    let invocation = CompileInvocation {
+        source: &source,
+        targets: &["__prepared"],
+        include: &include,
+        fallback_module_name: "Input",
+    };
+    compile_invocation_inner(
+        &invocation,
+        &mut |_, _, _| {},
+        CompilationPolicy::RetainedEntry {
+            source_path: sources.source(),
+            scratch,
+            output,
+            sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
+        },
+    )?;
+    Ok(())
+}
+
+/// Compile a settled entry under one declared frozen native source selection.
+/// The original source path must survive through the existing bundle retention
+/// contract. This API does not export arbitrary transient workspace sources.
+pub fn build_production_entry(
+    source: &Path,
+    source_root: &Path,
+    scratch: &Path,
+    output: &Path,
+) -> Result<(), CompileError> {
+    let selection = module_candidates::deployment::prepare_build_roots(source_root, output)?;
+    if !selection.contains_source(source)
+        || !selection
+            .source_files
+            .iter()
+            .any(|file| selection.snapshot_root.join(&file.path) == source)
+    {
+        return Err(invalid(
+            "entry source is outside the retained original source selection",
+        ));
+    }
+    validate_build_action_request(
+        source,
+        &["__prepared"],
+        &selection.include_roots(),
+        scratch,
+        output,
+    )?;
+    compile_build_action(
+        source,
+        &["__prepared"],
+        &selection.include_roots(),
+        scratch,
+        BuildActionExport::ProductionEntry {
+            output_root: output,
+            source_selection: &ProductionEntrySources::NativeCatalog(selection.clone()),
+        },
+    )
+}
+
+pub(super) fn export(
+    original: &Path,
+    output: &Path,
+    source: &Path,
+    sources: &ProductionEntrySources,
+    deployment: &AdmittedCompilerDeployment,
+    targets: &[&str],
+) -> Result<(), CompileError> {
+    if targets != ["__prepared"] || output.exists() {
+        return Err(invalid(
+            "requires one original settled target and absent output",
+        ));
+    }
+    let parent = output.parent().ok_or_else(|| invalid("output parent"))?;
+    let _parent = tidepool_atomic_write::DirectoryAnchor::open_existing(parent)
+        .map_err(|error| CompileError::Io(error.into()))?;
+    let staging = tempfile::tempdir_in(parent)?;
+    let raw = staging.path().join("raw");
+    std::fs::create_dir(&raw)?;
+    let files = inventory(original)?;
+    for relative in files.keys() {
+        let destination = raw.join(relative);
+        std::fs::create_dir_all(
+            destination
+                .parent()
+                .ok_or_else(|| invalid("artifact parent"))?,
+        )?;
+        std::fs::copy(original.join(relative), destination)?;
+    }
+    if inventory(&raw)? != files {
+        return Err(invalid("original container changed while copying"));
+    }
+    let manifest = EntryManifest {
+        schema: ENTRY_SCHEMA,
+        purpose: EntryPurpose::OriginalSource,
+        producer: deployment.producer_identity,
+        worker: deployment.consumed_worker_identity,
+        target: "__prepared".into(),
+        source: source.to_owned(),
+        sources: sources.clone(),
+        files,
+    };
+    std::fs::write(
+        staging.path().join(MANIFEST),
+        serde_json::to_vec(&manifest).map_err(invalid)?,
+    )?;
+    let CompilerDeploymentConfiguration::Configured(authority) =
+        CompilerDeploymentConfiguration::from_env().map_err(invalid)?
+    else {
+        return Err(invalid("configured compiler deployment unavailable"));
+    };
+    load_selected_production_entry(staging.path(), &authority, sources)?;
+    sync_entry_tree(staging.path())?;
+    std::fs::rename(staging.path(), output)?;
+    // A failure here means the entry is visible. Callers must inspect that
+    // completed output and retry its durability confirmation, never source.
+    tidepool_atomic_write::sync_parent_directory(output).map_err(|source| {
+        CompileError::EntryPublicationUnconfirmed {
+            path: output.to_owned(),
+            source,
+        }
+    })?;
+    Ok(())
+}
+
+fn sync_entry_tree(directory: &Path) -> Result<(), CompileError> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_entry_tree(&entry.path())?;
+        } else {
+            std::fs::File::open(entry.path())?.sync_all()?;
+        }
+    }
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+/// Validate the complete original container and issue custody through the same
+/// original-output owner used after compilation. `sources` is the caller's
+/// configured retained source selection, not an identity inferred from the file.
+pub fn load_production_entry(
+    directory: &Path,
+    authority: &CompilerDeploymentAuthority,
+    sources: &NativeCatalogSourceSelection,
+) -> Result<ProductionEntryOutput, CompileError> {
+    load_selected_production_entry(
+        directory,
+        authority,
+        &ProductionEntrySources::NativeCatalog(sources.clone()),
+    )
+}
+
+/// Open an explicitly selected completed artifact. Snapshot equality does not
+/// claim that a fresh compilation with untracked inputs would yield this output.
+pub fn load_selected_production_entry(
+    directory: &Path,
+    authority: &CompilerDeploymentAuthority,
+    sources: &ProductionEntrySources,
+) -> Result<ProductionEntryOutput, CompileError> {
+    let bytes = crate::checked_cell::read(directory.join(MANIFEST), 16 << 20)?;
+    let manifest: EntryManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
+    if manifest.schema != ENTRY_SCHEMA
+        || manifest.purpose != EntryPurpose::OriginalSource
+        || manifest.target != "__prepared"
+        || &manifest.sources != sources
+    {
+        return Err(invalid(
+            "original purpose, target or configured source selection differs",
+        ));
+    }
+    CompilerDeploymentConfiguration::Configured(authority.clone())
+        .admit(manifest.producer, manifest.worker)
+        .map_err(invalid)?;
+    sources.revalidate(&manifest.source)?;
+    let raw = directory.join("raw");
+    if inventory(&raw)? != manifest.files {
+        return Err(invalid("complete original container differs"));
+    }
+    let source = std::fs::read_to_string(&manifest.source)?;
+    let prepared = Arc::new(tidepool_repr::execution_schema::parse_program(
+        &crate::checked_cell::read(raw.join(prepared_artifact_name("__prepared")), 128 << 20)?,
+        &crate::prepared_artifact::production_requirements()?,
+        DecodeLimits::default(),
+    )?);
+    let metadata: Arc<[u8]> = crate::checked_cell::read(raw.join("meta.cbor"), 32 << 20)?.into();
+    let (table, warnings) = read_metadata(&metadata)?;
+    let sites = parse_asks(&crate::checked_cell::read(raw.join("asks.json"), 16 << 20)?)?;
+    let offer = ModuleCandidateOffer {
+        selected: None,
+        producer: manifest.producer.to_vec(),
+        include: sources.include_roots(),
+        exact: None,
+        checked_cell: None,
+        planned_cell: None,
+        checked_values: None,
+        checked_projections: Vec::new(),
+        checked: None,
+    };
+    let products = seal_turn_outputs_inner(
+        &offer,
+        &raw,
+        &manifest.source,
+        &source,
+        &prepared,
+        "__prepared",
+        Some((&table, &sites)),
+        None,
+        OriginalOutputPublication::RetainedEntry,
+    )?
+    .ok_or_else(|| invalid("original native custody unavailable"))?;
+    if products.checked.is_some() || products.original_compile_input.is_none() {
+        return Err(invalid("entry has no complete original source custody"));
+    }
+    Ok(ProductionEntryOutput {
+        prepared,
+        table,
+        warnings,
+        sites,
+        products: Arc::new(products),
+        source,
+    })
+}
+
+fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
+    if !std::fs::symlink_metadata(root)?.is_dir() {
+        return Err(invalid("container root is not a directory"));
+    }
+    let mut remaining = vec![root.to_owned()];
+    let mut files = BTreeMap::new();
+    let mut total = 0u64;
+    while let Some(directory) = remaining.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                remaining.push(path);
+                continue;
+            }
+            if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
+                return Err(invalid(
+                    "container contains an alias, special file or oversized artifact",
+                ));
+            }
+            total = total
+                .checked_add(metadata.len())
+                .ok_or_else(|| invalid("container bound"))?;
+            if total > MAX_CONTAINER_BYTES || files.len() >= MAX_FILES {
+                return Err(invalid("container bound"));
+            }
+            let relative = path.strip_prefix(root).map_err(invalid)?.to_owned();
+            files.insert(
+                relative,
+                format!("{:x}", Sha256::digest(std::fs::read(&path)?)),
+            );
+        }
+    }
+    Ok(files)
+}
