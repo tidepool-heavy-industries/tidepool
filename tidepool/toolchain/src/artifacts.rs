@@ -2320,6 +2320,7 @@ pub struct SealedTurnProducts {
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub(crate) retained_core_products: certified_products::CertifiedRetainedCoreProducts,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
     pub checked: Option<CheckedNativeProof>,
 }
@@ -2714,6 +2715,7 @@ fn seal_turn_outputs_inner(
         certified_groups,
         pending_imports,
         recovery_products: certified.recovery_products,
+        retained_core_products: certified.retained_core_products,
         package_interfaces,
     }))
 }

@@ -718,8 +718,10 @@ pub(crate) fn certify_same_offer_planned_declaration(
         unit: candidates[0].unit.clone(),
         module: module_name,
     };
-    // Later whole-check modules are transient consumers, not original owners.
-    // Retain only the original graph and its already admitted baseline closure.
+    // Keep the original graph, its admitted baseline, and native originals
+    // promoted from that request's retained canonical Core. Promotions have no
+    // fresh source row or prior native owner; their issuer's packet retains
+    // the exact newly certified product.
     let products = sealed
         .recovery_products
         .iter()
@@ -733,7 +735,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
                     .recovery_products()
                     .iter()
                     .any(|retained| retained.owner() == product.owner())
-            })
+            }) || sealed.retained_core_products.contains_original(product)
         })
         .cloned()
         .collect::<Vec<_>>();

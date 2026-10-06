@@ -277,12 +277,28 @@ pub(crate) struct CertifiedProducts {
 
 /// Assembly authority issued only after complete native promotion certification.
 /// Empty values carry no authority; the nonempty inventory remains private.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct CertifiedRetainedCoreProducts {
     products: BTreeMap<(String, String), crate::recovery_artifacts::CertifiedRecoveryProduct>,
 }
 
 impl CertifiedRetainedCoreProducts {
+    pub(crate) fn contains_original(
+        &self,
+        original: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    ) -> bool {
+        self.products
+            .get(&(
+                original.owner().unit.clone(),
+                original.owner().module.clone(),
+            ))
+            .is_some_and(|admitted| {
+                admitted
+                    .original_native()
+                    .is_some_and(|native| native.matches_original(original))
+            })
+    }
+
     pub(crate) fn matches_emitted(&self, emitted: &RawModuleProduct) -> Option<bool> {
         let product = self
             .products
@@ -6038,6 +6054,30 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn retained_core_selection_requires_exact_certified_original() {
+        let packages = BTreeMap::new();
+        let fixture = original_witness_fixture("Original", None, 7, &packages);
+        let original = recovered_witness_fixtures(std::slice::from_ref(&fixture))
+            .remove(0)
+            .product;
+        let packet = CertifiedRetainedCoreProducts {
+            products: BTreeMap::from([(
+                (
+                    original.owner().unit.clone(),
+                    original.owner().module.clone(),
+                ),
+                original.clone(),
+            )]),
+        };
+        assert!(packet.contains_original(&original.clone()));
+        assert!(!CertifiedRetainedCoreProducts::default().contains_original(&original));
+        let recaptured = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        assert_eq!(recaptured.owner(), original.owner());
+        assert_eq!(recaptured.product_bytes(), original.product_bytes());
+        assert!(!packet.contains_original(&recaptured));
     }
 
     #[test]
