@@ -1415,28 +1415,35 @@ impl ExactCompilationRequest {
         {
             return Err(failure("program context has another producer"));
         }
-        // This request already owns authenticated materializations for its
-        // baseline context. A later item adds immutable entries, while output
-        // admission still revalidates the full consumed files for tampering.
-        let baseline_ids = self
-            .context
-            .artifact_view()
-            .artifact_ids()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let current_entries = context.artifact_view().entries();
-        let current_ids = current_entries
-            .iter()
-            .map(|entry| entry.descriptor.id)
-            .collect::<BTreeSet<_>>();
+        // Inventory custody grows by immutable artifact ID, but materialized
+        // inputs follow its selected owner projection. An original product can
+        // become available for an already retained canonical interface.
+        let baseline = self.context.inventory.metadata_snapshot();
+        let current = context.inventory.metadata_snapshot();
+        baseline.validate_native_selection()?;
+        current.validate_native_selection()?;
+        let baseline_ids = baseline.artifacts.keys().copied().collect::<BTreeSet<_>>();
+        let current_ids = current.artifacts.keys().copied().collect::<BTreeSet<_>>();
         if !baseline_ids.is_subset(&current_ids) {
             return Err(failure("program context removed an admitted artifact"));
         }
-        let new_entries = current_entries
-            .iter()
+        let new_entries = current
+            .entries
+            .values()
             .filter(|entry| !baseline_ids.contains(&entry.descriptor.id))
             .cloned()
             .collect::<Vec<_>>();
+        let replaced_owners = new_entries
+            .iter()
+            .filter(|entry| baseline.entries.contains_key(&entry.descriptor.owner))
+            .map(|entry| entry.descriptor.owner.clone())
+            .collect::<BTreeSet<_>>();
+        if !replaced_owners.is_empty() {
+            // Displaced paths were consumed by earlier segments. Validate them
+            // before replacing their rows so promotion cannot hide tampering.
+            self.context
+                .validate_artifacts_from_metadata(&self.artifacts, &baseline)?;
+        }
         let delta_bytes = materialization_bytes(&new_entries);
         if !new_entries.is_empty() {
             std::fs::create_dir_all(root)?;
@@ -1456,9 +1463,17 @@ impl ExactCompilationRequest {
             delta_start.elapsed(),
             delta_bytes,
         );
-        materialized
-            .artifacts
-            .extend(self.artifacts.iter().cloned());
+        materialized.artifacts.extend(
+            self.artifacts
+                .iter()
+                .filter(|artifact| {
+                    !replaced_owners.contains(&identity(
+                        &artifact.interface.unit,
+                        &artifact.interface.module,
+                    ))
+                })
+                .cloned(),
+        );
         let certify_start = std::time::Instant::now();
         let products = new_entries
             .iter()
@@ -1467,6 +1482,7 @@ impl ExactCompilationRequest {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let current_entries = current.artifacts.values().cloned().collect::<Vec<_>>();
         let available = original_products(&current_entries);
         let additional = certify_owned_products_in_context_with_validation(
             &products,
@@ -5818,6 +5834,133 @@ mod tests {
             .validate_artifacts(&effective.artifacts)
             .is_err());
     }
+    #[test]
+    fn program_context_promotes_canonical_owner_without_duplicate_materialization() {
+        let product = support_product("Support");
+        let unchanged = support_product("Unchanged");
+        let inventory = ArtifactInventory::default();
+        let interfaces = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![
+                    ArtifactEntry::canonical(product.module_interface().unwrap().clone()),
+                    ArtifactEntry::canonical(unchanged.module_interface().unwrap().clone()),
+                ],
+            )
+            .unwrap();
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces([2; 32], &interfaces).unwrap(),
+        );
+        let context = Arc::new(
+            baseline
+                .as_ref()
+                .clone()
+                .extend_checked_original_products([2; 32], &[product])
+                .unwrap(),
+        );
+        assert_eq!(
+            context.artifact_view().artifact_ids().len(),
+            baseline.artifact_view().artifact_ids().len() + 1,
+            "promotion retains the canonical carrier and adds its original product"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompilationRequest {
+            artifacts: baseline.materialize_scratch(&directory).unwrap().artifacts,
+            context: baseline,
+            manifest: directory.path().join("scope"),
+            request_sha256: String::new(),
+            semantic_sha256: [1; 32],
+            producer_sha256: [2; 32],
+            groups: Arc::from([]),
+            program_support: None,
+            program_source_lexical: Vec::new(),
+            source_selected_support: BTreeSet::new(),
+            source_search_include: None,
+            checked_value_imports: Default::default(),
+            generated_scaffold_imports: Vec::new(),
+        };
+        let support = request
+            .artifacts
+            .iter()
+            .position(|artifact| artifact.interface.module == "Support")
+            .unwrap();
+        let old_path = &request.artifacts[support].interface.path;
+        let old_bytes = std::fs::read(old_path).unwrap();
+        let root = directory.path().join("program-inputs");
+        std::fs::write(old_path, b"tampered").unwrap();
+        assert!(request.in_program_context(&root, context.clone()).is_err());
+        assert!(
+            !root.exists(),
+            "displaced consumed bytes are checked before writing"
+        );
+        std::fs::write(old_path, old_bytes).unwrap();
+        let mut duplicate = request.clone();
+        duplicate.artifacts.push(request.artifacts[support].clone());
+        assert!(duplicate
+            .in_program_context(&root, context.clone())
+            .is_err());
+        let mut relative = request.clone();
+        relative.artifacts[support].interface.path = PathBuf::from("relative.hi");
+        assert!(relative.in_program_context(&root, context.clone()).is_err());
+
+        let effective = request.in_program_context(&root, context.clone()).unwrap();
+        assert_eq!(effective.artifacts.len(), 2);
+        let promoted = effective
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "Support")
+            .unwrap();
+        assert!(promoted.product.is_some());
+        assert_ne!(&promoted.interface.path, old_path);
+        let unchanged_path = |artifacts: &[DeclarationArtifact]| {
+            artifacts
+                .iter()
+                .find(|artifact| artifact.interface.module == "Unchanged")
+                .unwrap()
+                .interface
+                .path
+                .clone()
+        };
+        assert_eq!(
+            unchanged_path(&effective.artifacts),
+            unchanged_path(&request.artifacts)
+        );
+        context.validate_artifacts(&effective.artifacts).unwrap();
+        let recomputed_directory = tempfile::tempdir().unwrap();
+        let recomputed = context.materialize_scratch(&recomputed_directory).unwrap();
+        let selections = |artifacts: &[DeclarationArtifact]| {
+            artifacts
+                .iter()
+                .map(|artifact| {
+                    (
+                        identity(&artifact.interface.unit, &artifact.interface.module),
+                        (
+                            artifact.interface.sha256.clone(),
+                            artifact.interface.requirements.clone(),
+                            artifact
+                                .product
+                                .as_ref()
+                                .map(|product| product.sha256.clone()),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            selections(&effective.artifacts),
+            selections(&recomputed.artifacts)
+        );
+        let repeated_root = directory.path().join("unchanged-inputs");
+        let repeated = effective
+            .in_program_context(&repeated_root, context.clone())
+            .unwrap();
+        assert!(!repeated_root.exists());
+        assert_eq!(repeated.artifacts.len(), 2);
+        context.validate_artifacts(&repeated.artifacts).unwrap();
+        std::fs::write(&promoted.product.as_ref().unwrap().path, b"tampered").unwrap();
+        assert!(context.validate_artifacts(&repeated.artifacts).is_err());
+    }
+
     #[test]
     fn unchanged_program_context_reuses_materialization_but_admission_checks_tampering() {
         let owner = CachedHomeOwner {
