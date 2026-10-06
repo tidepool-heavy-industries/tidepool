@@ -5620,6 +5620,37 @@ pub(crate) mod tests {
         let bytes = vec![0x42; 131_073];
         std::fs::write(&path, &bytes).unwrap();
         let producer = [2; 32];
+        let package_binder = SymbolIdentity {
+            unit: "package-unit".into(),
+            module: "Package.Module".into(),
+            namespace: "value".into(),
+            occurrence: "packageValue".into(),
+            record_parent: None,
+        };
+        let package_program = |module: &str| {
+            use tidepool_repr::execution_schema::{
+                Atom, ExprFrame, GlobalId, Group, SignatureId, ValueRef,
+            };
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(binding) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            binding.identity.unit = "home-unit".into();
+            binding.identity.module = module.into();
+            wire.globals.push(GlobalDecl {
+                identity: package_binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
+                required_evaluated: false,
+                required_generation: None,
+            });
+            wire.expressions.nodes[0] = ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                signature: SignatureId(0),
+                arguments: Vec::new(),
+            };
+            wire
+        };
         let make_products = |names: &[String]| {
             let packages = BTreeMap::from([(
                 ("package-unit".into(), "Package.Module".into()),
@@ -5639,25 +5670,64 @@ pub(crate) mod tests {
                         BTreeMap::new(),
                         Some(&path),
                     );
+                    let group =
+                        Arc::new(testing::projected_group(package_program(name), 7).unwrap());
+                    let mut product_bytes = Vec::new();
+                    ciborium::ser::into_writer(
+                        &value_array([
+                            value_text("TPMOD"),
+                            Value::Integer(1.into()),
+                            value_array([value_array([
+                                value_text("home-unit"),
+                                value_text(name),
+                                Value::Bytes(interface.interface_bytes().to_vec()),
+                                value_array([Value::Bytes(
+                                    tidepool_test_data::prepared_encode::encode_projected_group(
+                                        &group,
+                                    ),
+                                )]),
+                            ])]),
+                        ]),
+                        &mut product_bytes,
+                    )
+                    .unwrap();
                     let owner = CachedHomeOwner {
                         unit: "home-unit".into(),
                         module: name.clone(),
                         module_version: ModuleVersion([1; 32]),
                         skinny_iface_sha256: interface.interface_sha256(),
-                        product_sha256: sha(name.as_bytes()),
+                        product_sha256: sha(&product_bytes),
+                    };
+                    let group = PendingCertifiedGroup {
+                        owner: owner.clone(),
+                        origin: ProductOrigin::Fresh,
+                        group,
+                        imports: vec![PendingImportOwner::Package {
+                            unit: package_binder.unit.clone(),
+                            module: package_binder.module.clone(),
+                            binder: package_binder.clone(),
+                            interface_digest: packages
+                                [&(package_binder.unit.clone(), package_binder.module.clone())]
+                                .sha256,
+                        }]
+                        .into(),
                     };
                     let certification = encode_home_certification_with_module(
                         &owner,
-                        &[],
+                        &[group],
                         &packages,
                         interface.requirements(),
                         sha(interface.certificate_bytes()),
                     )
                     .unwrap();
+                    let witness = decode_home_witness(&certification).unwrap();
+                    assert_eq!(witness.packages, packages);
+                    assert_eq!(witness.groups.len(), 1);
+                    assert_eq!(witness.groups[0].2.len(), 1);
                     crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
                         owner,
-                        name.as_bytes().to_vec(),
-                        name.as_bytes().to_vec(),
+                        interface.interface_bytes().to_vec(),
+                        product_bytes,
                         interface.package_imports_bytes().to_vec(),
                         certification,
                     )
@@ -5669,7 +5739,7 @@ pub(crate) mod tests {
         };
         let names = (0..17).map(|i| format!("Home{i}")).collect::<Vec<_>>();
         let (products, packages) = make_products(&names);
-        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let target = Arc::new(testing::prepare(package_program("Target")).unwrap());
         let observed = crate::recovery_artifacts::package_interface_io;
         let before = observed();
         let mut admission = PackageInterfaceValidation::default();
@@ -5724,6 +5794,19 @@ pub(crate) mod tests {
             )
             .is_err(),
             "a captured path does not confer another producer's authority"
+        );
+
+        // The former per-original validation shape rereads this same demanded
+        // package seventeen times. Shared admission must remain sensitive to it.
+        let before = observed();
+        for product in &products {
+            crate::artifact_inventory::ArtifactEntry::original(producer, product.clone()).unwrap();
+        }
+        let after = observed();
+        assert_eq!(after.0 - before.0, products.len() as u64);
+        assert_eq!(
+            after.1 - before.1,
+            products.len() as u64 * bytes.len() as u64
         );
 
         // Another admission must really open/read even unchanged package bytes.
