@@ -5672,25 +5672,15 @@ pub(crate) mod tests {
                     );
                     let group =
                         Arc::new(testing::projected_group(package_program(name), 7).unwrap());
-                    let mut product_bytes = Vec::new();
-                    ciborium::ser::into_writer(
-                        &value_array([
-                            value_text("TPMOD"),
-                            Value::Integer(1.into()),
-                            value_array([value_array([
-                                value_text("home-unit"),
-                                value_text(name),
-                                Value::Bytes(interface.interface_bytes().to_vec()),
-                                value_array([Value::Bytes(
-                                    tidepool_test_data::prepared_encode::encode_projected_group(
-                                        &group,
-                                    ),
-                                )]),
-                            ])]),
-                        ]),
-                        &mut product_bytes,
-                    )
-                    .unwrap();
+                    let product_bytes =
+                        tidepool_test_data::prepared_encode::encode_module_products(&[
+                            RawModuleProduct {
+                                unit: "home-unit".into(),
+                                module: name.clone(),
+                                interface: interface.interface_bytes().to_vec(),
+                                groups: vec![group.as_ref().clone()],
+                            },
+                        ]);
                     let owner = CachedHomeOwner {
                         unit: "home-unit".into(),
                         module: name.clone(),

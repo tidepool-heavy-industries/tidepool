@@ -1301,6 +1301,10 @@ fn parse_projected_group_with_budget(
     })
 }
 
+/// Version of the module-product envelope; group payloads retain their own
+/// current prepared schema and execution ABI.
+pub const MODULE_PRODUCTS_VERSION: u64 = 1;
+
 /// One source module's skinny GHC interface and entry-free definitions as
 /// emitted by a single compiler transaction. This is not cache admission:
 /// the toolchain must still attach complete graph evidence and exact owners.
@@ -1337,9 +1341,10 @@ pub fn parse_module_products_with_framing(
             // Reserve this row's items and payload copies before framing allocates.
             budget.charge(framing_work)?;
             let mut singleton = Vec::new();
-            ciborium::ser::into_writer(&("TPMOD", 1u64, [row]), &mut singleton).map_err(
-                |error| ParseError::Malformed(format!("module product framing: {error}")),
-            )?;
+            ciborium::ser::into_writer(&("TPMOD", MODULE_PRODUCTS_VERSION, [row]), &mut singleton)
+                .map_err(|error| {
+                    ParseError::Malformed(format!("module product framing: {error}"))
+                })?;
             if singleton.len() > limits.max_bytes {
                 return Err(ParseError::LimitExceeded("module product framing"));
             }
@@ -1369,7 +1374,7 @@ fn parse_module_products_inner(
     };
     if header.len() != 3
         || header[0] != Value::Text("TPMOD".into())
-        || header[1] != Value::Integer(1.into())
+        || header[1] != Value::Integer(MODULE_PRODUCTS_VERSION.into())
     {
         return Err(ParseError::Malformed(
             "unsupported module products header".into(),

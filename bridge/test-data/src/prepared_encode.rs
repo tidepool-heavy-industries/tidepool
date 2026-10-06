@@ -65,6 +65,29 @@ pub fn encode_wire_program(wire: &WireProgram) -> Vec<u8> {
     bytes(&a(fields))
 }
 
+/// Encode current typed module products without issuing compiler evidence.
+/// Group payloads use the same current prepared codec as standalone fixtures.
+pub fn encode_module_products(products: &[RawModuleProduct]) -> Vec<u8> {
+    bytes(&a([
+        s("TPMOD"),
+        n(MODULE_PRODUCTS_VERSION),
+        list(products, |product| {
+            let RawModuleProduct {
+                unit,
+                module,
+                interface,
+                groups,
+            } = product;
+            a([
+                s(unit),
+                s(module),
+                Value::Bytes(interface.clone()),
+                list(groups, |group| Value::Bytes(encode_projected_group(group))),
+            ])
+        }),
+    ]))
+}
+
 /// Encode an entry-free group; its existing typed validation is independent of
 /// compiler provenance, which only the production toolchain can supply.
 pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
@@ -889,6 +912,21 @@ mod tests {
             )
             .unwrap(),
             expected
+        );
+        let products = vec![RawModuleProduct {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            interface: vec![0x42],
+            groups: vec![expected],
+        }];
+        assert_eq!(
+            parse_module_products(
+                &encode_module_products(&products),
+                &requirements,
+                DecodeLimits::default(),
+            )
+            .unwrap(),
+            products,
         );
     }
 }
