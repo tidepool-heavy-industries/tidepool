@@ -394,7 +394,7 @@ pub fn load_selected_production_entry(
     )?);
     let metadata: Arc<[u8]> = crate::checked_cell::read(raw.join("meta.cbor"), 32 << 20)?.into();
     let (table, warnings) = read_metadata(&metadata)?;
-    let sites = parse_asks(&crate::checked_cell::read(raw.join("asks.json"), 16 << 20)?)?;
+    let sites = parse_asks(&crate::checked_cell::read(raw.join("asks.json"), 16 << 20)?)?.sites();
     let offer = ModuleCandidateOffer {
         selected: None,
         producer: manifest.producer.to_vec(),
