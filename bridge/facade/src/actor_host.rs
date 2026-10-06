@@ -2642,7 +2642,6 @@ fn legacy_has_meaningful_state(root: &Path) -> Result<bool, exomonad_worktree::W
     Ok(false)
 }
 
-#[cfg(test)]
 fn actor_worktree_resources_at(
     directory: &tidepool_atomic_write::DirectoryAnchor,
     workspace: &Path,

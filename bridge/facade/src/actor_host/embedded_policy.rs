@@ -4,7 +4,7 @@ use harness::finalize::FunctionToolSchema;
 
 use exomonad_actor::{
     ActorRef, HostedCheckpointCapture, HostedContextBinding, LocalResidentInstallation,
-    ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+    ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
 };
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use serde_json::{json, Value};
@@ -246,6 +246,7 @@ fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exomonad_actor::ResidentToolDispatchFuture;
     use exomonad_tool::{CustomToolDeclaration, ToolDeclaration, ToolKind};
     use std::future::ready;
 
