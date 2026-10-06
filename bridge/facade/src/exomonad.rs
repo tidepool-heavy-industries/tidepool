@@ -1004,7 +1004,7 @@ pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::
             frozen.clone(),
             workspace.clone(),
             directory.path().to_owned(),
-            frozen.runtime_stdlib(),
+            frozen.runtime_actors(),
             source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
         )?);
         let entries = crate::actor_host::prepare_workspace_toolsets(
@@ -1018,11 +1018,11 @@ pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::
             .read_active()?
             .ok_or("workspace preparation did not settle its original source revision")?;
         frozen.complete_preparation(&directory, revision.identity, entries)?;
+    } else {
+        // A retry finishes partial sealing before publishing a default pointer.
+        frozen.seal_preparation(&directory)?;
     }
-    let pointer = workspace::PreparedWorkspacePointer {
-        version: 1,
-        directory: directory.path().to_owned(),
-    };
+    let pointer = workspace::PreparedWorkspacePointer::for_directory(directory.path())?;
     tidepool_atomic_write::write_durable(
         &workspace.join(".exomonad/prepared.json"),
         &serde_json::to_vec_pretty(&pointer)?,

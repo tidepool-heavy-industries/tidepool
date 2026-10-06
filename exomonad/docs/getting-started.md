@@ -200,6 +200,9 @@ Preparation records the selected deployment in
 given. Each run retains its own pointer to the original deployment. Changing
 workspace configuration, prompts or source makes the deployment stale, and
 init refuses it; prepare a new deployment for the changed workspace.
+The version 2 pointer pins the exact completed selection bytes. Editing or
+removing that selection causes refusal before actor admission. Older pointer
+formats require running `prepare` again to publish a current pointer.
 
 ## `exomonad init`: start a run
 
