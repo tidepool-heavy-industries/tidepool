@@ -63,6 +63,39 @@ def check_running(out, deadline):
         raise TimeoutError("bounded campaign deadline expired")
 
 
+def settle_compiler_owner(owner, output, environment, grace=90):
+    if owner is None:
+        return None
+    try:
+        return {"exit_code": owner.wait(timeout=grace), "forced_kill": False}
+    except subprocess.TimeoutExpired:
+        pass
+    # Ask the existing private daemon owner to STOP before killing its frontend.
+    # Its lifecycle receipt was written by that exact selected frontend; never
+    # discover or address another session's socket.
+    control = {"status": "unavailable"}
+    try:
+        receipt = json.loads((output / "compiler/lifecycle.json").read_text())
+        socket = receipt["socket_path"]
+        if not isinstance(socket, str) or not Path(socket).is_absolute():
+            raise ValueError("private lifecycle socket is not absolute")
+        argv = [environment["TIDEPOOL_EXTRACT"], "--stop-daemon", "--socket", socket]
+        result = subprocess.run(argv, env=environment, timeout=30, capture_output=True)
+        control = {"argv": argv, "exit_code": result.returncode,
+                   "stdout": result.stdout.decode(errors="replace"),
+                   "stderr": result.stderr.decode(errors="replace")}
+        code = owner.wait(timeout=30)
+        return {"exit_code": code, "forced_kill": False, "stop_control": control}
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        control["error"] = str(error)
+    row = settle(owner, grace=5, stop=True)
+    # Both frontend children already use the crate's parent-death constructor.
+    # This fallback settles the process chain but cannot claim acknowledged
+    # compiler cleanup; the actual lifecycle receipt remains authoritative.
+    row.update(owner_forced_termination=True, stop_control=control)
+    return row
+
+
 class Trace:
     """Incrementally observe complete lines, retaining only request envelopes."""
 
@@ -252,7 +285,10 @@ def inside(plan):
             # The counted runner's existing SIGTERM handler stops its delegated
             # service/process groups. Do not terminate the compiler frontend:
             # it must observe this child exit and acknowledge STOP/reap itself.
-            save(out / "foreground-settlement.json", settle(foreground, grace=30, stop=True))
+            receipt = settle(foreground, grace=30, stop=True)
+            save(out / "foreground-settlement.json", receipt)
+            if receipt["forced_kill"]:
+                raise ValueError("counted runner forced settlement; native acceptance refused")
     return 0
 
 
@@ -367,14 +403,16 @@ def main():
                                          ("source_observer", source_observer, 10),
                                          ("resource_observer", observer, 5)):
                 try:
-                    settlement[name] = settle(process, grace=grace)
+                    settlement[name] = (settle_compiler_owner(process, output, env, grace)
+                                        if name == "owner" else settle(process, grace=grace))
                 except BaseException as error:
                     settlement[name] = {"error": f"{type(error).__name__}: {error}"}
         finally:
             signal.signal(signal.SIGINT, old_int)
             signal.signal(signal.SIGTERM, old_term)
             save(output / "process-settlement.json", settlement)
-    if failure or any(row and (row.get("forced_kill") or row.get("error") or row.get("exit_code", 0) != 0)
+    if failure or any(row and (row.get("forced_kill") or row.get("owner_forced_termination")
+                              or row.get("error") or row.get("exit_code", 0) != 0)
                       for row in settlement.values()):
         receipt = None
         try:
