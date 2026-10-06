@@ -76,6 +76,8 @@ def settle_compiler_owner(owner, output, environment, grace=90):
     control = {"status": "unavailable"}
     try:
         receipt = json.loads((output / "compiler/lifecycle.json").read_text())
+        if not isinstance(receipt, dict):
+            raise ValueError("private lifecycle receipt is not an object")
         socket = receipt["socket_path"]
         if not isinstance(socket, str) or not Path(socket).is_absolute():
             raise ValueError("private lifecycle socket is not absolute")
