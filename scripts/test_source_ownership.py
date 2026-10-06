@@ -71,6 +71,8 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs',
         'tidepool/runtime/src/session/fixtures/provenance-shared-request-producer.hs',
         'tidepool/runtime/src/session/fixtures/provenance-shared-request-receiver.hs',
+        'tidepool/runtime/src/session/fixtures/resident-receive-value.hs',
+        'tidepool/runtime/src/session/fixtures/resident-receive-value-runner.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs',
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',

@@ -1071,6 +1071,199 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
 }
 
 #[test]
+fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() {
+    use tidepool_repr::execution_schema::SiteDelivery;
+
+    fn fresh(session: SessionId, root: &tempfile::TempDir, recipe: &InputRecipe) -> TestSession {
+        let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(recipe.include.clone());
+        let mut resident = TestSession::unbootstrapped(
+            frunk::HNil,
+            EmptyOutput,
+            crate::DEFAULT_NURSERY_SIZE,
+            Some(library),
+        );
+        resident
+            .set_actor_execution(
+                SessionRunContext::ROOT,
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        resident
+    }
+
+    tidepool_testing::eval_harness::require_extract();
+    let surface = TestEffectSurface::minimal(&[tidepool_mcp::actor_local_decl()]).unwrap();
+    let recipe = InputRecipe {
+        preamble: insert_preamble_imports(
+            surface.preamble(),
+            "qualified Tidepool.Aeson.Value as Json",
+        ),
+        row: surface.row().into(),
+        include: surface.include_paths().to_vec(),
+    };
+    let source_root = tempfile::tempdir().unwrap();
+    let mut source = fresh(SessionId(1791), &source_root, &recipe);
+    let source_view = source.compile_view_in(ScopeId::ROOT).unwrap();
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = compile_turn(
+        &source_view,
+        &recipe,
+        include_str!("fixtures/resident-receive-value.hs"),
+        &[],
+    )
+    else {
+        panic!("the genuine Eff value must compile as a binding");
+    };
+    let [binder] = bound.as_slice() else {
+        panic!("the producer must bind one Eff value");
+    };
+    let site = compiled
+        .prepared
+        .sites()
+        .iter()
+        .find(|site| site.delivery == SiteDelivery::LiveReentry)
+        .expect("GHC issues a typed receive site")
+        .clone();
+    assert!(matches!(
+        source
+            .run_bind_with_sites(
+                "evaluatedReceiveValue",
+                compiled.code(),
+                binder,
+                source_view.next_value_generation(),
+            )
+            .unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    let custody = source
+        .retain_binding_custody("heldRequest")
+        .unwrap()
+        .unwrap();
+    let original = Arc::clone(&custody.provenance);
+    assert!(original.sites.contains_key(&site.site));
+
+    // The receiver compiles only an identity runner and the live answer. It
+    // has never executed or installed the producer's request definition.
+    let receiver_root = tempfile::tempdir().unwrap();
+    let mut receiver = fresh(SessionId(1792), &receiver_root, &recipe);
+    let receiver_view = receiver.compile_view_in(ScopeId::ROOT).unwrap();
+    let TurnResult::Bind {
+        bound,
+        compiled: runner,
+        ..
+    } = compile_turn(
+        &receiver_view,
+        &recipe,
+        include_str!("fixtures/resident-receive-value-runner.hs"),
+        &[],
+    )
+    else {
+        panic!("the receiver must compile its real runner and answer bindings");
+    };
+    assert!(runner.asks.is_empty());
+    assert!(runner.prepared.sites().is_empty());
+    assert!(matches!(
+        receiver
+            .run_projected_bind_with_sites(
+                "receiveValueRunner",
+                runner.code(),
+                &bound,
+                receiver_view.next_value_generation(),
+            )
+            .unwrap(),
+        ResidentOutcome::BindingsCommitted { .. }
+    ));
+
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    let source_handles = source.value_handle_count();
+    let parcel = source.export_custody(custody).unwrap();
+    assert_eq!(source.value_handle_count(), source_handles - 1);
+    assert!(Arc::ptr_eq(&parcel.provenance, &original));
+    let images = parcel
+        .native
+        .images()
+        .iter()
+        .map(|image| Arc::downgrade(&image.image))
+        .collect::<Vec<_>>();
+    let emitting_images = parcel
+        .native
+        .images()
+        .iter()
+        .filter(|image| {
+            image
+                .image
+                .definition_facts()
+                .sites
+                .iter()
+                .any(|row| row == &site)
+        })
+        .count();
+    // This census observes the production exporter. An Eff continuation or
+    // static binding may retain code; no image is removed to force a data-only case.
+    eprintln!(
+        "receive custody parcel: images={}, emitting_images={emitting_images}, bytes={}",
+        images.len(),
+        parcel.bytes()
+    );
+    drop(compiled);
+    drop(source);
+    drop(source_root);
+    assert!(images.iter().all(|image| image.upgrade().is_some()));
+
+    let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+    assert!(Arc::ptr_eq(&imported.provenance, &original));
+    let runner = receiver
+        .retain_binding_custody("runRequestValue")
+        .unwrap()
+        .unwrap();
+    let hole = suspended(
+        receiver
+            .run_rooted_application(
+                "importedReceiveValue",
+                &runner,
+                &imported,
+                RealmId::ROOT,
+                None,
+            )
+            .expect("the production custody importer admits the original typed request"),
+    );
+    assert_eq!(parked_site(&mut receiver, &hole), site.site);
+    let parked = receiver.parked_program_provenance(&hole).unwrap();
+    assert!(parked.sites[&site.site].same_metadata(&original.sites[&site.site]));
+    assert_eq!(receiver.parked_count(), 1);
+    assert_eq!(receiver.stowed_roots_count(), 1);
+    assert!(matches!(
+        receiver.resume_classified(hole.clone(), serde_json::json!("custody reply")),
+        Err(ResidentResumeError::Rejected(ResidentError::Prepared(
+            PreparedRuntimeError::AnswerDelivery {
+                delivery: SiteDelivery::LiveReentry,
+                ..
+            }
+        )))
+    ));
+    assert_eq!(receiver.parked_holes(), vec![hole.cont_id()]);
+    let answer = receiver
+        .retain_binding_custody("custodyAnswer")
+        .unwrap()
+        .unwrap();
+    let ResidentOutcome::Completed { result, .. } = receiver.resume_handle(hole, answer).unwrap()
+    else {
+        panic!("the genuine typed live answer must complete the receive value");
+    };
+    assert_eq!(result.to_json(), serde_json::json!("custody reply"));
+    assert!(receiver.parked_holes().is_empty());
+    assert_eq!(receiver.stowed_roots_count(), 0);
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
+    assert!(receiver.discard_custody(imported));
+    assert!(receiver.discard_custody(runner));
+    assert_eq!(receiver.outstanding_custody(), 0);
+}
+
+#[test]
 fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let fixture = InputFixture::compile(
         include_str!("fixtures/activation-input-function.hs"),
