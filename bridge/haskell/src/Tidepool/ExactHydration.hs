@@ -90,7 +90,7 @@ import Language.Haskell.Syntax (HsModule(..))
 import GHC.Hs (ImportDecl(..), ImportDeclQualifiedStyle(..))
 import GHC.Unit.Module.Deps (dep_orphs, dep_finsts)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
-import GHC.Unit.Types (GenWithIsBoot(..), UnitId)
+import GHC.Unit.Types (GenWithIsBoot(..), InstalledModuleWithIsBoot, UnitId)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprintByteString, fingerprintString)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts)
@@ -547,8 +547,9 @@ forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env 
   eps <- ExternalUnitCache <$> (eucEPS (ue_eps (hsc_unit_env env)) >>= newIORef)
   localFinder <- initFinderCache
   let homeUnits = Set.union packageHomes (hsc_all_home_unit_ids env)
+      selected :: InstalledModuleWithIsBoot -> FinderCache
       selected (GWIB owner _)
-        | toUnitId (moduleUnit owner) `Set.member` homeUnits = localFinder
+        | moduleUnit owner `Set.member` homeUnits = localFinder
         | otherwise = packages
       finder = localFinder
         { lookupFinderCache = \key -> lookupFinderCache (selected key) key
