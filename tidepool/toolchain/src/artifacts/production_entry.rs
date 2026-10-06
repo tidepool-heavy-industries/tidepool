@@ -66,6 +66,20 @@ impl FrozenEntrySources {
     pub fn source(&self) -> &Path {
         &self.source
     }
+
+    /// Apply the existing ordered-root identity to these actual observations.
+    /// This comparison does not issue compiler custody or source replay rights.
+    pub fn source_revision(&self, domain: &[u8]) -> Result<String, CompileError> {
+        let manifests = self
+            .roots
+            .iter()
+            .map(|root| {
+                crate::cache::SourceRootManifest::from_file_digests(root.files.iter().cloned())
+                    .map_err(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::cache::source_manifests_identity(domain, &manifests))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

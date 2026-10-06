@@ -12,8 +12,12 @@ use tidepool_runtime::session::{
 
 use super::ResolvedSpec;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub(crate) struct InstallerRecipe {
+    /// In-memory coalescing retains the exact issuer and source selection.
+    /// Durable addresses are independent of a fresh run's issuer identity.
+    #[serde(skip)]
+    pub(crate) source_authority: [u8; 32],
     pub(crate) source_revision: String,
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) preamble: String,
@@ -27,6 +31,7 @@ pub(crate) struct PreparedToolset {
     pub(crate) entry_name: String,
     pub(crate) resolved: ResolvedSpec,
     pub(crate) source_revision: String,
+    pub(crate) completed_selection: Option<(String, uuid::Uuid)>,
     /// Retains the published source owner for the complete installer lifetime.
     _source: crate::CheckpointSourceLayer,
     /// Nominal owners include producer and original canonical interface identity.
@@ -80,6 +85,8 @@ fn nominal_artifacts(
 
 #[derive(Clone)]
 pub(crate) enum PreparationFailure {
+    AbsentSelection { recipe: String },
+    Admission(Arc<crate::ResidentActorWorkbenchError>),
     Source(String),
     Compiler(tidepool_toolchain::failclass::FailureEnvelope),
     Native(String),
@@ -149,6 +156,30 @@ impl ToolsetPreparation {
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let (task, launch) = self.lookup(&recipe);
         if launch {
+            let completed_original = matches!(
+                source.prepared_entries(),
+                Some(crate::SourceEntryStorage::CompletedOriginal { .. })
+            );
+            let compiler_work = if completed_original {
+                None
+            } else {
+                let admitted = crate::resident_workbench::CompilerCloseOwner::current()
+                    .and_then(|owner| owner.register_work());
+                match admitted {
+                    Ok(ticket) => Some((
+                        ticket,
+                        tidepool_runtime::CompilerTransactionCancellation::new(),
+                    )),
+                    Err(error) => {
+                        self.settle(
+                            recipe,
+                            &task,
+                            Err(PreparationFailure::Admission(Arc::new(error))),
+                        );
+                        return task.wait().await;
+                    }
+                }
+            };
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
             let key = recipe.clone();
@@ -156,10 +187,13 @@ impl ToolsetPreparation {
             // actor waiting for it. Dropping a waiter cannot interrupt its peers.
             tokio::spawn(async move {
                 let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                    tidepool_toolchain::artifacts::with_compiler_transaction_for_workload(
-                        workload,
-                        || compile_installer(recipe, resolved, source, registry),
-                    )
+                    if let Some((ticket, cancellation)) = compiler_work {
+                        ticket.run_for_workload(workload, cancellation, || {
+                            compile_installer(recipe, resolved, source, registry)
+                        })
+                    } else {
+                        compile_installer(recipe, resolved, source, registry)
+                    }
                 })
                 .await
                 .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
@@ -212,6 +246,7 @@ pub(crate) mod tests {
 
     fn recipe(entry: &str) -> InstallerRecipe {
         InstallerRecipe {
+            source_authority: [0; 32],
             source_revision: "frozen source".into(),
             roots: Vec::new(),
             preamble: String::new(),
@@ -340,6 +375,54 @@ fn compile_installer(
     );
     let templates =
         resident_workbench_templates(&recipe.preamble, &dispatcher_effects, &recipe.imports);
+    let (compiled, selection) = if let Some(storage) = source.prepared_entries() {
+        let template = templates
+            .iter()
+            .find(|template| {
+                template.kind == tidepool_runtime::session::TemplateSelector::BindDiscard
+            })
+            .ok_or_else(|| {
+                PreparationFailure::Source("installer has no discarded-bind template".into())
+            })?;
+        let wrapper = tidepool_runtime::session::render_template(
+            &template.source,
+            &installation.expression,
+            &[],
+        );
+        retained_installer(&recipe, storage, &wrapper)?
+    } else {
+        (
+            compile_unprepared_installer(&recipe, &templates, &installation.expression)?,
+            None,
+        )
+    };
+    let compiled: Arc<CompiledTurn> = Arc::new(compiled);
+    let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
+    let entry = PreparedSourceEntry::prepare(compiled, registry)
+        .map_err(|error| PreparationFailure::Native(error.to_string()))?;
+    if let Some(selection) = selection.as_ref() {
+        if let Some(path) = selection.publish.as_ref() {
+            tidepool_atomic_write::write_durable(path, selection.original.to_string().as_bytes())
+                .map_err(|error| PreparationFailure::Source(error.to_string()))?;
+        }
+    }
+    Ok(Arc::new(PreparedToolset {
+        entry,
+        entry_name: recipe.entry,
+        resolved,
+        source_revision: recipe.source_revision,
+        completed_selection: selection.map(|selection| (selection.recipe, selection.original)),
+        _source: source,
+        _nominal_artifacts: nominal_artifacts,
+    }))
+}
+
+/// This explicit developer/fixture path has no retained source storage.
+fn compile_unprepared_installer(
+    recipe: &InstallerRecipe,
+    templates: &[tidepool_runtime::session::TurnTemplate],
+    expression: &str,
+) -> Result<CompiledTurn, PreparationFailure> {
     let scratch =
         tempfile::tempdir().map_err(|error| PreparationFailure::Source(error.to_string()))?;
     let include = recipe
@@ -350,8 +433,8 @@ fn compile_installer(
     let result = run_turn(TurnRequest {
         exact_context: None,
         session_id: None,
-        turn_text: &installation.expression,
-        templates: &templates,
+        turn_text: expression,
+        templates,
         include: &include,
         session_root: scratch.path(),
         inject_modules: &[],
@@ -369,7 +452,7 @@ fn compile_installer(
         diagnostic.message = tidepool_runtime::session::render_turn_compile_error(
             &failure.error,
             failure.attempted_source.as_deref(),
-            &installation.expression,
+            expression,
             "<agent-spec-installation>",
         );
         PreparationFailure::Compiler(diagnostic)
@@ -387,16 +470,124 @@ fn compile_installer(
             "source installer exports public notebook bindings".into(),
         ));
     }
-    let compiled: Arc<CompiledTurn> = Arc::new(compiled);
-    let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
-    let entry = PreparedSourceEntry::prepare(compiled, registry)
-        .map_err(|error| PreparationFailure::Native(error.to_string()))?;
-    Ok(Arc::new(PreparedToolset {
-        entry,
-        entry_name: recipe.entry,
-        resolved,
-        source_revision: recipe.source_revision,
-        _source: source,
-        _nominal_artifacts: nominal_artifacts,
-    }))
+    Ok(compiled)
+}
+
+fn retained_installer(
+    recipe: &InstallerRecipe,
+    storage: &crate::SourceEntryStorage,
+    wrapper: &str,
+) -> Result<(CompiledTurn, Option<CompletedInstallerSelection>), PreparationFailure> {
+    use tidepool_toolchain::artifacts::{
+        load_selected_production_entry, prepare_frozen_production_entry, FrozenEntrySources,
+        ProductionEntrySources,
+    };
+    use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
+    let source_error =
+        |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
+    let key = blake3::hash(&serde_json::to_vec(recipe).map_err(|error| source_error(&error))?)
+        .to_hex()
+        .to_string();
+    let directory = storage.directory().join(&key);
+    let (original, selected, publication) = match storage {
+        crate::SourceEntryStorage::FreshCompilation { .. } => {
+            let root = tidepool_atomic_write::DirectoryAnchor::open_existing(storage.directory())
+                .map_err(|error| source_error(&error))?;
+            let selected = uuid::Uuid::new_v4();
+            let original = root
+                .child(&key)
+                .and_then(|root| root.child(selected.to_string()))
+                .map_err(|error| source_error(&error))?;
+            (
+                original.path().to_owned(),
+                selected,
+                Some(directory.join("selected")),
+            )
+        }
+        crate::SourceEntryStorage::CompletedOriginal { selections, .. } => {
+            let selected =
+                selections
+                    .get(&key)
+                    .ok_or_else(|| PreparationFailure::AbsentSelection {
+                        recipe: key.clone(),
+                    })?;
+            let bytes =
+                std::fs::read(directory.join("selected")).map_err(|error| source_error(&error))?;
+            if bytes != selected.to_string().as_bytes() {
+                return Err(PreparationFailure::Source(
+                    "completed installer pointer differs from owner-selected original".into(),
+                ));
+            }
+            let original = directory.join(selected.to_string());
+            let canonical_root =
+                std::fs::canonicalize(storage.directory()).map_err(|error| source_error(&error))?;
+            if std::fs::canonicalize(&original).map_err(|error| source_error(&error))?
+                != canonical_root.join(&key).join(selected.to_string())
+            {
+                return Err(PreparationFailure::Source(
+                    "completed installer escapes its retained source owner".into(),
+                ));
+            }
+            (original, *selected, None)
+        }
+    };
+    let module = tidepool_toolchain::extract_module_name(wrapper)
+        .ok_or_else(|| PreparationFailure::Source("installer wrapper has no module".into()))?;
+    let source_path = original.join(format!("{module}.hs"));
+    let output = original.join("entry");
+    if matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
+        tidepool_atomic_write::write_durable(&source_path, wrapper.as_bytes())
+            .map_err(|error| source_error(&error))?;
+    } else if std::fs::read(&source_path).map_err(|error| source_error(&error))?
+        != wrapper.as_bytes()
+    {
+        return Err(PreparationFailure::Source(
+            "completed installer wrapper differs from selected source and row".into(),
+        ));
+    }
+    let sources = FrozenEntrySources::capture(&recipe.roots, &source_path)
+        .map_err(|error| source_error(&error))?;
+    if sources
+        .source_revision(b"exomonad-agent-spec-ordered-source-closure-v1")
+        .map_err(|error| source_error(&error))?
+        != recipe.source_revision
+    {
+        return Err(PreparationFailure::Source(
+            "source owner snapshot changed before installer acquisition".into(),
+        ));
+    }
+    if matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
+        prepare_frozen_production_entry(&sources, &original, &output).map_err(|error| {
+            PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
+        })?;
+    }
+    let CompilerDeploymentConfiguration::Configured(authority) =
+        CompilerDeploymentConfiguration::from_env().map_err(|error| source_error(&error))?
+    else {
+        return Err(PreparationFailure::Source(
+            "completed installer requires configured compiler deployment".into(),
+        ));
+    };
+    let loaded = load_selected_production_entry(
+        &output,
+        &authority,
+        &ProductionEntrySources::FrozenWorkspace(sources),
+    )
+    .map_err(|error| source_error(&error))?;
+    let compiled =
+        CompiledTurn::from_production_entry(&loaded).map_err(|error| source_error(&error))?;
+    Ok((
+        compiled,
+        Some(CompletedInstallerSelection {
+            recipe: key,
+            original: selected,
+            publish: publication,
+        }),
+    ))
+}
+
+struct CompletedInstallerSelection {
+    recipe: String,
+    original: uuid::Uuid,
+    publish: Option<PathBuf>,
 }

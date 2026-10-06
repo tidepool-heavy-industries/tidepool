@@ -115,6 +115,16 @@ impl WorkbenchCompilationAuthority {
         }
     }
 
+    pub(crate) fn fresh_toolset_source(
+        &self,
+        selected: &crate::CheckpointSourceLayer,
+    ) -> Result<crate::CheckpointSourceLayer, String> {
+        self.source_layers
+            .as_ref()
+            .ok_or("fresh installer preparation has no admitted source owner")?
+            .fresh_toolset_layer_from(selected)
+    }
+
     #[cfg(test)]
     fn installed_tools(&self) -> Option<&crate::InstalledToolLease> {
         self._installed_tools.as_ref()

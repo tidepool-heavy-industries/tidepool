@@ -117,7 +117,7 @@ pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
-    RetainedSourceLayer, SourceLayerIssuer, SourceLayerReload,
+    RetainedSourceLayer, SourceEntryStorage, SourceLayerIssuer, SourceLayerReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
