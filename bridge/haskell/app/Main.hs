@@ -51,7 +51,7 @@ import Tidepool.Binders
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
   )
-import Tidepool.CompilerExecution (CompilerExecutor, compilerExecutionGrant, withCompilerExecutor)
+import Tidepool.CompilerExecution (CompilerExecutor, compilerExecutionGrant, serialCompilerExecutionGrant, withCompilerExecutor)
 import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
@@ -65,9 +65,8 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
-  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
-  , prepareOriginalProductsWithExecutor, prepareOriginalProductsWithCollector
-  , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
+  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCache
+  , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
@@ -172,7 +171,7 @@ renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
 -- only a prepared-STG compile recovers and persists retained-generation
 -- 'GlobalDecl' references; metadata checks have nothing to withhold. The resident-daemon path ('withResidentPipelineSelectedRequests',
 -- used only behind @--worker-loop-v2@) honors this parameter per compile too,
--- via a single installed plugin that reads a transaction-local 'IORef' cell.
+-- with an immutable withholding policy installed in each owning compiler view.
 type Compiler =
   forall result. PipelineSelection result
   -> Set.Set SymbolIdentity
@@ -188,11 +187,11 @@ type Compiler =
 data RecoveryCaches = RecoveryCaches
   { acquireRecoveryCaches :: IO CompilerRecoveryCaches
   , recoveryExecutor :: Maybe CompilerExecutor
-  , recoveryOriginalProjection :: Maybe OriginalProjectionCollector
+  , recoveryOriginalWorklist :: IO (Maybe OriginalProductWorklist)
   }
 
 scopeRecoveryCaches :: CompilerScope -> RecoveryCaches
-scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope) Nothing
+scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope) (pure Nothing)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
 -- stderr is the human-readable channel.
@@ -238,10 +237,16 @@ runParsedInvocation compilerScope caches parsedWorkerRequest = do
   bracket getNumCapabilities setNumCapabilities $ \_previous -> do
     setNumCapabilities (requestCompilerCapabilities parsedWorkerRequest)
     withCompilerExecutor grant $ \executor -> do
-      originalProjection <- newOriginalProjectionCollector
-      let completion = observeOriginalProjection originalProjection
-            (requestRetainedGenerations parsedWorkerRequest)
-            [preparedResumeTargetName,preparedApplyEntryTargetName,preparedApplyValueTargetName] Nothing
+      originalWorklist <- newIORef Nothing
+      let completion env interfaces owner exact inputs = do
+            recovery <- scopedRecoveryCaches compilerScope
+            (observer,worklist) <- observeOriginalProjectionWithRecovery
+              (compilerOriginalProjections recovery) (compilerPreparedBodies recovery) executor
+              (requestRetainedGenerations parsedWorkerRequest)
+              [preparedResumeTargetName,preparedApplyEntryTargetName,preparedApplyValueTargetName] Nothing
+              env interfaces owner exact inputs
+            writeIORef originalWorklist (Just worklist)
+            pure observer
           observeProducts :: PipelineSelection result -> PipelineSelection result
           observeProducts selection = case selection of
             PreparedStg -> WithPreparedModuleCompletion completion selection
@@ -253,7 +258,7 @@ runParsedInvocation compilerScope caches parsedWorkerRequest = do
             , scopedExecutor = Just executor
             }
       runGrantedInvocation scope (caches
-        {recoveryExecutor=Just executor,recoveryOriginalProjection=Just originalProjection}) parsedWorkerRequest
+        {recoveryExecutor=Just executor,recoveryOriginalWorklist=readIORef originalWorklist}) parsedWorkerRequest
 
 runGrantedInvocation
   :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
@@ -619,13 +624,18 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
-  let prepareOriginal = case recoveryExecutor caches of
-        Nothing -> prepareOriginalProducts
-        Just executor -> case recoveryOriginalProjection caches of
-          Nothing -> prepareOriginalProductsWithExecutor executor
-          Just collector -> prepareOriginalProductsWithCollector collector executor
+  let prepareOriginal executor = do
+        acquired <- recoveryOriginalWorklist caches
+        case acquired of
+          Just worklist -> prepareOriginalProductsWithWorklist worklist
+            hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+          Nothing -> prepareOriginalProductsWithCache
+            (compilerPreparedBodies recoveryCaches) (Just (compilerOriginalProjections recoveryCaches)) executor
+            hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
   (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
-    prepareOriginal hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+    case recoveryExecutor caches of
+      Just executor -> prepareOriginal executor
+      Nothing -> withCompilerExecutor serialCompilerExecutionGrant prepareOriginal
   productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
   inventory <- maybe (fail "current original admission did not issue its inventory") pure
     (preparedCurrentOriginalInventory productContext)

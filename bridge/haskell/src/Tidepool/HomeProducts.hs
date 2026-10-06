@@ -2,7 +2,7 @@
 -- Boot declarations are source inputs, not executable products. A boot SCC
 -- receives fresh GHC load validation before its original prepared bodies reuse.
 module Tidepool.HomeProducts
-  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals
+  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals, hydrateCandidateHomeProductsWithOriginalsUsing
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
   , materializeCandidateCompilerView, materializeAdmittedCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
@@ -67,7 +67,7 @@ import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, withExactHomeInstances
+  ( ExactIfaceArtifact(..), forkExactContext, hydrateExactScope, withExactHomeInstances
   , exactInterfaceSummary )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
@@ -298,16 +298,23 @@ hydrateCandidateHomeProductsWithOriginals
   -> [(ExactIfaceArtifact, ModIface)]
   -> (ModuleGraph -> HscEnv -> IO (Either String HscEnv))
   -> [ModSummary] -> [ModSummary] -> Ghc (Either String HscEnv)
-hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals installLexical
+hydrateCandidateHomeProductsWithOriginals = hydrateCandidateHomeProductsWithOriginalsUsing forkExactContext
+
+hydrateCandidateHomeProductsWithOriginalsUsing
+  :: (HscEnv -> IO HscEnv) -> HscEnv -> ModuleGraph -> [(ExactIfaceArtifact, ModIface)]
+  -> [(ExactIfaceArtifact, ModIface)]
+  -> (ModuleGraph -> HscEnv -> IO (Either String HscEnv))
+  -> [ModSummary] -> [ModSummary] -> Ghc (Either String HscEnv)
+hydrateCandidateHomeProductsWithOriginalsUsing forkContext initial loadGraph interfaces originals installLexical
     summaries boots = reifyGhc $ \session -> do
+  rollback <- forkContext initial
   result <- try (reflectGhc hydrate session)
   case result of
     Left failure | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
     Left (failure :: SomeException) -> do
-      -- Typechecking may have populated mutable EPS/finder state before the
-      -- refusal. Ordinary source fallback starts from empty mutable tables.
-      fresh <- freshExactState initial
-      reflectGhc (setSession fresh) session
+      -- Typechecking may have mutated the attempt's EPS/finder cells. The
+      -- private pre-attempt fork retains package facts and admitted homes.
+      reflectGhc (setSession rollback) session
       pure (Left (displayException failure))
     Right environment -> pure (Right environment)
   where

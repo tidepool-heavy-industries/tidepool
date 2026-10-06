@@ -117,6 +117,7 @@ library tidepool-extract-internal
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
+    ghci         >= 9.12 && < 9.13,
     ghc-boot     >= 9.12 && < 9.13,
     bytestring,
     containers,

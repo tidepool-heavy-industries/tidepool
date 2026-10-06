@@ -106,14 +106,9 @@ import Text.Read (readMaybe)
 import GHC.Unit.Types (unitString)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
--- | Install the withholding pass on a session's 'HscEnv', ahead of every
--- other registered plugin. UNCONDITIONALLY installs (unlike the pure
--- 'withholdRetainedUnfoldings' this pass wraps): the pass reads the given
--- 'IORef' at RUN time, once per module, so the same installed pass serves
--- every later retained set a caller writes into the cell -- including a
--- 'Set.null' one, which stays a true no-op on the compiled bytes. Each
--- retained resolution context installs one pass with immutable inputs. Lazy
--- computations captured by an earlier HscEnv never observe another policy.
+-- Each attempt installs one pass with immutable inputs. Lazy computations
+-- captured by an earlier HscEnv keep their original policy. An empty retained
+-- set leaves the compiled bytes unchanged.
 data RetainedContext = RetainedContext
   { contextAll :: !(Set SymbolIdentity)
   , contextByModule :: !(Map (Text.Text, Text.Text) (Set SymbolIdentity, Fingerprint))
@@ -136,9 +131,13 @@ scopeFingerprint identities = fingerprintString
 
 installRetainedUnfoldingsPlugin :: RetainedContext -> HscEnv -> HscEnv
 installRetainedUnfoldingsPlugin context hscEnv =
-  hscEnv { hsc_plugins = plugins { staticPlugins = staticPlugin : staticPlugins plugins } }
+  hscEnv { hsc_plugins = plugins
+    { staticPlugins = staticPlugin : filter (not . withholding) (staticPlugins plugins) } }
   where
     plugins = hsc_plugins hscEnv
+    withholding plugin = case paArguments (spPlugin plugin) of
+      marker : _ -> marker == pluginMarker
+      [] -> False
     staticPlugin = StaticPlugin
       { spPlugin = PluginWithArgs
           { paPlugin = withholdingPlugin context
