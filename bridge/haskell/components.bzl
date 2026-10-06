@@ -3238,6 +3238,7 @@ def declare_haskell_components():
         "test-source-boot/fixtures/CacheEven.hs": "test-source-boot/fixtures/CacheEven.hs",
         "test-source-boot/fixtures/CacheEven.hs-boot": "test-source-boot/fixtures/CacheEven.hs-boot",
         "test-source-boot/fixtures/CacheOdd.hs": "test-source-boot/fixtures/CacheOdd.hs",
+        "test-source-boot/fixtures/CancelledMetadataQuoteSupport.hs": "test-source-boot/fixtures/CancelledMetadataQuoteSupport.hs",
         "test-source-boot/fixtures/CanonicalConsumer.hs": "test-source-boot/fixtures/CanonicalConsumer.hs",
         "test-source-boot/fixtures/CanonicalDependency.hs": "test-source-boot/fixtures/CanonicalDependency.hs",
         "test-source-boot/fixtures/CanonicalDependencyChanged.hs": "test-source-boot/fixtures/CanonicalDependencyChanged.hs",
