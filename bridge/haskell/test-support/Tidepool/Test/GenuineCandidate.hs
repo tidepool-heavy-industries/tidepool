@@ -26,12 +26,11 @@ import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Tidepool.Test.FixturePacket
   ( PacketProducer(..), newPacketDirectory, runPacketProducer )
-import Tidepool.ExactHydration (newOriginalInterfaceArtifacts)
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
 import Tidepool.CompilerProducts
-  ( CertifiedOriginalProducts, prepareCompilerProjectionContext, retainedOriginalInterfaces
+  ( CertifiedOriginalProducts, prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts
   , writeCertifiedProductsKeeping )
 import Tidepool.PreparedStg (pmModule)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..))
@@ -185,6 +184,5 @@ capturePacket includes packet prepared = do
         (Set.fromList [binder | candidate <- pprAcceptedCandidates prepared
           , group <- candidateGroups candidate, binder <- candidateGroupBinders group])
         (pprModules prepared)
-  originals <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
-    (retainedOriginalInterfaces prepared) packet
+  originals <- newPreparedOriginalInterfaceArtifacts prepared packet
   writeCertifiedProductsKeeping includes originals packet prepared (Just products) []

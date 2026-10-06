@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts
+  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , originalInterfaceBytes, originalInterfaceSha256, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , freshExactState, freshExactContext, forkExactContext
@@ -28,7 +28,7 @@ module Tidepool.ExactHydration
   ) where
 
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
+import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface)
 import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (mapAccumL)
@@ -650,7 +650,14 @@ data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
 -- owner. A checking HPT entry is provisional and cannot issue original bytes.
 newOriginalInterfaceArtifacts :: HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> FilePath -> IO OriginalInterfaceArtifacts
-newOriginalInterfaceArtifacts env finalized retained directory = do
+newOriginalInterfaceArtifacts env finalized retained =
+  newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained []
+
+-- | Selected session snapshots supply type-dependency seals alongside exact
+-- captures. They do not enter the finalized-source or executable inventory.
+newOriginalInterfaceArtifactsWithSessionCaptures :: HscEnv -> Map.Map ModuleName FinalizedModule
+  -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> FilePath -> IO OriginalInterfaceArtifacts
+newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected directory = do
   captures <- forM retained $ \artifact -> do
     bytes <- BS.readFile (exactPath artifact)
     unless (hexBytes (SHA256.hash bytes) == exactSha256 artifact) $
@@ -660,8 +667,9 @@ newOriginalInterfaceArtifacts env finalized retained directory = do
   let originals = Map.fromList
         [(mi_module (hm_iface (finalizedHomeModInfo original)), original)
         | original <- Map.elems finalized]
-      admitted = Map.fromList captures
-  unless (all (\(owner,bytes) -> Map.lookup owner admitted == Just bytes) captures) $
+      selected = captures ++ map capturedSessionInterface injected
+      admitted = Map.fromList selected
+  unless (all (\(owner,bytes) -> Map.lookup owner admitted == Just bytes) selected) $
     throwIO ConflictingOriginalInterfaces
   OriginalInterfaceArtifacts env originals admitted directory <$> newIORef Map.empty
 

@@ -66,6 +66,8 @@ module Tidepool.Session
   , writeSessionIface
   , injectSessionIface
   , injectSessionScope, registerSessionInterfaceLocation
+  , CapturedSessionInterface, capturedSessionInterface
+  , injectSessionScopeWithCaptures
     -- * Persistent binder identity
   , sessionBinderName
     -- * Reserved scaffold binders
@@ -101,7 +103,7 @@ import GHC.Iface.Errors.Ppr (readInterfaceErrorDiagnostic)
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Unit.Module.ModIface
-  ( ModIface, emptyFullModIface, set_mi_decls, set_mi_exports, set_mi_fixities )
+  ( ModIface, mi_module, emptyFullModIface, set_mi_decls, set_mi_exports, set_mi_fixities )
 import GHC.Unit.Module.ModDetails (ModDetails)
 
 import GHC.Unit.Home (homeUnitAsUnit)
@@ -113,7 +115,7 @@ import GHC.Unit.Module.Location
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable )
 import GHC.Unit.Types (mkModule, GenWithIsBoot(..), ModuleNameWithIsBoot)
-import GHC.Unit.Module (ModuleName, mkModuleName, moduleNameString)
+import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleNameString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)
@@ -121,12 +123,15 @@ import GHC.Utils.Outputable (text, showSDocUnsafe)
 import GHC.Types.SrcLoc (noSrcSpan)
 import qualified GHC.Data.Maybe as MErr
 
+import Control.Exception (bracket)
+import qualified Data.ByteString as BS
 import Control.Monad (foldM, unless)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, stripPrefix, nub)
 import Data.Word (Word64)
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile)
+import System.IO (openBinaryTempFile, hClose, hIsClosed)
 import System.FilePath (takeDirectory, (</>), (<.>))
 
 --------------------------------------------------------------------------------
@@ -321,14 +326,37 @@ writeSessionIface hsc root sm iface = do
 -- The reconstructed @md_insts@ (if the iface carried any) become available to
 -- importing modules through the HPT — see the module header on instance replay.
 injectSessionIface :: MonadIO m => FilePath -> SessionModule -> HscEnv -> m HscEnv
-injectSessionIface root sm hsc0 = liftIO $ do
+injectSessionIface root sm hsc0 = fst <$> liftIO (injectSessionIfaceWithCapture root sm hsc0)
+
+-- | The exact thin-interface bytes consumed by this injection. This snapshot
+-- proves a type dependency; it carries neither source nor executable Core.
+data CapturedSessionInterface = CapturedSessionInterface Module BS.ByteString
+
+capturedSessionInterface :: CapturedSessionInterface -> (Module, BS.ByteString)
+capturedSessionInterface (CapturedSessionInterface owner bytes) = (owner, bytes)
+
+injectSessionIfaceWithCapture :: FilePath -> SessionModule -> HscEnv
+  -> IO (HscEnv, CapturedSessionInterface)
+injectSessionIfaceWithCapture root sm hsc0 = do
   let homeU = hsc_home_unit hsc0
       modNm = renderSessionModule sm
       theMod = mkModule (homeUnitAsUnit homeU) modNm
       path = sessionHiPath root sm
   timing <- readTimingEnabled
   emitCount timing ("session_iface_decode_reads." ++ sessionModuleString sm) 1
-  readRes <- readIface (hsc_dflags hsc0) (hsc_NC hsc0) theMod path
+  bytes <- BS.readFile path
+  -- Decode a private copy so the snapshot and the installed interface cannot
+  -- disagree if the mutable session file changes during or after injection.
+  temporary <- getTemporaryDirectory
+  readRes <- bracket (openBinaryTempFile temporary "tidepool-session-iface.hi")
+    (\(capturedPath, handle) -> do
+      closed <- hIsClosed handle
+      unless closed (hClose handle)
+      removeFile capturedPath)
+    (\(capturedPath, handle) -> do
+      BS.hPut handle bytes
+      hClose handle
+      readIface (hsc_dflags hsc0) (hsc_NC hsc0) theMod capturedPath)
   case readRes of
     MErr.Failed err ->
       ioError (userError ("injectSessionIface: readIface failed for "
@@ -336,11 +364,13 @@ injectSessionIface root sm hsc0 = liftIO $ do
                           ++ ": " ++ showSDocUnsafe
                                (readInterfaceErrorDiagnostic err)))
     MErr.Succeeded iface -> do
+      unless (mi_module iface == theMod) $
+        ioError (userError "injectSessionIface: captured interface has another owner")
       details <- injectDetails hsc0 modNm iface
       let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
           hsc1 = hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0
       registerSessionInterfaceLocation path sm hsc1
-      pure hsc1
+      pure (hsc1, CapturedSessionInterface theMod bytes)
   where
     injectDetails :: HscEnv -> ModuleName -> ModIface -> IO ModDetails
     injectDetails hsc _ iface =
@@ -372,7 +402,14 @@ sourcelessModLocation hi = ModLocation
 -- the env unchanged) for an inert scope, so the normal eval path is unaffected.
 injectSessionScope :: MonadIO m => SessionScope -> HscEnv -> m HscEnv
 injectSessionScope scope hsc =
-  foldM (\h sm -> injectSessionIface (ssRoot scope) sm h) hsc (ssValIfaces scope)
+  fst <$> injectSessionScopeWithCaptures scope hsc
+
+injectSessionScopeWithCaptures :: MonadIO m => SessionScope -> HscEnv
+  -> m (HscEnv, [CapturedSessionInterface])
+injectSessionScopeWithCaptures scope hsc = liftIO $
+  foldM (\(env, captures) sm -> do
+    (injected, captured) <- injectSessionIfaceWithCapture (ssRoot scope) sm env
+    pure (injected, captured : captures)) (hsc, []) (ssValIfaces scope)
 
 --------------------------------------------------------------------------------
 -- Scaffold binder-name protocol — the eval-wrapper's reserved names

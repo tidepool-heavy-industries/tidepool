@@ -5,7 +5,7 @@
 -- independently admitted candidate/exact evidence remain compiler inputs.
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
+  , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces, newPreparedOriginalInterfaceArtifacts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
@@ -48,7 +48,7 @@ import System.Mem.StableName (makeStableName)
 import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionCaptures )
 import Tidepool.ExactScope
   ( ExactScope(..), ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
   , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
@@ -555,6 +555,14 @@ retainedOriginalInterfaces prepared =
         (candidateInterface candidate) (candidateInterfaceSha256 candidate)
         (candidateInterfaceRequirements candidate)
      | candidate <- pprAcceptedCandidates prepared]
+
+-- | Share the selected interfaces with finalization and type-witness sealing.
+newPreparedOriginalInterfaceArtifacts :: PreparedPipelineResult -> FilePath -> IO OriginalInterfaceArtifacts
+newPreparedOriginalInterfaceArtifacts prepared directory =
+  newOriginalInterfaceArtifactsWithSessionCaptures (prHscEnv result)
+    (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared)
+    (prInjectedSessionInterfaces result) directory
+  where result = pprPipelineResult prepared
 
 writeCertifiedProductsKeeping
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedModuleProducts

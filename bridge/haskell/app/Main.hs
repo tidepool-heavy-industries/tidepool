@@ -69,7 +69,7 @@ import Tidepool.CompilerProducts
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
-  , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
+  , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
@@ -93,7 +93,7 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
-  , newOriginalInterfaceArtifacts, originalInterfaceBytes, generatedActivationPreviewRecipe)
+  , originalInterfaceBytes, generatedActivationPreviewRecipe)
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..), WorkerExecutionSource(..)
@@ -409,8 +409,7 @@ runActivationPreviewMode compiler caches request args path = do
         environment = prHscEnv compiled
         binds = prBinds compiled
     verifiedInput <- either fail pure (activationPreviewInputType (prTargetTcGblEnv compiled))
-    originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
-      (retainedOriginalInterfaces prepared) outDir
+    originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     witness <- captureCheckedTypeWitness environment verifiedInput
       >>= maybe (fail "activation preview input type has no complete canonical witness") pure
     sealed <- sealCheckedTypeWitness originalInterfaces witness
@@ -564,7 +563,7 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
+    originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
@@ -1081,7 +1080,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           SExpr -> maybe [] pure (admitted >>= itemObservationName)
           _ -> []
     sessionBindings <- prepareSessionBindings boundNames result
-    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
+    originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
@@ -1547,7 +1546,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       environment = prHscEnv result
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
-  originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
+  originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
   (artifacts, productContext) <- prepareArtifacts originalInterfaces directory caches prepared
     ["__result"] [] (requestRetainedGenerations args) []
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)

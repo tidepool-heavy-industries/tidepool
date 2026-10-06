@@ -199,7 +199,7 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , isSessionScopeActive, injectSessionScope, registerSessionInterfaceLocation, renderSessionModule
+  , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, registerSessionInterfaceLocation, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
@@ -580,6 +580,9 @@ data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
   , prTyCons :: [TyCon]
   , prHscEnv :: HscEnv
+  -- | Actual thin-interface bytes selected by ordinary session injection.
+  -- These authorize type-dependency seals, not source or native products.
+  , prInjectedSessionInterfaces :: [CapturedSessionInterface]
   -- | Verified canonical owners selected by this exact compiler request.
   -- Retained home interfaces have no source location in the GHC finder.
   , prCanonicalInterfaceAdmissions :: Map.Map (String,String) CanonicalInterfaceAdmission
@@ -1316,6 +1319,7 @@ data CompilePlan = CompilePlan
     -- ^ Runs after the compile loop and its phase emits, before the guts are
     -- merged. Native results validate the current scope here; metadata's
     -- terminal proof belongs to its checked receipt publication owner.
+  , cpInjectedSessionInterfaces :: IO [CapturedSessionInterface]
   , cpFinalEnv :: HscEnv -> HscEnv
     -- ^ Applied to the post-loop session before it becomes 'prHscEnv'.
   }
@@ -3519,10 +3523,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           targetEnvironment <- liftIO (readIORef targetEnvironmentRef) >>= maybe
             (liftIO (ioError (userError (pvLabel variant ++ ": target frontend environment is absent")))) pure
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
+          injectedInterfaces <- liftIO (cpInjectedSessionInterfaces plan)
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
                 , prHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
+                , prInjectedSessionInterfaces = injectedInterfaces
                 , prCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
                     (pvExactScope variant)
                 , prCapturedType = capturedType
@@ -4970,6 +4976,7 @@ normalVariant purpose path = do
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
       , cpBeforeMerge = \_ -> pure ()
+      , cpInjectedSessionInterfaces = pure []
       , cpFinalEnv = id
       }
   }
@@ -5518,6 +5525,7 @@ sessionVariant purpose scope path = do
                        ModuleNode _ ms -> not (ms_mod_name ms `Set.member` deferredMods)
                        _               -> True ]
       injectedRef <- liftIO (newIORef Set.empty)
+      injectedInterfacesRef <- liftIO (newIORef [])
       originalHooks <- hsc_hooks <$> getSession
       verifiedClosureRef <- liftIO (newIORef Nothing)
       retainedOriginalHomesRef <- liftIO (newIORef [])
@@ -5731,7 +5739,9 @@ sessionVariant purpose scope path = do
                     _ | captureCompleted -> liftIO $ ioError $ userError
                       "completed value injection lacks its protected request"
                       | otherwise -> do
-                          hydrated <- injectSessionScope (scope { ssValIfaces = needed }) hsc0
+                          (hydrated, captured) <- injectSessionScopeWithCaptures
+                            (scope { ssValIfaces = needed }) hsc0
+                          liftIO (modifyIORef' injectedInterfacesRef (captured ++))
                           pure (hydrated, Nothing)
                 setSession hscInjected
                 liftIO $ do
@@ -5748,6 +5758,7 @@ sessionVariant purpose scope path = do
                    env <- getSession
                    verified <- liftIO (revalidateExactScope env admitted)
                    either (liftIO . fail) pure verified
+        , cpInjectedSessionInterfaces = readIORef injectedInterfacesRef
         , cpFinalEnv = \env -> hscUpdateFlags canonicalizeDFlags env {hsc_hooks=originalHooks}
         }
    }

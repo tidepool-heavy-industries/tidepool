@@ -36,7 +36,7 @@ import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma, gopt_set, PackageDBFlag(..), PkgDbRef(..))
 import GHC.Driver.Backend (interpreterBackend)
-import GHC.Driver.Env (hsc_HPT)
+import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 import GHC.Unit.Module.ModIface (mi_iface_hash, mi_mod_hash, mi_usages)
 import GHC.Unit.Module.Deps (Usage(..))
@@ -59,6 +59,12 @@ import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope (readExactScope)
+import Tidepool.CompilerProducts (newPreparedOriginalInterfaceArtifacts)
+import Tidepool.ExactHydration
+  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
+  , originalInterfaceBytes, originalInterfaceSha256 )
+import Tidepool.FinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
@@ -69,7 +75,8 @@ import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspectio
 import Tidepool.DependencyEvidence
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
+  , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule
+  , sessionHiPath, capturedSessionInterface, injectSessionScopeWithCaptures )
 import Tidepool.PreparedStg (pmModule, pmBindings)
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
@@ -77,7 +84,7 @@ import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
   , removeFile, removeDirectoryRecursive, copyFile
   , getPermissions, setPermissions, setOwnerExecutable )
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose, hFlush, readFile', stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -166,6 +173,87 @@ functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $
     temporary = do
       parent <- getTemporaryDirectory
       (path,handle) <- openTempFile parent "tidepool-function-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- A genuinely published thin value interface remains a type dependency in the
+-- next cell. Its consumed bytes must survive mutation of the session path.
+sessionValueFinalizedDependency :: IO ()
+sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \root -> do
+  let producerPath = root </> "ValueProducer.hs"
+      consumerPath = root </> "ValueConsumer.hs"
+      owner = SessionModule ValMod (Generation 1)
+      scope = SessionScope root [owner] Nothing Nothing
+      valuePath = sessionHiPath root owner
+  writeFile producerPath "module ValueProducer where\n__result :: IO (() -> Int)\n__result = pure (\\() -> (42 :: Int))\n"
+  producer <- runPipelineSelected PreparedStg producerPath [root]
+  _ <- mkBoundBinders ["captured"] 1 root (pprPipelineResult producer)
+  consumedBytes <- BS.readFile valuePath
+  writeFile consumerPath (unlines
+    [ "module ValueConsumer where"
+    , "import " ++ showSDocUnsafe (ppr (renderSessionModule owner)) ++ " (captured)"
+    , "__result :: Int"
+    , "__result = captured ()"
+    ])
+  prepared <- runPipelineSessionSelected (PreparedProducts Nothing) mempty GeneralCompile
+    (Just scope) consumerPath [root] Nothing
+  let result = pprPipelineResult prepared
+      env = prHscEnv result
+  (valueOwner, capturedBytes) <- case prInjectedSessionInterfaces result of
+    [snapshot] -> pure (capturedSessionInterface snapshot)
+    _ -> fail "later cell did not capture its one selected value interface"
+  unless (capturedBytes == consumedBytes) (fail "injection captured different interface bytes")
+  when (renderSessionModule owner `Map.member` pprFinalizedModules prepared)
+    (fail "thin value interface was promoted to source finalization")
+  -- A provisional HPT entry alone still cannot satisfy finalization.
+  absent <- newOriginalInterfaceArtifacts env (pprFinalizedModules prepared) [] root
+  missing <- originalInterfaceSha256 absent valueOwner
+  unless (missing == Nothing) (fail "ambient HPT issued an original interface seal")
+  let capture originals = captureFinalizedModuleArtifacts originals env
+        (pprFinalizedModules prepared) (pprPackageImports prepared)
+        (preparedFreshDependencies prepared) root
+  refused <- try (capture absent) :: IO (Either SomeException FinalizedModuleArtifacts)
+  case refused of
+    Left _ -> pure ()
+    Right _ -> fail "finalization accepted an absent value-dependency capture"
+  removeFile valuePath
+  originals <- newPreparedOriginalInterfaceArtifacts prepared root
+  retainedBytes <- originalInterfaceBytes originals valueOwner
+  unless (retainedBytes == Just consumedBytes)
+    (fail "original interface seal reread the mutable session path")
+  sealed <- originalInterfaceSha256 originals valueOwner >>= maybe
+    (fail "selected value interface has no dependency seal") pure
+  finalized <- capture originals
+  let requirements = concatMap (Map.toList . localFinalizedRequirements)
+        (Map.elems (finalizedLocalAdmissions finalized))
+  unless (any (\((_, name), sha) -> name == moduleNameString (renderSessionModule owner)
+            && sha == sealed) requirements)
+    (fail "later source finalization omitted its exact thin value dependency")
+  -- A different genuine capture for the same owner cannot replace selected bytes.
+  replacement <- mkThinSessionIface env owner [(mkVarOcc "replacement", intTy)]
+  writeSessionIface env root owner replacement
+  (_, changed) <- injectSessionScopeWithCaptures scope env
+  conflict <- try (newOriginalInterfaceArtifactsWithSessionCaptures env
+    (pprFinalizedModules prepared) [] (prInjectedSessionInterfaces result ++ changed) root)
+      :: IO (Either SomeException OriginalInterfaceArtifacts)
+  case conflict of
+    Left _ -> pure ()
+    Right _ -> fail "conflicting selected session captures were accepted"
+  -- Decoding bytes for another exact owner must not issue a snapshot.
+  let otherOwner = SessionModule ValMod (Generation 2)
+      otherPath = sessionHiPath root otherOwner
+  createDirectoryIfMissing True (takeDirectory otherPath)
+  BS.writeFile otherPath consumedBytes
+  wrongOwner <- try (injectSessionIface root otherOwner env) :: IO (Either SomeException HscEnv)
+  case wrongOwner of
+    Left _ -> pure ()
+    Right _ -> fail "session injection admitted another interface owner"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-session-finalized-dependency"
       hClose handle
       removeFile path
       createDirectory path
