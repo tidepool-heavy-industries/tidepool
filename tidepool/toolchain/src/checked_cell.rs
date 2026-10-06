@@ -2122,11 +2122,6 @@ impl ExactCompiledPrefix {
         Ok(next)
     }
 
-    pub fn completed_item(&self, index: usize) -> Option<&Arc<ExactCompiledItem>> {
-        self.completed
-            .get(index)
-            .and_then(CompletedCheckedItem::native)
-    }
     pub fn completed_declaration(&self, index: usize) -> Option<&ExactCheckedItem> {
         match self.completed.get(index) {
             Some(CompletedCheckedItem::Declaration(item)) => Some(item),
@@ -2266,12 +2261,6 @@ impl ExactCompiledPrefix {
                     }),
             )
             .collect()
-    }
-    pub fn completed_interfaces(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.completed
-            .iter()
-            .filter_map(CompletedCheckedItem::native)
-            .filter_map(|completed| completed.value_interface())
     }
     fn value_artifacts(&self) -> Result<BTreeMap<&str, &ValueInterfaceBytes>, CompileError> {
         let mut inputs = self
