@@ -28,13 +28,11 @@ import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar
 import Data.List (foldl', partition, sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.IntMap.Strict qualified as IntMap
-import Data.ByteString qualified as BS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as TextEncoding
 import Data.Word (Word32, Word64)
 import System.Environment (lookupEnv)
 import GHC.Core.Lint (displayLintResults)
@@ -579,9 +577,6 @@ newPreparedComponentTaskPreparer env owners stable = do
                 (fromIntegral (fatSelectionDemandedGroupCount selection))
               emitCount timing "prepared_recover_component_prepared_groups"
                 (fromIntegral (fatSelectionPreparedGroupCount selection))
-              emitCount timing "prepared_recover_component_stg_text_bytes"
-                (fromIntegral (BS.length (TextEncoding.encodeUtf8 (Text.pack
-                  (showSDocUnsafe (ppr (map fst (pmBindings assembled))))))))
               pure assembled
             pure $ case outcome of
               Left reason -> Left (RecoveredModulePreparationFailure owner reason)

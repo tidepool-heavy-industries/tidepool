@@ -354,14 +354,13 @@ indexOriginalBindings version coreBinds =
       (Map.fromList (IntMap.toAscList localDependencySets))
     componentOrdinals = IntMap.fromList
       [ (ordinal, componentOrdinal)
-      | roster <- rosters
-      , let componentOrdinal = head roster
+      | roster@(componentOrdinal:_) <- rosters
       , ordinal <- roster ]
     componentOf = validateCrossComponentEdges localDependencySets componentOrdinals `seq` componentOrdinals
     components = IntMap.fromList
-      [ (head roster, FatIfaceComponent version roster
+      [ (componentOrdinal, FatIfaceComponent version roster
           (IntMap.restrictKeys groups (IntSet.fromList roster)) allBinders)
-      | roster <- rosters ]
+      | roster@(componentOrdinal:_) <- rosters ]
 
 validateCrossComponentEdges
   :: IntMap.IntMap (Set.Set Int) -> IntMap.IntMap Int -> ()
