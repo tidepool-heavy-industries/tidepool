@@ -7,7 +7,7 @@ module Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..)
   , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
-  , prepareModule
+  , prepareModule, PreparedModuleTask, acquirePreparedModule, runPreparedModuleTask
   , RecoveredModuleInput(..)
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
@@ -141,8 +141,20 @@ preparedUsesSiteAuthority = preparedAuthorityDependent
 -- | Complete fresh and admitted retained originals share this preparation owner.
 prepareModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModule -> IO PreparedModule
 prepareModule env location siblings finalized =
+  acquirePreparedModule env location siblings finalized >>= runPreparedModuleTask
+
+-- | Acquired under the selected compiler context. The task retains typed
+-- lowering inputs; running it does not consult or replace the live Session.
+newtype PreparedModuleTask = PreparedModuleTask (IO PreparedModule)
+
+runPreparedModuleTask :: PreparedModuleTask -> IO PreparedModule
+runPreparedModuleTask (PreparedModuleTask action) = action
+
+acquirePreparedModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModule
+  -> IO PreparedModuleTask
+acquirePreparedModule env location siblings finalized =
   let guts = finalizedTidyGuts finalized
-  in prepareTypedBindings CompleteSourceModule env (cg_module guts) location
+  in acquireTypedBindings CompleteSourceModule env (cg_module guts) location
        (cg_tycons guts) siblings (cg_binds guts)
 
 -- | Exact optimized bindings retain their defining module and interface
@@ -208,7 +220,13 @@ restoreRecoveredEntries entries binding = case binding of
 -- Both complete modules and recovered subsets elaborate before CorePrep erases types.
 prepareTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
   -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModule
-prepareTypedBindings coverage env owner location tycons imported bindings = do
+prepareTypedBindings coverage env owner location tycons imported bindings =
+  acquireTypedBindings coverage env owner location tycons imported bindings
+    >>= runPreparedModuleTask
+
+acquireTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
+  -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
+acquireTypedBindings coverage env owner location tycons imported bindings = do
   timing <- readTimingEnabled
   let census = censusPreparedIntrinsics tycons bindings
       ownedSiblings = resolvePreparedSiblings bindings
@@ -225,7 +243,7 @@ prepareTypedBindings coverage env owner location tycons imported bindings = do
   let subset = case coverage of
         CompleteSourceModule -> []
         ExactBodySubset -> recoveredSubsetScope owner rewritten
-  timePhase timing "prepared_stg" $ prepareBindingsWithScope subset env owner location tycons
+  acquireBindingsWithScope timing subset env owner location tycons
     rewritten coverage ownedSiblings sites preparedSites graph rejections carrier census
 
 -- | An exact subset can reference other external tops in its defining module.
@@ -364,10 +382,10 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
           Nothing -> pure (Left (displayException (exception :: SomeException)))
         Right value -> pure (Right value)
 
-prepareBindingsWithScope :: [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
+acquireBindingsWithScope :: Bool -> [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
-  -> [SiteRejection] -> Maybe TyCon -> IntrinsicCensus -> IO PreparedModule
-prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimizedCore coverage
+  -> [SiteRejection] -> Maybe TyCon -> IntrinsicCensus -> IO PreparedModuleTask
+acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons optimizedCore coverage
     siblings yieldSites sites graph rejections carrierTyCon census = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
@@ -386,29 +404,30 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
       coreLint = lintCoreBindings preparedFlags CorePrep [] optimizedCore
       stgOptions = initStgPipelineOpts preparedFlags False
 
-  displayLintResults logger False (text "Tidepool prepared-STG pre-CorePrep")
-    (text "optimized Core") coreLint
   corePrepConfig <- initCorePrepConfig (hscEnv { hsc_dflags = preparedFlags })
-  preppedCore <- corePrepPgm logger corePrepConfig
-    (initCorePrepPgmConfig preparedFlags interactiveVars)
-    thisModule location optimizedCore dataTyCons
-  -- CorePrep's configured end-pass performs the post-preparation Core lint.
-  let (initialStg, _, _) =
-        coreToStg (initCoreToStgOpts preparedFlags) thisModule location preppedCore
-  (stgBindings, tagSigs) <-
-    stg2stg logger interactiveVars stgOptions thisModule initialStg
-  pure PreparedModule
-    { preparedModule = thisModule
-    , preparedCoverage = coverage
-    , preparedBindings = stgBindings
-    , preparedTagSigs = tagSigs
-    , preparedSitedSiblings = siblings
-    , preparedYieldSites = yieldSites
-    , preparedPreparedSites = sites
-    , preparedTypeGraph = graph
-    , preparedSiteRejections = rejections
-    , preparedRequestSiteTyCon = carrierTyCon
-    , preparedAuthorityDependent = not (intrinsicFree census)
-    , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
-    , preparedExpectedEntries = Map.empty
-    }
+  pure $ PreparedModuleTask $ timePhase timing "prepared_stg" $ do
+    displayLintResults logger False (text "Tidepool prepared-STG pre-CorePrep")
+      (text "optimized Core") coreLint
+    preppedCore <- corePrepPgm logger corePrepConfig
+      (initCorePrepPgmConfig preparedFlags interactiveVars)
+      thisModule location optimizedCore dataTyCons
+    -- CorePrep's configured end-pass performs the post-preparation Core lint.
+    let (initialStg, _, _) =
+          coreToStg (initCoreToStgOpts preparedFlags) thisModule location preppedCore
+    (stgBindings, tagSigs) <-
+      stg2stg logger interactiveVars stgOptions thisModule initialStg
+    pure PreparedModule
+      { preparedModule = thisModule
+      , preparedCoverage = coverage
+      , preparedBindings = stgBindings
+      , preparedTagSigs = tagSigs
+      , preparedSitedSiblings = siblings
+      , preparedYieldSites = yieldSites
+      , preparedPreparedSites = sites
+      , preparedTypeGraph = graph
+      , preparedSiteRejections = rejections
+      , preparedRequestSiteTyCon = carrierTyCon
+      , preparedAuthorityDependent = not (intrinsicFree census)
+      , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
+      , preparedExpectedEntries = Map.empty
+      }
