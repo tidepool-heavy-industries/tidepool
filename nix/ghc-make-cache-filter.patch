@@ -5,11 +5,11 @@
  module GHC.Driver.Make (
          depanal, depanalE, depanalPartial, checkHomeUnitsClosed,
 -        load, loadWithCache, load', AnyGhcDiagnostic, LoadHowMuch(..), ModIfaceCache(..), noIfaceCache, newIfaceCache,
-+        load, loadWithCache, load', AnyGhcDiagnostic, LoadHowMuch(..), ModIfaceCache(..), noIfaceCache, newIfaceCache, filterModIfaceCache,
++        load, loadWithCache, load', AnyGhcDiagnostic, LoadHowMuch(..), ModIfaceCache(..), noIfaceCache, newIfaceCache, filterModIfaceCache, cachedIfaceInterface, addHmiToCache,
          instantiationNodes,
  
          downsweep,
-@@ -447,6 +447,12 @@
+@@ -447,6 +447,17 @@
  
  instance Outputable CachedIface where
    ppr (CachedIface mi ln) = hsep [text "CachedIface", ppr (miKey mi), ppr ln]
@@ -19,6 +19,11 @@
 +filterModIfaceCache :: (ModIface -> Bool) -> ModIfaceCache -> ModIfaceCache
 +filterModIfaceCache keep cache = cache
 +  { iface_clearCache = filter (keep . cached_modiface) <$> iface_clearCache cache }
++
++-- | Inspect the immutable interface without separating its cached linkable.
++-- Clients retain and replay the complete opaque entry through the cache API.
++cachedIfaceInterface :: CachedIface -> ModIface
++cachedIfaceInterface = cached_modiface
  
  noIfaceCache :: Maybe ModIfaceCache
  noIfaceCache = Nothing
