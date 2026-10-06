@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs #-}
 
-module FinalizedCoreTest (finalizedCoreChecks) where
+module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce) where
 
 import Control.Exception (bracket, try)
 import Control.Monad (forM_, unless)
@@ -11,6 +11,7 @@ import Data.Dynamic (fromDynamic)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as Text
 import GHC
 import GHC.Core (Bind(..), bindersOfBinds)
 import GHC.Core.InstEnv (is_dfun)
@@ -53,7 +54,7 @@ import System.Directory
   ( copyFile, createDirectory, doesFileExist, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
+import System.IO (hClose, openTempFile, hPutStrLn, stderr)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope )
 import Tidepool.ExtractUtil (getLibdir)
@@ -67,15 +68,18 @@ import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), PipelineResult(..), PipelineSelection(..)
-  , CompilePurpose(..), runPipelineSessionSelected )
+  , CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected
+  , withResidentPipelineSelected )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
-  , writeGenuineMetadataScope )
+  , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (pmBindings, prepareModule)
+import Tidepool.Session (SessionScope(..), emptySessionScope)
+import SourceBootFixtureSupport (withTiming, withScratch, captureDiagnostics)
 import Tidepool.RetainedUnfoldings
   ( emptyRetainedContext, installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
@@ -437,3 +441,58 @@ assert condition message = unless condition (fail message)
 hexBytes :: BS.ByteString -> String
 hexBytes = concatMap (\byte -> let rendered = showHex byte ""
   in replicate (2 - length rendered) '0' ++ rendered) . BS.unpack
+
+-- The exact plan restores its lexical environment before compiling fresh
+-- providers. Their effectful quoter must run once in that canonical frontend,
+-- and the checked/native consumer must use the resulting finalized product.
+postloadProviderFrontendOnce :: IO ()
+postloadProviderFrontendOnce = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      provider = work </> "MetadataObservedQuotedTarget.hs"
+      target = work </> "PostloadProviderConsumer.hs"
+      counter = work </> "postload-quoter-executions"
+      owners = ["MetadataQuoteSupport", "MetadataQuoter", "MetadataObservedQuotedTarget"]
+      captured phase name diagnostics = length
+        [line | line <- lines diagnostics, line == "tidepool-canonical-" ++ phase
+          ++ " module=" ++ name]
+      requireOnce diagnostics = do
+        actual <- lines <$> readFile counter
+        unless (actual == ["42"] && all (\name -> captured "frontend" name diagnostics == 1
+            && captured "finalization" name diagnostics == 1) owners) $ do
+          hPutStrLn stderr ("post-load quoter executions=" ++ show actual ++ "\n" ++ diagnostics)
+          fail "post-load fresh provider replayed its quoter or lost canonical capture"
+        assert (Text.pack "tidepool-count name=exact_execution_fresh_provider_compiles count=3 "
+            `Text.isInfixOf` Text.pack diagnostics)
+          "regression did not enter the three-provider post-load pass"
+      executable env name = case lookupHpt (hsc_HPT env) (mkModuleName name) of
+        Nothing -> False
+        Just home -> case homeMod_bytecode (hm_linkable home) of
+          Just _ -> True
+          Nothing -> False
+  forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "PostloadProviderConsumer.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  observedSource <- Text.pack <$> readFile (fixture "MetadataObservedQuotedTarget.hs")
+  writeFile provider (Text.unpack (Text.replace "{{QUOTER_COUNTER}}" (Text.pack counter) observedSource))
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope {ssRoot=work, ssExactScope=Just scopePath}
+  writeFile counter ""
+  withResidentPipelineSelected [work] $ \compile -> do
+    (checked, diagnostics) <- captureDiagnostics $
+      compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing
+    requireOnce diagnostics
+    assert (all (executable (crHscEnv checked)) owners)
+      "checked consumer lost its fresh providers' real GHC bytecode"
+    assert (case crResultType checked of Just _ -> True; Nothing -> False)
+      "checked provider consumer lost its result type"
+  -- A separate fresh compiler makes this native check independent of the
+  -- preceding checked request's resident memo and executable products.
+  writeFile counter ""
+  withResidentPipelineSelected [work] $ \compile -> do
+    (prepared, diagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+    requireOnce diagnostics
+    assert (all (\name -> Map.member (mkModuleName name) (pprFinalizedModules prepared)) owners)
+      "native consumer omitted a fresh provider's canonical finalized product"
+    assert (all (executable (prHscEnv (pprPipelineResult prepared))) owners)
+      "native consumer lost its fresh providers' real GHC bytecode"
+  putStrLn "post-load providers: actual quoter42 once in each checked/native cycle, canonical capture and executable bytecode passed"
