@@ -2793,7 +2793,7 @@ pub(crate) fn spec_effect_preflight(
         let installation =
             exomonad_actor::agent_spec::installation_expression(entry, role().effect_keys());
         let dispatcher_effects = format!(
-            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {})",
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
             installation.effect_row
         );
         let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
