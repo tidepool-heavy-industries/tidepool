@@ -316,7 +316,7 @@ where
                 .resume_fork_unit(frame.context, frame.continuation)
                 .await
         }
-        Resume::Unconfirmed(error) => Err(ResidentActorWorkbenchError::ActorProtocol(error.detail)),
+        Resume::Unconfirmed(error) => Err(error.into()),
         outcome => {
             let rejected_children = if frame.owns_group {
                 environment
