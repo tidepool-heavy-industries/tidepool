@@ -24,6 +24,14 @@ impl OperationBudget {
         Ok(())
     }
 
+    pub(super) fn reserve<T>(&mut self, count: usize) -> Result<(), ParseError> {
+        self.charge(
+            count
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or(ParseError::LimitExceeded("work"))?,
+        )
+    }
+
     pub(super) fn remaining(&self) -> usize {
         self.limit - self.spent
     }

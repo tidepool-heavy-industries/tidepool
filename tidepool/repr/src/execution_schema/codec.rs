@@ -339,10 +339,20 @@ fn scan_item(bytes: &[u8], budget: &mut OperationBudget) -> Result<usize, ParseE
                     .ok_or(ParseError::Truncated)?;
                 0
             }
-            4 => argument,
-            5 => argument
-                .checked_mul(2)
-                .ok_or(ParseError::LimitExceeded("work"))?,
+            4 => {
+                budget.reserve::<Value>(
+                    usize::try_from(argument).map_err(|_| ParseError::LimitExceeded("work"))?,
+                )?;
+                argument
+            }
+            5 => {
+                budget.reserve::<(Value, Value)>(
+                    usize::try_from(argument).map_err(|_| ParseError::LimitExceeded("work"))?,
+                )?;
+                argument
+                    .checked_mul(2)
+                    .ok_or(ParseError::LimitExceeded("work"))?
+            }
             6 => 1,
             _ => return Err(ParseError::Malformed("invalid CBOR major type".into())),
         };

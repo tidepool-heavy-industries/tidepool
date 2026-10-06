@@ -1322,42 +1322,169 @@ pub struct RawModuleProduct {
 pub fn parse_module_products(
     bytes: &[u8],
     requirements: &ProgramRequirements,
-    limits: DecodeLimits,
+    limits: InventoryDecodeLimits,
 ) -> Result<Vec<RawModuleProduct>, ParseError> {
-    parse_module_products_inner(bytes, requirements, limits, |_, _, _| Ok(()))
+    InventoryOperation::new(limits).parse_module_products(bytes, requirements)
 }
 
 /// Decode products and normalize each singleton sidecar from the same bounded
-/// wire value. Interface bytes and opaque projected-group bytes are preserved;
-/// only the enclosing TPMOD framing follows the encoder's normal widths.
+/// wire value. Interface and opaque projected-group bytes are preserved.
 pub fn parse_module_products_with_framing(
     bytes: &[u8],
     requirements: &ProgramRequirements,
-    limits: DecodeLimits,
+    limits: InventoryDecodeLimits,
 ) -> Result<(Vec<RawModuleProduct>, Vec<Vec<u8>>), ParseError> {
-    let mut sidecars = Vec::new();
-    let products =
-        parse_module_products_inner(bytes, requirements, limits, |row, framing_work, budget| {
-            // Reserve this row's items and payload copies before framing allocates.
-            budget.charge(framing_work)?;
-            let mut singleton = Vec::new();
-            ciborium::ser::into_writer(&("TPMOD", MODULE_PRODUCTS_VERSION, [row]), &mut singleton)
+    InventoryOperation::new(limits).parse_module_products_with_framing(bytes, requirements)
+}
+
+/// Resource policy for an inventory of independently bounded original owners.
+/// Program limits apply to each embedded executable, never to the inventory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InventoryDecodeLimits {
+    pub max_bytes: usize,
+    pub max_module_bytes: usize,
+    pub program: DecodeLimits,
+    pub max_work: usize,
+}
+
+impl Default for InventoryDecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 4 << 30,
+            max_module_bytes: 64 << 20,
+            program: DecodeLimits {
+                max_bytes: 64 << 20,
+                ..DecodeLimits::default()
+            },
+            max_work: 4 << 30,
+        }
+    }
+}
+
+/// One non-cloneable accounting owner for an entire inventory admission.
+/// Charges cover visits, reserved container storage and copies, not process RSS.
+/// The cell permits nested receipt owners to share accounting without issuing
+/// independently reset budgets. It contains no compiler or publication authority.
+pub struct InventoryOperation {
+    limits: InventoryDecodeLimits,
+    budget: std::cell::RefCell<OperationBudget>,
+}
+
+impl InventoryOperation {
+    pub fn new(limits: InventoryDecodeLimits) -> Self {
+        Self {
+            limits,
+            budget: std::cell::RefCell::new(OperationBudget::new(limits.max_work)),
+        }
+    }
+
+    pub fn limits(&self) -> InventoryDecodeLimits {
+        self.limits
+    }
+
+    pub fn charge(&self, amount: usize) -> Result<(), ParseError> {
+        self.budget.borrow_mut().charge(amount)
+    }
+
+    pub fn reserve<T>(&self, count: usize) -> Result<(), ParseError> {
+        self.budget.borrow_mut().reserve::<T>(count)
+    }
+
+    /// Decode another representation belonging to this operation. All CBOR
+    /// containers and payloads are reserved before the general decoder allocates.
+    pub fn decode_value(
+        &self,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<ciborium::value::Value, ParseError> {
+        let limits = DecodeLimits {
+            max_bytes,
+            ..self.limits.program
+        };
+        codec::decode_value(bytes, limits, &mut self.budget.borrow_mut())
+    }
+
+    pub fn parse_module_products(
+        &self,
+        bytes: &[u8],
+        requirements: &ProgramRequirements,
+    ) -> Result<Vec<RawModuleProduct>, ParseError> {
+        parse_module_products_inner(
+            bytes,
+            requirements,
+            self.limits,
+            &mut self.budget.borrow_mut(),
+            |_, _, _| Ok(()),
+        )
+    }
+
+    pub fn parse_module_products_with_framing(
+        &self,
+        bytes: &[u8],
+        requirements: &ProgramRequirements,
+    ) -> Result<(Vec<RawModuleProduct>, Vec<Vec<u8>>), ParseError> {
+        let mut sidecars = Vec::new();
+        let products = parse_module_products_inner(
+            bytes,
+            requirements,
+            self.limits,
+            &mut self.budget.borrow_mut(),
+            |row, size, budget| {
+                budget.charge(size)?;
+                budget.reserve::<Vec<u8>>(1)?;
+                let mut singleton = Vec::with_capacity(size);
+                ciborium::ser::into_writer(
+                    &("TPMOD", MODULE_PRODUCTS_VERSION, [row]),
+                    &mut singleton,
+                )
                 .map_err(|error| {
                     ParseError::Malformed(format!("module product framing: {error}"))
                 })?;
-            if singleton.len() > limits.max_bytes {
-                return Err(ParseError::LimitExceeded("module product framing"));
-            }
-            sidecars.push(singleton);
-            Ok(())
-        })?;
-    Ok((products, sidecars))
+                sidecars.push(singleton);
+                Ok(())
+            },
+        )?;
+        Ok((products, sidecars))
+    }
+}
+
+/// Count the existing serde encoding before allocating a normalized row.
+struct CountingWriter {
+    bytes: usize,
+    limit: usize,
+}
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("module byte count overflow"))?;
+        if self.bytes > self.limit {
+            return Err(std::io::Error::other("module byte limit"));
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn normalized_module_size(row: &ciborium::value::Value, limit: usize) -> Result<usize, ParseError> {
+    let mut writer = CountingWriter { bytes: 0, limit };
+    ciborium::ser::into_writer(&("TPMOD", MODULE_PRODUCTS_VERSION, [row]), &mut writer).map_err(
+        |_| ParseError::ModuleByteLimit {
+            limit,
+            actual: writer.bytes,
+        },
+    )?;
+    Ok(writer.bytes)
 }
 
 fn parse_module_products_inner(
     bytes: &[u8],
     requirements: &ProgramRequirements,
-    limits: DecodeLimits,
+    inventory: InventoryDecodeLimits,
+    budget: &mut OperationBudget,
     mut normalized_row: impl FnMut(
         &ciborium::value::Value,
         usize,
@@ -1366,8 +1493,18 @@ fn parse_module_products_inner(
 ) -> Result<Vec<RawModuleProduct>, ParseError> {
     use ciborium::value::Value;
 
-    let mut budget = OperationBudget::new(limits.max_work);
-    let Value::Array(header) = codec::decode_value(bytes, limits, &mut budget)? else {
+    if bytes.len() > inventory.max_bytes {
+        return Err(ParseError::InventoryByteLimit {
+            limit: inventory.max_bytes,
+            actual: bytes.len(),
+        });
+    }
+    let limits = inventory.program;
+    let outer_limits = DecodeLimits {
+        max_bytes: inventory.max_bytes,
+        ..limits
+    };
+    let Value::Array(header) = codec::decode_value(bytes, outer_limits, budget)? else {
         return Err(ParseError::Malformed(
             "module products require an array".into(),
         ));
@@ -1385,10 +1522,7 @@ fn parse_module_products_inner(
             "module products require modules".into(),
         ));
     };
-    if modules.len() > limits.max_table_entries {
-        return Err(ParseError::LimitExceeded("module products"));
-    }
-    budget.charge(modules.len())?;
+    budget.reserve::<RawModuleProduct>(modules.len())?;
     let mut seen_modules = std::collections::BTreeSet::new();
     let mut output = Vec::with_capacity(modules.len());
     for module in modules {
@@ -1424,31 +1558,19 @@ fn parse_module_products_inner(
                 "module {unit}:{name}"
             )));
         }
-        if groups.len() > limits.max_table_entries {
-            return Err(ParseError::LimitExceeded("projected groups"));
-        }
-        budget.charge(groups.len())?;
+        let normalized_size = normalized_module_size(module, inventory.max_module_bytes)?;
+        budget.reserve::<ProjectedGroup>(groups.len())?;
         let mut seen_ordinals = std::collections::BTreeSet::new();
         let mut seen_binders = std::collections::BTreeSet::new();
         let mut projected = Vec::with_capacity(groups.len());
-        // A singleton TPMOD envelope/row has nine fixed CBOR items plus five
-        // magic bytes; each opaque group adds one item and its byte payload.
-        let mut framing_work = identity_bytes
-            .checked_add(interface.len())
-            .and_then(|work| work.checked_add(14))
-            .and_then(|work| work.checked_add(groups.len()))
-            .ok_or(ParseError::LimitExceeded("work"))?;
         for group in groups {
             let Value::Bytes(group_bytes) = group else {
                 return Err(ParseError::Malformed(
                     "projected group requires bytes".into(),
                 ));
             };
-            framing_work = framing_work
-                .checked_add(group_bytes.len())
-                .ok_or(ParseError::LimitExceeded("work"))?;
             let parsed =
-                parse_projected_group_with_budget(group_bytes, requirements, limits, &mut budget)?;
+                parse_projected_group_with_budget(group_bytes, requirements, limits, budget)?;
             if !seen_ordinals.insert(parsed.original_ordinal()) {
                 return Err(ParseError::DuplicateDefinition(
                     "original group ordinal".into(),
@@ -1467,7 +1589,7 @@ fn parse_module_products_inner(
             }
             projected.push(parsed);
         }
-        normalized_row(module, framing_work, &mut budget)?;
+        normalized_row(module, normalized_size, budget)?;
         budget.charge(
             identity_bytes
                 .checked_add(interface.len())
@@ -1527,6 +1649,10 @@ impl Default for DecodeLimits {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, thiserror::Error)]
 pub enum ParseError {
+    #[error("module inventory exceeds {limit} byte limit ({actual})")]
+    InventoryByteLimit { limit: usize, actual: usize },
+    #[error("normalized module exceeds {limit} byte limit ({actual})")]
+    ModuleByteLimit { limit: usize, actual: usize },
     #[error("prepared program exceeds {limit} byte limit ({actual})")]
     ByteLimit { limit: usize, actual: usize },
     #[error("truncated prepared program")]
