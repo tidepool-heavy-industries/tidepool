@@ -7,6 +7,7 @@ module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
   , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
+  , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
   , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
   ) where
@@ -25,10 +26,10 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word64)
 import GHC.Tc.Types (tcg_mod)
-import GHC.Driver.Env (HscEnv)
+import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
-import GHC.Unit.Types (unitString, stringToUnit)
+import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
 import Numeric (readHex)
 import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
 import System.FilePath (normalise, (</>))
@@ -46,11 +47,12 @@ import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncoding, encodeModuleProductInventory )
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), PreparedModuleProducts, OriginalGroupOmission(..)
+  ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
   , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
   , projectOriginalHomeModuleProductDemand )
 import Tidepool.ExecutionSchema
-  ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram )
+  ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram
+  , GlobalDecl(..), ProjectedGroup(..) )
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..), SourceRecipeUnavailable(..), ExecutionSourceRecipe(..)
   , ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
@@ -121,6 +123,27 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   }
 
 type PreparedProductContext = (PreparedModuleProducts, Map.Map Module AdmittedFinalizedOriginal)
+
+-- Final emitted home imports need a native original group. A retained
+-- generation already supplies its implementation; a canonical interface
+-- alone does not. Check after recovery's package-root fixed point, when the
+-- selected executable globals are known, rather than rejecting unused owners.
+requireOriginalExecutableGlobals
+  :: HscEnv -> Set.Set SymbolIdentity -> PreparedModuleProducts -> [GlobalDecl]
+  -> Either ProjectionError ()
+requireOriginalExecutableGlobals env external products globals =
+  if Set.null unavailable then Right ()
+    else Left (UnavailableOriginalHomeDependencies (Set.toAscList unavailable))
+  where
+    available = Set.union external (Set.fromList
+      [binder | (_,Right groups) <- preparedModuleProductOutcomes products
+        , group <- groups, binder <- projectedBinders group])
+    unavailable = Set.fromList
+      [identity | global <- globals, globalRequiredGeneration global == Nothing
+        , let identity = globalIdentity global
+        , toUnitId (stringToUnit (T.unpack (symbolUnit identity)))
+            `Set.member` hsc_all_home_unit_ids env
+        , identity `Set.notMember` available]
 
 -- Close emitted original home globals before adjudicating unavailable owners.
 -- Each defining owner is prepared once from its admitted complete Core pair.

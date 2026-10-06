@@ -94,7 +94,8 @@ import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
-  ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts )
+  ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
+  , requireOriginalExecutableGlobals )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
@@ -2399,8 +2400,9 @@ originalProjectionProducts = withScratch $ \work -> do
           Just (Right groups) | not (null groups) -> pure ()
           other -> fail (ownerKind ++ " owner did not preserve its dependent product: " ++ show other)
   let incompleteModules = filter ((/= pmModule provider) . pmModule) (pprModules paired)
-      incompleteProducts = preparedModuleProductOutcomes
-        (projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules)
+      incompleteProductContext =
+        projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules
+      incompleteProducts = preparedModuleProductOutcomes incompleteProductContext
       moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
       rejectedByMissing prepared = case moduleOutcome prepared of
         Just (Left (UnavailableOriginalHomeDependencies identities)) -> any (`Set.member` providerBinders) identities
@@ -2411,6 +2413,43 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "unavailable module sibling did not reject its consumers while preserving an independent owner"
   let safeContext = pairedContext { projectionEntry = safe }
   safeProgram <- either (fail . show) pure (projectPrepared safeContext [independent])
+  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+      (programGlobals safeProgram) == Right ()) $
+    fail "unselected unavailable home owner rejected an independent executable"
+  bad <- findBinder ownerModule "bad"
+  badProgram <- either (fail . show) pure
+    (projectPrepared (pairedContext {projectionEntry = bad}) [ownerModule])
+  let demanded = Set.fromList
+        [globalIdentity global | global <- programGlobals badProgram
+          , globalIdentity global `Set.member` providerBinders]
+  unless (not (Set.null demanded)) $
+    fail "final executable availability control lost its genuine missing-provider demand"
+  case requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+      (programGlobals badProgram) of
+    Left (UnavailableOriginalHomeDependencies missing)
+      | Set.fromList missing == demanded -> pure ()
+    other -> fail ("final emitted home demand lost its typed unavailable outcome: " ++ show other)
+  unless (requireOriginalExecutableGlobals pairedEnv providerBinders incompleteProductContext
+      (programGlobals badProgram) == Right ()) $
+    fail "native original binding census did not satisfy the emitted home demand"
+  let completeProducts = projectOriginalHomeModuleProducts pairedEnv pairedInterfaces
+        pairedContext mempty (pprModules paired)
+  unless (requireOriginalExecutableGlobals pairedEnv mempty completeProducts
+      (programGlobals badProgram) == Right ()) $
+    fail "successfully projected original did not satisfy the emitted home demand"
+  let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
+  case requireOriginalExecutableGlobals pairedEnv wrongUnitBinders incompleteProductContext
+      (programGlobals badProgram) of
+    Left (UnavailableOriginalHomeDependencies missing)
+      | Set.fromList missing == demanded -> pure ()
+    other -> fail ("different-unit original granted native ownership: " ++ show other)
+  let retainedGlobals =
+        [if globalIdentity global `Set.member` demanded
+          then global {globalRequiredGeneration = Just 7} else global
+        | global <- programGlobals badProgram]
+  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext retainedGlobals
+      == Right ()) $
+    fail "retained generation reopened its original native implementation"
   _ <- certifyProjectedProducts work "independent-after-product-rejection" paired incompleteProducts
     [("safe", safeProgram)] pairedEnv >>= either fail pure
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")

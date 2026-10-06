@@ -65,6 +65,7 @@ import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, modulePr
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
+  , requireOriginalExecutableGlobals
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedRootIdentity)
@@ -632,6 +633,8 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
           if nextRoots == roots
             then do
               (program, constructors) <- project (finalizePreparedCandidate candidate)
+              project (requireOriginalExecutableGlobals hscEnv externalOriginalBinders products
+                (programGlobals program))
               pure (recovered, program, constructors, roots)
             else do
               packageRoots <- forM nextRoots $ \identity -> do
