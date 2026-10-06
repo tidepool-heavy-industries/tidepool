@@ -1,20 +1,27 @@
 //! Live source layers: the run's authored tooling and branch-local notebook helpers.
 //!
-//! A run freezes its Haskell source roots once, into
-//! `<run_root>/workspace/sources/<capture>/<index>`, and that capture is
-//! verified byte for byte every time the run is reloaded
-//! ([`super::workspace::FrozenWorkspace::load`]). Nothing here writes inside
-//! it. Instead this module owns mutable layers in FRONT of that floor. The
-//! run's layer is shared by every actor:
+//! An ordinary run freezes its authored Haskell roots under
+//! `<run_root>/workspace/sources/<capture>/<index>`, and verifies that capture
+//! when the run is reloaded ([`super::workspace::FrozenWorkspace::load`]). A
+//! completed prepared workspace keeps those roots in its separately owned
+//! deployment; the run publishes a local active link to that exact prepared
+//! source revision as its initial live revision. Neither path is rewritten by
+//! this module. Later live reloads publish run-owned revisions in front of
+//! that immutable floor. The run's layer is shared by every actor:
 //!
 //! ```text
 //! <run_root>/workspace/revisions/<identity>/{0,1,…,resources}
 //! <run_root>/workspace/active -> revisions/<identity>
 //! ```
 //!
-//! A managed checkout's historical `.exomonad` package is not silently added
-//! to the graph. Every actor uses the run's current tooling, while
-//! `SessionHelpers` remain branch-local.
+//! For a prepared workspace, the initial `revisions/<identity>` entry points
+//! to the deployment-owned source revision; subsequent candidates are regular
+//! run-owned revision directories.
+//!
+//! The generated `Exomonad.Workspace` resource is retained as its own exact
+//! root after the run source roots. A managed checkout's historical
+//! `.exomonad` package is not silently added to the graph. Every actor uses the
+//! run's current tooling, while `SessionHelpers` remain branch-local.
 //!
 //! Publishing a revision is one `rename(2)` of a symlink: a compile that opens
 //! `active/0` sees either the whole previous revision or the whole new one,
@@ -2689,10 +2696,10 @@ mod tests {
     }
 
     #[test]
-    fn completed_prepared_source_reference_stays_in_its_deployment() {
+    fn prepared_source_reference_transitions_to_a_run_owned_live_revision() {
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
         let original_run = tempfile::tempdir().unwrap();
-        let mut frozen = FrozenWorkspace::load(project.path(), original_run.path()).unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), original_run.path()).unwrap();
         let original_layer = SourceLayer::new(original_run.path());
         let original = original_layer.ensure_active(&frozen).unwrap();
 
@@ -2707,18 +2714,10 @@ mod tests {
             &prepared_revision,
         )
         .unwrap();
-        let original_preparation = uuid::Uuid::new_v4();
-        frozen.preparation = Some(super::super::workspace::WorkspacePreparation::Completed {
-            original: original_preparation,
-            revision: original.identity.clone(),
-            entries: BTreeMap::from([("recipe".to_owned(), uuid::Uuid::new_v4())]),
-        });
-        frozen.prepared_deployment = Some(Arc::new(
-            tidepool_atomic_write::DirectoryAnchor::open_existing(deployment.path()).unwrap(),
-        ));
-
         let layer = SourceLayer::new(run.path());
-        let seeded = layer.ensure_active(&frozen).unwrap();
+        let seeded = layer
+            .ensure_active_from_prepared(frozen.identity(), &prepared_revision)
+            .unwrap();
         assert_eq!(seeded.identity, original.identity);
         let run_revision = run
             .path()
@@ -2743,9 +2742,33 @@ mod tests {
             .map(|path| std::fs::canonicalize(path).unwrap())
             .collect::<Vec<_>>()
         );
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork = 2\n",
+        )
+        .unwrap();
+        let pending = layer
+            .capture_from_workspace(&frozen, project.path())
+            .unwrap();
+        let updated = layer.publish(pending).unwrap();
+        assert_ne!(updated.identity, seeded.identity);
+        let live = layer.checkpoint_revision(frozen.identity()).unwrap();
+        assert!(live.paths[0].starts_with(run.path().join("workspace/revisions")));
+        let live_revision = run
+            .path()
+            .join("workspace/revisions")
+            .join(&updated.identity);
+        assert!(!std::fs::symlink_metadata(&live_revision)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(
             std::fs::read_to_string(prepared_revision.join("0/Project/Work.hs")).unwrap(),
             "module Project.Work where\nwork = 1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(live.paths[0].join("Project/Work.hs")).unwrap(),
+            "module Project.Work where\nwork = 2\n"
         );
     }
 
@@ -2837,6 +2860,34 @@ mod tests {
         .unwrap()
         .file_type()
         .is_symlink());
+        let after_reload = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
+        let mut expected = owned.paths.clone();
+        expected.push(workspace_resource.clone());
+        assert_eq!(after_reload.include_paths(), expected);
+        assert_eq!(
+            after_reload.include_paths().last(),
+            Some(&workspace_resource)
+        );
+        assert_eq!(
+            after_reload
+                .include_paths()
+                .iter()
+                .filter(|path| path.as_path() == workspace_resource.as_path())
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_reload.source_manifests().unwrap().len(),
+            after_reload.include_paths().len()
+        );
+        assert!(same_source_manifest(
+            after_reload.source_manifests().unwrap().last().unwrap(),
+            &source_root_manifest(&workspace_resource).unwrap()
+        ));
+        assert!(!after_reload
+            .include_paths()
+            .iter()
+            .any(|path| path != &workspace_resource && selected.include_paths().contains(path)));
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
