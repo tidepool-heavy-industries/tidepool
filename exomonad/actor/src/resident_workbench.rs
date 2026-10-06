@@ -4203,6 +4203,7 @@ where
             let registry = self.access.image_registry.clone()
                 .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
             let prepared = self.access.source.toolset_preparation.prepare(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::agent_spec::preparation::InstallerRecipe {
                     source_revision: revision,
                     roots,

@@ -119,6 +119,7 @@ const RETAINED_TOOLSETS: usize = 16;
 impl ToolsetPreparation {
     pub(crate) async fn prepare(
         self: &Arc<Self>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
         recipe: InstallerRecipe,
         resolved: ResolvedSpec,
         source: crate::CheckpointSourceLayer,
@@ -152,7 +153,10 @@ impl ToolsetPreparation {
             // actor waiting for it. Dropping a waiter cannot interrupt its peers.
             tokio::spawn(async move {
                 let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                    compile_installer(recipe, resolved, source, registry)
+                    tidepool_toolchain::artifacts::with_compiler_transaction_for_workload(
+                        workload,
+                        || compile_installer(recipe, resolved, source, registry),
+                    )
                 })
                 .await
                 .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
