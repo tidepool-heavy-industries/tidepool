@@ -5144,15 +5144,10 @@ externalVarModules = go
 -- | The canonical extraction DynFlags transformation, applied to the session
 -- flags at startup AND re-applied per-module before extraction.
 --
--- Why re-applied: GHC 9.12's @enableCodeGenForTH@ downgrades the DynFlags of
--- home modules whose code is needed for splices (QuasiQuotes/TH) so 'load'
--- can provision bytecode — interpreter backend, -O0. That downgrade is
--- correct for the load phase (splices run against dep bytecode), but it
--- persists in each ModSummary's @ms_hspp_opts@, which the extraction loop
--- re-uses. Without re-canonicalizing, extraction of any module in a
--- quasi-quote dependency graph emits UNOPTIMIZED Core — e.g.
--- @negate \@Double $fNumDouble (D# 2.5##)@ instead of a folded @D# -2.5##@,
--- which then requires runtime machinery the optimized program did not.
+-- Interactive compilation uses -O0. GHC 9.12's @enableCodeGenForTH@ also
+-- selects -O0 for home modules needed by splices, but its default interface
+-- and unboxing flags differ from the prepared backend's contracts. Re-apply
+-- those contracts to each ModSummary's @ms_hspp_opts@ before extraction.
 --
 -- Surgical: backend/opt-level/gopt only — exactly the fields the TH
 -- downgrade touches. Per-module LANGUAGE pragmas already merged into
@@ -5161,9 +5156,14 @@ externalVarModules = go
 -- here would strip the platform constants populated at session init.
 --
 -- Flag contracts:
---   * FullLaziness conflicts with eager eval.
---   * Opt_CprAnal is ineffective for this GHC version, but keeping it unset
---     records the intended extraction profile. Worker-wrapper remains enabled.
+--   * Keep interface pragmas and exposed unfoldings: imported entry metadata
+--     and exact original recovery must remain available independently of the
+--     optimization level. RetainedUnfoldings protects retained native bodies.
+--   * Preserve automatic unboxing of small strict fields, including imported
+--     constructor layouts, without enabling the optimizer. Explicit
+--     Opt_UnboxStrictFields remains source-selected, as with the former policy.
+--   * FullLaziness and CPR stay disabled; PreparedStg owns CorePrep, STG CSE
+--     and linting separately from this frontend optimization policy.
 --   * Opt_ShowErrorContext / maxRelevantBinds (this change): every repl/eval
 --     turn typechecks the user's expression inside harness scaffolding
 --     (@__user@, @__b@, @it@, @toWire@ wrapper bindings). An ambiguity in
@@ -5204,7 +5204,10 @@ canonicalizeDFlags dflags =
   -- writes `_` to ask "what goes here"). The search only runs on hole
   -- errors, never on clean compiles.
   (`gopt_unset` Opt_ShowErrorContext) $
-  gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
+  (`gopt_set` Opt_UnboxSmallStrictFields) $
+  (`gopt_unset` Opt_IgnoreInterfacePragmas) $
+  (`gopt_unset` Opt_OmitInterfacePragmas) $
+  gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 0 $ dflags
         { backend = noBackend
         , ghcLink = NoLink
         , maxRelevantBinds = Just 0
