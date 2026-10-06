@@ -53,7 +53,7 @@ import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Iface.Load (loadInterface, WhereFrom(..))
 import GHC.Rename.Names (renameRawPkgQual)
-import GHC.Driver.Make (load', ModIfaceCache(..), newIfaceCache, filterModIfaceCache, cachedIfaceInterface, addHmiToCache)
+import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache, filterModIfaceCache, addHmiToCache)
 import qualified GHC.Linker.Loader as Linker
 import GHC.Linker.Types (Linkable(..), linkableObjs, linkableLibs)
 import GHC.Unit.Module.Env (moduleEnvElts)
@@ -68,7 +68,7 @@ import System.Timeout (timeout)
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash, mi_mnwib)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
 import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -84,7 +84,7 @@ import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey, mkNodeKey, nodeDependencies)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
 import GHC.Unit.Env (UnitEnv(..))
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset, xopt
@@ -151,7 +151,6 @@ import GHC.Types.Name.Occurrence (mkOccName, mkTyVarOcc, occNameSpace, occNameSt
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName)
 import GHC.Types.Var.Set (isEmptyVarSet)
-import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
@@ -1100,7 +1099,6 @@ data CompilerUniverse = CompilerUniverse
   { universeEnvironment :: HscEnv
   , universeSourceVersions :: Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion))
   , universeOriginalVersions :: Map.Map (Module, HomeDependencyDigest, Maybe String) CompletedOriginalVersion
-  , universeIfaceVersions :: Map.Map CompilerIfaceVersion CompilerIfaceEntry
   , universeRecovery :: RecoveryContext
   , universeInterpreter :: IORef CompilerInterpreterState
   , universePackageFinder :: PackageFinderFacts
@@ -1145,18 +1143,6 @@ data CompletedOriginalVersion = CompletedOriginalVersion
   , completedOriginalEpoch :: Word64
   }
 
--- GHC deliberately hides CachedIface's constructor. A replay closure retains
--- the complete opaque interface/linkable pair; the read-only accessor supplies
--- its key. One entry per owner/boot/interface version replaces snapshot merging.
-data CompilerIfaceVersion = CompilerIfaceVersion Module Bool Fingerprint MemoValidity
-  deriving (Eq, Ord)
-data CompilerIfaceEntry = CompilerIfaceEntry Word64 (ModIfaceCache -> IO ())
-
-compilerIfaceVersion :: MemoValidity -> ModIface -> CompilerIfaceVersion
-compilerIfaceVersion validity iface = CompilerIfaceVersion (mi_module iface)
-  (mi_mnwib iface == GWIB (moduleName (mi_module iface)) IsBoot)
-  (mi_iface_hash (mi_final_exts iface)) validity
-
 -- Only the active attempt carries targets and a mutable memo. It is released
 -- after the request; immutable dependency nodes survive independently.
 data ActiveCompilerAttempt = ActiveCompilerAttempt
@@ -1168,7 +1154,6 @@ data CycleState
   = StandaloneCycle
   | TransactionCycle ModIfaceCache (IORef GutsMemo) (Maybe (Either String CapturedCandidateManifest))
       (Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion)))
-      (Map.Map CompilerIfaceVersion CompilerIfaceEntry)
       (Map.Map Module CompletedModuleVersion -> IO ())
       (IORef CompilerInterpreterState) PackageFinderFacts (IORef InterpreterAttemptState)
 
@@ -1933,7 +1918,7 @@ runCompileCycle
 runCompileCycle selection cycleState retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
     packageFinder <- case cycleState of
       StandaloneCycle -> getSession >>= liftIO . newPackageFinderFacts
-      TransactionCycle _ _ _ _ _ _ _ facts _ -> pure facts
+      TransactionCycle _ _ _ _ _ _ facts _ -> pure facts
     forM_ (pvExactScope variant) $ \scope ->
       case compilerProducerFor variant of
         Nothing -> liftIO (throwIO CompilerProducerUnavailable)
@@ -1946,7 +1931,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     disabledPreparedOwnersRef <- liftIO (newIORef Set.empty)
     interpreterAttempt <- case cycleState of
       StandaloneCycle -> liftIO (newIORef InterpreterConfirmed)
-      TransactionCycle _ _ _ _ _ _ _ _ attempt -> pure attempt
+      TransactionCycle _ _ _ _ _ _ _ attempt -> pure attempt
     let markInterpreterMutation = writeIORef interpreterAttempt InterpreterMutationPending
     let reuseContext = ReuseContext requestIdentity (compilePurposeLabel (pvPurpose variant))
         reuseOwner summary = Just (ReuseModule (unitString (moduleUnit (ms_mod summary)))
@@ -1966,13 +1951,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         exactCycle = exactCompileCycle selection variant
         mCache = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle cache _ _ _ _ _ _ _ _ -> Just cache
+          TransactionCycle cache _ _ _ _ _ _ _ -> Just cache
         mMemoRef = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ memo _ _ _ _ _ _ _ -> Just memo
+          TransactionCycle _ memo _ _ _ _ _ _ -> Just memo
         capturedCandidates = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ _ captured _ _ _ _ _ _ -> captured
+          TransactionCycle _ _ captured _ _ _ _ _ -> captured
     when (exactCycle && case cycleState of StandaloneCycle -> True; _ -> False) $ do
       current <- getSession
       fresh <- liftIO (freshExactState current)
@@ -2172,10 +2157,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             , ms_hsc_src summary == HsSrcFile])
     interpreterState <- case cycleState of
       StandaloneCycle -> liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
-      TransactionCycle _ _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
+      TransactionCycle _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
     selectedVersionsRef <- liftIO (newIORef Map.empty)
     case cycleState of
-      TransactionCycle _ memo _ versions _ _ _ _ _ -> liftIO $ do
+      TransactionCycle _ memo _ versions _ _ _ _ -> liftIO $ do
         let matching summary node =
               let entry = completedModuleEntry node
                   validity = gmeValidity entry
@@ -2431,7 +2416,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                  | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
                  | otherwise = case cycleState of
                      StandaloneCycle -> CacheDisabled
-                     TransactionCycle _ _ _ versions _ _ _ _ _ ->
+                     TransactionCycle _ _ _ versions _ _ _ _ ->
                        case Map.lookup (ms_mod summary) versions of
                          Nothing -> Absent
                          Just previous ->
@@ -2447,7 +2432,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         reuseEvent Interface ReuseHit Matched summary
     case cycleState of
       StandaloneCycle -> pure ()
-      TransactionCycle _ _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
+      TransactionCycle _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
         selectedVersions <- readIORef selectedVersionsRef
         activateRecovery (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
     let recompiledOwners = Set.fromList [ms_mod summary | summary <- sourceOrder
@@ -2466,7 +2451,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         emptyHomePackageTable (eltsHpt table)) current)
     case cycleState of
       StandaloneCycle -> pure ()
-      TransactionCycle cache _ _ _ ifaceVersions _ _ _ _ -> do
+      TransactionCycle cache _ _ _ _ _ _ _ -> do
         selectedVersions <- liftIO (readIORef selectedVersionsRef)
         forM_ sourceOrder $ \summary -> forM_ (Map.lookup (ms_mod summary) validatedMemo) $ \entry -> do
           current <- getSession
@@ -2494,11 +2479,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               pure home {hm_linkable=justBytecode bytecode}
             else pure home
           setSession (hscUpdateHPT (\table -> addToHpt table (ms_mod_name summary) refreshed) current)
-          let version = compilerIfaceVersion (gmeValidity entry) (hm_iface refreshed)
-          case Map.lookup version ifaceVersions of
-            Just (CompilerIfaceEntry storedEpoch replay)
-              | not needsBytecode && sameEpoch && storedEpoch == epoch -> liftIO (replay cache)
-            _ -> liftIO (addHmiToCache cache refreshed)
+          -- Make publishes empty linkables for metadata-only loads. This
+          -- selected complete owner retains the exact current executable
+          -- capacity, including across code-to-metadata-to-code transitions.
+          liftIO (addHmiToCache cache refreshed)
     let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -4395,7 +4379,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
     initialRecovery <- liftIO (RecoveryContext <$> RequestUnique.newUnique <*> pure auxiliaryRecovery)
     interpreter <- liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
     packageFinder <- liftIO (newPackageFinderFacts baseEnv)
-    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty Map.empty initialRecovery interpreter packageFinder))
+    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder))
     active <- liftIO (newIORef Nothing)
     availability <- liftIO (newIORef ResidentAvailable)
     ownerThread <- liftIO myThreadId
@@ -4557,25 +4541,6 @@ selectCompilerRecoveryCaches env packages selected = do
     <*> mergePreparedBodyCaches [(compilerPreparedBodies homes,const True),(compilerPreparedBodies packageCaches,packageOwner)]
     <*> mergeOriginalProjectionCaches [(compilerOriginalProjections homes,const True),(compilerOriginalProjections packageCaches,packageOwner)]
 
--- One pass retains each complete opaque interface/linkable entry. Replaying a
--- selected version creates an attempt-local cache; GHC may drain that cache
--- without removing or rebinding any completed node.
-retainCompilerIfaceEntries
-  :: Word64 -> Module -> GutsMemo -> ModIfaceCache -> Map.Map CompilerIfaceVersion CompilerIfaceEntry
-  -> IO (Map.Map CompilerIfaceVersion CompilerIfaceEntry)
-retainCompilerIfaceEntries epoch target memo cache previous = do
-  entries <- iface_clearCache cache
-  pure (foldl' retain previous (reverse entries))
-  where
-    retain known entry
-      | mi_module iface == target = known
-      | Just ownerEntry <- Map.lookup (moduleName (mi_module iface)) memo
-      , payloadOwner (gmePayload ownerEntry) == mi_module iface =
-          Map.insert (compilerIfaceVersion (gmeValidity ownerEntry) iface)
-            (CompilerIfaceEntry epoch (\destination -> iface_addToCache destination entry)) known
-      | otherwise = known
-      where iface = cachedIfaceInterface entry
-
 sourceReuseAdmitted :: PipelineVariant -> Maybe SessionScope -> Bool
 sourceReuseAdmitted variant session = case pvExactScope variant of
   Just scope -> case exactReuseAdmission scope session of
@@ -4645,7 +4610,7 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   result <- runCompileCycle selection
     (TransactionCycle cache memo candidates
       (universeSourceVersions universe)
-      (universeIfaceVersions universe) activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
+      activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
     policy incarnation timing requestIdentity sessionT0 resources variant path
   final <- getSession
   recovery <- liftIO (readIORef recoveryRef)
@@ -4664,7 +4629,6 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   -- Commit after the complete compiler operation. Failed/cancelled targets or
   -- partial dependency additions never enter this inventory.
   epoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
-  ifaceVersions <- liftIO (retainCompilerIfaceEntries epoch targetOwner admittedSnapshot cache (universeIfaceVersions universe))
   let sourceNodes = Map.fromListWith Map.union
         [(owner,Map.singleton (memoSelectionKey (gmeValidity entry))
             (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry final home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
@@ -4694,8 +4658,7 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
           sourceNodes (universeSourceVersions current)
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion
           originalVersions (universeOriginalVersions current)
-          else universeOriginalVersions current
-      , universeIfaceVersions=ifaceVersions })
+          else universeOriginalVersions current })
   pure result
 
 -- Each key owns one immutable product. Upgrade incomplete acceleration once,

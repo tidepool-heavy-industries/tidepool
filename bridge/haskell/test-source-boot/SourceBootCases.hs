@@ -3860,6 +3860,19 @@ quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
         Just hmi -> let linkable = hm_linkable hmi
           in isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable)
         Nothing -> False
+      providerObjects result = forM providers $ \name -> do
+        finalized <- maybe (fail ("quotation omitted its finalized provider " ++ name)) pure
+          (Map.lookup (mkModuleName name) (pprFinalizedModules result))
+        evaluate finalized >>= makeStableName
+      requireProviderHit stage name diagnostics = do
+        let events = [line | line <- lines diagnostics
+              , "tidepool-reuse {" `isPrefixOf` line
+              , ("\"stage\":\"" ++ stage ++ "\"") `isInfixOf` line
+              , "\"unit\":\"main\"" `isInfixOf` line
+              , ("\"module\":\"" ++ name ++ "\"") `isInfixOf` line]
+        unless (any (isInfixOf "\"decision\":\"hit\"") events
+            && not (any (isInfixOf "\"decision\":\"work\"") events)) $
+          fail ("executable provider " ++ name ++ " lost its " ++ stage ++ " owner: " ++ diagnostics)
   forM_ ["MetadataQuoteFreeTarget.hs", "MetadataQuoter.hs", "MetadataQuoteSupport.hs"] $ \name ->
     copyFile (fixture name) (work </> name)
   quoteFree <- readFile (fixture "MetadataQuoteFreeTarget.hs")
@@ -3880,8 +3893,19 @@ quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
         && null (counterValues "quasiquote_codegen_elided_modules" diagnostics)
         && all (\name -> providerExecutable name (prHscEnv (pprPipelineResult executing))) providers) $
       fail "warm real quote did not provision and execute its transitive providers"
+    originals <- providerObjects executing
     writeFile target quoteFree
     run >>= requireFree "warm after quotation"
+    writeFile target quotedTarget
+    (repeated,repeatedDiagnostics) <- run
+    restored <- providerObjects repeated
+    unless (restored == originals
+        && hasIntResultLiteral 42 (prBinds (pprPipelineResult repeated))
+        && all (\name -> providerExecutable name (prHscEnv (pprPipelineResult repeated))) providers) $
+      fail ("metadata selection discarded completed executable provider Core: " ++ repeatedDiagnostics)
+    forM_ providers $ \name -> mapM_ (\stage -> requireProviderHit stage name repeatedDiagnostics)
+      ["source_frontend","finalized_core"]
+    writeFile target quoteFree
     copyFile (fixture "MetadataQuoteSupportExternalPlugin.hs") (work </> "MetadataQuoteSupport.hs")
     (pluginResult, pluginDiagnostics) <- captureDiagnostics $
       try (compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing)
@@ -3893,7 +3917,7 @@ quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
       _ -> fail "external library plugin input entered quotation elision or bypassed GHC loading"
     copyFile (fixture "MetadataQuoteSupport.hs") (work </> "MetadataQuoteSupport.hs")
     run >>= requireFree "after plugin refusal"
-  putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free, external plugin refusal and recovery passed"
+  putStrLn "quasiquote codegen: metadata/executable transitions preserve finalized providers and quoter42; external plugin refusal and recovery passed"
 
 exactTransactionReuse :: IO ()
 exactTransactionReuse = withTiming $ withScratch $ \work -> do
