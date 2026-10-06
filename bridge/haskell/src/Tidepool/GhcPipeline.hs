@@ -1524,13 +1524,15 @@ newtype HomeDependencyDigest = HomeDependencyDigest BS.ByteString
 -- memo storage instead of copying a transitive witness map into every module.
 homeDependencyDigests
   :: Map.Map HomeDependency (HomeDependencyWitness, [HomeDependency])
+  -> Map.Map HomeDependency BS.ByteString
   -> (Map.Map HomeDependency HomeDependencyDigest, Int)
-homeDependencyDigests graph = dependencyIdentityDigests ownFrame (Map.map snd graph)
+homeDependencyDigests graph policies = dependencyIdentityDigests ownFrame (Map.map snd graph)
   where
     -- Paths are freshly observed, but equal source bytes in another checkout
     -- retain the same compiled identity. Owner/kind and content remain sealed.
-    ownFrame dependency = BS8.pack $
-      moduleNameString name ++ "\0" ++ show kind ++ "\0" ++ show fingerprint
+    ownFrame dependency = BS8.pack
+      (moduleNameString name ++ "\0" ++ show kind ++ "\0" ++ show fingerprint ++ "\0")
+        <> Map.findWithDefault BS.empty dependency policies
       where
         HomeDependency name kind = dependency
         HomeDependencyWitness _selectedPath fingerprint = fst (graph Map.! dependency)
@@ -1987,7 +1989,17 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- the executable memo walk: an import inside a .hs-boot must still
     -- invalidate its ordinary importer. Ordinary dependencies additionally
     -- propagate compile validity in summary order below.
-    let summaryDependency summary = HomeDependency (ms_mod_name summary)
+    let exactIdentities = exactModuleDigests (pvExactScope variant)
+        homeImportKey modSum (qualifier,locatedName) = case qualifier of
+          NoPkgQual -> Just (unitString (moduleUnit (ms_mod modSum)),moduleNameString (unLoc locatedName))
+          ThisPkg unit -> Just (unitIdString unit,moduleNameString (unLoc locatedName))
+          OtherPkg _ -> Nothing
+        exactImportEnvironment modSum = Map.restrictKeys exactIdentities (Set.fromList
+          (catMaybes (map (homeImportKey modSum) (ms_textual_imps modSum ++ ms_srcimps modSum))))
+        incarnationFor modSum
+          | isJust (parseSessionModule (moduleNameString (ms_mod_name modSum))) = incarnation
+          | otherwise = Nothing
+        summaryDependency summary = HomeDependency (ms_mod_name summary)
               (if ms_hsc_src summary == HsBootFile
                 then BootHomeSource else OrdinaryHomeSource)
         summaryByDependency = Map.fromList
@@ -2012,8 +2024,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (\dependency summary ->
             (summaryFingerprints Map.! dependency, summaryDependencies summary))
           summaryByDependency
+        summaryPolicies = Map.map (\summary -> BS8.pack (show
+          (retainedDefinedBy (ms_mod summary) retained,incarnationFor summary,
+           [(owner,hexBytes bytes) | (owner,HomeDependencyDigest bytes) <-
+             Map.toAscList (exactImportEnvironment summary)]))) summaryByDependency
         (dependencyDigests, digestComputations) =
-          homeDependencyDigests dependencyGraph
+          homeDependencyDigests dependencyGraph summaryPolicies
         directDependencyKeys modSum = Set.fromList
           ( importedDependencies OrdinaryHomeSource (ms_textual_imps modSum)
          ++ importedDependencies BootHomeSource (ms_srcimps modSum))
@@ -2061,18 +2077,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- definitions; retained identities defined elsewhere reach it through
     -- a dependency, whose invalidity is already covered by 'depsValidSoFar'.
     let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
-        exactIdentities = exactModuleDigests (pvExactScope variant)
-        homeImportKey modSum (qualifier,locatedName) = case qualifier of
-          NoPkgQual -> Just (unitString (moduleUnit (ms_mod modSum)),moduleNameString (unLoc locatedName))
-          ThisPkg unit -> Just (unitIdString unit,moduleNameString (unLoc locatedName))
-          OtherPkg _ -> Nothing
-        exactImportEnvironment modSum = Map.restrictKeys exactIdentities (Set.fromList
-          (catMaybes (map (homeImportKey modSum) (ms_textual_imps modSum ++ ms_srcimps modSum))))
         exactUsages finalized = Map.restrictKeys exactIdentities (Set.fromList
           (homeInterfaceUsageOwners previous (hm_iface (finalizedHomeModInfo finalized))))
-        incarnationFor modSum
-          | isJust (parseSessionModule (moduleNameString (ms_mod_name modSum))) = incarnation
-          | otherwise = Nothing
         memoValidity modSum finalized = MemoValidity
           (ms_hs_hash modSum) (retainedFor modSum) (homeDependencyWitnesses modSum)
           (incarnationFor modSum) (exactImportEnvironment modSum) (exactUsages finalized)
