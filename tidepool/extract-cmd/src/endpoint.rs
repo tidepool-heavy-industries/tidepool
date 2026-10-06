@@ -2316,6 +2316,38 @@ mod tests {
     }
 
     #[test]
+    fn stale_direct_frontend_success_cannot_confirm_strengthened_close_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 13);
+        let outcome = observed_scope(|| {
+            CompilerEndpoint::bind_launch(spec).and_then(CompilerEndpoint::transaction)
+        });
+        let primary = outcome.action.unwrap_err();
+        assert!(
+            !primary.permits_rebind(),
+            "stale accepted grammar cannot authorize replay"
+        );
+        assert_eq!(primary.source.kind(), io::ErrorKind::UnexpectedEof);
+        let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+            panic!("legacy frontend cannot confirm direct v2 close");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::AdmissionAborted(
+                CompilerTransactionClosePhase::BeginHandshake
+            )
+        );
+        let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+            panic!("actual stale frontend retirement required");
+        };
+        assert!(
+            retirement.exit.unwrap().success(),
+            "stale exit0 alone is not close evidence"
+        );
+        assert!(retirement.worker_report.is_none());
+    }
+
+    #[test]
     fn producer_identity_retains_each_compiler_input() {
         let identity = producer_identity(b"frontend", b"worker", OsStr::new("/ghc/lib"));
         for changed in [

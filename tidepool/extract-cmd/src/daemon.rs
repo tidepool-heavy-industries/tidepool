@@ -75,7 +75,9 @@ const REQUEST: &[u8; 8] = b"TPDRQ002";
 const STOP: &[u8; 8] = b"TPDST001";
 const STOP_ACK: u8 = 1;
 pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR002";
-pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR001";
+// Direct v2 exit0 confirms checked worker/scratch close, independently of
+// the daemon's admission/BEGIN version and cleanup acknowledgement protocol.
+pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR002";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 /// Requests one worker serves before the daemon replaces it. Keep ordinary

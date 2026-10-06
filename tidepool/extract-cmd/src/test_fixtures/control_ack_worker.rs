@@ -97,7 +97,15 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
     output.flush().unwrap();
     let mut prefix = [0; 8];
     input.read_exact(&mut prefix).unwrap();
-    assert_eq!(&prefix, b"TPDTR001");
+    if phase == 13 {
+        // A legacy frontend accepts only its old direct transaction grammar.
+        // Exit0 on refusal still cannot substitute for the current BEGIN ack.
+        if &prefix != b"TPDTR001" {
+            return;
+        }
+    } else {
+        assert_eq!(&prefix, b"TPDTR002");
+    }
     if phase == 4 {
         stall(b"begin");
     }
