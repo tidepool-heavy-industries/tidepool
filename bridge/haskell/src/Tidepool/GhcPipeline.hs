@@ -1045,6 +1045,11 @@ instance Exception CompilerTransactionFailure
 data CompilerPhase = CompilerReady | CompilerRunning | CompilerFailed | CompilerClosed
   deriving (Eq)
 
+-- A loader can physically load an object before its registry update fails.
+-- Only successful settlement can confirm the attempt's interpreter boundary.
+data InterpreterAttemptState = InterpreterConfirmed | InterpreterMutationPending
+  deriving (Eq)
+
 -- Legacy value injection is mutable and cannot select a completed exact view.
 data ExactReuseAdmission = ScopeAuthenticatedValueInputs | UnsealedSessionValueInputs
 
@@ -1161,7 +1166,7 @@ data CycleState
       (Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion)))
       (Map.Map CompilerIfaceVersion CompilerIfaceEntry)
       (Map.Map Module CompletedModuleVersion -> IO ())
-      (IORef CompilerInterpreterState) PackageFinderFacts
+      (IORef CompilerInterpreterState) PackageFinderFacts (IORef InterpreterAttemptState)
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
@@ -1863,13 +1868,17 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     preparationCycle <- liftIO RequestUnique.newUnique
     packageFinder <- case cycleState of
       StandaloneCycle -> getSession >>= liftIO . newPackageFinderFacts
-      TransactionCycle _ _ _ _ _ _ _ facts -> pure facts
+      TransactionCycle _ _ _ _ _ _ _ facts _ -> pure facts
     forM_ (pvExactScope variant) $ \scope ->
       case compilerProducerFor variant of
         Nothing -> liftIO (throwIO CompilerProducerUnavailable)
         Just producer -> unless (producer == scopeProducerSha256 scope)
           (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
+    interpreterAttempt <- case cycleState of
+      StandaloneCycle -> liftIO (newIORef InterpreterConfirmed)
+      TransactionCycle _ _ _ _ _ _ _ _ attempt -> pure attempt
+    let markInterpreterMutation = writeIORef interpreterAttempt InterpreterMutationPending
     let reuseContext = ReuseContext requestIdentity (compilePurposeLabel (pvPurpose variant))
         reuseOwner summary = Just (ReuseModule (unitString (moduleUnit (ms_mod summary)))
           (moduleNameString (ms_mod_name summary)) SourceFingerprint (show (ms_hs_hash summary)))
@@ -1882,13 +1891,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         exactCycle = exactCompileCycle selection variant
         mCache = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle cache _ _ _ _ _ _ _ -> Just cache
+          TransactionCycle cache _ _ _ _ _ _ _ _ -> Just cache
         mMemoRef = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ memo _ _ _ _ _ _ -> Just memo
+          TransactionCycle _ memo _ _ _ _ _ _ _ -> Just memo
         capturedCandidates = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ _ captured _ _ _ _ _ -> captured
+          TransactionCycle _ _ captured _ _ _ _ _ _ -> captured
     when (exactCycle && case cycleState of StandaloneCycle -> True; _ -> False) $ do
       current <- getSession
       fresh <- liftIO (freshExactState current)
@@ -2099,10 +2108,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             , ms_hsc_src summary == HsSrcFile])
     interpreterState <- case cycleState of
       StandaloneCycle -> liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
-      TransactionCycle _ _ _ _ _ _ retainedInterpreter _ -> pure retainedInterpreter
+      TransactionCycle _ _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
     selectedVersionsRef <- liftIO (newIORef Map.empty)
     case cycleState of
-      TransactionCycle _ memo _ versions _ _ _ _ -> liftIO $ do
+      TransactionCycle _ memo _ versions _ _ _ _ _ -> liftIO $ do
         let matching summary node =
               let entry = completedModuleEntry node
                   validity = gmeValidity entry
@@ -2341,7 +2350,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                  | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
                  | otherwise = case cycleState of
                      StandaloneCycle -> CacheDisabled
-                     TransactionCycle _ _ _ versions _ _ _ _ ->
+                     TransactionCycle _ _ _ versions _ _ _ _ _ ->
                        case Map.lookup (ms_mod summary) versions of
                          Nothing -> Absent
                          Just previous ->
@@ -2354,14 +2363,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         reuseEvent Interface ReuseHit Matched summary
     case cycleState of
       StandaloneCycle -> pure ()
-      TransactionCycle _ _ _ _ _ activateRecovery _ _ -> liftIO $ do
+      TransactionCycle _ _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
         selectedVersions <- readIORef selectedVersionsRef
         activateRecovery (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
     let recompiledOwners = Set.fromList [ms_mod summary | summary <- sourceOrder
           , ms_mod summary `Map.notMember` validatedMemo
           , ms_mod_name summary `Map.notMember` acceptedCandidates]
     beforeEpoch <- liftIO (compilerInterpreterEpoch <$> readIORef interpreterState)
+    liftIO markInterpreterMutation
     getSession >>= liftIO . activateCompilerInterpreter interpreterState selectedExecutables recompiledOwners
+    liftIO (writeIORef interpreterAttempt InterpreterConfirmed)
     epoch <- liftIO (compilerInterpreterEpoch <$> readIORef interpreterState)
     when (epoch /= beforeEpoch) $ do
       liftIO (emitReuse timing reuseContext NativeImage ReuseEpochRotated Epoch Nothing 1 Nothing)
@@ -2371,7 +2382,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         emptyHomePackageTable (eltsHpt table)) current)
     case cycleState of
       StandaloneCycle -> pure ()
-      TransactionCycle cache _ _ _ ifaceVersions _ _ _ -> do
+      TransactionCycle cache _ _ _ ifaceVersions _ _ _ _ -> do
         selectedVersions <- liftIO (readIORef selectedVersionsRef)
         forM_ sourceOrder $ \summary -> forM_ (Map.lookup (ms_mod summary) validatedMemo) $ \entry -> do
           current <- getSession
@@ -2388,6 +2399,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               -- publishes a new complete interface/linkable pair.
               let native = scopeRetainedSummaryHscEnv summary current
                   guts = (finalizedTidyGuts finalized) {cg_modBreaks=Nothing}
+              liftIO markInterpreterMutation
               bytecode <- timePhase timing "retained_source_bytecode" (liftIO
                 (generateFreshByteCode native (ms_mod_name summary) (mkCgInteractiveGuts guts) (ms_location summary)))
               pure home {hm_linkable=justBytecode bytecode}
@@ -2688,6 +2700,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           Nothing -> True
           Just original -> mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
         loadCache = fmap (filterModIfaceCache keepCurrent) mCache
+    liftIO markInterpreterMutation
     loadFlag <- reifyGhc $ \session -> bracket
       (reflectGhc (getSession >>= \env -> setSession env
         { hsc_hooks = (hsc_hooks env)
@@ -4219,6 +4232,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
           runRequest clearRecovery action = bracket acquire release $ \() -> do
             phase <- newIORef CompilerReady
             interrupted <- newIORef False
+            interpreterAttempt <- newIORef InterpreterConfirmed
+            operationPurpose <- newIORef "request"
             requestIdentity <- newTimingRequestIdentity
             let runGuarded :: forall result. IO result -> IO result
                 runGuarded operation = mask $ \restore -> do
@@ -4231,47 +4246,64 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     CompilerRunning -> throwIO CompilerTransactionBusy
                     CompilerFailed -> throwIO CompilerTransactionFailed
                     CompilerClosed -> throwIO CompilerTransactionReleased
+                  writeIORef interpreterAttempt InterpreterConfirmed
                   result <- restore operation `catch` \(failure :: SomeException) -> do
                     writeIORef phase CompilerFailed
                     writeIORef availability ResidentPoisoned
                     case fromException failure :: Maybe SomeAsyncException of
                       Just _ -> writeIORef interrupted True >> throwIO failure
                       Nothing -> do
+                        case fromException failure of
+                          Just CompilerTransactionPoisoned -> throwIO failure
+                          _ -> pure ()
                         -- The failed attempt owns cloned EPS, finder, HPT and
                         -- memo cells. No completed context is reset or rebound.
                         clearRecovery
                         writeIORef active Nothing
-                        recoverCompilerInterpreter interpreter baseEnv False
+                        mutation <- readIORef interpreterAttempt
+                        recoverCompilerInterpreter interpreter baseEnv
+                          (mutation == InterpreterMutationPending)
+                        when (mutation == InterpreterMutationPending) $ do
+                          purpose <- readIORef operationPurpose
+                          emitReuse timing (ReuseContext requestIdentity purpose)
+                            NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing
                         restoreBase
                         writeIORef phase CompilerReady
                         writeIORef availability ResidentBusy
                         throwIO failure
+                  writeIORef interpreterAttempt InterpreterConfirmed
                   writeIORef phase CompilerReady
                   pure result
                 compile :: ResidentCompiler
-                compile selection retained purpose mscope path includes products = runGuarded $
+                compile selection retained purpose mscope path includes products = runGuarded $ do
+                  writeIORef operationPurpose (compilePurposeLabel purpose)
                   reflectGhc
-                    (residentCompileOne producer selection retained universe active baseEnv baseFlags
+                    (residentCompileOne producer selection retained universe active interpreterAttempt baseEnv baseFlags
                       timing requestIdentity purpose mscope path includes products) session
                 runOperation :: forall result. Ghc result -> IO result
-                runOperation operation = runGuarded $ bracket
-                  (reflectGhc getSession session)
-                  (\original -> reflectGhc (setSession original) session)
-                  (\_original -> do
-                    retainedUniverse <- readIORef universe
-                    current <- readIORef active
-                    borrowed <- forkExactContextWithPackageFacts (universePackageFinder retainedUniverse)
-                      (maybe (universeEnvironment retainedUniverse) activeEnvironment current)
-                    result <- reflectGhc (setSession (borrowed
-                      {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv}) >> operation) session
-                    observed <- reflectGhc getSession session
-                    -- A successful helper may demand package declarations. Retain
-                    -- its EPS/finder cells without publishing its home visibility.
-                    modifyIORef' universe (\state -> state {universeEnvironment =
-                      (universeEnvironment state)
-                        {hsc_FC=hsc_FC observed, hsc_unit_env=(hsc_unit_env (universeEnvironment state))
-                          {ue_eps=ue_eps (hsc_unit_env observed)}}})
-                    pure result)
+                runOperation operation = runGuarded $ do
+                  writeIORef operationPurpose "helper"
+                  -- This capability admits arbitrary Ghc operations. A refusal
+                  -- cannot prove that opaque loading left the interpreter intact.
+                  writeIORef interpreterAttempt InterpreterMutationPending
+                  bracket
+                    (reflectGhc getSession session)
+                    (\original -> reflectGhc (setSession original) session)
+                    (\_original -> do
+                      retainedUniverse <- readIORef universe
+                      current <- readIORef active
+                      borrowed <- forkExactContextWithPackageFacts (universePackageFinder retainedUniverse)
+                        (maybe (universeEnvironment retainedUniverse) activeEnvironment current)
+                      result <- reflectGhc (setSession (borrowed
+                        {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv}) >> operation) session
+                      observed <- reflectGhc getSession session
+                      -- A successful helper may demand package declarations. Retain
+                      -- its EPS/finder cells without publishing its home visibility.
+                      modifyIORef' universe (\state -> state {universeEnvironment =
+                        (universeEnvironment state)
+                          {hsc_FC=hsc_FC observed, hsc_unit_env=(hsc_unit_env (universeEnvironment state))
+                            {ue_eps=ue_eps (hsc_unit_env observed)}}})
+                      pure result)
                 recovery = do
                   caller <- myThreadId
                   unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
@@ -4287,6 +4319,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   cancelled <- readIORef interrupted
                   when cancelled $ do
                     recoverCompilerInterpreter interpreter baseEnv True
+                    purpose <- readIORef operationPurpose
+                    emitReuse timing (ReuseContext requestIdentity purpose)
+                      NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing
                     writeIORef availability ResidentBusy
                   writeIORef active Nothing
                   restoreBase
@@ -4371,10 +4406,10 @@ sourceReuseAdmitted variant session = case pvExactScope variant of
 
 residentCompileOne
   :: Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity
-  -> IORef CompilerUniverse -> IORef (Maybe ActiveCompilerAttempt)
+  -> IORef CompilerUniverse -> IORef (Maybe ActiveCompilerAttempt) -> IORef InterpreterAttemptState
   -> HscEnv -> DynFlags -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> Ghc result
-residentCompileOne producer selection retained universeRef active baseEnv baseFlags timing requestIdentity purpose mscope path includes products = do
+residentCompileOne producer selection retained universeRef active interpreterAttempt baseEnv baseFlags timing requestIdentity purpose mscope path includes products = do
   sessionT0 <- monotonicTime
   resources <- beginResourceTiming timing
   selected <- liftIO $ case mscope of
@@ -4430,7 +4465,7 @@ residentCompileOne producer selection retained universeRef active baseEnv baseFl
   result <- runCompileCycle selection
     (TransactionCycle cache memo candidates
       (if admitted then universeSourceVersions universe else Map.empty)
-      (if admitted then universeIfaceVersions universe else Map.empty) activateRecovery (universeInterpreter universe) (universePackageFinder universe))
+      (if admitted then universeIfaceVersions universe else Map.empty) activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
     policy incarnation timing requestIdentity sessionT0 resources variant path
   final <- getSession
   recovery <- liftIO (readIORef recoveryRef)
@@ -4537,7 +4572,9 @@ activateCompilerInterpreter versions selected recompiled env = forM_ (hsc_interp
     then retireCompilerInterpreter interp >> writeIORef versions
       (CompilerInterpreterState (compilerInterpreterEpoch state + 1) Map.empty)
     else do
-      Linker.unload interp env keep
+      -- An uninitialised or unchanged loader needs no unload. Calling
+      -- unload on an empty state would initialise and preload the interpreter.
+      when (isJust loaded && not (Set.null stale)) (Linker.unload interp env keep)
       modifyIORef' versions (\previous -> previous
         {compilerLoadedExecutables=Map.withoutKeys (compilerLoadedExecutables previous) stale})
 
@@ -4596,19 +4633,13 @@ retireCompilerInterpreter interp = mask $ \restore -> do
   purgeLookupSymbolCache interp
 
 recoverCompilerInterpreter :: IORef CompilerInterpreterState -> HscEnv -> Bool -> IO ()
-recoverCompilerInterpreter versions env unconfirmed = do
-  retired <- case hsc_interp env of
-    Nothing -> pure False
-    Just interp -> do
-      loaded <- Linker.getLoaderState interp
-      let linkables = maybe [] (\state -> moduleEnvElts (Linker.objs_loaded state)
-            ++ moduleEnvElts (Linker.bcos_loaded state)) loaded
-          native linkable = not (null (linkableObjs linkable) && null (linkableLibs linkable))
-      if unconfirmed || any native linkables
-        then retireCompilerInterpreter interp >> pure True
-        else Linker.unload interp env [] >> pure False
+recoverCompilerInterpreter _ _ False = pure ()
+recoverCompilerInterpreter versions env True = do
+  -- LoaderState can have rolled back after physical loading. Retire the
+  -- process from the typed unsettled boundary, independent of its registry.
+  forM_ (hsc_interp env) retireCompilerInterpreter
   modifyIORef' versions (\state -> CompilerInterpreterState
-    (compilerInterpreterEpoch state + if retired then 1 else 0) Map.empty)
+    (compilerInterpreterEpoch state + 1) Map.empty)
 
 -- Protected requests use their complete admitted search order. GHC's boot
 -- defaults (including the worker CWD) are not additional source authority.
