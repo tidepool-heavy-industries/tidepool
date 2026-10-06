@@ -930,7 +930,7 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
     Nothing (work </> "GeneratedScaffoldOrphanCapture.hs") [work] Nothing
   captured <- capturePreparedFixture work original
   let owners = filter (/= "GeneratedScaffoldOrphanCapture") (preparedNames original)
-  scopePath <- writeGenuineCandidateNativeScope owners owners work captured
+  scopePath <- writeGenuineExecutionScope owners owners work captured
   admitted <- readExactScope scopePath >>= either fail pure
   let byOwner = Map.fromList [((exactUnit interface,exactModule interface),interface)
         | (interface,_,_) <- scopeInterfaces admitted]
