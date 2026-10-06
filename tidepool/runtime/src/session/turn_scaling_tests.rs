@@ -123,20 +123,42 @@ struct HostTimingFields {
     owners_known: Option<bool>,
     accepted: Option<bool>,
     success: Option<bool>,
-    oversized_label: bool,
+    phase_present: bool,
+    unreadable_field: bool,
+}
+
+impl HostTimingFields {
+    fn reject_type(&mut self, field: &tracing::field::Field) {
+        self.phase_present |= field.name() == "phase";
+        self.unreadable_field |= matches!(
+            field.name(),
+            "stage"
+                | "phase"
+                | "node"
+                | "round"
+                | "ms"
+                | "elapsed_ms"
+                | "bytes"
+                | "owners"
+                | "owners_known"
+                | "accepted"
+                | "success"
+        );
+    }
 }
 
 impl tracing::field::Visit for HostTimingFields {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.phase_present |= field.name() == "phase";
         let slot = match field.name() {
             "stage" => &mut self.stage,
             "phase" => &mut self.phase,
             "node" => &mut self.node,
             "round" => &mut self.round,
-            _ => return,
+            _ => return self.reject_type(field),
         };
         if value.len() > MAX_HOST_TIMING_LABEL_BYTES {
-            self.oversized_label = true;
+            self.unreadable_field = true;
         } else {
             *slot = Some(value.into());
         }
@@ -148,7 +170,7 @@ impl tracing::field::Visit for HostTimingFields {
             "elapsed_ms" => self.elapsed_ms = Some(value),
             "bytes" => self.bytes = Some(value),
             "owners" => self.owners = Some(value),
-            _ => {}
+            _ => self.reject_type(field),
         }
     }
 
@@ -157,11 +179,13 @@ impl tracing::field::Visit for HostTimingFields {
             "owners_known" => self.owners_known = Some(value),
             "accepted" => self.accepted = Some(value),
             "success" => self.success = Some(value),
-            _ => {}
+            _ => self.reject_type(field),
         }
     }
 
-    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+        self.reject_type(field);
+    }
 }
 
 #[derive(Clone, Default)]
@@ -187,21 +211,21 @@ struct ActiveCell<'a> {
 }
 
 impl CellRequestObserver {
-    fn capture_host_timing(&self, event: &tracing::Event<'_>) {
+    fn capture_host_timing(&self, event: &tracing::Event<'_>) -> bool {
         let mut fields = HostTimingFields::default();
         event.record(&mut fields);
         let toolchain_stage = event.metadata().target() == "exomonad_harness::timing";
-        if !toolchain_stage && fields.phase.is_none() && !fields.oversized_label {
-            return;
+        if !toolchain_stage && !fields.phase_present {
+            return false;
         }
         let mut state = self.0.lock();
         let Some(active) = state.active.as_mut() else {
-            return;
+            return true;
         };
         let ordinal =
             (active.host_timings.len() as u64).saturating_add(active.dropped_host_timings);
         let measurement = (|| {
-            if fields.oversized_label {
+            if fields.unreadable_field {
                 return None;
             }
             Some(if toolchain_stage {
@@ -227,13 +251,14 @@ impl CellRequestObserver {
         })();
         if active.host_timings.len() == MAX_HOST_TIMINGS_PER_CELL || measurement.is_none() {
             active.dropped_host_timings = active.dropped_host_timings.saturating_add(1);
-            return;
+            return true;
         }
         active.host_timings.push(HostTimingObservation {
             ordinal,
             identified_request_count: active.compiler_requests.len(),
             measurement: measurement.expect("validated typed host timing fields"),
         });
+        true
     }
 
     fn begin(&self, label: &str, source: &str) -> ActiveCell<'_> {
@@ -356,6 +381,9 @@ where
         if event.metadata().target() != "tidepool_extract_cmd::endpoint" {
             return;
         }
+        if self.capture_host_timing(event) {
+            return;
+        }
         let mut fields = RequestFields::default();
         event.record(&mut fields);
         let get = |name: &str| fields.0.get(name).map(String::as_str);
@@ -471,12 +499,15 @@ mod cell_request_observer_tests {
                 tracing::info!(target: "tidepool_extract_cmd::daemon",
                     phase = "compiler_preflight", elapsed_ms = 2_u64,
                     "unparsed event wording");
+                tracing::info!(target: "tidepool_extract_cmd::endpoint",
+                    phase = "compiler_transaction_admission", elapsed_ms = 3_u64,
+                    "unparsed admission wording");
                 identified(1, 1);
                 tracing::info!(target: "tidepool_extract_cmd::daemon",
                     phase = "compiler_response", elapsed_ms = 11_u64,
                     success = true, "unparsed response wording");
                 let captured = cell.finish();
-                assert_eq!(captured.host_timings.len(), 3);
+                assert_eq!(captured.host_timings.len(), 4);
                 assert_eq!(captured.dropped_host_timings, 0);
                 assert_eq!(captured.host_timings[0].ordinal, 0);
                 assert_eq!(captured.host_timings[0].identified_request_count, 0);
@@ -487,9 +518,18 @@ mod cell_request_observer_tests {
                     } if stage == "future.context_stage"
                 ));
                 assert_eq!(captured.host_timings[2].ordinal, 2);
-                assert_eq!(captured.host_timings[2].identified_request_count, 1);
+                assert_eq!(captured.host_timings[2].identified_request_count, 0);
                 assert!(matches!(
                     &captured.host_timings[2].measurement,
+                    HostTimingMeasurement::CompilerPhase {
+                        phase, elapsed_ms: 3, success: None, accepted: None,
+                    } if phase == "compiler_transaction_admission"
+                ));
+                assert_eq!(captured.compiler_requests.len(), 1);
+                assert_eq!(captured.host_timings[3].ordinal, 3);
+                assert_eq!(captured.host_timings[3].identified_request_count, 1);
+                assert!(matches!(
+                    &captured.host_timings[3].measurement,
                     HostTimingMeasurement::CompilerPhase {
                         phase, elapsed_ms: 11, success: Some(true), accepted: None,
                     } if phase == "compiler_response"
@@ -497,6 +537,50 @@ mod cell_request_observer_tests {
                 stage();
                 let next = active(&observer, "next").finish();
                 assert!(next.host_timings.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn cell_capture_marks_wrong_typed_present_fields_incomplete() {
+        let observer = CellRequestObserver::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(observer.clone()),
+            || {
+                let cell = active(&observer, "wrong-types");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = 1_i64, elapsed_ms = 2_u64, "signed phase");
+                tracing::info!(target: "tidepool_extract_cmd::endpoint",
+                    phase = %"compiler_transaction_admission", elapsed_ms = 2_u64,
+                    "display phase");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", elapsed_ms = 2_i64, "signed elapsed");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", elapsed_ms = 2_f64, "float elapsed");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", elapsed_ms = "2", "string elapsed");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", elapsed_ms = 2_u64, accepted = "true",
+                    "string optional bool");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", elapsed_ms = 2_u64, success = 1_i64,
+                    "signed optional bool");
+                tracing::info!(target: "tidepool_extract_cmd::daemon",
+                    phase = "future.phase", elapsed_ms = 2_u64,
+                    "valid absent optional bools");
+                let captured = cell.finish();
+                assert_eq!(captured.dropped_host_timings, 7);
+                assert_eq!(captured.host_timings.len(), 1);
+                assert_eq!(captured.host_timings[0].ordinal, 7);
+                assert!(matches!(
+                    &captured.host_timings[0].measurement,
+                    HostTimingMeasurement::CompilerPhase {
+                        elapsed_ms: 2,
+                        accepted: None,
+                        success: None,
+                        ..
+                    }
+                ));
             },
         );
     }
