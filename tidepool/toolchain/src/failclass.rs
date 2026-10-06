@@ -191,6 +191,7 @@ pub enum EvidenceReadCause {
 impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFailure {
     fn from(error: &crate::certified_products::CertificationError) -> Self {
         use crate::certified_products::{CertificationError, EvidenceReadFailure};
+        use crate::recovery_artifacts::{RecoveryAdmissionFailure, RecoveryArtifactError};
         use tidepool_repr::execution_schema::ParseError;
         match error {
             CertificationError::EvidenceRead { path, failure } => Self::Read {
@@ -243,6 +244,31 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
             }
             CertificationError::Product(ParseError::LimitExceeded(resource)) => Self::Budget {
                 resource: (*resource).to_owned(),
+            },
+            CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::InventoryAccounting(failure),
+            ) => match failure {
+                RecoveryAdmissionFailure::Decode(error) => {
+                    Self::from(&CertificationError::Product(error.clone()))
+                }
+                RecoveryAdmissionFailure::CertificateSize { actual, limit, .. } => {
+                    Self::ByteLimit {
+                        owner: EvidenceByteLimitOwner::Certificate,
+                        actual: *actual,
+                        limit: *limit,
+                    }
+                }
+                RecoveryAdmissionFailure::EvidenceSize {
+                    path,
+                    actual,
+                    limit,
+                } => Self::Read {
+                    path: path.clone(),
+                    failure: EvidenceReadCause::SizeLimit {
+                        actual: *actual,
+                        limit: *limit,
+                    },
+                },
             },
             _ => Self::Contract,
         }
@@ -559,6 +585,34 @@ mod tests {
             assert_eq!(envelope.class, FailureClass::Infra);
             let json = serde_json::to_value(envelope).unwrap();
             assert_eq!(json["cause"]["kind"], "compiler_evidence");
+            assert_ne!(json["cause"]["failure"]["kind"], "contract");
+        }
+        use crate::recovery_artifacts::{RecoveryAdmissionFailure, RecoveryArtifactError};
+        for failure in [
+            RecoveryAdmissionFailure::Decode(ParseError::LimitExceeded("work")),
+            RecoveryAdmissionFailure::Decode(ParseError::ByteLimit {
+                actual: 5,
+                limit: 4,
+            }),
+            RecoveryAdmissionFailure::CertificateSize {
+                format: crate::certified_products::CertificationFormat::CanonicalModuleCertificate,
+                actual: 5,
+                limit: 4,
+            },
+            RecoveryAdmissionFailure::EvidenceSize {
+                path: path.clone(),
+                actual: 5,
+                limit: 4,
+            },
+        ] {
+            let error = CompileError::CompilerEvidence(Box::new(
+                CertificationError::CapturedModulePayload(
+                    RecoveryArtifactError::InventoryAccounting(failure),
+                ),
+            ));
+            let envelope = classify_compile(&error);
+            assert_eq!(envelope.class, FailureClass::Infra);
+            let json = serde_json::to_value(envelope).unwrap();
             assert_ne!(json["cause"]["failure"]["kind"], "contract");
         }
         for failure in [

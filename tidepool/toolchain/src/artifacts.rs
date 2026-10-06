@@ -2304,6 +2304,50 @@ enum OriginalOutputPublication {
     RetainedEntry,
 }
 
+#[derive(Clone, Copy)]
+enum CompilerSidecar {
+    ModuleProducts,
+    ModulePackageImports,
+    Dependencies,
+    CertifiedProducts,
+}
+
+impl CompilerSidecar {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::ModuleProducts => "module-products.cbor",
+            Self::ModulePackageImports => "module-package-imports.cbor",
+            Self::Dependencies => "dependencies.json",
+            Self::CertifiedProducts => "certified-products.cbor",
+        }
+    }
+
+    fn read(
+        self,
+        root: &Path,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<u8>, CompileError> {
+        let limit = match self {
+            Self::Dependencies => {
+                certified_products::COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes)
+            }
+            Self::ModuleProducts | Self::ModulePackageImports | Self::CertifiedProducts => {
+                operation.limits().max_bytes
+            }
+        };
+        certified_products::read_bounded_with_operation(
+            &root.join(self.filename()),
+            limit as u64,
+            operation,
+        )
+        .map_err(compiler_evidence_failure)
+    }
+}
+
+fn compiler_evidence_failure(error: certified_products::CertificationError) -> CompileError {
+    CompileError::CompilerEvidence(Box::new(error))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn seal_turn_outputs_inner(
     offer: &ModuleCandidateOffer,
@@ -2349,29 +2393,19 @@ fn seal_turn_outputs_with_validation(
             "turn source changed after worker compile".into(),
         ));
     }
-    let read_sidecar = |name: &str| {
-        let path = output_dir.join(name);
-        let limit = if matches!(name, "module-products.cbor" | "certified-products.cbor") {
-            validation.inventory.limits().max_bytes
-        } else {
-            32 << 20
-        };
-        certified_products::read_bounded_with_operation(&path, limit as u64, &validation.inventory)
-            .map_err(|error| {
-                CompileError::ExtractFailed(format!("turn sidecar {}: {error}", path.display()))
-            })
-    };
-    let product_bytes = read_sidecar("module-products.cbor")?;
-    let package_bundle_bytes = read_sidecar("module-package-imports.cbor")?;
-    let evidence_bytes = read_sidecar("dependencies.json")?;
-    let receipt_bytes = read_sidecar("certified-products.cbor")?;
+    let product_bytes = CompilerSidecar::ModuleProducts.read(output_dir, &validation.inventory)?;
+    let package_bundle_bytes =
+        CompilerSidecar::ModulePackageImports.read(output_dir, &validation.inventory)?;
+    let evidence_bytes = CompilerSidecar::Dependencies.read(output_dir, &validation.inventory)?;
+    let receipt_bytes =
+        CompilerSidecar::CertifiedProducts.read(output_dir, &validation.inventory)?;
     let product_decode_start = Instant::now();
     let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
         &product_bytes,
         &package_bundle_bytes,
         validation.inventory.clone(),
     )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    .map_err(compiler_evidence_failure)?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2384,7 +2418,7 @@ fn seal_turn_outputs_with_validation(
         .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
             CompileError::ExtractFailed("source evidence accounting overflow".into())
         })?)
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
     let exact_source = offer
         .exact
         .as_ref()
@@ -2425,7 +2459,7 @@ fn seal_turn_outputs_with_validation(
         Some(output_dir),
         &validation.inventory,
     )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    .map_err(compiler_evidence_failure)?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2468,7 +2502,7 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], Vec::as_slice),
         validation,
     )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    .map_err(compiler_evidence_failure)?;
     let target_admission_start = Instant::now();
     ensure_ready_module_inventory(&receipt.modules, valid)?;
     let accepted = receipt
@@ -2489,13 +2523,13 @@ fn seal_turn_outputs_with_validation(
         &package_closure,
         validation,
     )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    .map_err(compiler_evidence_failure)?;
     let package_interfaces = certified_products::certify_target_package_interfaces_with_validation(
         prepared,
         &package_closure,
         validation,
     )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    .map_err(compiler_evidence_failure)?;
     timing::record_stage_with_owners(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2706,7 +2740,7 @@ fn merge_package_closure_with_validation(
             &request.context.recovery_products(),
             validation,
         )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        .map_err(compiler_evidence_failure)?;
         for (owner, witness) in inherited {
             if selected
                 .insert(owner, witness.clone())
@@ -3550,18 +3584,10 @@ fn compile_invocation_inner(
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory_operation.clone(),
         );
-        let evidence_bytes = certified_products::read_bounded_with_operation(
-            &output_owner.path().join("dependencies.json"),
-            32 << 20,
-            &inventory_operation,
-        )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let package_bundle_bytes = certified_products::read_bounded_with_operation(
-            &output_owner.path().join("module-package-imports.cbor"),
-            inventory_operation.limits().max_bytes as u64,
-            &inventory_operation,
-        )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let evidence_bytes =
+            CompilerSidecar::Dependencies.read(output_owner.path(), &inventory_operation)?;
+        let package_bundle_bytes = CompilerSidecar::ModulePackageImports
+            .read(output_owner.path(), &inventory_operation)?;
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
@@ -3569,7 +3595,7 @@ fn compile_invocation_inner(
             .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
                 CompileError::ExtractFailed("source evidence accounting overflow".into())
             })?)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
         if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
             validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
@@ -3604,12 +3630,8 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
-        let receipt_bytes = certified_products::read_bounded_with_operation(
-            &output_owner.path().join("certified-products.cbor"),
-            validation.inventory.limits().max_bytes as u64,
-            &validation.inventory,
-        )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let receipt_bytes =
+            CompilerSidecar::CertifiedProducts.read(output_owner.path(), &validation.inventory)?;
         if receipt_bytes.is_empty() {
             if inventory_export.is_some() {
                 return Err(CompileError::ExtractFailed(
@@ -3633,7 +3655,7 @@ fn compile_invocation_inner(
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             let fresh_products = inventory_operation
                 .parse_module_products(&product_bytes, &requirements)
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
             if !fresh_products.is_empty() {
                 return Err(CompileError::ExtractFailed(
                     "fresh module product certificate unavailable".into(),
@@ -3662,13 +3684,13 @@ fn compile_invocation_inner(
             Some(output_owner.path()),
             &validation.inventory,
         )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        .map_err(compiler_evidence_failure)?;
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
             &package_bundle_bytes,
             validation.inventory.clone(),
         )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        .map_err(compiler_evidence_failure)?;
         let valid_evidence = evidence
             .as_ref()
             .filter(|value| value.revalidate(inv.source).is_ok());
@@ -3694,7 +3716,7 @@ fn compile_invocation_inner(
                 &selected_session_value_modules(&cmd)?,
                 &mut validation,
             )
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            .map_err(compiler_evidence_failure)?;
             if let Some((output, selection)) = inventory_export {
                 catalog_inventory::inventory(output, selection, valid, &certified)?;
             }
@@ -3800,14 +3822,14 @@ fn compile_invocation_inner(
                     &package_closure,
                     &mut validation,
                 )
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                .map_err(compiler_evidence_failure)?;
                 target.package_interfaces =
                     certified_products::certify_target_package_interfaces_with_validation(
                         target.prepared.prepared_shared(),
                         &package_closure,
                         &mut validation,
                     )
-                    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                    .map_err(compiler_evidence_failure)?;
             }
         }
         timing::record_stage_with_owners(
@@ -4388,17 +4410,12 @@ pub(crate) fn extract_and_read(
         inventory_operation.limits().max_bytes as u64,
         &inventory_operation,
     )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    .map_err(compiler_evidence_failure)?;
     let products_path = temp_dir.join("module-products.cbor");
     if !products_path.exists() {
         return Err(CompileError::MissingOutput(products_path));
     }
-    let product_bytes = certified_products::read_bounded_with_operation(
-        &products_path,
-        inventory_operation.limits().max_bytes as u64,
-        &inventory_operation,
-    )
-    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let product_bytes = CompilerSidecar::ModuleProducts.read(temp_dir, &inventory_operation)?;
 
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
@@ -4411,7 +4428,7 @@ pub(crate) fn extract_and_read(
             DecodeLimits::default().max_bytes as u64,
             &inventory_operation,
         )
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        .map_err(compiler_evidence_failure)?;
         let asks_path = if multi {
             temp_dir.join(format!("{target}.asks.json"))
         } else {
@@ -4833,6 +4850,161 @@ fn store_memo(
         artifacts.push((name, Some(product_bytes)));
     }
     cache::artifacts_store(key, &artifacts, evidence, source);
+}
+
+#[cfg(test)]
+mod compiler_sidecar_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation, ParseError};
+
+    #[test]
+    fn aggregate_package_sidecar_reaches_decoder_above_individual_record_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let mut packages = root.path().join("packages");
+        for _ in 0..8 {
+            packages.push("p".repeat(128));
+        }
+        std::fs::create_dir_all(&packages).unwrap();
+        let interface = b"fixture interface";
+        let interface_sha = Sha256::digest(interface)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let mut package_roots = Vec::new();
+        for index in 0..2400 {
+            let path = packages.join(format!("Package{index}.hi"));
+            std::fs::write(&path, interface).unwrap();
+            package_roots.push(Value::Array(vec![
+                Value::Text("fixture-package".into()),
+                Value::Text(format!("Fixture.Package{index}")),
+                Value::Text(path.to_str().unwrap().into()),
+                Value::Text(interface_sha.clone()),
+            ]));
+        }
+        let mut rows = Vec::new();
+        let mut products = Vec::new();
+        for index in 0..13 {
+            let module = format!("Owner{index}");
+            let mut sidecar = Vec::new();
+            ciborium::ser::into_writer(
+                &Value::Array(vec![
+                    Value::Text("TPPKGROOTS".into()),
+                    Value::Text("2".into()),
+                    Value::Array(vec![
+                        Value::Text("main".into()),
+                        Value::Text(module.clone()),
+                        Value::Text(interface_sha.clone()),
+                    ]),
+                    Value::Array(package_roots.clone()),
+                    Value::Array(vec![]),
+                ]),
+                &mut sidecar,
+            )
+            .unwrap();
+            assert!(sidecar.len() < 4 << 20);
+            rows.push(Value::Array(vec![
+                Value::Text("main".into()),
+                Value::Text(module.clone()),
+                Value::Bytes(sidecar),
+            ]));
+            products.push(RawModuleProduct {
+                unit: "main".into(),
+                module,
+                interface: interface.to_vec(),
+                groups: vec![],
+            });
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![
+                Value::Text("TPPKGBUNDLES".into()),
+                Value::Integer(1.into()),
+                Value::Array(rows),
+            ]),
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(bytes.len() > certified_products::COMPILER_RECEIPT_BYTES_LIMIT);
+        let path = root
+            .path()
+            .join(CompilerSidecar::ModulePackageImports.filename());
+        std::fs::write(&path, &bytes).unwrap();
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let read = CompilerSidecar::ModulePackageImports
+            .read(root.path(), &operation)
+            .unwrap();
+        let decoded =
+            module_candidates::split_package_imports_with_operation(&read, &products, &operation)
+                .unwrap()
+                .unwrap();
+        assert_eq!(decoded.len(), products.len());
+        let mut validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(operation);
+        for product in &products {
+            assert_eq!(
+                crate::recovery_artifacts::validate_package_imports_with_validation(
+                    &decoded[&(product.unit.clone(), product.module.clone())],
+                    &product.unit,
+                    &product.module,
+                    &Sha256::digest(interface).into(),
+                    &path,
+                    &mut validation,
+                )
+                .unwrap()
+                .len(),
+                package_roots.len()
+            );
+        }
+
+        let restricted = InventoryOperation::new(InventoryDecodeLimits {
+            max_bytes: bytes.len() - 1,
+            ..Default::default()
+        });
+        let refusal = CompilerSidecar::ModulePackageImports
+            .read(root.path(), &restricted)
+            .unwrap_err();
+        assert!(matches!(&refusal, CompileError::CompilerEvidence(_)));
+        assert_eq!(
+            crate::failclass::classify_compile(&refusal).class,
+            crate::failclass::FailureClass::Infra
+        );
+        let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: bytes.len(),
+            ..Default::default()
+        });
+        assert!(
+            matches!(CompilerSidecar::ModulePackageImports.read(root.path(), &exhausted),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                certified_products::CertificationError::Product(ParseError::LimitExceeded("work"))))
+        );
+        let mut malformed = read;
+        malformed.push(0);
+        assert!(module_candidates::split_package_imports_with_operation(
+            &malformed,
+            &products,
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "refusal cannot alter compiler output"
+        );
+        std::fs::remove_file(&path).unwrap();
+        let absent = CompilerSidecar::ModulePackageImports
+            .read(root.path(), &InventoryOperation::new(Default::default()))
+            .unwrap_err();
+        assert!(
+            matches!(&absent, CompileError::CompilerEvidence(error) if matches!(error.as_ref(),
+            certified_products::CertificationError::EvidenceRead { failure: certified_products::EvidenceReadFailure::Io { .. }, .. }))
+        );
+        assert_eq!(
+            crate::failclass::classify_compile(&absent).class,
+            crate::failclass::FailureClass::Infra
+        );
+    }
 }
 
 #[cfg(test)]
