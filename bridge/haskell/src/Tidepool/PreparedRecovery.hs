@@ -35,11 +35,11 @@ import Tidepool.ExecutionProjection
   , preparedTargetReferences, preparedRootIdentity, topBinders )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.FatIface
-  ( FatIfaceCache, FatIfaceMissing, FatIfaceLookup(..), OwnerInterfaceCache
-  , lookupFatIfaceBodies )
+  ( FatIfaceCache, FatIfaceMissing, FatIfaceComponentLookup(..), OwnerInterfaceCache
+  , lookupFatIfaceComponents )
 import Tidepool.PreparedStg
   ( PreparedBodyCache, PreparedModule, pmModule, pmBindings, RecoveredModuleFailure(..)
-  , newPreparedBodyTaskPreparer, runPreparedBodyTask )
+  , newPreparedComponentTaskPreparer, runPreparedBodyTask )
 import Tidepool.CompilerExecution (CompilerExecutor, runCompilerTasks)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
@@ -169,7 +169,7 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
         Just shared -> runCompilerTasks shared action completed inputs
         Nothing -> mapM (\input -> action input >>= \output -> completed input output >> pure output) inputs
   factsMemo <- newIORef Map.empty
-  acquireBodies <- newPreparedBodyTaskPreparer env ownerCache bodyCache
+  acquireBodies <- newPreparedComponentTaskPreparer env ownerCache bodyCache
   pure $ \entry -> do
     let homeOwners = Set.fromList (map pmModule home)
         run roots carriedAttempts carriedGroups carriedModules carriedFailures carriedOwners carriedReach = do
@@ -241,14 +241,14 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                 | otherwise = Just <$> recoverExactBody env cache binder
               acquireOwner current owner = do
                 let version = Map.findWithDefault 0 owner (recoveryVersions current)
-                selected <- lookupFatIfaceBodies env cache owner
+                selected <- lookupFatIfaceComponents env cache owner
                   (concatMap (map varName . binders) (Map.findWithDefault [] owner (recoveryGroups current)))
                 task <- case selected of
-                  FatIfaceFound bodies -> acquireBodies owner bodies
-                  FatIfaceMissing reason -> pure (Left
+                  FatIfaceComponents components -> acquireBodies components
+                  FatIfaceComponentsMissing reason -> pure (Left
                     (RecoveredModulePreparationFailure owner
                       ("original body set disappeared: " ++ show reason)))
-                  FatIfaceLoadFailure _ reason -> pure (Left
+                  FatIfaceComponentsLoadFailure _ reason -> pure (Left
                     (RecoveredModuleInterfaceFailure owner reason))
                 pure (owner, version, task)
               -- Recompute target demand immediately on module completion. Other

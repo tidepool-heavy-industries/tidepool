@@ -17,19 +17,24 @@ module Tidepool.PreparedStg
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
   , newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
+  , newPreparedComponentTaskPreparer
   ) where
 
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException
   , throwIO, try )
-import Control.Monad (unless)
-import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
-import Data.List (foldl')
+import Control.Monad (unless, forM)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+import Data.List (foldl', partition, sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.IntMap.Strict qualified as IntMap
+import Data.ByteString qualified as BS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
 import Data.Word (Word32, Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -56,13 +61,16 @@ import GHC.Driver.Session
   (GeneralFlag(..), gopt_set, gopt_unset)
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Stg.Pipeline (StgCgInfos, stg2stg)
-import GHC.Stg.Syntax (CgStgTopBinding)
+import GHC.Stg.Syntax (CgStgTopBinding, GenStgTopBinding(..), GenStgBinding(..))
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var (Id, isId, varName, varUnique)
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe)
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Env (plusNameEnv, emptyNameEnv, disjointNameEnv)
 import GHC.Unit.Types (Module)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModIface (ModIface)
@@ -84,11 +92,16 @@ import Tidepool.HomeProducts
   ( OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
-import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase, emitCount)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
+  , FatOriginalVersion, fatOriginalOwner, FatIfaceComponent, fatComponentVersion
+  , fatComponentOrdinals, fatComponentOrdinal, fatComponentBindings, fatComponentAllBinders
+  , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
+  , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , OwnerInterfaceContext(..), OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
+import Tidepool.FatIface.Internal qualified as Shared
 
 -- | Observe prepared output without replacing its compiler-owned evidence.
 pmModule :: PreparedModule -> Module
@@ -317,16 +330,18 @@ recoveredSubsetScope owner bindings =
 data PreparedBodyCache = PreparedBodyCache
   { cachedExactBodies :: MVar (Map Module (Map [[Word64]] PreparedModule))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
+  , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule))
   }
 
 newPreparedBodyCache :: IO PreparedBodyCache
-newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty <*> newMVar Map.empty
+newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty <*> newMVar Map.empty <*> newMVar Map.empty
 
 -- | Attempt additions are private until their compiler context is promoted.
 copyPreparedBodyCache :: PreparedBodyCache -> IO PreparedBodyCache
 copyPreparedBodyCache cache = PreparedBodyCache
   <$> (readMVar (cachedExactBodies cache) >>= newMVar)
   <*> (readMVar (cachedOriginalModules cache) >>= newMVar)
+  <*> (readMVar (cachedFatComponents cache) >>= mapM Shared.copyLoadCache >>= newMVar)
 
 -- | Select completed acceleration for the validated owner roster. Both exact
 -- subsets and full canonical versions retain earlier-input key priority.
@@ -337,8 +352,11 @@ mergePreparedBodyCaches sources = do
     originals <- Map.filterWithKey (\owner _ -> keep owner)
       <$> readMVar (cachedOriginalModules cache)
     pure (exact, originals)) sources
+  components <- mapM (\(cache, keep) -> Map.filterWithKey (\owner _ -> keep owner)
+    <$> readMVar (cachedFatComponents cache)) sources >>= mergeComponentBuckets
   PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
+    <*> newMVar components
 
 -- | Home activation reads only validated owner buckets. Within an owner,
 -- exact subsets and canonical versions keep earlier-source key priority.
@@ -348,8 +366,17 @@ selectPreparedBodyCaches sources = do
     exact <- selectOwnerBuckets owners <$> readMVar (cachedExactBodies cache)
     originals <- selectOwnerBuckets owners <$> readMVar (cachedOriginalModules cache)
     pure (exact, originals)) sources
+  components <- mapM (\(cache, owners) -> selectOwnerBuckets owners
+    <$> readMVar (cachedFatComponents cache)) sources >>= mergeComponentBuckets
   PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
+    <*> newMVar components
+
+mergeComponentBuckets :: [Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule)]
+  -> IO (Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule))
+mergeComponentBuckets sources = mapM
+  (Shared.mergeLoadCaches . map (\cache -> (cache,const True)))
+  (Map.unionsWith (++) (map (Map.map pure) sources))
 
 selectOwnerBuckets :: Set.Set Module -> Map Module value -> Map Module value
 selectOwnerBuckets owners entries = Map.fromAscList
@@ -365,6 +392,8 @@ evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
 evictPreparedBodyMatching cache stale = do
   modifyMVar_ (cachedExactBodies cache) (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
   modifyMVar_ (cachedOriginalModules cache)
+    (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
+  modifyMVar_ (cachedFatComponents cache)
     (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
 
 type PreparedOriginalAlternative = (AdmittedFinalizedOriginal,PreparedModule)
@@ -449,6 +478,134 @@ newtype PreparedBodyTask = PreparedBodyTask (IO (Either RecoveredModuleFailure P
 
 runPreparedBodyTask :: PreparedBodyTask -> IO (Either RecoveredModuleFailure PreparedModule)
 runPreparedBodyTask (PreparedBodyTask action) = action
+
+-- | Each original private component is one preparation unit. Completed pure
+-- units survive subset growth; the shared per-key loader coalesces overlapping
+-- growth and releases waiters on failure or cancellation. Live defining and
+-- site context work is acquired before the returned task runs.
+newPreparedComponentTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedBodyTask))
+newPreparedComponentTaskPreparer env owners stable = do
+  acquireSiteBatch <- newPreparedBodyTaskPreparer env owners stable
+  timing <- readTimingEnabled
+  pure $ \selection -> do
+    let version = fatSelectionVersion selection
+        owner = fatOriginalOwner version
+        components = sortOn fatComponentOrdinal (fatSelectionComponents selection)
+    resolved <- acquireRecoveredContext env owners owner
+    case resolved of
+      Left failure -> pure (Left failure)
+      Right context -> do
+        bucket <- modifyMVar (cachedFatComponents stable) $ \buckets ->
+          case Map.lookup owner buckets of
+            Just cache -> pure (buckets,cache)
+            Nothing -> do
+              cache <- Shared.newLoadCache
+              pure (Map.insert owner cache buckets,cache)
+        let pureUnit component = intrinsicFree (censusPreparedIntrinsics
+              (ownerInterfaceTyCons context) (IntMap.elems (fatComponentBindings component)))
+            (plain, siteBearing) = partition pureUnit components
+        acquired <- forM plain $ \component -> do
+          let key = (version,fatComponentOrdinal component)
+          completed <- Shared.lookupCompletedLoadCache bucket key
+          task <- case completed of
+            Just prepared -> pure (Right (PreparedModuleTask (pure prepared)))
+            Nothing -> acquireRecoveredWithContext env owner context
+              (IntMap.elems (fatComponentBindings component))
+          pure ((component,key),task)
+        -- Site graphs have owner-local indexes. Until their owning type policy
+        -- supplies checked rebasing, all selected site units form one typed
+        -- batch; pure-unit reuse remains independent of that batch's growth.
+        siteTask <- if null siteBearing then pure (Right Nothing) else
+          fmap (fmap Just) (acquireSiteBatch owner (IntMap.elems (IntMap.unions
+            (map fatComponentBindings siteBearing))))
+        case (sequence [fmap ((,) pair) task | (pair,task) <- acquired], siteTask) of
+          (Left failure, _) -> pure (Left failure)
+          (_, Left failure) -> pure (Left failure)
+          (Right tasks, Right site) -> pure (Right (PreparedBodyTask $ do
+            outcome <- trySynchronous $ do
+              pureResults <- forM tasks $ \((component,key),task) -> do
+                prepared <- Shared.lookupLoadCache bucket key $ do
+                  fresh <- runPreparedModuleTask task
+                  unless (not (preparedUsesSiteAuthority fresh))
+                    (ioError (userError "pure fat component acquired site authority"))
+                  emitCount timing "prepared_recover_component_new_groups"
+                    (fromIntegral (length (fatComponentOrdinals component)))
+                  pure (issueComponentSpellings component fresh)
+                pure (fatComponentOrdinals component,prepared)
+              siteResult <- case site of
+                Nothing -> pure []
+                Just task -> do
+                  result <- runPreparedBodyTask task >>= either (ioError . userError . show) pure
+                  pure [(concatMap fatComponentOrdinals siteBearing,result)]
+              assembled <- assembleComponentSelection selection (pureResults ++ siteResult)
+              emitCount timing "prepared_recover_component_demanded_groups"
+                (fromIntegral (fatSelectionDemandedGroupCount selection))
+              emitCount timing "prepared_recover_component_prepared_groups"
+                (fromIntegral (fatSelectionPreparedGroupCount selection))
+              emitCount timing "prepared_recover_component_stg_text_bytes"
+                (fromIntegral (BS.length (TextEncoding.encodeUtf8 (Text.pack
+                  (showSDocUnsafe (ppr (map fst (pmBindings assembled))))))))
+              pure assembled
+            pure $ case outcome of
+              Left reason -> Left (RecoveredModulePreparationFailure owner reason)
+              Right prepared -> Right prepared)))
+
+issueComponentSpellings :: FatIfaceComponent -> PreparedModule -> PreparedModule
+issueComponentSpellings component prepared = prepared
+  { preparedStableTopSpellings = Map.fromList
+      [(varName binder, choose (Text.pack ("$tp.package."
+          ++ show (fatComponentOrdinal component) ++ "." ++ show ordinal)))
+      | (ordinal,binder) <- zip [0 :: Int ..] allTops
+      , not (isExternalName (varName binder))] }
+  where
+    allTops = concatMap (preparedTopBinders . fst) (pmBindings prepared)
+    reserved = Set.fromList (map (Text.pack . occNameString . nameOccName . varName)
+      (fatComponentAllBinders component))
+    choose stem | stem `Set.notMember` reserved = stem
+    choose stem = head [candidate | suffix <- [1 :: Int ..]
+      , let candidate = stem <> Text.pack (".reserved." ++ show suffix)
+      , candidate `Set.notMember` reserved]
+
+preparedTopBinders :: CgStgTopBinding -> [Id]
+preparedTopBinders (StgTopStringLit identifier _) = [identifier]
+preparedTopBinders (StgTopLifted (StgNonRec identifier _)) = [identifier]
+preparedTopBinders (StgTopLifted (StgRec pairs)) = map fst pairs
+
+-- Assembly is private to this preparation owner. Every supplied unit must be
+-- an exact, disjoint part of the issued roster with disjoint emitted binders
+-- and tag evidence. The single site batch supplies the owner-local type graph.
+assembleComponentSelection :: FatIfaceSelection -> [([Int],PreparedModule)] -> IO PreparedModule
+assembleComponentSelection selection units = do
+  let version = fatSelectionVersion selection
+      owner = fatOriginalOwner version
+      rosters = map fst units
+      expected = Set.fromList (concatMap fatComponentOrdinals (fatSelectionComponents selection))
+      supplied = concat rosters
+      prepared = map snd (sortOn (minimum . fst) units)
+      names = concatMap (concatMap (map varName . preparedTopBinders . fst) . pmBindings) prepared
+      spellings = concatMap (Map.elems . pmStableTopSpellings) prepared
+      siteUnits = filter preparedUsesSiteAuthority prepared
+      tagsDisjoint = snd (foldl (\(known,valid) item ->
+        (plusNameEnv known (pmTagSigs item), valid && disjointNameEnv known (pmTagSigs item)))
+        (emptyNameEnv,True) prepared)
+  unless (not (null prepared)
+      && all ((== version) . fatComponentVersion) (fatSelectionComponents selection)
+      && all ((== owner) . pmModule) prepared
+      && all ((== ExactBodySubset) . pmCoverage) prepared
+      && Set.fromList supplied == expected && length supplied == Set.size expected
+      && length names == Set.size (Set.fromList names)
+      && length spellings == Set.size (Set.fromList spellings)
+      && tagsDisjoint && length siteUnits <= 1)
+    (ioError (userError "canonical fat component assembly has inconsistent or overlapping evidence"))
+  let base = case siteUnits of site:_ -> site; [] -> head prepared
+  pure base
+    { preparedBindings = concatMap pmBindings prepared
+    , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
+    , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
+    , preparedSitedSiblings = Map.unions (map pmSitedSiblings prepared)
+    , preparedExpectedEntries = Map.unions (map preparedExpectedEntries prepared)
+    }
 
 -- | Exact defining/site context acquisition stays on the coordinator. Tasks
 -- contain only immutable inputs, lowering and short exact-body cache commits.
