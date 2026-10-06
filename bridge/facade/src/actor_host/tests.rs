@@ -926,10 +926,10 @@ fn root_recovery_does_not_fall_back_past_a_retired_incarnation() {
         incarnation: exomonad_actor::Incarnation(2),
     };
     let mut latest = durable_root(second);
-    latest.terminal = Some(exomonad_actor::DurableActorTerminal {
-        kind: exomonad_actor::ActorExitKind::Completed,
-        summary: "retired".into(),
-    });
+    latest.terminal = Some(exomonad_actor::DurableActorTerminal::new(
+        exomonad_actor::ActorExitKind::Completed,
+        "retired",
+    ));
 
     assert_eq!(
         durable_root_identity(&[durable_root(first), latest], Some("source-revision")).unwrap(),

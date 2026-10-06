@@ -692,9 +692,9 @@ impl ActorRecoveryJournal {
     pub(crate) fn retire(
         &self,
         actor: ActorRef,
-        mut terminal: crate::ActorTerminal,
+        terminal: crate::ActorTerminal,
     ) -> std::io::Result<()> {
-        terminal.diagnostic = crate::termination::retain_failure_diagnostic(terminal.diagnostic);
+        let terminal = terminal.bound_diagnostic();
         let mut state = self.state.lock();
         ensure_writable(&state)?;
         let record = state.records.get(&actor).ok_or_else(|| {

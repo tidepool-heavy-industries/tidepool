@@ -99,8 +99,14 @@ impl ActorTerminal {
         Self {
             kind: ActorExitKind::Failed,
             summary,
-            diagnostic: retain_failure_diagnostic(diagnostic),
+            diagnostic,
         }
+        .bound_diagnostic()
+    }
+
+    pub(crate) fn bound_diagnostic(mut self) -> Self {
+        self.diagnostic = retain_failure_diagnostic(self.diagnostic);
+        self
     }
 }
 
@@ -226,6 +232,7 @@ impl RetainedActorExit {
     /// Record intent without publishing an exit. Bootstrap checks this at safe
     /// boundaries; only ordinary lifecycle cleanup may publish the terminal.
     pub(crate) fn request_shutdown(&self, terminal: ActorTerminal) -> ActorTerminal {
+        let terminal = terminal.bound_diagnostic();
         let terminal = self
             .state
             .requested_shutdown
@@ -307,11 +314,8 @@ impl RetainedActorExit {
     /// own tests. Returning an error rather than replacing the value makes
     /// competing cleanup paths an explicit invariant violation while
     /// preserving the first result.
-    pub(crate) fn publish(
-        &self,
-        mut terminal: ActorTerminal,
-    ) -> Result<(), ActorExitAlreadyPublished> {
-        terminal.diagnostic = retain_failure_diagnostic(terminal.diagnostic);
+    pub(crate) fn publish(&self, terminal: ActorTerminal) -> Result<(), ActorExitAlreadyPublished> {
+        let terminal = terminal.bound_diagnostic();
         {
             let mut retained = self.state.lifecycle.lock();
             if let ActorLifecycle::Exited(existing) = &retained.current {
@@ -380,10 +384,19 @@ mod tests {
                 "αβγ\n".repeat(10_000)
             ),
         };
-        let terminal = ActorTerminal::failed(
-            "Haskell compilation failed (1 diagnostic)".into(),
-            Some(original.clone()),
+        let raw = ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "Haskell compilation failed (1 diagnostic)".into(),
+            diagnostic: Some(original.clone()),
+        };
+        let intent = RetainedActorExit::new();
+        let terminal = intent.request_shutdown(raw.clone());
+        assert_eq!(intent.requested_shutdown(), Some(terminal.clone()));
+        assert_eq!(
+            intent.claim_before_shutdown(|| panic!("intent already owns retirement")),
+            Err(terminal.clone())
         );
+        assert_eq!(terminal, ActorTerminal::failed(raw.summary, raw.diagnostic));
         let diagnostic = terminal.diagnostic.as_ref().expect("original diagnostic");
         assert_eq!(diagnostic.class, original.class);
         assert_eq!(diagnostic.phase, original.phase);

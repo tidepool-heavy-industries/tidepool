@@ -3159,6 +3159,7 @@ where
     *state.context.child_admission_closed.write().await = true;
     match disposition {
         Disposition::Stop(requested) => {
+            let requested = requested.bound_diagnostic();
             // One shutdown deadline, computed once: hook admission and resource-scope
             // checkout race it directly, and children get the remainder minus
             // a margin so a child's own budget always expires first and it
@@ -3418,6 +3419,7 @@ mod tests {
         release_first: Arc<Notify>,
         fail_cast: bool,
         resume_failure: Option<KernelBehaviorError>,
+        terminal_callbacks: Arc<Mutex<Vec<ActorTerminal>>>,
         mailbox_ready: bool,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
@@ -3895,9 +3897,11 @@ mod tests {
         fn shutdown(
             &mut self,
             _context: &KernelContext,
-            _terminal: &ActorTerminal,
+            terminal: &ActorTerminal,
         ) -> BoxFuture<'_, Result<(), KernelBehaviorError>> {
+            let terminal = terminal.clone();
             Box::pin(async move {
+                self.terminal_callbacks.lock().push(terminal);
                 self.calls.lock().push("shutdown");
                 Ok(())
             })
@@ -3906,8 +3910,9 @@ mod tests {
         fn stopped(
             &mut self,
             _context: &KernelContext,
-            _terminal: &ActorTerminal,
+            terminal: &ActorTerminal,
         ) -> BoxFuture<'_, ()> {
+            self.terminal_callbacks.lock().push(terminal.clone());
             Box::pin(async {})
         }
 
@@ -4016,6 +4021,7 @@ mod tests {
         release: Arc<Notify>,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
+        terminal_callbacks: Arc<Mutex<Vec<ActorTerminal>>>,
     }
 
     fn behavior(fail_cast: bool) -> ProbeFixture {
@@ -4025,6 +4031,7 @@ mod tests {
         let spawned_child = Arc::new(Mutex::new(None));
         let child_exits = Arc::new(Mutex::new(Vec::new()));
         let spawned_children = Arc::new(Mutex::new(Vec::new()));
+        let terminal_callbacks = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
                 replacement_staged: false,
@@ -4034,6 +4041,7 @@ mod tests {
                 release_first: Arc::clone(&release),
                 fail_cast,
                 resume_failure: None,
+                terminal_callbacks: terminal_callbacks.clone(),
                 mailbox_ready: true,
                 spawned_child: Arc::clone(&spawned_child),
                 child_exits: Arc::clone(&child_exits),
@@ -4058,6 +4066,7 @@ mod tests {
             release,
             spawned_child,
             child_exits,
+            terminal_callbacks,
         }
     }
 
@@ -6255,6 +6264,63 @@ mod tests {
         task.await.expect("actor task");
         assert!(call_rx.await.is_err(), "deferred caller must be released");
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn raw_terminal_is_bounded_before_cleanup_callbacks_and_shutdown_reply() {
+        let fixture = behavior(false);
+        let callbacks = fixture.terminal_callbacks.clone();
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let original = ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "original terminal disposition".into(),
+            diagnostic: Some(tidepool_toolchain::failclass::FailureEnvelope {
+                class: tidepool_toolchain::failclass::FailureClass::UserHaskell,
+                phase: tidepool_toolchain::failclass::Phase::Compile,
+                cause: Some(tidepool_toolchain::failclass::CompileFailureCause::SourceDiagnostics),
+                message: "λ\n".repeat(32 * 1024),
+            }),
+        };
+        let (reply, received) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Shutdown {
+                terminal: original.clone(),
+                reply: reply.into(),
+            })
+            .expect("admit raw public terminal without an intent precheck");
+        let returned = received.await.expect("actual shutdown reply");
+        task.await.expect("actor task joined");
+        assert_eq!(returned.kind, original.kind);
+        assert_eq!(returned.summary, original.summary);
+        assert!(returned.diagnostic.as_ref().unwrap().message.len() <= 16 * 1024);
+        assert_eq!(actor.terminal().get(), Some(returned.clone()));
+        assert_eq!(*callbacks.lock(), vec![returned.clone(), returned.clone()]);
+        let directory = tempfile::tempdir().unwrap();
+        let anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let descriptor = crate::ActorDescriptor::new(
+            "raw-terminal",
+            crate::ActorPlacement {
+                session: SessionId(1),
+                lexical_scope: tidepool_codegen::scope::ScopeId(1),
+                resource_scope: tidepool_codegen::suspension::RealmId(1),
+            },
+        );
+        journal.admit(actor.identity(), &descriptor, &[]).unwrap();
+        journal.retire(actor.identity(), original).unwrap();
+        assert_eq!(journal.records()[0].terminal, Some(returned.clone()));
+        assert_eq!(
+            actor
+                .shutdown(ActorTerminal::new(
+                    ActorExitKind::Cancelled,
+                    "later cleanup"
+                ))
+                .await
+                .unwrap(),
+            returned
+        );
     }
 
     #[tokio::test]
