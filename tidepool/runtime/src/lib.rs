@@ -236,23 +236,29 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<EvalResult, RuntimeError> {
     let _ = target;
-    let CompileResult {
-        table,
-        warnings,
-        prepared,
-    } = compile_haskell(source, session::PREPARED_SCAFFOLD_TARGET, include)?;
-    if warnings.has_io {
-        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-    }
-    let value = run_prepared_program(
-        prepared.into_prepared(),
-        &table,
+    let include_owned = include
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect::<Vec<_>>();
+    let artifacts = compile_targets(
+        source,
+        &[session::PREPARED_SCAFFOLD_TARGET],
+        &include_owned,
+        |_, _, _| {},
+    )?;
+    let value = run_compiled_target(
+        &artifacts,
+        session::PREPARED_SCAFFOLD_TARGET,
         nursery_size,
         handlers,
         user,
         on_ready,
     )?;
-    Ok(EvalResult::new(value, table, warnings.warnings))
+    Ok(EvalResult::new(
+        value,
+        artifacts.table,
+        artifacts.warnings.warnings,
+    ))
 }
 
 /// Run an ALREADY-COMPILED prepared program to completion against `handlers`,
@@ -263,12 +269,9 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
 /// ([`session::resident`]'s `finish_prepared`, `pub(crate)` there) — reusing
 /// exactly what a resident session turn already uses, not a second engine.
 ///
-/// [`compile_and_run_cancellable`] is this plus its own `compile_haskell`
-/// call; this lower-level entry point is for a caller that already holds a
-/// [`tidepool_repr::execution_schema::PreparedProgram`] from its own earlier
-/// compile (e.g. `tidepool-testing::eval_harness::EvalHarness::run_target*`,
-/// which extracts several targets from one `tidepool-extract` invocation and
-/// must not spawn a second one per target it runs).
+/// This entry point requires a self-contained program. Compiler artifact
+/// consumers use [`run_compiled_target`] to install certified imported groups
+/// alongside the target before entering the same settlement loop.
 ///
 /// `on_ready` receives the freshly-built engine's [`CancelHandle`] BEFORE
 /// the (blocking) run begins, exactly as [`compile_and_run_cancellable`]
@@ -285,7 +288,67 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     user: &U,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<HaskellValue, RuntimeError> {
-    use session::prepared::{ParkPolicy, PreparedEngine, PreparedRuntimeError};
+    let (mut engine, program) =
+        session::prepared::PreparedEngine::bootstrap_with_nursery_bytes(prepared, nursery_size)?;
+    run_installed_program(&mut engine, program, table, handlers, user, on_ready)
+}
+
+/// Run an ordinary compiler target with its complete certified source closure.
+/// Source groups and the target install together through the resident linker,
+/// with fresh mutable state for this one-shot execution.
+pub fn run_compiled_target<U, H: DispatchEffect<U>>(
+    artifacts: &CompiledArtifacts,
+    target: &str,
+    nursery_size: usize,
+    handlers: &mut H,
+    user: &U,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<HaskellValue, RuntimeError> {
+    use session::prepared::CertifiedTargetImage;
+    use tidepool_codegen::scope::ScopeId;
+
+    if artifacts.warnings.has_io {
+        return Err(CompileError::IOTypeDetected.into());
+    }
+    let target = artifacts.targets.get(target).ok_or_else(|| {
+        CompileError::ExtractFailed(format!("compiled artifact has no target {target:?}"))
+    })?;
+    let certification = session::TurnCertification::from_artifacts(artifacts, target);
+    let mut state = session::PersistentSession::new(None, nursery_size);
+    let resolved = state.resolve_certification_in(
+        ScopeId::ROOT,
+        target.prepared.prepared(),
+        &certification,
+    )?;
+    let registry = state.certified_image_registry();
+    let (target, demanded) = CertifiedTargetImage::compile_scoped(
+        target.prepared.prepared().clone(),
+        &resolved,
+        &registry,
+    )?;
+    let (program, _) = state.install_certified_turn_in(
+        ScopeId::ROOT,
+        target,
+        &resolved.target_owners,
+        &resolved.source_evidence,
+        demanded,
+        &resolved.inherited_needed,
+    )?;
+    let engine = state.require_prepared()?;
+    let result = run_installed_program(engine, program, &artifacts.table, handlers, user, on_ready);
+    engine.unpin(program);
+    result
+}
+
+fn run_installed_program<U, H: DispatchEffect<U>>(
+    engine: &mut session::prepared::PreparedEngine,
+    program: tidepool_codegen::prepared_program::ProgramId,
+    table: &DataConTable,
+    handlers: &mut H,
+    user: &U,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<HaskellValue, RuntimeError> {
+    use session::prepared::{ParkPolicy, PreparedRuntimeError};
     use session::resident::{finish_prepared, PreparedRun, SettlePlan};
     use tidepool_codegen::suspension::RealmId;
     use tidepool_effect::dispatch::{request_constructor, DeferredEffect};
@@ -293,8 +356,6 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
     use tidepool_repr::PrincipalId;
 
-    let (mut engine, program) =
-        PreparedEngine::bootstrap_with_nursery_bytes(prepared, nursery_size)?;
     let realm = RealmId::ROOT;
     on_ready(engine.cancel_handle(realm));
     let park = ParkPolicy {
@@ -304,7 +365,7 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     };
     let settlement = engine.run_settled(program, realm)?;
     let mut run = finish_prepared(
-        &mut engine,
+        engine,
         program,
         realm,
         SettlePlan::Observe,
@@ -351,7 +412,7 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
                     }
                 };
                 run = finish_prepared(
-                    &mut engine,
+                    engine,
                     resumed.runner,
                     resumed.realm,
                     SettlePlan::Observe,

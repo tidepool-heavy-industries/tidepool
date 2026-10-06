@@ -11,7 +11,7 @@ use tidepool_repr::DataConTable;
 pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
     compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_targets,
-    run_prepared_program, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
+    run_compiled_target, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
     HaskellValue, RuntimeError, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
@@ -131,19 +131,21 @@ pub fn require_extract() {
 /// this dance; call this instead.
 pub fn with_eval_stack<T, F>(f: F) -> T
 where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
+    F: FnOnce() -> T + Send,
+    T: Send,
 {
     #[allow(
         clippy::expect_used,
         reason = "spawn/join of the eval-stack thread does not fail in practice"
     )]
-    std::thread::Builder::new()
-        .stack_size(EVAL_STACK_SIZE)
-        .spawn(f)
-        .expect("spawn eval-stack thread")
-        .join()
-        .expect("eval-stack thread panicked")
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(EVAL_STACK_SIZE)
+            .spawn_scoped(scope, f)
+            .expect("spawn eval-stack thread")
+            .join()
+            .expect("eval-stack thread panicked")
+    })
 }
 
 /// The outcome of a compile+run: a thin, assertion-friendly wrapper over
@@ -472,28 +474,11 @@ impl EvalHarness {
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
     {
-        // `compile_many` artifacts do not yet provide settled scaffolds for
-        // non-designated targets. Keep this helper on the single-target path
-        // until that runtime contract is implemented and covered directly.
-        let prepared = artifacts
-            .targets
-            .get(target)
-            .unwrap_or_else(|| panic!("compile_many did not produce target {target:?}"))
-            .prepared
-            .prepared()
-            .clone();
-        let table = artifacts.table.clone();
-        let has_io = artifacts.warnings.has_io;
         let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
         let (result, handlers) = with_eval_stack(move || {
-            let result: Result<(HaskellValue, DataConTable), RuntimeError> = (|| {
-                if has_io {
-                    return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-                }
-                let value =
-                    run_prepared_program(prepared, &table, nursery, &mut handlers, &user, |_| {})?;
-                Ok((value, table))
-            })();
+            let result =
+                run_compiled_target(artifacts, target, nursery, &mut handlers, &user, |_| {})
+                    .map(|value| (value, artifacts.table.clone()));
             (result, handlers)
         });
         (TargetOutcome(result), handlers)

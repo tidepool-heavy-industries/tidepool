@@ -1749,6 +1749,21 @@ impl Default for TurnCertification {
 }
 
 impl TurnCertification {
+    /// Carry an ordinary compiler target's complete certified import closure.
+    pub(crate) fn from_artifacts(
+        artifacts: &crate::CompiledArtifacts,
+        target: &crate::TargetArtifact,
+    ) -> Self {
+        Self {
+            artifact_view: artifacts.artifact_view.clone(),
+            groups: artifacts.certified_groups.clone().into(),
+            target_owners: target.pending_imports.clone(),
+            package_interfaces: target.package_interfaces.clone(),
+            recovery_products: artifacts.recovery_products.clone(),
+            ..Default::default()
+        }
+    }
+
     pub(super) fn host_prototype(&self) -> Result<Self, CompileError> {
         let TurnPurpose::Execution { execution, prefix } = &self.purpose else {
             return Err(CompileError::ExtractFailed(
