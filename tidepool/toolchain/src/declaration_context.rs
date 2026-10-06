@@ -769,13 +769,21 @@ pub(crate) struct RetainedArtifactMaterialization {
 
 impl RetainedArtifactMaterialization {
     fn visit_owners<'a>(&'a self, seen: &mut BTreeSet<usize>, visit: &mut impl FnMut(&'a Self)) {
-        if !seen.insert(self as *const Self as usize) {
-            return;
+        let mut pending = vec![(self, false)];
+        while let Some((owner, parents_visited)) = pending.pop() {
+            if parents_visited {
+                visit(owner);
+            } else if seen.insert(owner as *const Self as usize) {
+                pending.push((owner, true));
+                pending.extend(
+                    owner
+                        ._parents
+                        .iter()
+                        .rev()
+                        .map(|parent| (parent.as_ref(), false)),
+                );
+            }
         }
-        for parent in &self._parents {
-            parent.visit_owners(seen, visit);
-        }
-        visit(self);
     }
 
     fn selected_rows<'a>(
@@ -4916,6 +4924,124 @@ mod tests {
         drop(second);
         drop(b);
         assert!(!root_a.exists());
+    }
+
+    #[test]
+    fn retained_materialization_nonempty_groups_select_versions_and_shared_parents() {
+        let (initial, producer) = metadata_fixture();
+        let product = |module, version, generation| {
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_witness_fixture(
+                    module,
+                    Some(crate::certified_products::PendingImportOwner::Retained {
+                        identity: tidepool_repr::execution_schema::testing::identity(
+                            "Value", "live",
+                        ),
+                        generation,
+                    }),
+                    version,
+                    &BTreeMap::new(),
+                ),
+                initial.producer,
+            )
+        };
+        let extend = |context: &Arc<ExactDeclarationContext>, product| {
+            Arc::new(
+                context
+                    .as_ref()
+                    .clone()
+                    .extend_checked_original_products(context.producer, &[product])
+                    .unwrap(),
+            )
+        };
+        let scratch = tempfile::tempdir().unwrap();
+        let base = extend(&initial, product("Native", 7, 11));
+        let base_request = base
+            .prepare_compilation(&scratch.path().join("base"), &producer)
+            .unwrap();
+        assert_eq!(base_request.groups.len(), 1);
+        let left = extend(&base, product("Left", 8, 12));
+        let right = extend(&base, product("Right", 9, 13));
+        let left_request = left
+            .prepare_compilation(&scratch.path().join("left"), &producer)
+            .unwrap();
+        let right_request = right
+            .prepare_compilation(&scratch.path().join("right"), &producer)
+            .unwrap();
+        let mut joined = left.as_ref().clone();
+        joined.inventory = joined.inventory.merge(&right.inventory).unwrap();
+        joined.normalize().unwrap();
+        let joined = Arc::new(joined);
+        let joined_request = joined
+            .prepare_compilation(&scratch.path().join("joined"), &producer)
+            .unwrap();
+        let joined_owner = joined_request.materialization.as_ref().unwrap();
+        assert!(
+            joined_owner.groups.is_empty(),
+            "joining adds no native payload"
+        );
+        assert_eq!(joined_owner._parents.len(), 2);
+        let base_owner = base_request.materialization.as_ref().unwrap();
+        for branch in [&left_request, &right_request] {
+            let owner = branch.materialization.as_ref().unwrap();
+            assert_eq!(owner.groups.len(), 1);
+            assert!(Arc::ptr_eq(&owner._parents[0], base_owner));
+        }
+        let mut visited = Vec::new();
+        joined_owner.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            visited.push(owner as *const RetainedArtifactMaterialization);
+        });
+        assert_eq!(visited.len(), 4, "the diamond visits its shared base once");
+        assert_eq!(visited[0], Arc::as_ptr(base_owner));
+        assert_eq!(visited[3], Arc::as_ptr(joined_owner));
+        assert_eq!(
+            joined_request
+                .groups
+                .iter()
+                .map(|group| group.owner().module.as_str())
+                .collect::<Vec<_>>(),
+            ["Native", "Left", "Right"]
+        );
+        for branch in [&base_request, &left_request, &right_request] {
+            let original = branch
+                .materialization
+                .as_ref()
+                .unwrap()
+                .groups
+                .first()
+                .unwrap();
+            let selected = joined_request
+                .groups
+                .iter()
+                .find(|group| group.owner() == original.owner())
+                .unwrap();
+            assert!(std::ptr::eq(selected.group(), original.group()));
+            assert_eq!(selected.imports(), original.imports());
+        }
+
+        let replacement = extend(&initial, product("Native", 10, 22));
+        let replacement_request = replacement
+            .prepare_compilation(&scratch.path().join("replacement"), &producer)
+            .unwrap();
+        let replacement_owner = replacement_request.materialization.as_ref().unwrap();
+        let selected = RetainedArtifactMaterialization::selected_group_refs(
+            [joined_owner.as_ref(), replacement_owner.as_ref()],
+            &replacement.inventory.metadata_snapshot(),
+        );
+        assert_eq!(
+            selected.len(),
+            1,
+            "unselected modules and old versions are excluded"
+        );
+        assert_eq!(selected[0].owner().module_version.0, [10; 32]);
+        assert!(std::ptr::eq(
+            selected[0].group(),
+            replacement_request.groups[0].group()
+        ));
+        assert!(matches!(
+            selected[0].imports()[0],
+            crate::certified_products::PendingImportOwner::Retained { generation: 22, .. }
+        ));
     }
 
     #[test]
