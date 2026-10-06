@@ -193,7 +193,8 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
-        "-Wall"
+        "-Wall",
+        "-Werror=missing-fields"
     ]),
         linker_flags = haskell_component_link_flags([
         "bytestring",
@@ -218,7 +219,8 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
-        "-Wall"
+        "-Wall",
+        "-Werror=missing-fields"
     ], dynamic = False),
         visibility = ["PUBLIC"],
     )
@@ -321,6 +323,7 @@ def declare_haskell_components():
         "-XGHC2024",
         "-XOverloadedStrings",
         "-Wall",
+        "-Werror=missing-fields",
         "-g3",
         "-fexpose-internal-symbols",
         "-finfo-table-map"
@@ -348,7 +351,8 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
-        "-Wall"
+        "-Wall",
+        "-Werror=missing-fields"
     ], dynamic = False),
         visibility = ["PUBLIC"],
     )
@@ -364,12 +368,14 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
-        "-Wall"
+        "-Wall",
+        "-Werror=missing-fields"
     ]),
         linker_flags = haskell_component_link_flags([
         "text"
     ], [
-        "-Wall"
+        "-Wall",
+        "-Werror=missing-fields"
     ], dynamic = False),
         visibility = ["PUBLIC"],
     )
@@ -396,6 +402,7 @@ def declare_haskell_components():
         "-XGHC2024",
         "-XOverloadedStrings",
         "-Wall",
+        "-Werror=missing-fields",
         "-threaded",
         "-with-rtsopts=-T"
     ]),
@@ -423,6 +430,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-Wall",
+        "-Werror=missing-fields",
         "-threaded",
         "-with-rtsopts=-T"
     ], dynamic = True),
@@ -451,6 +459,7 @@ def declare_haskell_components():
         "-XGHC2024",
         "-XOverloadedStrings",
         "-Wall",
+        "-Werror=missing-fields",
         "-threaded",
         "-with-rtsopts=-T",
         "-g3",
@@ -481,6 +490,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-Wall",
+        "-Werror=missing-fields",
         "-threaded",
         "-with-rtsopts=-T"
     ], dynamic = True),
@@ -738,6 +748,7 @@ def declare_haskell_components():
         "unix"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-rtsopts"
     ]),
@@ -766,6 +777,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-rtsopts"
     ], dynamic = True),
@@ -1020,6 +1032,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -1047,6 +1060,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -1296,6 +1310,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -1323,6 +1338,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -1568,6 +1584,7 @@ def declare_haskell_components():
         "text"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -1575,6 +1592,7 @@ def declare_haskell_components():
         "tasty-hunit",
         "text"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -1734,6 +1752,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -1761,6 +1780,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -1931,6 +1951,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -1958,6 +1979,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -2118,6 +2140,7 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -2145,6 +2168,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -2312,6 +2336,7 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -2339,6 +2364,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -2633,6 +2659,7 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -2660,6 +2687,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -2825,6 +2853,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -2852,6 +2881,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -3046,6 +3076,7 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
+        "-Werror=missing-fields",
         "-Wall",
         "-rtsopts"
     ]),
@@ -3074,6 +3105,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-rtsopts"
     ], dynamic = True),
@@ -3379,7 +3411,8 @@ def declare_haskell_components():
         "text"
     ], [
         "-XGHC2024",
-        "-XOverloadedStrings"
+        "-XOverloadedStrings",
+        "-Werror=missing-fields"
     ]),
         linker_flags = haskell_component_link_flags([
         "bytestring",
@@ -3405,7 +3438,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Werror=missing-fields"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -3684,6 +3719,7 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -3711,6 +3747,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -3872,6 +3909,7 @@ def declare_haskell_components():
         "-XDeriveFunctor",
         "-XDeriveFoldable",
         "-XDeriveTraversable",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -3880,6 +3918,7 @@ def declare_haskell_components():
         "tasty-hunit",
         "tasty-quickcheck"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -4041,6 +4080,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -4068,6 +4108,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -4344,6 +4385,7 @@ def declare_haskell_components():
         "text"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -4371,6 +4413,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -4663,6 +4706,7 @@ def declare_haskell_components():
         "text"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -4690,6 +4734,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -4965,6 +5010,7 @@ def declare_haskell_components():
         "tasty-hunit"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-rtsopts",
         "-with-rtsopts=-T"
@@ -4994,6 +5040,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-rtsopts",
         "-with-rtsopts=-T"
@@ -5159,6 +5206,7 @@ def declare_haskell_components():
     ], [
         "-XGHC2024",
         "-XOverloadedStrings",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -5186,6 +5234,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -5402,6 +5451,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -5422,6 +5472,7 @@ def declare_haskell_components():
         "time",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -5605,6 +5656,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ]),
@@ -5621,6 +5673,7 @@ def declare_haskell_components():
         "text",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ], dynamic = True),
@@ -5819,6 +5872,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ]),
@@ -5835,6 +5889,7 @@ def declare_haskell_components():
         "text",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ], dynamic = True),
@@ -6077,6 +6132,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ]),
@@ -6092,6 +6148,7 @@ def declare_haskell_components():
         "text",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ], dynamic = True),
@@ -6437,6 +6494,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ]),
@@ -6452,6 +6510,7 @@ def declare_haskell_components():
         "text",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ], dynamic = True),
@@ -6797,6 +6856,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ]),
@@ -6812,6 +6872,7 @@ def declare_haskell_components():
         "text",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ], dynamic = True),
@@ -7031,6 +7092,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-XGHC2024",
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ]),
@@ -7047,6 +7109,7 @@ def declare_haskell_components():
         "text",
         "witherable"
     ], [
+        "-Werror=missing-fields",
         "-Wall",
         "-Wno-simplifiable-class-constraints"
     ], dynamic = True),
