@@ -36,10 +36,11 @@ sh_test(
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
-        "TIDEPOOL_SCRIPT_RESOURCE_ENV": "EXOMONAD_WORKSPACE_GIT_BUNDLE EXOMONAD_WORKSPACE_GITLINK",
+        "TIDEPOOL_RUNTIME_TOOLS": "$(location toolchains//:exomonad_runtime_tools)",
+        "TIDEPOOL_SCRIPT_RESOURCE_ENV": "EXOMONAD_WORKSPACE_GIT_BUNDLE EXOMONAD_WORKSPACE_GITLINK TIDEPOOL_RUNTIME_TOOLS",
         "PATH": read_root_config("nix", "action_path"),
     },
-    resources = [":script_test_resources", "//build/rust:workspace_git_bundle", "//build/rust:workspace_gitlink", "toolchains//:python", "toolchains//:test_tools_closure"],
+    resources = [":script_test_resources", "//build/rust:workspace_git_bundle", "//build/rust:workspace_gitlink", "toolchains//:exomonad_runtime_tools", "toolchains//:python", "toolchains//:test_tools_closure"],
     visibility = ["PUBLIC"],
 )
 

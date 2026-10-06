@@ -109,11 +109,20 @@ class WorkspaceGitResourceTests(unittest.TestCase):
         copied = shared / "workspace.bundle"
         shutil.copyfile(self.bundle, copied)
         (shared / "ghc-libdir.txt").write_text(str(self.root) + "\n")
-        tools = frozen / "tools"
-        tools.mkdir()
+        tools = Path(os.environ["TIDEPOOL_RUNTIME_TOOLS"]).resolve(strict=True)
         (shared / "runtime-tools").symlink_to(tools)
         environment = qualification.native_environment(frozen)
         self.assertEqual(environment["EXOMONAD_WORKSPACE_GIT_BUNDLE"], str(copied))
+        search = self.root / "search"
+        search.mkdir()
+        (search / "input.txt").write_text("packaged search witness\n")
+        command_environment = {"PATH": environment["PATH"], "LC_ALL": "C"}
+        self.assertEqual(subprocess.check_output(
+            [str(tools / "bin/bash"), "-c", "rg --fixed-strings --line-number 'packaged search witness' ."],
+            cwd=search, env=command_environment, text=True).strip(), "./input.txt:1:packaged search witness")
+        self.assertEqual(subprocess.check_output(
+            [str(tools / "bin/bash"), "-c", "find . -type f -name input.txt"],
+            cwd=search, env=command_environment, text=True).strip(), "./input.txt")
         descriptor = {"inventory": qualification.inventory(frozen)}
         descriptor["inventory_sha256"] = qualification.digest_inventory(descriptor["inventory"])
         qualification.verify_frozen_inventory(frozen, descriptor)
