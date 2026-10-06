@@ -4420,6 +4420,14 @@ pub(crate) fn certify_products_with_validation(
     let mut origin_counts = [[0_u64; 3]; 3];
     let mut fresh_modules = BTreeSet::new();
     let mut groups = Vec::new();
+    validation.inventory.reserve::<(
+        CachedHomeOwner,
+        [u8; 32],
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        ProductOrigin,
+    )>(receipt.modules.len())?;
     let mut module_bytes = Vec::with_capacity(receipt.modules.len());
     // Fresh and retained-Core rows refer to these immutable aggregate buffers.
     // Authenticate them once, while retaining each module's independent checks.
@@ -4701,6 +4709,13 @@ pub(crate) fn certify_products_with_validation(
         origin_counts[origin_index][0] += 1;
         origin_counts[origin_index][1] += product.groups.len() as u64;
         origin_counts[origin_index][2] += product_bytes.len() as u64;
+        // Certification retains independent immutable payload copies.
+        // Shared group arenas below clone handles rather than whole programs.
+        validation.inventory.charge(product.interface.len())?;
+        validation.inventory.charge(product_bytes.len())?;
+        validation.inventory.charge(package_bytes.len())?;
+        validation.inventory.charge(owner.unit.len())?;
+        validation.inventory.charge(owner.module.len())?;
         module_bytes.push((
             owner.clone(),
             source_sha,
@@ -4717,14 +4732,26 @@ pub(crate) fn certify_products_with_validation(
             {
                 return Err(CertificationError::Mismatch("original group/globals"));
             }
+            validation
+                .inventory
+                .reserve::<ReceiptImportOwner>(witness.globals.len())?;
             let mut imports = Vec::with_capacity(witness.globals.len());
             for (declaration, selected) in group.globals().iter().zip(&witness.globals) {
+                charge_global(&validation.inventory, selected)?;
                 imports.push(validate_global_witness(
                     declaration,
                     group.definitions().signatures(),
                     selected,
                 )?);
             }
+            validation.inventory.reserve::<(
+                ProductOrigin,
+                CachedHomeOwner,
+                ProjectedGroup,
+                Vec<ReceiptImportOwner>,
+            )>(2)?;
+            validation.inventory.charge(owner.unit.len())?;
+            validation.inventory.charge(owner.module.len())?;
             groups.push((accepted.origin, owner.clone(), group.clone(), imports));
         }
     }
