@@ -2644,7 +2644,7 @@ impl Worker {
             Ok(status) => {
                 let scratch = self.build_products_namespace.cleanup_checked();
                 if status.success() {
-                    scratch.map_err(FrontendError::ScratchCleanup)
+                    scratch.map_err(|failures| FrontendError::ScratchCleanup { status, failures })
                 } else {
                     Err(FrontendError::WorkerClose {
                         status,
@@ -2656,7 +2656,7 @@ impl Worker {
                 // Products may still be in use. Preserve the primary wait
                 // failure and keep their existing owner attached to the child.
                 self.abort();
-                Err(FrontendError::Io(source))
+                Err(FrontendError::WorkerWait(source))
             }
         }
     }
@@ -2788,9 +2788,10 @@ mod tests {
             "scratch failure does not imply a live worker"
         );
         assert!(!response.is_empty(), "request completed before close");
-        let Err(FrontendError::ScratchCleanup(failures)) = result else {
+        let Err(FrontendError::ScratchCleanup { status, failures }) = result else {
             panic!("scratch health must be separate from successful worker retirement");
         };
+        assert!(status.success());
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].path, owned);
         assert_eq!(

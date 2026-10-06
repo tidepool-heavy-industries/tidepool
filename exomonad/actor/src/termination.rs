@@ -202,6 +202,21 @@ impl CompilerWorkTicket {
             owner,
         }
     }
+    pub(crate) fn run<T>(
+        self,
+        cancellation: tidepool_runtime::CompilerTransactionCancellation,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        tidepool_runtime::with_compiler_transaction_cancellable(
+            cancellation,
+            move |close| {
+                self.consume(tidepool_runtime::CompilerTransactionOutcome { action: (), close })
+            },
+            action,
+        )
+        .action
+    }
+
     pub(crate) fn consume<T>(
         mut self,
         outcome: tidepool_runtime::CompilerTransactionOutcome<T>,

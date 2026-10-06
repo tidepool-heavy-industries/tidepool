@@ -5033,20 +5033,17 @@ where
             let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
             let compiler_work = register_compiler_work()?;
             let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
-                    cancellation,
-                    || {
-                        let prototype = original_admission.prototype();
-                        tidepool_toolchain::artifacts::issue_host_binding_interface(
-                            prototype.compiler().clone(),
-                            original_admission.digest(),
-                            original_admission.generation().0,
-                            original_admission.binding(),
-                            prototype.include_paths(),
-                        )
-                        .map_err(ResidentActorWorkbenchError::Compile)
-                    },
-                ))
+                compiler_work.run(cancellation, || {
+                    let prototype = original_admission.prototype();
+                    tidepool_toolchain::artifacts::issue_host_binding_interface(
+                        prototype.compiler().clone(),
+                        original_admission.digest(),
+                        original_admission.generation().0,
+                        original_admission.binding(),
+                        prototype.include_paths(),
+                    )
+                    .map_err(ResidentActorWorkbenchError::Compile)
+                })
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -5262,16 +5259,13 @@ where
         let parser_cancellation = cancellation.clone();
         let compiler_work = register_compiler_work()?;
         let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-            compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
-                parser_cancellation,
-                || {
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(parser_specification.cell.clone()),
-                        &parser_specification.include,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Compile)
-                },
-            ))
+            compiler_work.run(parser_cancellation, || {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(parser_specification.cell.clone()),
+                    &parser_specification.include,
+                )
+                .map_err(ResidentActorWorkbenchError::Compile)
+            })
         }))
         .await
         .map_err(ResidentActorWorkbenchError::Join)??;
@@ -5325,35 +5319,32 @@ where
         let compiler_work = register_compiler_work()?;
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
-                    cancellation,
-                    || {
-                        let include = check_specification
-                            .include
-                            .iter()
-                            .map(PathBuf::as_path)
-                            .collect::<Vec<_>>();
-                        let view = check_admission.view();
-                        tidepool_runtime::session::turn::compile_cell_program_admitted(
-                            CellCheckRequest {
-                                exact_context: view.exact_compile_context(),
-                                session_id: Some(view.session()),
-                                cell_text: &check_specification.cell.cell_source,
-                                template: &check_specification.cell.template_source,
-                                include: &include,
-                                session_root: view.session_root(),
-                                inject_modules: &check_specification.cell.injected_modules,
-                                compile_generation: view.next_value_generation().0,
-                                compile_view_evidence: &check_specification.evidence,
-                            },
-                            check_admission.clone(),
-                            &check_specification.templates,
-                        )
-                        .map_err(|failure| {
-                            cell_check_error(failure, &check_specification.cell.cell_source)
-                        })
-                    },
-                ))
+                compiler_work.run(cancellation, || {
+                    let include = check_specification
+                        .include
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>();
+                    let view = check_admission.view();
+                    tidepool_runtime::session::turn::compile_cell_program_admitted(
+                        CellCheckRequest {
+                            exact_context: view.exact_compile_context(),
+                            session_id: Some(view.session()),
+                            cell_text: &check_specification.cell.cell_source,
+                            template: &check_specification.cell.template_source,
+                            include: &include,
+                            session_root: view.session_root(),
+                            inject_modules: &check_specification.cell.injected_modules,
+                            compile_generation: view.next_value_generation().0,
+                            compile_view_evidence: &check_specification.evidence,
+                        },
+                        check_admission.clone(),
+                        &check_specification.templates,
+                    )
+                    .map_err(|failure| {
+                        cell_check_error(failure, &check_specification.cell.cell_source)
+                    })
+                })
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -5553,34 +5544,29 @@ where
             let spawn = {
                 let _entered = compile_span.enter();
                 spawn_blocking_in_span(move || {
-                    let answer = compiler_work.consume(
-                        tidepool_runtime::with_compiler_transaction_cancellable(
-                            compile_cancellation,
-                            || {
-                                crate::lookup::execute(
-                                    request,
-                                    request_view,
+                    let answer = compiler_work.run(compile_cancellation, || {
+                        crate::lookup::execute(
+                            request,
+                            request_view,
+                            &imports,
+                            &injected,
+                            &workspace_modules,
+                            usage,
+                            |queries| {
+                                inspect_lookup_queries(
+                                    &inspection_view,
+                                    Some(&inspection_values),
+                                    &preamble,
                                     &imports,
+                                    &include,
                                     &injected,
-                                    &workspace_modules,
-                                    usage,
-                                    |queries| {
-                                        inspect_lookup_queries(
-                                            &inspection_view,
-                                            Some(&inspection_values),
-                                            &preamble,
-                                            &imports,
-                                            &include,
-                                            &injected,
-                                            &effects,
-                                            queries,
-                                            timing.as_ref(),
-                                        )
-                                    },
+                                    &effects,
+                                    queries,
+                                    timing.as_ref(),
                                 )
                             },
-                        ),
-                    );
+                        )
+                    });
                     #[cfg(test)]
                     lookup_inspection_probe::after_request();
                     answer
@@ -5810,18 +5796,15 @@ where
             let compiler_work = register_compiler_work()?;
             let (snapshot, compiled) =
                 crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                    compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
-                        compile_cancellation,
-                        || {
-                            let compiled = compile_fragment_off_checkout(
-                                &snapshot,
-                                &compile_source,
-                                &effects,
-                                &compile_block_text,
-                            );
-                            compiled.map(|compiled| (snapshot, compiled))
-                        },
-                    ))
+                    compiler_work.run(compile_cancellation, || {
+                        let compiled = compile_fragment_off_checkout(
+                            &snapshot,
+                            &compile_source,
+                            &effects,
+                            &compile_block_text,
+                        );
+                        compiled.map(|compiled| (snapshot, compiled))
+                    })
                 }))
                 .await
                 .map_err(ResidentActorWorkbenchError::Join)??;
@@ -7558,7 +7541,7 @@ where
                 publication_error(PrivatePublicationPhase::CertifyAndStage, error)
             })?;
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
+                compiler_work.run(
                     compile_cancellation,
                     || match baseline {
                         tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
@@ -7575,7 +7558,7 @@ where
                             }
                         }
                     },
-                ))
+                )
             }))
             .await
             .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Join(error)))?
@@ -12457,14 +12440,16 @@ pub(crate) mod request_tests {
                 // Exercise the same admission boundary as every real compiler spawn.
                 let ticket = register_compiler_work().unwrap();
                 let native = spawn_blocking_in_span(move || {
-                    entered.send(()).unwrap();
-                    proceed
-                        .recv_timeout(std::time::Duration::from_secs(5))
-                        .unwrap();
-                    let action = ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-                        action: Err::<(), _>("completed primary refusal"),
-                        close: tidepool_runtime::CompilerTransactionClose::Clean,
-                    });
+                    let action = ticket.run(
+                        tidepool_runtime::CompilerTransactionCancellation::new(),
+                        || {
+                            entered.send(()).unwrap();
+                            proceed
+                                .recv_timeout(std::time::Duration::from_secs(5))
+                                .unwrap();
+                            Err::<(), _>("completed primary refusal")
+                        },
+                    );
                     settled.send(action).unwrap();
                 });
                 tokio::spawn(async move { native.await })

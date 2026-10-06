@@ -1,10 +1,11 @@
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
-#[cfg(test)]
-use std::io::Read;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
@@ -179,6 +180,7 @@ pub enum CompilerTransactionCloseReason {
     EndFailed(CompilerTransactionCloseFailure),
     FrontendExitUnsuccessful,
     FrontendRetirementUnconfirmed,
+    FrontendReportedFailure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,6 +188,7 @@ pub enum CompilerTransactionClosePhase {
     IdentityHandshake,
     BeginHandshake,
     EndWrite,
+    EndRead,
     DaemonEndAcknowledgement,
     DaemonDisconnect,
     FrontendWait,
@@ -227,7 +230,313 @@ pub enum CompilerTransactionRetirement {
 pub struct DirectCompilerRetirement {
     pub exit: Result<std::process::ExitStatus, CompilerTransactionCloseFailure>,
     pub termination: CompilerTermination,
+    pub worker_report: Option<CompilerFrontendCloseReport>,
     _retained_child: Option<RetainedCompilerChild>,
+}
+
+/// Facts reported by the paired frontend; its own reap remains independent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerFrontendCloseReport {
+    pub worker: CompilerWorkerRetirement,
+    pub scratch: CompilerScratchRetirement,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerWorkerRetirement {
+    Reaped(std::process::ExitStatus),
+    WaitUnconfirmed(CompilerIoCause),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerScratchRetirement {
+    NotObserved,
+    Confirmed,
+    Unconfirmed(Vec<CompilerScratchFailure>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerScratchFailure {
+    pub path: PathBuf,
+    pub phase: crate::frontend::ScratchCleanupPhase,
+    pub cause: CompilerIoCause,
+}
+
+/// The exact OS code and diagnostic observation cross the process boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerIoCause {
+    pub raw_os_error: Option<i32>,
+    pub kind: io::ErrorKind,
+    pub message: String,
+}
+
+impl From<&io::Error> for CompilerIoCause {
+    fn from(error: &io::Error) -> Self {
+        Self {
+            raw_os_error: error.raw_os_error(),
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+}
+
+const FAILURE_END_MAGIC: &[u8; 8] = b"TPCEND01";
+const MAX_FAILURE_END_BYTES: usize = 64 * 1024;
+const MAX_SCRATCH_FAILURES: usize = 128;
+const DIRECT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn invalid_close(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+impl CompilerFrontendCloseReport {
+    fn validate(&self) -> io::Result<()> {
+        match (&self.worker, &self.scratch) {
+            (
+                CompilerWorkerRetirement::WaitUnconfirmed(_),
+                CompilerScratchRetirement::NotObserved,
+            ) => Ok(()),
+            (CompilerWorkerRetirement::Reaped(status), CompilerScratchRetirement::Confirmed)
+                if !status.success() =>
+            {
+                Ok(())
+            }
+            (
+                CompilerWorkerRetirement::Reaped(_),
+                CompilerScratchRetirement::Unconfirmed(failures),
+            ) if !failures.is_empty() && failures.len() <= MAX_SCRATCH_FAILURES => Ok(()),
+            _ => Err(invalid_close("contradictory compiler failure END report")),
+        }
+    }
+}
+
+fn append_close_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > MAX_FAILURE_END_BYTES.saturating_sub(output.len()) {
+        return Err(invalid_close(
+            "compiler failure END report exceeds total budget",
+        ));
+    }
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn append_close_field(output: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
+    let size =
+        u32::try_from(bytes.len()).map_err(|_| invalid_close("oversized compiler close field"))?;
+    append_close_bytes(output, &size.to_le_bytes())?;
+    append_close_bytes(output, bytes)
+}
+
+// Non-OS IO failures use a bounded typed vocabulary. OS errors retain their
+// exact errno; ErrorKind is derived by the matching frontend/caller platform.
+const CLOSE_IO_KINDS: &[io::ErrorKind] = &[
+    io::ErrorKind::Other,
+    io::ErrorKind::NotFound,
+    io::ErrorKind::PermissionDenied,
+    io::ErrorKind::ConnectionRefused,
+    io::ErrorKind::ConnectionReset,
+    io::ErrorKind::ConnectionAborted,
+    io::ErrorKind::NotConnected,
+    io::ErrorKind::AddrInUse,
+    io::ErrorKind::AddrNotAvailable,
+    io::ErrorKind::BrokenPipe,
+    io::ErrorKind::AlreadyExists,
+    io::ErrorKind::WouldBlock,
+    io::ErrorKind::InvalidInput,
+    io::ErrorKind::InvalidData,
+    io::ErrorKind::TimedOut,
+    io::ErrorKind::WriteZero,
+    io::ErrorKind::Interrupted,
+    io::ErrorKind::UnexpectedEof,
+    io::ErrorKind::Unsupported,
+    io::ErrorKind::OutOfMemory,
+];
+
+fn append_close_cause(output: &mut Vec<u8>, cause: &CompilerIoCause) -> io::Result<()> {
+    match cause.raw_os_error {
+        Some(code) => {
+            if io::Error::from_raw_os_error(code).kind() != cause.kind {
+                return Err(invalid_close("compiler close errno/kind mismatch"));
+            }
+            append_close_bytes(output, &[1])?;
+            append_close_bytes(output, &code.to_le_bytes())?;
+        }
+        None => {
+            let kind = CLOSE_IO_KINDS
+                .iter()
+                .position(|kind| *kind == cause.kind)
+                .ok_or_else(|| invalid_close("unsupported non-OS compiler close IO kind"))?;
+            append_close_bytes(output, &[0, kind as u8])?;
+        }
+    }
+    append_close_field(output, cause.message.as_bytes())
+}
+
+fn encode_failure_end(report: &CompilerFrontendCloseReport) -> io::Result<Vec<u8>> {
+    report.validate()?;
+    let mut body = Vec::new();
+    match &report.worker {
+        CompilerWorkerRetirement::Reaped(status) => {
+            append_close_bytes(&mut body, &[1])?;
+            append_close_bytes(&mut body, &status.into_raw().to_le_bytes())?;
+        }
+        CompilerWorkerRetirement::WaitUnconfirmed(cause) => {
+            append_close_bytes(&mut body, &[2])?;
+            append_close_cause(&mut body, cause)?;
+        }
+    }
+    match &report.scratch {
+        CompilerScratchRetirement::NotObserved => append_close_bytes(&mut body, &[0])?,
+        CompilerScratchRetirement::Confirmed => append_close_bytes(&mut body, &[1])?,
+        CompilerScratchRetirement::Unconfirmed(failures) => {
+            append_close_bytes(&mut body, &[2])?;
+            append_close_bytes(&mut body, &(failures.len() as u32).to_le_bytes())?;
+            for failure in failures {
+                let phase = match failure.phase {
+                    crate::frontend::ScratchCleanupPhase::Products => 1,
+                    crate::frontend::ScratchCleanupPhase::EmptyNamespace => 2,
+                };
+                append_close_bytes(&mut body, &[phase])?;
+                append_close_field(&mut body, failure.path.as_os_str().as_bytes())?;
+                append_close_cause(&mut body, &failure.cause)?;
+            }
+        }
+    }
+    Ok(body)
+}
+
+pub(crate) fn write_failure_end(
+    writer: &mut impl Write,
+    report: &CompilerFrontendCloseReport,
+) -> io::Result<()> {
+    let body = encode_failure_end(report)?;
+    writer.write_all(FAILURE_END_MAGIC)?;
+    writer.write_all(&(body.len() as u32).to_le_bytes())?;
+    writer.write_all(&body)?;
+    writer.flush()
+}
+
+struct CloseDecoder<'a>(&'a [u8]);
+impl<'a> CloseDecoder<'a> {
+    fn take(&mut self, size: usize) -> io::Result<&'a [u8]> {
+        if size > self.0.len() {
+            return Err(invalid_close("truncated compiler close field"));
+        }
+        let (value, rest) = self.0.split_at(size);
+        self.0 = rest;
+        Ok(value)
+    }
+    fn byte(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn word(&mut self) -> io::Result<[u8; 4]> {
+        self.take(4)?
+            .try_into()
+            .map_err(|_| invalid_close("truncated compiler close word"))
+    }
+    fn field(&mut self) -> io::Result<&'a [u8]> {
+        let size = u32::from_le_bytes(self.word()?) as usize;
+        self.take(size)
+    }
+    fn cause(&mut self) -> io::Result<CompilerIoCause> {
+        let (raw_os_error, kind) = match self.byte()? {
+            1 => {
+                let code = i32::from_le_bytes(self.word()?);
+                (Some(code), io::Error::from_raw_os_error(code).kind())
+            }
+            0 => {
+                let code = self.byte()? as usize;
+                let kind = *CLOSE_IO_KINDS
+                    .get(code)
+                    .ok_or_else(|| invalid_close("unknown compiler close IO kind"))?;
+                (None, kind)
+            }
+            _ => return Err(invalid_close("unknown compiler close IO cause")),
+        };
+        let message = std::str::from_utf8(self.field()?)
+            .map_err(|_| invalid_close("non-UTF8 compiler IO diagnostic"))?
+            .to_owned();
+        Ok(CompilerIoCause {
+            raw_os_error,
+            kind,
+            message,
+        })
+    }
+}
+
+fn decode_failure_end(body: &[u8]) -> io::Result<CompilerFrontendCloseReport> {
+    if body.len() > MAX_FAILURE_END_BYTES {
+        return Err(invalid_close("oversized compiler failure END report"));
+    }
+    let mut decoder = CloseDecoder(body);
+    let worker = match decoder.byte()? {
+        1 => CompilerWorkerRetirement::Reaped(std::process::ExitStatus::from_raw(
+            i32::from_le_bytes(decoder.word()?),
+        )),
+        2 => CompilerWorkerRetirement::WaitUnconfirmed(decoder.cause()?),
+        _ => return Err(invalid_close("unknown compiler worker retirement")),
+    };
+    let scratch = match decoder.byte()? {
+        0 => CompilerScratchRetirement::NotObserved,
+        1 => CompilerScratchRetirement::Confirmed,
+        2 => {
+            let count = u32::from_le_bytes(decoder.word()?) as usize;
+            if count == 0 || count > MAX_SCRATCH_FAILURES {
+                return Err(invalid_close("invalid scratch failure count"));
+            }
+            let mut failures = Vec::with_capacity(count);
+            for _ in 0..count {
+                let phase = match decoder.byte()? {
+                    1 => crate::frontend::ScratchCleanupPhase::Products,
+                    2 => crate::frontend::ScratchCleanupPhase::EmptyNamespace,
+                    _ => return Err(invalid_close("unknown scratch cleanup phase")),
+                };
+                let path = PathBuf::from(OsString::from_vec(decoder.field()?.to_owned()));
+                let cause = decoder.cause()?;
+                failures.push(CompilerScratchFailure { path, phase, cause });
+            }
+            CompilerScratchRetirement::Unconfirmed(failures)
+        }
+        _ => return Err(invalid_close("unknown scratch retirement")),
+    };
+    if !decoder.0.is_empty() {
+        return Err(invalid_close("trailing compiler failure END fields"));
+    }
+    let report = CompilerFrontendCloseReport { worker, scratch };
+    report.validate()?;
+    Ok(report)
+}
+
+fn read_failure_end(
+    reader: &mut (impl Read + AsRawFd),
+    deadline: Instant,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<Option<CompilerFrontendCloseReport>> {
+    let mut magic = [0u8; 8];
+    match process::read_exact_until(reader, &mut magic[..1], deadline, &cancelled) {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        result => result?,
+    }
+    process::read_exact_until(reader, &mut magic[1..], deadline, &cancelled)?;
+    if &magic != FAILURE_END_MAGIC {
+        return Err(invalid_close("invalid compiler failure END magic"));
+    }
+    let mut length = [0u8; 4];
+    process::read_exact_until(reader, &mut length, deadline, &cancelled)?;
+    let size = u32::from_le_bytes(length) as usize;
+    if size > MAX_FAILURE_END_BYTES {
+        return Err(invalid_close(
+            "compiler failure END exceeds allocation budget",
+        ));
+    }
+    let mut body = vec![0u8; size];
+    process::read_exact_until(reader, &mut body, deadline, &cancelled)?;
+    let report = decode_failure_end(&body)?;
+    let mut trailing = [0u8; 1];
+    match process::read_exact_until(reader, &mut trailing, deadline, cancelled) {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(Some(report)),
+        Err(error) => Err(error),
+        Ok(()) => Err(invalid_close("trailing bytes after compiler failure END")),
+    }
 }
 
 /// Retains the exact unreaped child when retirement could not be confirmed.
@@ -325,6 +634,8 @@ struct DirectEndpoint {
     program: OsString,
     retired: bool,
     admission_phase: CompilerTransactionClosePhase,
+    #[cfg(test)]
+    wait_observation_fault: bool,
 }
 
 impl DirectEndpoint {
@@ -346,6 +657,12 @@ impl DirectEndpoint {
         drop(self.stdin.take());
         drop(self.stdout.take());
         self.retired = true;
+        #[cfg(test)]
+        if self.wait_observation_fault {
+            return retire_owned_child_observing(&self.child, true, || {
+                Err(io::Error::other("injected retirement observation failure"))
+            });
+        }
         retire_owned_child(&self.child, true)
     }
 
@@ -455,19 +772,29 @@ fn wait_for_owned_child(child: &Arc<Mutex<Child>>) -> DirectCompilerRetirement {
 }
 
 fn retire_owned_child(child: &Arc<Mutex<Child>>, abort: bool) -> DirectCompilerRetirement {
+    retire_owned_child_observing(child, abort, || {
+        child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_wait()
+    })
+}
+
+fn retire_owned_child_observing(
+    child: &Arc<Mutex<Child>>,
+    abort: bool,
+    mut observe: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+) -> DirectCompilerRetirement {
     let mut termination = CompilerTermination::NotRequested;
     let mut deadline = Instant::now() + Duration::from_secs(5);
     if abort {
         termination = request_child_termination(child);
     }
     loop {
-        let observed = child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .try_wait();
-        match observed {
+        match observe() {
             Ok(Some(status)) => {
                 return DirectCompilerRetirement {
+                    worker_report: None,
                     exit: Ok(status),
                     termination,
                     _retained_child: None,
@@ -478,6 +805,7 @@ fn retire_owned_child(child: &Arc<Mutex<Child>>, abort: bool) -> DirectCompilerR
                     termination = request_child_termination(child);
                 }
                 return DirectCompilerRetirement {
+                    worker_report: None,
                     exit: Err(CompilerTransactionCloseFailure::new(
                         CompilerTransactionClosePhase::FrontendWait,
                         source,
@@ -494,6 +822,7 @@ fn retire_owned_child(child: &Arc<Mutex<Child>>, abort: bool) -> DirectCompilerR
                 deadline = Instant::now() + Duration::from_secs(5);
             } else {
                 return DirectCompilerRetirement {
+                    worker_report: None,
                     exit: Err(CompilerTransactionCloseFailure::new(
                         CompilerTransactionClosePhase::FrontendWait,
                         io::Error::new(
@@ -661,6 +990,8 @@ impl CompilerEndpoint {
             program: spec.program.clone(),
             retired: false,
             admission_phase: CompilerTransactionClosePhase::IdentityHandshake,
+            #[cfg(test)]
+            wait_observation_fault: false,
         };
         if let Some(cancellation) = cancellation {
             cancellation.arm(CancellationTarget::Direct(Arc::clone(&direct.child)));
@@ -1003,58 +1334,70 @@ fn retain_earlier_close(
     CompilerTransactionClose::Unconfirmed(evidence)
 }
 
-struct TransactionScopeGuard;
+struct TransactionScopeGuard<C: FnOnce(CompilerTransactionClose)> {
+    close_sink: Option<C>,
+}
 
-impl TransactionScopeGuard {
-    fn take_scope() -> Option<TransactionScope> {
-        TRANSACTION_SCOPE.with(|scope| scope.borrow_mut().take())
-    }
-
-    fn finish(self) -> CompilerTransactionClose {
-        let Some(scope) = Self::take_scope() else {
-            return CompilerTransactionClose::NotStarted;
-        };
-        let close = match scope.transaction {
-            Some(transaction) => transaction.finish(),
-            None => {
-                if let Some(cancellation) = scope.cancellation {
-                    cancellation.disarm();
-                }
-                CompilerTransactionClose::NotStarted
+fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
+    let Some(scope) = TRANSACTION_SCOPE.with(|scope| scope.borrow_mut().take()) else {
+        return CompilerTransactionClose::NotStarted;
+    };
+    let close = match scope.transaction {
+        Some(mut transaction) if abandoned => transaction.abandon(),
+        Some(transaction) => transaction.finish(),
+        None => {
+            if let Some(cancellation) = scope.cancellation {
+                cancellation.disarm();
             }
-        };
-        retain_earlier_close(close, scope.admission_close)
+            CompilerTransactionClose::NotStarted
+        }
+    };
+    retain_earlier_close(close, scope.admission_close)
+}
+
+impl<C: FnOnce(CompilerTransactionClose)> TransactionScopeGuard<C> {
+    fn finish(mut self) -> CompilerTransactionClose {
+        let close = finish_scope(false);
+        if let Some(sink) = self.close_sink.take() {
+            sink(close.clone());
+        }
+        close
     }
 }
 
-impl Drop for TransactionScopeGuard {
+impl<C: FnOnce(CompilerTransactionClose)> Drop for TransactionScopeGuard<C> {
     fn drop(&mut self) {
-        if let Some(mut transaction) = Self::take_scope().and_then(|scope| scope.transaction) {
-            let close = transaction.abandon();
-            tracing::warn!(?close, "compiler transaction abandoned during unwind");
+        if let Some(sink) = self.close_sink.take() {
+            // The owning sink retains exact retirement custody even during unwind.
+            sink(finish_scope(true));
         }
     }
 }
 
 /// Run synchronous compiler preparation calls against one pinned worker.
-/// The transaction is created lazily by the first `ExtractCmd::bind` and is
-/// always closed before this function returns or unwinds.
-pub fn with_compiler_transaction<T>(action: impl FnOnce() -> T) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(None, action)
+/// The affine close sink is armed before the first action and invoked once on
+/// normal finish or abandonment. It must retain close evidence without panicking
+/// or performing asynchronous work. Cleanup never replaces the action result.
+pub fn with_compiler_transaction<T>(
+    close_sink: impl FnOnce(CompilerTransactionClose),
+    action: impl FnOnce() -> T,
+) -> CompilerTransactionOutcome<T> {
+    with_compiler_transaction_inner(None, close_sink, action)
 }
 
 /// As [`with_compiler_transaction`], with an external cancellation edge that
-/// may be triggered when the async owner of the blocking preparation is
-/// dropped.
+/// may be triggered when the async owner of the blocking preparation is dropped.
 pub fn with_compiler_transaction_cancellable<T>(
     cancellation: CompilerTransactionCancellation,
+    close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(Some(cancellation), action)
+    with_compiler_transaction_inner(Some(cancellation), close_sink, action)
 }
 
 fn with_compiler_transaction_inner<T>(
     cancellation: Option<CompilerTransactionCancellation>,
+    close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
     TRANSACTION_SCOPE.with(|scope| {
@@ -1069,7 +1412,9 @@ fn with_compiler_transaction_inner<T>(
             admission_close: Vec::new(),
         });
     });
-    let guard = TransactionScopeGuard;
+    let guard = TransactionScopeGuard {
+        close_sink: Some(close_sink),
+    };
     let action = action();
     let close = guard.finish();
     CompilerTransactionOutcome { action, close }
@@ -1213,25 +1558,54 @@ impl CompilerTransaction {
                                 .and_then(|()| stdin.flush())
                         });
                     drop(endpoint.stdin.take());
+                    let report = endpoint
+                        .stdout
+                        .as_mut()
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "direct compiler stdout is closed",
+                            )
+                        })
+                        .and_then(|stdout| {
+                            read_failure_end(stdout, Instant::now() + DIRECT_CLOSE_TIMEOUT, || {
+                                self.cancellation
+                                    .as_ref()
+                                    .is_some_and(CompilerTransactionCancellation::is_cancelled)
+                            })
+                        });
                     drop(endpoint.stdout.take());
-                    let retirement = wait_for_owned_child(&endpoint.child);
+                    let mut retirement = wait_for_owned_child(&endpoint.child);
+                    if let Ok(Some(report)) = &report {
+                        retirement.worker_report = Some(report.clone());
+                    }
                     endpoint.retired = true;
                     let clean_exit = matches!(&retirement.exit, Ok(status) if status.success())
                         && matches!(retirement.termination, CompilerTermination::NotRequested);
-                    if end.is_ok() && clean_exit {
+                    if end.is_ok() && matches!(report, Ok(None)) && clean_exit {
                         CompilerTransactionClose::Clean
                     } else {
-                        let reason = match end {
-                            Err(source) => CompilerTransactionCloseReason::EndFailed(
+                        let reason = match (end, report) {
+                            (Err(source), _) => CompilerTransactionCloseReason::EndFailed(
                                 CompilerTransactionCloseFailure::new(
                                     CompilerTransactionClosePhase::EndWrite,
                                     source,
                                 ),
                             ),
-                            Ok(()) if retirement.exit.is_err() => {
+                            (Ok(()), Err(source)) => CompilerTransactionCloseReason::EndFailed(
+                                CompilerTransactionCloseFailure::new(CompilerTransactionClosePhase::EndRead, source),
+                            ),
+                            (Ok(()), Ok(Some(_))) if matches!(&retirement.exit, Ok(status) if status.success()) => {
+                                CompilerTransactionCloseReason::EndFailed(CompilerTransactionCloseFailure::new(
+                                    CompilerTransactionClosePhase::EndRead,
+                                    invalid_close("failure END report conflicts with successful frontend exit"),
+                                ))
+                            }
+                            (Ok(()), Ok(Some(_))) => CompilerTransactionCloseReason::FrontendReportedFailure,
+                            (Ok(()), Ok(None)) if retirement.exit.is_err() => {
                                 CompilerTransactionCloseReason::FrontendRetirementUnconfirmed
                             }
-                            Ok(()) => CompilerTransactionCloseReason::FrontendExitUnsuccessful,
+                            (Ok(()), Ok(None)) => CompilerTransactionCloseReason::FrontendExitUnsuccessful,
                         };
                         CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
                             reason,
@@ -1513,13 +1887,29 @@ mod tests {
         assert!(cancellation.state.lock().unwrap().target.is_none());
     }
 
+    fn observed_scope<T>(action: impl FnOnce() -> T) -> CompilerTransactionOutcome<T> {
+        let retained = std::cell::RefCell::new(None);
+        let outcome =
+            with_compiler_transaction(|close| *retained.borrow_mut() = Some(close), action);
+        assert_eq!(retained.into_inner(), Some(outcome.close.clone()));
+        outcome
+    }
+
     fn scoped_transport_fixture(
         phase: u8,
         primary_failure: bool,
     ) -> CompilerTransactionOutcome<Result<Vec<u8>, &'static str>> {
         let directory = tempfile::tempdir().unwrap();
-        let spec = direct_handshake_fixture(directory.path(), phase);
-        with_compiler_transaction(|| {
+        scoped_transport_fixture_in(directory.path(), phase, primary_failure)
+    }
+
+    fn scoped_transport_fixture_in(
+        directory: &Path,
+        phase: u8,
+        primary_failure: bool,
+    ) -> CompilerTransactionOutcome<Result<Vec<u8>, &'static str>> {
+        let spec = direct_handshake_fixture(directory, phase);
+        observed_scope(|| {
             let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
             let identity = endpoint.identity.clone();
             let transaction = endpoint.transaction().unwrap();
@@ -1618,7 +2008,7 @@ mod tests {
     fn begin_refusal_retains_actual_retirement_in_scoped_close_evidence() {
         let directory = tempfile::tempdir().unwrap();
         let spec = direct_handshake_fixture(directory.path(), 4);
-        let outcome = with_compiler_transaction(|| {
+        let outcome = observed_scope(|| {
             CompilerEndpoint::bind_launch(spec).and_then(|endpoint| {
                 endpoint.transaction_with_cancellation_timeout(None, Duration::from_millis(100))
             })
@@ -1650,7 +2040,7 @@ mod tests {
         let refused_spec = direct_handshake_fixture(refused.path(), 8);
         let healthy = tempfile::tempdir().unwrap();
         let healthy_spec = direct_handshake_fixture(healthy.path(), 5);
-        let outcome = with_compiler_transaction(|| {
+        let outcome = observed_scope(|| {
             let refusal = CompilerEndpoint::bind_launch(refused_spec).unwrap_err();
             assert!(
                 refusal.permits_rebind(),
@@ -1685,6 +2075,194 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn scratch_close_report() -> CompilerFrontendCloseReport {
+        CompilerFrontendCloseReport {
+            worker: CompilerWorkerRetirement::Reaped(std::process::ExitStatus::from_raw(0)),
+            scratch: CompilerScratchRetirement::Unconfirmed(vec![CompilerScratchFailure {
+                path: PathBuf::from(OsString::from_vec(b"/owned/products/invalid-\xff".to_vec())),
+                phase: crate::frontend::ScratchCleanupPhase::Products,
+                cause: CompilerIoCause::from(&io::Error::from_raw_os_error(20)),
+            }]),
+        }
+    }
+
+    fn report_transport_fixture(
+        bytes: &[u8],
+        phase: u8,
+        primary: bool,
+    ) -> CompilerTransactionOutcome<Result<Vec<u8>, &'static str>> {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("failure-end"), bytes).unwrap();
+        scoped_transport_fixture_in(directory.path(), phase, primary)
+    }
+
+    #[test]
+    fn completed_action_retains_reported_worker_reap_and_exact_scratch_failure() {
+        let report = scratch_close_report();
+        let mut bytes = Vec::new();
+        write_failure_end(&mut bytes, &report).unwrap();
+        for primary in [false, true] {
+            let outcome = report_transport_fixture(&bytes, 7, primary);
+            if primary {
+                assert_eq!(outcome.action, Err("primary action refusal"));
+            } else {
+                assert_eq!(outcome.action, Ok(b"1".to_vec()));
+            }
+            let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+                panic!("negative END cannot confirm close");
+            };
+            assert_eq!(
+                evidence.reason,
+                CompilerTransactionCloseReason::FrontendReportedFailure
+            );
+            let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+                panic!("direct facts required");
+            };
+            assert_eq!(retirement.exit.unwrap().code(), Some(17));
+            assert_eq!(retirement.termination, CompilerTermination::NotRequested);
+            assert_eq!(retirement.worker_report, Some(report.clone()));
+        }
+    }
+
+    #[test]
+    fn malformed_truncated_oversized_and_trailing_end_reports_never_confirm_close() {
+        let mut valid = Vec::new();
+        write_failure_end(&mut valid, &scratch_close_report()).unwrap();
+        let mut oversized = FAILURE_END_MAGIC.to_vec();
+        oversized.extend_from_slice(&((MAX_FAILURE_END_BYTES + 1) as u32).to_le_bytes());
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        let cases = [
+            b"INVALID!".to_vec(),
+            valid[..7].to_vec(),
+            oversized,
+            trailing,
+        ];
+        for bytes in cases {
+            let outcome = report_transport_fixture(&bytes, 7, false);
+            assert_eq!(outcome.action, Ok(b"1".to_vec()));
+            let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+                panic!("bad END cannot confirm close");
+            };
+            let CompilerTransactionCloseReason::EndFailed(error) = evidence.reason else {
+                panic!("typed protocol failure required");
+            };
+            assert_eq!(error.phase, CompilerTransactionClosePhase::EndRead);
+            let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+                panic!("frontend retirement required");
+            };
+            assert!(retirement.exit.is_ok());
+            assert!(
+                retirement.worker_report.is_none(),
+                "malformed frame proves no worker facts"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_end_report_conflicting_with_exit_zero_is_unconfirmed() {
+        let report = scratch_close_report();
+        let mut bytes = Vec::new();
+        write_failure_end(&mut bytes, &report).unwrap();
+        let outcome = report_transport_fixture(&bytes, 11, false);
+        let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+            panic!("contradiction cannot confirm close");
+        };
+        let CompilerTransactionCloseReason::EndFailed(error) = evidence.reason else {
+            panic!("typed contradiction required");
+        };
+        assert_eq!(error.phase, CompilerTransactionClosePhase::EndRead);
+        assert_eq!(error.source.kind(), io::ErrorKind::InvalidData);
+        let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+            panic!("direct facts required");
+        };
+        assert!(retirement.exit.unwrap().success());
+        assert_eq!(retirement.worker_report, Some(report));
+    }
+
+    #[test]
+    fn end_report_requires_eof_under_the_same_absolute_deadline() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        write_failure_end(&mut writer, &scratch_close_report()).unwrap();
+        // Keep the writer alive: valid frame bytes alone cannot prove close.
+        let error = read_failure_end(
+            &mut reader,
+            Instant::now() + Duration::from_millis(50),
+            || false,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn close_codec_refuses_contradictory_worker_scratch_facts_and_count_growth() {
+        let clean = CompilerFrontendCloseReport {
+            worker: CompilerWorkerRetirement::Reaped(std::process::ExitStatus::from_raw(0)),
+            scratch: CompilerScratchRetirement::Confirmed,
+        };
+        assert!(
+            encode_failure_end(&clean).is_err(),
+            "successful close has no extra ACK"
+        );
+        let mut oversized = scratch_close_report();
+        let CompilerScratchRetirement::Unconfirmed(failures) = &mut oversized.scratch else {
+            unreachable!()
+        };
+        failures.resize(MAX_SCRATCH_FAILURES + 1, failures[0].clone());
+        assert!(encode_failure_end(&oversized).is_err());
+        let mut malformed = encode_failure_end(&scratch_close_report()).unwrap();
+        malformed[5] = 0; // Reaped worker with unobserved scratch is not a closed fact.
+        assert!(decode_failure_end(&malformed).is_err());
+    }
+
+    #[test]
+    fn unwind_close_sink_retains_exact_child_after_retirement_observation_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 5);
+        let retained = RefCell::new(None);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_compiler_transaction(
+                |close| *retained.borrow_mut() = Some(close),
+                || {
+                    let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
+                    let mut transaction = endpoint.transaction().unwrap();
+                    let Some(TransactionTransport::Direct(endpoint)) =
+                        transaction.transport.as_mut()
+                    else {
+                        panic!("direct fixture required");
+                    };
+                    endpoint.wait_observation_fault = true;
+                    TRANSACTION_SCOPE.with(|scope| {
+                        scope.borrow_mut().as_mut().unwrap().transaction = Some(transaction)
+                    });
+                    panic!("original action unwind");
+                },
+            )
+        }));
+        assert_eq!(
+            unwind.unwrap_err().downcast_ref::<&str>(),
+            Some(&"original action unwind")
+        );
+        let Some(CompilerTransactionClose::Unconfirmed(evidence)) = retained.into_inner() else {
+            panic!("owning sink must survive unwind");
+        };
+        assert_eq!(evidence.reason, CompilerTransactionCloseReason::Abandoned);
+        let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+            panic!("exact process custody required");
+        };
+        assert!(retirement.exit.is_err());
+        let held = retirement
+            ._retained_child
+            .as_ref()
+            .expect("failed observation must retain exact child");
+        let actual = retire_owned_child(&held.0, false);
+        assert!(
+            actual.exit.is_ok(),
+            "same owner can subsequently observe actual reap"
+        );
+        assert!(actual._retained_child.is_none());
     }
 
     #[test]

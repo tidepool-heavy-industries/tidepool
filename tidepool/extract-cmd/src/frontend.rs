@@ -633,9 +633,8 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
             io::stdout().flush().map_err(FrontendError::Io)?;
             loop {
                 let mut command = [0u8; 1];
-                if stdin.read_exact(&mut command).is_err() {
-                    break;
-                }
+                // EOF is abandonment, not an implicit successful END.
+                stdin.read_exact(&mut command).map_err(FrontendError::Io)?;
                 match command[0] {
                     daemon::TRANSACTION_END => break,
                     daemon::TRANSACTION_REQUEST => {
@@ -661,6 +660,15 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
                 Err(primary)
             }
         };
+        if let Err(error) = &result {
+            if let Some(report) = error.close_report() {
+                if let Err(report_error) =
+                    crate::endpoint::write_failure_end(&mut io::stdout().lock(), &report)
+                {
+                    tracing::warn!(%report_error, "could not deliver compiler failure END evidence");
+                }
+            }
+        }
         return result.map(|()| 0);
     }
     let mut request = io::Cursor::new(prefix).chain(stdin);
@@ -805,7 +813,11 @@ pub struct ScratchCleanupFailure {
 #[derive(Debug)]
 pub enum FrontendError {
     Usage(String),
-    ScratchCleanup(Vec<ScratchCleanupFailure>),
+    ScratchCleanup {
+        status: std::process::ExitStatus,
+        failures: Vec<ScratchCleanupFailure>,
+    },
+    WorkerWait(io::Error),
     WorkerClose {
         status: std::process::ExitStatus,
         scratch: Vec<ScratchCleanupFailure>,
@@ -826,6 +838,46 @@ pub enum FrontendError {
     Daemon(String),
 }
 
+impl FrontendError {
+    fn close_report(&self) -> Option<crate::endpoint::CompilerFrontendCloseReport> {
+        use crate::endpoint::{
+            CompilerFrontendCloseReport, CompilerIoCause, CompilerScratchFailure,
+            CompilerScratchRetirement, CompilerWorkerRetirement,
+        };
+        let scratch_failures = |failures: &[ScratchCleanupFailure]| {
+            CompilerScratchRetirement::Unconfirmed(
+                failures
+                    .iter()
+                    .map(|failure| CompilerScratchFailure {
+                        path: failure.path.clone(),
+                        phase: failure.phase,
+                        cause: CompilerIoCause::from(&failure.source),
+                    })
+                    .collect(),
+            )
+        };
+        match self {
+            Self::ScratchCleanup { status, failures } => Some(CompilerFrontendCloseReport {
+                worker: CompilerWorkerRetirement::Reaped(*status),
+                scratch: scratch_failures(failures),
+            }),
+            Self::WorkerClose { status, scratch } => Some(CompilerFrontendCloseReport {
+                worker: CompilerWorkerRetirement::Reaped(*status),
+                scratch: if scratch.is_empty() {
+                    CompilerScratchRetirement::Confirmed
+                } else {
+                    scratch_failures(scratch)
+                },
+            }),
+            Self::WorkerWait(cause) => Some(CompilerFrontendCloseReport {
+                worker: CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(cause)),
+                scratch: CompilerScratchRetirement::NotObserved,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl From<crate::request::CliError> for FrontendError {
     fn from(error: crate::request::CliError) -> Self {
         Self::Usage(error.to_string())
@@ -842,7 +894,8 @@ impl std::fmt::Display for FrontendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Usage(message) | Self::Daemon(message) => f.write_str(message),
-            Self::ScratchCleanup(failures) => write!(f, "compiler worker reaped; scratch cleanup unconfirmed: {failures:?}"),
+            Self::ScratchCleanup { status, failures } => write!(f, "compiler worker reaped with status {status}; scratch cleanup unconfirmed: {failures:?}"),
+            Self::WorkerWait(error) => write!(f, "compiler worker wait unconfirmed: {error}"),
             Self::WorkerClose { status, scratch } => write!(f, "compiler worker reaped with status {status}; scratch cleanup failures: {scratch:?}"),
             Self::WorkerClientDisconnected => {
                 f.write_str("compiler worker retired after client disconnected")
