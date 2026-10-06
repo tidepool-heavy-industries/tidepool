@@ -55,6 +55,7 @@ TEST_ONLY_SOURCES = {
     'exomonad-actor': frozenset({
         'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',
         'exomonad/actor/src/fixtures/prepared-instance-provider.hs',
+        'exomonad/actor/src/fixtures/ForkReplyContracts.hs',
         'exomonad/actor/src/local_actor/failure_origin.hs',
         'exomonad/actor/src/request/sequence_tests.rs',
         'exomonad/actor/src/resident_actor/capture_workspace_child.hs',
