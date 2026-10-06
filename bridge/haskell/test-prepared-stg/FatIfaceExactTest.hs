@@ -6,8 +6,9 @@ import Control.Exception (finally)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import GHC
-import GHC.Core (Bind(..))
-import GHC.Driver.Session (gopt_set, updOptLevel)
+import GHC.Core (Bind(..), maybeUnfoldingTemplate)
+import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
+import GHC.Types.Id (realIdUnfolding)
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
@@ -29,6 +30,7 @@ import Tidepool.FatIface
   , lookupFatIfaceExact
   , newFatIfaceCache
   )
+import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -61,7 +63,7 @@ scenario = do
       let fatFlags =
             (`gopt_set` Opt_WriteInterface)
             $ (`gopt_set` Opt_WriteIfSimplifiedCore)
-            $ updOptLevel 0 flags
+            $ gopt_unset (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas
       _ <- setSessionDynFlags fatFlags
         { importPaths = work : importPaths flags
         , hiDir = Just work
@@ -81,6 +83,15 @@ scenario = do
           thinIdentityName = findName "ThinFixture" "thinIdentity" names
           missingIdentityName = findName "MissingFixture" "missingIdentity" names
       hsc <- getSession
+      thinId <- lookupName thinIdentityName >>= \case
+        Just (AnId identifier) -> pure identifier
+        _ -> fail "thin identity has no genuine exported Id"
+      missingId <- lookupName missingIdentityName >>= \case
+        Just (AnId identifier) -> pure identifier
+        _ -> fail "missing-interface identity has no genuine exported Id"
+      liftIO $ mapM_ (\identifier -> case maybeUnfoldingTemplate (realIdUnfolding identifier) of
+        Just _ -> pure ()
+        Nothing -> fail "INLINE absence control has no optimizer unfolding") [thinId, missingId]
       cache <- liftIO newFatIfaceCache
       localResult <- liftIO (lookupFatIfaceExact hsc cache
         (mkSystemName (mkUnique 'v' 983450) (mkVarOcc "localOnly")))
@@ -105,11 +116,23 @@ scenario = do
       thinCachedResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn thinIdentityName))
       liftIO (assert (isNoExtra thinCachedResult)
         "typed no-extra outcome was not retained in the cache")
+      thinRecovery <- liftIO (recoverExactBody hsc cache thinId)
+      liftIO $ case thinRecovery of
+        MissingExactBody name NoExtraDeclarations -> assert (name == thinIdentityName)
+          "thin recovery refusal changed the exact defining identity"
+        _ -> fail "optimizer unfolding bypassed missing original fat Core"
       liftIO (removeFile (work </> "MissingFixture.hi"))
       missingResult <- liftIO (lookupFatIfaceExact hsc cache missingIdentityName)
       liftIO (assertLoadFailure "MissingFixture" missingResult)
       missingCachedResult <- liftIO (lookupFatIfaceExact hsc cache missingIdentityName)
       liftIO (assertLoadFailure "MissingFixture" missingCachedResult)
+      missingRecovery <- liftIO (recoverExactBody hsc cache missingId)
+      liftIO $ case missingRecovery of
+        BodyInterfaceFailure owner reason -> do
+          assert (Just owner == nameModule_maybe missingIdentityName)
+            "read failure changed the exact defining owner"
+          assert (not (null reason)) "read failure lost its reason"
+        _ -> fail "optimizer unfolding bypassed an unreadable defining interface"
       pure ()
 
 copyFixture :: FilePath -> FilePath -> FilePath -> IO ()

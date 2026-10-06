@@ -323,6 +323,13 @@ decoding an observation alone does not grant that authority.
 
 ## Generated fixtures
 
+Recovered package executable bodies come from their defining interface's
+original fat Core. Optimizer unfoldings remain frontend metadata; reconstructing
+them can change exported allocation and entry contracts. Missing original Core,
+unreadable interfaces and incompatible body types retain distinct refusals.
+Exact recursive groups stay intact, and final selected emission still checks
+the canonical entry signature and evaluatedness.
+
 After changing translation or serialization, run `just fixtures-check`.
 Each native corpus producer compiles its declared module/targets and emits
 constructor metadata and prepared programs from that same graph. The native

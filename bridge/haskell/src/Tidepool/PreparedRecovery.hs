@@ -270,17 +270,16 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
                 | otherwise = do
                     found <- recoverExactBody env cache binder
                     pure $ case found of
-                      ExactBody owner group _ ->
+                      ExactBody owner group ->
                         (Map.alter (Just . insertGroup group . maybe [] id) owner groups,
                          Set.insert owner dirty, failures)
                       MissingExactBody name reason ->
                         (groups, dirty, failures ++ [MissingImplementation name reason])
                       BodyInterfaceFailure owner reason ->
                         (groups, dirty, failures ++ [InterfaceLoadingFailure owner reason])
-                      BodyTypeMismatch _ name requested candidate fallback ->
-                        let fallbackText = maybe "" ("; fallback: " ++) fallback
-                            reason = "requested type " ++ requested
-                              ++ "; candidate type " ++ candidate ++ fallbackText
+                      BodyTypeMismatch _ name requested candidate detail ->
+                        let reason = "requested type " ++ requested
+                              ++ "; candidate type " ++ candidate ++ "; " ++ detail
                         in (groups, dirty
                           , failures ++ [IncompatibleImplementation name reason])
                       UnsupportedBodyCapability name ->
@@ -323,7 +322,7 @@ recoveredFailureOwner failure = case failure of
   RecoveredModuleInterfaceFailure owner _ -> owner
   RecoveredModulePreparationFailure owner _ -> owner
 
--- Full recursive groups supersede overlapping singleton unfoldings. When a
+-- Full recursive groups supersede overlapping singleton groups. When a
 -- newly discovered group bridges two previously disjoint groups, retain every
 -- member from all of them; dropping the non-overlapping siblings would leave
 -- references in the merged group unbound.
@@ -337,8 +336,8 @@ insertGroup incoming previous =
   in case existing of
        [] -> previous ++ [incoming]
        -- A full fat-interface Rec group is authoritative for the complete
-       -- sibling set.  A later singleton unfolding from the same pinned
-       -- environment must not discard those siblings.  Only a partial
+       -- sibling set. Rediscovering a subset must not discard those siblings.
+       -- Only a partial
        -- overlap needs a merge; in that case incoming pairs deterministically
        -- replace duplicate binders while retaining every sibling.
        [group] | names `Set.isSubsetOf` existingNames group -> previous

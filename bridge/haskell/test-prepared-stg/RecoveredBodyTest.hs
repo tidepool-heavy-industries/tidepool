@@ -63,7 +63,7 @@ import Tidepool.PreparedStg
   ( pmModule, pmBindings, RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
   , prepareRecoveredBodies, RecoveredModuleInput(..), prepareRecoveredModule, preparedExpectedEntry )
 import Tidepool.Resolve
-  ( BodyOrigin(..), ExactBodyLookup(..), recoverExactBody )
+  ( ExactBodyLookup(..), recoverExactBody )
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -74,7 +74,7 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "recovered-body"
   [ testCase "original recovered entry contracts" assertRecoveredEntryContracts
-  , testCase "original recovered dictionary ordering" assertRecoveredDictionaryOrdering
+  , testCase "original recovered dictionary defining body" assertRecoveredDictionaryBody
   , testCase "original recovered body closure" assertAllRecoveredBodies
   , testCase "owner interface cache reuse eviction and retry" $ do
       root <- getCurrentDirectory
@@ -82,9 +82,10 @@ tests = testGroup "recovered-body"
       assertSemigroupSubset root libdir
   ]
 
--- Compare the same genuine defining body set, changing only group order.
-assertRecoveredDictionaryOrdering :: IO ()
-assertRecoveredDictionaryOrdering = do
+-- Optimizer DFun recipes need not preserve an exported allocation/entry shape.
+-- The defining fat body does, independently of discovery order.
+assertRecoveredDictionaryBody :: IO ()
+assertRecoveredDictionaryBody = do
   root <- getCurrentDirectory
   libdir <- trim <$> readProcessGhc ["--print-libdir"]
   runGhc (Just libdir) $ do
@@ -121,8 +122,8 @@ assertRecoveredDictionaryOrdering = do
       _ -> fail "authored dictionary did not retain its exact package reference"
     exact <- liftIO $ recoverExactBody env cache dictionary
     liftIO $ case exact of
-      ExactBody _ group origin -> putStrLn ("production dictionary input via " ++ show origin
-        ++ ": " ++ showSDocUnsafe (ppr group))
+      ExactBody _ group -> putStrLn ("production dictionary input from defining fat Core: "
+        ++ showSDocUnsafe (ppr group))
       _ -> fail "genuine dictionary exact body was unavailable"
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
@@ -161,6 +162,29 @@ assertRecoveredDictionaryOrdering = do
         "canonical defining order failed the genuine Applicative constructor entry"
       assert (isConstructor "$fApplicativeEff" recovered)
         "production recovered Applicative dictionary is not its canonical constructor entry"
+      assert (isConstructor "$fApplicativeEff" sorted)
+        "dictionary constructor entry depends on discovered group order"
+      identities <- either (fail . show) pure (preparedTopIdentities [recovered])
+      entry <- case [identity | identity <- identities,
+          symbolOccurrence identity == Text.pack "$fApplicativeEff"] of
+        [identity] -> pure identity
+        _ -> fail "recovered dictionary lost its exact native identity"
+      let dictionaryContext = context { projectionEntry = entry }
+      native <- either (fail . ("original dictionary native projection failed: " ++) . show) pure
+        (projectPreparedTarget dictionaryContext (closureModules closure))
+      assert (any (emitsConstructor entry) (concatMap groupItems (programBindings native)))
+        "original dictionary native projection did not emit its canonical constructor"
+      recipe <- maybe (fail "dictionary refusal control lost its genuine DFun unfolding") pure
+        (maybeUnfoldingTemplate (realIdUnfolding dictionary))
+      recipeCache <- newPreparedBodyCache
+      reconstructed <- prepareRecoveredBodies env owners recipeCache owner [NonRec dictionary recipe]
+        >>= either (fail . show) pure
+      case projectPreparedTarget dictionaryContext [reconstructed] of
+        Left (RecoveredEntryContractMismatch symbol Nothing True
+            (Just (Signature [] (Returns [LiftedRefRep]))) False)
+          | symbol == entry -> pure ()
+        Left failure -> fail ("reconstructed DFun recipe refused for the wrong reason: " ++ show failure)
+        Right _ -> fail "optimizer DFun recipe replaced the canonical constructor entry"
   where
     occurrence = occNameString . nameOccName . varName
     stgPairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
@@ -170,6 +194,10 @@ assertRecoveredDictionaryOrdering = do
       && case rhs of Stg.StgRhsCon{} -> True; _ -> False) (pairs modul)
     shapes modul = intercalate "; " [occurrence identifier ++ "=" ++ showSDocUnsafe (ppr rhs)
       | (identifier, rhs) <- pairs modul, occurrence identifier `elem` ["$fApplicativeEff", "$fFunctorEff"]]
+    groupItems (NonRecursive top) = [top]
+    groupItems (Recursive tops) = tops
+    emitsConstructor wanted (TopBinding symbol (HeapBinding _ Constructor{})) = symbol == wanted
+    emitsConstructor _ _ = False
 
 -- Both controls use genuine finalized Core and package interface declarations.
 -- Package decoding and optimization can change qApp's Core shape independently
@@ -211,14 +239,13 @@ assertRecoveredEntryContracts = do
       identifiers -> fail ("expected one genuine qApp reference, found " ++ show (length identifiers))
     cache <- liftIO newFatIfaceCache
     result <- liftIO $ recoverExactBody env cache requested
-    (owner, body, origin) <- case result of
-      ExactBody modul group provenance -> pure (modul, group, provenance)
+    (owner, body) <- case result of
+      ExactBody modul group -> pure (modul, group)
       _ -> fail "genuine package qApp exact Core was unavailable"
     let rawSelected = [(identifier, rhs) | (identifier, rhs) <- bindPairs body,
           varName identifier == varName requested]
     liftIO $ case rawSelected of
-      [(identifier, rhs)] -> putStrLn ("genuine qApp body via " ++ show origin
-        ++ ": Id arity=" ++ show (idArity identifier)
+      [(identifier, rhs)] -> putStrLn ("genuine qApp defining body: Id arity=" ++ show (idArity identifier)
         ++ ", manifest arity=" ++ show (manifestArity rhs))
       _ -> fail "qApp exact group did not retain exactly its selected binder"
     owners <- liftIO newOwnerInterfaceCache
@@ -331,9 +358,7 @@ assertAllRecoveredBodies = do
     bodyCache <- liftIO newPreparedBodyCache
     recovered <- liftIO $ recoverFirst hsc cache fstIds
     case recovered of
-      (fstId, ExactBody owner body origin) -> do
-        liftIO $ assert (origin == InterfaceUnfolding || origin == FatInterfaceGroup)
-          "exact recovery returned an unknown body origin"
+      (fstId, ExactBody owner body) -> do
         preparedResult <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache owner (bindList body)
         recoveredModule <- case preparedResult of
           Left failure -> liftIO $ ioError (userError
@@ -375,7 +400,7 @@ assertAllRecoveredBodies = do
     recoverFirst hsc cache (identifier : rest) = do
       result <- recoverExactBody hsc cache identifier
       case result of
-        exact@(ExactBody _ _ _) -> pure (identifier, exact)
+        exact@(ExactBody _ _) -> pure (identifier, exact)
         _ | null rest -> pure (identifier, result)
           | otherwise -> recoverFirst hsc cache rest
 
@@ -397,13 +422,13 @@ assertAllRecoveredBodies = do
         groupItems (NonRecursive top) = [top]
         groupItems (Recursive tops) = tops
 
-    showLookup (ExactBody owner _ origin) = "exact body in " ++ renderModule owner ++ " via " ++ show origin
+    showLookup (ExactBody owner _) = "defining body in " ++ renderModule owner
     showLookup (MissingExactBody name reason) = "missing " ++ renderName name ++ ": " ++ show reason
     showLookup (BodyInterfaceFailure owner reason) = "interface failure in " ++ renderModule owner ++ ": " ++ reason
-    showLookup (BodyTypeMismatch owner name requested candidate fallback) =
+    showLookup (BodyTypeMismatch owner name requested candidate reason) =
       "type mismatch in " ++ renderModule owner ++ " for " ++ renderName name
         ++ ": " ++ requested ++ " vs " ++ candidate
-        ++ maybe "" ("; " ++) fallback
+        ++ "; " ++ reason
     showLookup (UnsupportedBodyCapability name) = "unsupported body " ++ renderName name
 
     renderModule = showSDocUnsafe . ppr
@@ -468,7 +493,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
   bodyCache <- liftIO newPreparedBodyCache
   lookupResult <- liftIO $ recoverExactBody hsc cache semigroupId
   (owner, body) <- case lookupResult of
-    ExactBody owner group _ -> pure (owner, group)
+    ExactBody owner group -> pure (owner, group)
     other -> liftIO $ ioError (userError
       ("semigroup reference was not recovered exactly: " ++ showLookup' other))
   recovered <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache owner (bindList body)
@@ -485,7 +510,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
         ++ show (length found) ++ ": " ++ intercalate ", " (map renderId found)))
   productOneLookup <- liftIO $ recoverExactBody hsc cache productOneId
   (productOneOwner, productOneBody) <- case productOneLookup of
-    ExactBody owner' group _ -> pure (owner', group)
+    ExactBody owner' group -> pure (owner', group)
     other -> liftIO $ ioError (userError
       ("$fMonoidProduct1 was not recovered exactly: " ++ showLookup' other))
   liftIO $ assert (productOneOwner == owner)
@@ -542,13 +567,13 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
     bindList (NonRec binder body) = [NonRec binder body]
     bindList (Rec pairs) = [Rec pairs]
     renderId identifier = showSDocUnsafe (ppr (idName identifier))
-    showLookup' (ExactBody owner _ origin) = "exact body in " ++ renderModule' owner ++ " via " ++ show origin
+    showLookup' (ExactBody owner _) = "defining body in " ++ renderModule' owner
     showLookup' (MissingExactBody name reason) = "missing " ++ renderName' name ++ ": " ++ show reason
     showLookup' (BodyInterfaceFailure owner reason) = "interface failure in " ++ renderModule' owner ++ ": " ++ reason
-    showLookup' (BodyTypeMismatch owner name requested candidate fallback) =
+    showLookup' (BodyTypeMismatch owner name requested candidate reason) =
       "type mismatch in " ++ renderModule' owner ++ " for " ++ renderName' name
         ++ ": " ++ requested ++ " vs " ++ candidate
-        ++ maybe "" ("; " ++) fallback
+        ++ "; " ++ reason
     showLookup' (UnsupportedBodyCapability name) = "unsupported body " ++ renderName' name
     renderModule' = showSDocUnsafe . ppr
     renderName' = showSDocUnsafe . ppr
@@ -737,9 +762,8 @@ assertPatErrorBody root = do
         "typed patError mismatch named the wrong defining Id"
       assert (not (null requested) && not (null candidate))
         "typed patError mismatch omitted requested/candidate types"
-    ExactBody owner _ origin -> ioError (userError
-      ("patError fat candidate mismatch was accepted as exact body via "
-        ++ show origin ++ " in " ++ renderModule owner))
+    ExactBody owner _ -> ioError (userError
+      ("patError fat candidate mismatch was accepted as exact body in " ++ renderModule owner))
     other -> ioError (userError
       ("patError recovery returned an untyped outcome: " ++ showLookup' other))
   where
@@ -752,16 +776,16 @@ assertPatErrorBody root = do
     bindPairs (Rec pairs) = pairs
     renderId identifier = showSDocUnsafe (ppr (idName identifier))
     renderModule = showSDocUnsafe . ppr
-    showLookup' (ExactBody owner _ origin) =
-      "exact body in " ++ renderModule owner ++ " via " ++ show origin
+    showLookup' (ExactBody owner _) =
+      "defining body in " ++ renderModule owner
     showLookup' (MissingExactBody name reason) =
       "missing " ++ showSDocUnsafe (ppr name) ++ ": " ++ show reason
     showLookup' (BodyInterfaceFailure owner reason) =
       "interface failure in " ++ renderModule owner ++ ": " ++ reason
-    showLookup' (BodyTypeMismatch owner name requested candidate fallback) =
+    showLookup' (BodyTypeMismatch owner name requested candidate reason) =
       "type mismatch in " ++ renderModule owner ++ " for "
         ++ showSDocUnsafe (ppr name) ++ ": " ++ requested ++ " vs "
-        ++ candidate ++ maybe "" ("; " ++) fallback
+        ++ candidate ++ "; " ++ reason
     showLookup' (UnsupportedBodyCapability name) =
       "unsupported body " ++ showSDocUnsafe (ppr name)
 
