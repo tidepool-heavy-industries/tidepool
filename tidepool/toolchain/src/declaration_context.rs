@@ -1532,7 +1532,7 @@ impl ExactCompilationRequest {
     pub(crate) fn admit_program_support(
         &mut self,
         context: Arc<ExactDeclarationContext>,
-        products: &[CertifiedRecoveryProduct],
+        support: &ArtifactView,
         admissions: &[ExactSourceAdmission],
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
@@ -1563,49 +1563,60 @@ impl ExactCompilationRequest {
                 }
             }
         }
-        let retained = context.artifact_view().entries_for_owners(
-            products
-                .iter()
-                .map(|product| identity(&product.owner().unit, &product.owner().module)),
-        )?;
-        let fresh = products
-            .iter()
-            .filter(|product| {
-                let owner = identity(&product.owner().unit, &product.owner().module);
-                imports.contains_key(&owner) && !selected_originals.contains_key(&owner)
+        let supplied = support
+            .entries_for_owners(support.descriptors().into_iter().map(|entry| entry.owner))?;
+        let retained = context
+            .artifact_view()
+            .entries_for_owners(supplied.keys().cloned())?;
+        let fresh = supplied
+            .keys()
+            .filter(|owner| {
+                imports.contains_key(*owner) && !selected_originals.contains_key(*owner)
             })
+            .cloned()
             .collect::<Vec<_>>();
-        for product in products {
-            let owner = identity(&product.owner().unit, &product.owner().module);
-            if imports.contains_key(&owner) {
-                if let Some(selected) = selected_originals.get(&owner) {
-                    let Some(entry) = retained.get(&owner) else {
+        for (owner, entry) in &supplied {
+            if imports.contains_key(owner) {
+                if let Some(selected) = selected_originals.get(owner) {
+                    let Some(previous) = retained.get(owner) else {
                         return Err(failure(
                             "source-selected support is not an existing original",
                         ));
                     };
-                    if canonical_source_interface(entry) != Some(selected.interface())
-                        || product.module_interface() != Some(selected.interface())
+                    if canonical_source_interface(previous) != Some(selected.interface())
+                        || canonical_source_interface(entry) != Some(selected.interface())
                     {
                         return Err(failure(
                             "source-selected support has another original owner",
                         ));
                     }
-                } else if retained.contains_key(&owner) {
+                } else if retained.contains_key(owner) {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
                     ));
+                } else if canonical_source_interface(entry).is_none() {
+                    return Err(failure(
+                        "fresh program support lacks a canonical source seal",
+                    ));
                 }
-            } else if !retained.contains_key(&owner) {
+            } else if !retained.contains_key(owner) {
                 return Err(failure("program support lacks its fresh source admission"));
+            } else if canonical_source_interface(entry).is_none()
+                && retained[owner].descriptor.id != entry.descriptor.id
+            {
+                return Err(failure(
+                    "program support changed an inherited synthetic interface",
+                ));
             }
         }
         let extend_start = std::time::Instant::now();
-        let context = Arc::new(
-            (*context)
-                .clone()
-                .extend_checked_original_products(self.producer_sha256, products)?,
-        );
+        let mut context = (*context).clone();
+        context.admit_producer(self.producer_sha256)?;
+        for descriptor in support.descriptors() {
+            context.admit_producer(descriptor.producer_sha256)?;
+        }
+        context.inventory = context.inventory.merge(support)?;
+        let context = Arc::new(context);
         crate::timing::record_stage(
             crate::timing::NO_NODE,
             crate::timing::NO_ROUND,
@@ -1632,7 +1643,7 @@ impl ExactCompilationRequest {
         }
         let roots = fresh
             .iter()
-            .map(|product| identity(&product.owner().unit, &product.owner().module))
+            .cloned()
             // This helper is selected by executable scaffolding. Its native
             // custody does not introduce an authored import into later cells.
             .filter(|owner| owner.unit != "main" || owner.module != "Tidepool.Internal.Resume")
@@ -1654,7 +1665,7 @@ impl ExactCompilationRequest {
         let entries = context.artifact_view().entries_for_owners(
             fresh
                 .iter()
-                .map(|product| identity(&product.owner().unit, &product.owner().module))
+                .cloned()
                 .chain(selected_originals.keys().cloned()),
         )?;
         for (owner, selected) in &selected_originals {
@@ -3947,7 +3958,14 @@ mod tests {
     }
 
     fn support_product_in_unit(unit: &str, module: &str) -> CertifiedRecoveryProduct {
-        let interface = format!("{module} interface").into_bytes();
+        support_product_with_interface(unit, module, format!("{module} interface").into_bytes())
+    }
+
+    fn support_product_with_interface(
+        unit: &str,
+        module: &str,
+        interface: Vec<u8>,
+    ) -> CertifiedRecoveryProduct {
         let mut product = Vec::new();
         ciborium::ser::into_writer(
             &Value::Array(vec![
@@ -4094,6 +4112,14 @@ mod tests {
             extended.semantic_sha256(),
             legacy_semantic_sha256(&extended)
         );
+    }
+
+    fn support_view(products: &[CertifiedRecoveryProduct]) -> ArtifactView {
+        let producer = products
+            .first()
+            .and_then(|product| product.module_interface())
+            .map_or([2; 32], |interface| interface.producer_sha256());
+        certified_product_artifact_view(producer, products, &[], None).unwrap()
     }
 
     fn support_admission(root: &Path) -> ExactSourceAdmission {
@@ -4951,7 +4977,7 @@ mod tests {
                 },
             );
         let effective = request
-            .admit_program_support(Arc::clone(&context), &products, &[admission])
+            .admit_program_support(Arc::clone(&context), &support_view(&products), &[admission])
             .unwrap();
         let after = effective
             .artifact_view()
@@ -5182,7 +5208,7 @@ mod tests {
         request.context = Arc::clone(&context);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         let retained = request
-            .admit_program_support(Arc::clone(&context), &[], &[admission])
+            .admit_program_support(Arc::clone(&context), &support_view(&[]), &[admission])
             .unwrap();
         assert!(original_products(&retained.artifact_view().entries()).is_empty());
         assert_eq!(request.program_source_lexical().len(), 2);
@@ -5287,6 +5313,191 @@ mod tests {
         assert!(request.checked_value_imports.validate().is_err());
     }
 
+    const RECEIVER_INTERFACE_SOURCE: &str = "module Tidepool.Agent.Ref where\n";
+
+    fn interface_only_agent_ref_admission(root: &Path, unit: &str) -> ExactSourceAdmission {
+        let source = RECEIVER_INTERFACE_SOURCE;
+        let path = root.join("Ref.hs");
+        std::fs::write(&path, source).unwrap();
+        let mut admission = support_admission(root);
+        admission.evidence.sources = vec![crate::cache::SourceEvidence {
+            path: path.clone(),
+            sha256: sha256(source.as_bytes()),
+        }];
+        admission.evidence.modules = vec![crate::cache::ModuleEvidence {
+            unit: unit.into(),
+            module: "Tidepool.Agent.Ref".into(),
+            boot: false,
+            source: path,
+            imports: vec![],
+            product: crate::cache::ProductAvailability::InterfaceOnly,
+        }];
+        admission.evidence_bytes = serde_json::to_vec(&admission.evidence).unwrap();
+        admission
+    }
+
+    fn interface_only_agent_ref(producer: [u8; 32], unit: &str) -> ArtifactView {
+        let interface = crate::certified_products::fixture_source_module_interface(
+            producer,
+            unit,
+            "Tidepool.Agent.Ref",
+            Sha256::digest(RECEIVER_INTERFACE_SOURCE.as_bytes()).into(),
+            BTreeMap::new(),
+            None,
+        );
+        certified_product_artifact_view(producer, &[], &[interface], None).unwrap()
+    }
+
+    fn receiver_value_interface() -> Arc<CertifiedValueInterface> {
+        let evidence = support_product_in_unit("main", "Tidepool.Session.Val.G1");
+        Arc::new(
+            CertifiedValueInterface::from_checked_compilation(
+                [2; 32],
+                identity("main", "Tidepool.Session.Val.G1"),
+                evidence.interface_bytes().to_vec(),
+                evidence.package_imports_bytes().to_vec(),
+                vec![identity("main", "Tidepool.Agent.Ref")],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn program_support_preserves_interface_only_receiver_dependency_without_native_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), baseline.clone());
+        let support = interface_only_agent_ref([2; 32], "main");
+        let context = request
+            .admit_program_support(
+                baseline,
+                &support,
+                &[interface_only_agent_ref_admission(directory.path(), "main")],
+            )
+            .unwrap();
+        let owner = identity("main", "Tidepool.Agent.Ref");
+        assert!(context.recovery_products().is_empty());
+        assert!(context.lexical_graph().is_empty());
+        assert!(!context
+            .artifact_view()
+            .source_implementation_roles()
+            .contains_key(&owner));
+        let entry = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(owner.clone()))
+            .unwrap();
+        assert_eq!(
+            entry[&owner].descriptor.kind,
+            crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+        );
+        assert_eq!(
+            request.program_support.as_ref().unwrap().artifact_ids(),
+            support.artifact_ids()
+        );
+        // These are the two value-interface consumers after checked/program support.
+        for context in [
+            (*context)
+                .clone()
+                .extend_with_value_interfaces(&[receiver_value_interface()], vec![])
+                .unwrap(),
+            (*context)
+                .clone()
+                .extend_program_value_interface(receiver_value_interface())
+                .unwrap(),
+        ] {
+            assert!(context.recovery_products().is_empty());
+            assert!(!context
+                .lexical_graph()
+                .iter()
+                .any(|node| node.owner == owner));
+            assert!(context.artifact_view().interface_dependencies().iter().any(
+                |(_, required, dependency)| *required == entry[&owner].descriptor.id
+                    && matches!(
+                        dependency,
+                        crate::artifact_inventory::ArtifactDependency::Interface
+                    )
+            ));
+        }
+    }
+
+    #[test]
+    fn interface_only_receiver_support_refuses_unavailable_wrong_owner_and_unadmitted_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let assert_missing_ref = |error: CompileError| {
+            assert!(matches!(error, CompileError::ArtifactInventory(error)
+                if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency {
+                    dependent, required, dependency: crate::artifact_inventory::ArtifactDependency::Interface, ..
+                } if dependent == &identity("main", "Tidepool.Session.Val.G1")
+                    && required == &identity("main", "Tidepool.Agent.Ref"))));
+        };
+        assert_missing_ref(
+            (*empty)
+                .clone()
+                .extend_program_value_interface(receiver_value_interface())
+                .unwrap_err(),
+        );
+        let mut request = program_request(directory.path(), empty.clone());
+        let wrong_owner = request
+            .admit_program_support(
+                empty.clone(),
+                &interface_only_agent_ref([2; 32], "foreign"),
+                &[interface_only_agent_ref_admission(
+                    directory.path(),
+                    "foreign",
+                )],
+            )
+            .unwrap();
+        assert_missing_ref(
+            (*wrong_owner)
+                .clone()
+                .extend_program_value_interface(receiver_value_interface())
+                .unwrap_err(),
+        );
+        let support = interface_only_agent_ref([2; 32], "main");
+        let hidden = Arc::new(
+            (*empty)
+                .clone()
+                .extend_interface_artifacts(&support)
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), hidden.clone());
+        assert!(request
+            .admit_program_support(
+                hidden.clone(),
+                &support,
+                &[interface_only_agent_ref_admission(directory.path(), "main")],
+            )
+            .is_err());
+        assert!(hidden.lexical_graph().is_empty());
+        assert!(request.program_support.is_none());
+        let mut uncaptured = interface_only_agent_ref_admission(directory.path(), "main");
+        uncaptured.evidence.modules[0].source = directory.path().join("uncaptured.hs");
+        for (case, producer, admissions) in [
+            ("uncaptured source", [2; 32], vec![uncaptured]),
+            ("unadmitted source", [2; 32], vec![]),
+            (
+                "different producer",
+                [3; 32],
+                vec![interface_only_agent_ref_admission(directory.path(), "main")],
+            ),
+        ] {
+            let mut request = program_request(directory.path(), empty.clone());
+            assert!(
+                request
+                    .admit_program_support(
+                        empty.clone(),
+                        &interface_only_agent_ref(producer, "main"),
+                        &admissions
+                    )
+                    .is_err(),
+                "{case}"
+            );
+            assert!(empty.artifact_view().is_empty(), "{case}");
+            assert!(request.program_support.is_none(), "{case}");
+        }
+    }
+
     #[test]
     fn program_support_retains_selected_home_edges_without_public_exposure() {
         let directory = tempfile::tempdir().unwrap();
@@ -5302,10 +5513,10 @@ mod tests {
         let context = request
             .admit_program_support(
                 baseline.clone(),
-                &[
+                &support_view(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
-                ],
+                ]),
                 &[admission],
             )
             .unwrap();
@@ -5347,7 +5558,11 @@ mod tests {
         );
         let mut request = program_request(directory.path(), baseline.clone());
         assert!(request
-            .admit_program_support(baseline, &products, &[support_admission(directory.path())])
+            .admit_program_support(
+                baseline,
+                &support_view(&products),
+                &[support_admission(directory.path())]
+            )
             .is_err());
         let original = support_admission(directory.path());
         let mut forged = original.evidence.into_evidence();
@@ -5376,10 +5591,10 @@ mod tests {
         assert!(request
             .admit_program_support(
                 empty,
-                &[
+                &support_view(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay")
-                ],
+                ]),
                 &[original, changed]
             )
             .is_err());
@@ -5445,10 +5660,10 @@ mod tests {
         let context = request
             .admit_program_support(
                 baseline,
-                &[
+                &support_view(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
-                ],
+                ]),
                 &[support_admission(directory.path())],
             )
             .unwrap();
@@ -5578,7 +5793,7 @@ mod tests {
         let context = request
             .admit_program_support(
                 baseline,
-                &[hidden.clone(), owner.clone(), relay.clone()],
+                &support_view(&[hidden.clone(), owner.clone(), relay.clone()]),
                 &[support_admission(directory.path())],
             )
             .unwrap();
@@ -5629,7 +5844,7 @@ mod tests {
         let context = request
             .admit_program_support(
                 context,
-                &[hidden.clone(), owner, relay, support_product("Additional")],
+                &support_view(&[hidden.clone(), owner, relay, support_product("Additional")]),
                 &[later],
             )
             .unwrap();
@@ -5652,15 +5867,13 @@ mod tests {
         assert!(effective
             .validate_receipt(&receipt, None, &context)
             .is_err());
-        let altered = CertifiedRecoveryProduct::from_certification(
-            hidden.owner().clone(),
+        let altered = support_product_with_interface(
+            "fixture",
+            "Hidden",
             b"different inherited interface".to_vec(),
-            hidden.product_bytes().to_vec(),
-            hidden.package_imports_bytes().to_vec(),
-            hidden.certification_bytes().to_vec(),
         );
         assert!(request
-            .admit_program_support(context, &[altered], &[])
+            .admit_program_support(context, &support_view(&[altered]), &[])
             .is_err());
     }
 
@@ -5684,7 +5897,7 @@ mod tests {
         let context = request
             .admit_program_support(
                 baseline,
-                &[support_product_in_unit("main", "Tidepool.Internal.Resume")],
+                &support_view(&[support_product_in_unit("main", "Tidepool.Internal.Resume")]),
                 &[admission],
             )
             .unwrap();
@@ -5741,10 +5954,10 @@ mod tests {
         let context = request
             .admit_program_support(
                 baseline,
-                &[
+                &support_view(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
-                ],
+                ]),
                 &[support_admission(directory.path())],
             )
             .unwrap();

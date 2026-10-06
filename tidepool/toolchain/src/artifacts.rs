@@ -2000,17 +2000,14 @@ impl ModuleCandidateOffer {
                 ))
             }
         };
-        let support = output
-            .products
-            .as_ref()
-            .expect("program output was sealed")
-            .recovery_products
-            .iter()
-            .filter(|product| {
-                product.owner().unit != generated.unit || product.owner().module != generated.module
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let support = program_support_artifacts(
+            &output
+                .products
+                .as_ref()
+                .expect("program output was sealed")
+                .artifact_view,
+            generated,
+        )?;
         request.admit_program_support(context, &support, admissions)
     }
 
@@ -2648,7 +2645,7 @@ fn seal_turn_outputs_inner(
     let checked = if let Some(checked) = &offer.checked {
         let (context, lexical) = checked_output_context(
             offer,
-            &certified.recovery_products,
+            &artifact_view,
             exact_source
                 .as_ref()
                 .expect("checked output has exact source"),
@@ -2723,9 +2720,35 @@ fn seal_turn_outputs_inner(
     }))
 }
 
+/// Preserve all compiler-issued support carriers while excluding the exact
+/// generated scaffold authenticated by the consumed source receipt.
+fn program_support_artifacts(
+    artifacts: &crate::artifact_inventory::ArtifactView,
+    generated: &crate::declaration_join::ExactModuleIdentity,
+) -> Result<crate::artifact_inventory::ArtifactView, CompileError> {
+    let support = artifacts.select_roots(
+        artifacts
+            .descriptors()
+            .into_iter()
+            .filter(|entry| &entry.owner != generated)
+            .map(|entry| entry.id)
+            .collect(),
+    )?;
+    if support
+        .descriptors()
+        .iter()
+        .any(|entry| &entry.owner == generated)
+    {
+        return Err(CompileError::ExtractFailed(
+            "program support depends on its generated scaffold".into(),
+        ));
+    }
+    Ok(support)
+}
+
 fn checked_output_context(
     offer: &ModuleCandidateOffer,
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    artifacts: &crate::artifact_inventory::ArtifactView,
     source_admission: &crate::declaration_context::ExactSourceAdmission,
 ) -> Result<
     (
@@ -2738,13 +2761,7 @@ fn checked_output_context(
         CompileError::ExtractFailed("checked output lacks current exact context".into())
     })?;
     let generated = source_admission.generated_source_owner()?;
-    let support = products
-        .iter()
-        .filter(|product| {
-            product.owner().unit != generated.unit || product.owner().module != generated.module
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let support = program_support_artifacts(artifacts, &generated)?;
     let mut request = exact.clone();
     let context = request.admit_program_support(
         exact.context.clone(),
@@ -4643,6 +4660,100 @@ fn store_memo(
 #[cfg(test)]
 mod typed_site_tests {
     use super::*;
+
+    #[test]
+    fn program_support_projection_retains_interface_only_exact_owners_and_excludes_scaffold() {
+        let interfaces = [
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "main",
+                "Tidepool.Agent.Ref",
+                BTreeMap::new(),
+            ),
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "main",
+                "Generated",
+                BTreeMap::new(),
+            ),
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "foreign",
+                "Generated",
+                BTreeMap::new(),
+            ),
+        ];
+        let view = crate::declaration_context::certified_product_artifact_view(
+            [2; 32],
+            &[],
+            &interfaces,
+            None,
+        )
+        .unwrap();
+        let support = program_support_artifacts(
+            &view,
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: "Generated".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            support
+                .descriptors()
+                .into_iter()
+                .map(|entry| (entry.owner.unit, entry.owner.module, entry.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "foreign".into(),
+                    "Generated".into(),
+                    crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+                ),
+                (
+                    "main".into(),
+                    "Tidepool.Agent.Ref".into(),
+                    crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+                ),
+            ]
+        );
+        assert!(support.source_implementation_roles().is_empty());
+    }
+
+    #[test]
+    fn program_support_projection_refuses_required_generated_scaffold() {
+        let generated = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "main",
+            "Generated",
+            BTreeMap::new(),
+        );
+        let dependent = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "main",
+            "Support",
+            BTreeMap::from([(
+                ("main".into(), "Generated".into()),
+                generated.interface_sha256(),
+            )]),
+        );
+        let view = crate::declaration_context::certified_product_artifact_view(
+            [2; 32],
+            &[],
+            &[generated, dependent],
+            None,
+        )
+        .unwrap();
+        assert!(program_support_artifacts(
+            &view,
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: "Generated".into(),
+            }
+        )
+        .is_err());
+        assert_eq!(view.descriptors().len(), 2);
+    }
 
     #[cfg(unix)]
     #[test]
