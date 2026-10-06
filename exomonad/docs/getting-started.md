@@ -1,8 +1,9 @@
 # Getting started with Exomonad
 
-Two commands do two different jobs. `exomonad new` creates a project workspace
-with a pinned shared-source submodule. `exomonad init` starts a run in a project
-that has one. Everything else on this page is what happens around those two.
+`exomonad new` creates a project workspace with a pinned shared-source
+submodule. `exomonad prepare` creates an immutable deployment from that
+workspace, and `exomonad init` starts a fresh run from the workspace or a
+prepared deployment.
 
 ## What you need
 
@@ -175,6 +176,30 @@ just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$CHECK_REPORT" \
 This resolves the pinned sources and typechecks every module the config names.
 It launches no agents and makes no model calls. `--recipes` also runs the
 workspace's own model-free recipe checks, if it declares any.
+
+## `exomonad prepare`: capture a reusable deployment
+
+Prepare a workspace after its configuration, prompts and source are ready:
+
+```bash
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$PREPARE_REPORT" \
+  prepare --workspace /path/to/your/project --directory /path/to/deployment
+```
+
+Preparation creates an immutable deployment that later runs can reuse. It
+covers the required root toolset and explicitly configured preparation roles.
+Those are the only role configurations covered by that deployment. Recipe
+checks remain a separate, fresh, model-free operation through `exomonad check
+--recipes`. To start a run from the deployment, pass
+`--prepared /path/to/deployment` to `exomonad init`. Each init creates an
+independent run with its own run state. A prepared deployment does not resume or
+attach to an earlier run.
+
+Preparation records the selected deployment in
+`.exomonad/prepared.json`; `init` uses that pointer unless `--prepared` is
+given. Each run retains its own pointer to the original deployment. Changing
+workspace configuration, prompts or source makes the deployment stale, and
+init refuses it; prepare a new deployment for the changed workspace.
 
 ## `exomonad init`: start a run
 
