@@ -1473,6 +1473,9 @@ impl ModuleCandidateOffer {
             .ok_or_else(|| CompileError::ExtractFailed("program has no interface owner".into()))?;
         let mut context = initial.context.clone();
         let mut program_request = initial.clone();
+        // One host admission observes package bytes once across all original
+        // outputs. The next admission starts a fresh filesystem observation.
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let mut declarations = BTreeMap::new();
         let mut admissions = Vec::new();
         let mut outputs = BTreeMap::new();
@@ -1605,7 +1608,7 @@ impl ModuleCandidateOffer {
                         .in_program_context(&root.join("program-inputs"), context.clone())?;
                     let effective = self.program_offer(program_request.clone());
                     let directory = root.join(format!("item-{index}"));
-                    let output = effective.read_program_output(&directory)?;
+                    let output = effective.read_program_output(&directory, &mut validation)?;
                     let source_admissions = effective
                         .exact
                         .as_ref()
@@ -1750,7 +1753,11 @@ impl ModuleCandidateOffer {
         }
     }
 
-    fn read_program_output(&self, directory: &Path) -> Result<ProgramNativeOutput, CompileError> {
+    fn read_program_output(
+        &self,
+        directory: &Path,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
             crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
         let value = crate::checked_cell::decode(&turn)?;
@@ -1767,13 +1774,17 @@ impl ModuleCandidateOffer {
             CompileError::ExtractFailed("program native source has no module owner".into())
         })?;
         output.products = Some(Arc::new(
-            seal_turn_outputs(
+            seal_turn_outputs_with_validation(
                 self,
                 directory,
                 &directory.join(format!("{module}.hs")),
                 &output.source,
                 &output.target,
                 "__prepared",
+                None,
+                None,
+                OriginalOutputPublication::Transaction,
+                validation,
             )?
             .ok_or_else(|| {
                 CompileError::ExtractFailed("program native products are not sealed".into())
@@ -2256,6 +2267,34 @@ fn seal_turn_outputs_inner(
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     publication: OriginalOutputPublication,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
+    // Standalone turns own their own admission; program turns share theirs.
+    seal_turn_outputs_with_validation(
+        offer,
+        output_dir,
+        source_path,
+        source,
+        prepared,
+        target,
+        identity_metadata,
+        authored,
+        publication,
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_turn_outputs_with_validation(
+    offer: &ModuleCandidateOffer,
+    output_dir: &Path,
+    source_path: &Path,
+    source: &str,
+    prepared: &Arc<PreparedProgram>,
+    target: &str,
+    identity_metadata: Option<(&DataConTable, &[YieldSite])>,
+    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
+    publication: OriginalOutputPublication,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
             "turn source changed after worker compile".into(),
@@ -2340,7 +2379,7 @@ fn seal_turn_outputs_inner(
         }
         return Ok(None);
     };
-    let certified = certified_products::certify_products(
+    let certified = certified_products::certify_products_with_validation(
         offer.selected.as_deref(),
         &receipt,
         &fresh_products,
@@ -2353,6 +2392,7 @@ fn seal_turn_outputs_inner(
         &offer.include,
         exact.as_ref(),
         authored,
+        validation,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let target_admission_start = Instant::now();
@@ -2366,17 +2406,22 @@ fn seal_turn_outputs_inner(
             "turn target product receipt count".into(),
         ));
     }
-    let package_closure = merge_package_closure(&receipt.packages, offer.exact.as_ref())?;
-    let pending_imports = certified_products::certify_target_owners(
+    let package_closure =
+        merge_package_closure_with_validation(&receipt.packages, offer.exact.as_ref(), validation)?;
+    let pending_imports = certified_products::certify_target_owners_with_validation(
         prepared,
         accepted,
         &certified.groups,
         &package_closure,
+        validation,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    let package_interfaces =
-        certified_products::certify_target_package_interfaces(prepared, &package_closure)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let package_interfaces = certified_products::certify_target_package_interfaces_with_validation(
+        prepared,
+        &package_closure,
+        validation,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     timing::record_stage_with_owners(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2413,15 +2458,19 @@ fn seal_turn_outputs_inner(
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let artifact_view = crate::declaration_context::certified_product_artifact_view(
-        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
+    let artifact_view =
+        crate::declaration_context::certified_product_artifact_view_with_validation(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &offer.producer,
+            )
             .sha256(),
-        &certified.recovery_products,
-        &certified.module_interfaces,
-        exact
-            .as_ref()
-            .map(|admission| admission.request.context.as_ref()),
-    )?;
+            &certified.recovery_products,
+            &certified.module_interfaces,
+            exact
+                .as_ref()
+                .map(|admission| admission.request.context.as_ref()),
+            validation,
+        )?;
     let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
@@ -2571,15 +2620,18 @@ fn checked_output_context(
     Ok((context, request.program_source_lexical().to_vec()))
 }
 
-fn merge_package_closure(
+fn merge_package_closure_with_validation(
     packages: &BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
     exact: Option<&crate::declaration_context::ExactCompilationRequest>,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<BTreeMap<(String, String), certified_products::PackageInterfaceWitness>, CompileError> {
     let mut selected = packages.clone();
     if let Some(request) = exact {
-        let inherited =
-            certified_products::inherited_package_witnesses(&request.context.recovery_products())
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let inherited = certified_products::inherited_package_witnesses_with_validation(
+            &request.context.recovery_products(),
+            validation,
+        )
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         for (owner, witness) in inherited {
             if selected
                 .insert(owner, witness.clone())
@@ -3507,8 +3559,9 @@ fn compile_invocation_inner(
             .iter()
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let certified = if let Some(valid) = valid_evidence {
-            let certified = certified_products::certify_products(
+            let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
                 &receipt,
                 &fresh_products,
@@ -3521,6 +3574,7 @@ fn compile_invocation_inner(
                 inv.include,
                 exact.as_ref(),
                 authored,
+                &mut validation,
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             if let Some((output, selection)) = inventory_export {
@@ -3610,24 +3664,31 @@ fn compile_invocation_inner(
             ));
         }
         let target_admission_start = Instant::now();
-        let package_closure = merge_package_closure(&receipt.packages, exact_request.as_ref())?;
+        let package_closure = merge_package_closure_with_validation(
+            &receipt.packages,
+            exact_request.as_ref(),
+            &mut validation,
+        )?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
             })?;
             if valid_evidence.is_some() {
-                target.pending_imports = certified_products::certify_target_owners(
+                target.pending_imports = certified_products::certify_target_owners_with_validation(
                     target.prepared.prepared(),
                     accepted,
                     &certified.groups,
                     &package_closure,
+                    &mut validation,
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-                target.package_interfaces = certified_products::certify_target_package_interfaces(
-                    target.prepared.prepared_shared(),
-                    &package_closure,
-                )
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                target.package_interfaces =
+                    certified_products::certify_target_package_interfaces_with_validation(
+                        target.prepared.prepared_shared(),
+                        &package_closure,
+                        &mut validation,
+                    )
+                    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             }
         }
         timing::record_stage_with_owners(
@@ -3638,15 +3699,19 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
-        artifacts.artifact_view = crate::declaration_context::certified_product_artifact_view(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
+        artifacts.artifact_view =
+            crate::declaration_context::certified_product_artifact_view_with_validation(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &producer,
+                )
                 .sha256(),
-            &certified.recovery_products,
-            &certified.module_interfaces,
-            exact_request
-                .as_ref()
-                .map(|request| request.context.as_ref()),
-        )?;
+                &certified.recovery_products,
+                &certified.module_interfaces,
+                exact_request
+                    .as_ref()
+                    .map(|request| request.context.as_ref()),
+                &mut validation,
+            )?;
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;

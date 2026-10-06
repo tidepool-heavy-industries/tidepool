@@ -597,6 +597,8 @@ pub(crate) struct PackageInterfaceValidation {
     decoded_bytes: u64,
     #[cfg(test)]
     pub(crate) home_witness_validations: usize,
+    #[cfg(test)]
+    pub(crate) package_interface_opens: usize,
     execution_sources:
         BTreeMap<PathBuf, Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
@@ -657,6 +659,10 @@ impl PackageInterfaceValidation {
                 }
             }
         })?;
+        #[cfg(test)]
+        {
+            self.package_interface_opens += 1;
+        }
         let metadata = file
             .metadata()
             .map_err(|error| RecoveryArtifactError::Unreadable {

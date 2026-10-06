@@ -352,9 +352,22 @@ pub(crate) struct ArtifactEntry {
 }
 
 impl ArtifactEntry {
+    #[cfg(test)]
     pub(crate) fn original(
         producer: [u8; 32],
         product: CertifiedRecoveryProduct,
+    ) -> Result<Self, CompileError> {
+        Self::original_with_validation(
+            producer,
+            product,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+    }
+
+    pub(crate) fn original_with_validation(
+        producer: [u8; 32],
+        product: CertifiedRecoveryProduct,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let owner = product.owner();
         let canonical = product
@@ -364,8 +377,7 @@ impl ArtifactEntry {
             return Err(failure("native product has another canonical producer"));
         }
         let native_owners = crate::certified_products::original_home_requirements_with_validation(
-            &product,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            &product, validation,
         )
         .map_err(|error| failure(&format!("native source owners: {error}")))?
         .into_iter()

@@ -190,6 +190,7 @@ impl CertifiedTargetPackageInterfaces {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn certify_target_package_interfaces(
     target: &std::sync::Arc<PreparedProgram>,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
@@ -220,15 +221,6 @@ pub(crate) fn certify_target_package_interfaces_with_validation(
         target: Some(target.clone()),
         interfaces,
     })
-}
-
-pub(crate) fn inherited_package_witnesses(
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
-    inherited_package_witnesses_with_validation(
-        products,
-        &mut PackageInterfaceValidation::default(),
-    )
 }
 
 pub(crate) fn inherited_package_witnesses_with_validation(
@@ -3614,6 +3606,7 @@ impl<'a> ParsedModuleProducts<'a> {
 /// A shared offer outlives individual program slots. Recheck its accepted
 /// cached subgraph against this slot's growing exact context before inherited
 /// groups can participate in global-owner resolution.
+#[cfg(test)]
 fn validate_exact_cached_closure(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
@@ -3623,6 +3616,27 @@ fn validate_exact_cached_closure(
         crate::declaration_join::ExactModuleIdentity,
         Vec<crate::declaration_join::ExactModuleIdentity>,
     >,
+) -> CertResult<()> {
+    validate_exact_cached_closure_with_validation(
+        candidates,
+        receipt,
+        context,
+        evidence,
+        exact_imports,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+fn validate_exact_cached_closure_with_validation(
+    candidates: Option<&CandidateSet>,
+    receipt: &CertifiedReceipt,
+    context: &crate::declaration_context::ExactDeclarationContext,
+    evidence: &DependencyEvidence,
+    exact_imports: &BTreeMap<
+        crate::declaration_join::ExactModuleIdentity,
+        Vec<crate::declaration_join::ExactModuleIdentity>,
+    >,
+    package_validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
     use crate::cache::ImportQualifier;
     use crate::module_candidates::dependencies::CandidateDependencyInventory;
@@ -3667,7 +3681,6 @@ fn validate_exact_cached_closure(
             .filter(|row| row.source == Path::new("@generated-source"))
             .map(|row| (row.unit.clone(), row.module.clone())),
     );
-    let mut package_validation = PackageInterfaceValidation::default();
     // An offered dependency rejected by the worker cannot satisfy this receipt.
     let mut accepted_candidates = BTreeMap::new();
     for (key, module) in &accepted {
@@ -3761,7 +3774,7 @@ fn validate_exact_cached_closure(
                 &key.1,
                 &bundle.owner.skinny_iface_sha256,
                 &bundle.package_imports_path,
-                &mut package_validation,
+                package_validation,
             )
             .map_err(|_| CertificationError::Mismatch("cached candidate package witness"))?;
         let mut ordinary_imports = Vec::new();
@@ -3896,6 +3909,7 @@ fn validate_exact_cached_closure(
 /// appears in the receipt: every original global and source edge is checked.
 /// The compiler output owner supplies the captured payload root independently
 /// of the source path used to authenticate dependency and source evidence.
+#[cfg(test)]
 pub(crate) fn certify_products(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
@@ -3910,11 +3924,42 @@ pub(crate) fn certify_products(
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> CertResult<CertifiedProducts> {
+    certify_products_with_validation(
+        candidates,
+        receipt,
+        fresh_products,
+        fresh_evidence_bytes,
+        fresh_input_path,
+        captured_payload_root,
+        final_evidence,
+        final_target_source,
+        endpoint_identity,
+        include,
+        exact,
+        authored,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn certify_products_with_validation(
+    candidates: Option<&CandidateSet>,
+    receipt: &CertifiedReceipt,
+    fresh_products: &ParsedModuleProducts<'_>,
+    fresh_evidence_bytes: &[u8],
+    fresh_input_path: &Path,
+    captured_payload_root: &Path,
+    final_evidence: &CompletedSourceEvidence,
+    final_target_source: &str,
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
+    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<CertifiedProducts> {
     receipt
         .finalization
         .validate_owners(&receipt.modules, &receipt.packages)?;
     let evidence_start = std::time::Instant::now();
-    let mut validation = PackageInterfaceValidation::default();
     let normalized = match exact {
         None => CompletedSourceEvidence::from_worker(
             fresh_evidence_bytes,
@@ -4032,12 +4077,13 @@ pub(crate) fn certify_products(
     let parsed_fresh = fresh_products.products();
     let fresh_product_bytes = fresh_products.bytes;
     if let Some(admission) = exact {
-        validate_exact_cached_closure(
+        validate_exact_cached_closure_with_validation(
             candidates,
             receipt,
             &admission.request.context,
             final_evidence,
             &admission.source.exact_imports,
+            validation,
         )?;
     }
     let ownership_start = std::time::Instant::now();
@@ -4060,7 +4106,7 @@ pub(crate) fn certify_products(
                 &product.module,
                 &iface_sha,
                 Path::new("module-package-imports.cbor"),
-                &mut validation,
+                validation,
             )
             .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
         let promoted = receipt.modules.iter().any(|module| {
@@ -4220,7 +4266,7 @@ pub(crate) fn certify_products(
                     &key.1,
                     &accepted.skinny_iface_sha256,
                     &bundle.package_imports_path,
-                    &mut validation,
+                    validation,
                 )
                 .map_err(|_| CertificationError::StaleEvidence)?;
                 if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
@@ -4345,7 +4391,7 @@ pub(crate) fn certify_products(
             package_bytes,
             &owner,
             &receipt.packages,
-            &mut validation,
+            validation,
         )?;
         if product.groups.len() != accepted.groups.len() {
             return Err(CertificationError::Mismatch("original group count"));
@@ -4448,7 +4494,7 @@ pub(crate) fn certify_products(
         exact.map_or(&BTreeMap::new(), |admission| {
             &admission.source.exact_source_imports
         }),
-        &mut validation,
+        validation,
     )?;
     let mut admitted_interfaces = BTreeMap::new();
     for module in &receipt.modules {
@@ -4536,7 +4582,7 @@ pub(crate) fn certify_products(
                     import,
                     &source_groups,
                     &receipt.packages,
-                    &mut validation,
+                    validation,
                 )
             })
             .collect::<CertResult<Vec<_>>>()?;
@@ -4581,7 +4627,7 @@ pub(crate) fn certify_products(
                         import,
                         &source_groups,
                         &receipt.packages,
-                        &mut validation,
+                        validation,
                     )
                 })
                 .collect::<CertResult<Vec<_>>>()?;
@@ -4819,7 +4865,7 @@ pub(crate) fn certify_products(
                     &accepted.interface_requirements,
                     execution_source.map(|graph| graph.digest()),
                     Some(sha(canonical_interface.certificate_bytes())),
-                    &mut validation,
+                    validation,
                 )?;
                 let certification = encode_home_witness(&witness)?;
                 let binding = validate_module_binding(&witness, canonical_interface, &interface, &package_bytes, Some(source_sha))?;
@@ -4829,7 +4875,7 @@ pub(crate) fn certify_products(
                 let product = retain_original_native(product, original, witness)?;
                 match execution_source {
                     Some(graph) => product
-                        .with_execution_source_with_validation(Arc::clone(graph), &mut validation)
+                        .with_execution_source_with_validation(Arc::clone(graph), validation)
                         .map_err(|_| CertificationError::Mismatch("execution source owner")),
                     None => Ok(product),
                 }
@@ -5565,6 +5611,137 @@ pub(crate) mod tests {
                 assert!(index.contains(unit, module));
             }
         }
+    }
+
+    #[test]
+    fn original_product_admission_shares_package_reads_and_rechecks_next_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Package.hi");
+        let bytes = vec![0x42; 131_073];
+        std::fs::write(&path, &bytes).unwrap();
+        let producer = [2; 32];
+        let make_products = |names: &[String]| {
+            let packages = BTreeMap::from([(
+                ("package-unit".into(), "Package.Module".into()),
+                PackageInterfaceWitness {
+                    selected_path: path.clone(),
+                    sha256: sha(&std::fs::read(&path).unwrap()),
+                },
+            )]);
+            let products = names
+                .iter()
+                .map(|name| {
+                    let interface = fixture_source_module_interface(
+                        producer,
+                        "home-unit",
+                        name,
+                        [1; 32],
+                        BTreeMap::new(),
+                        Some(&path),
+                    );
+                    let owner = CachedHomeOwner {
+                        unit: "home-unit".into(),
+                        module: name.clone(),
+                        module_version: ModuleVersion([1; 32]),
+                        skinny_iface_sha256: interface.interface_sha256(),
+                        product_sha256: sha(name.as_bytes()),
+                    };
+                    let certification = encode_home_certification_with_module(
+                        &owner,
+                        &[],
+                        &packages,
+                        interface.requirements(),
+                        sha(interface.certificate_bytes()),
+                    )
+                    .unwrap();
+                    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                        owner,
+                        name.as_bytes().to_vec(),
+                        name.as_bytes().to_vec(),
+                        interface.package_imports_bytes().to_vec(),
+                        certification,
+                    )
+                    .with_module_interface(interface)
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            (products, packages)
+        };
+        let names = (0..17).map(|i| format!("Home{i}")).collect::<Vec<_>>();
+        let (products, packages) = make_products(&names);
+        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let mut admission = PackageInterfaceValidation::default();
+        let target_interfaces =
+            certify_target_package_interfaces_with_validation(&target, &packages, &mut admission)
+                .unwrap();
+        let view = crate::declaration_context::certified_product_artifact_view_with_validation(
+            producer,
+            &products,
+            &[],
+            None,
+            &mut admission,
+        )
+        .unwrap();
+        assert_eq!(view.descriptors().len(), names.len());
+        assert!(target_interfaces.matches_target(&target));
+        assert_eq!(admission.package_interface_opens, 1);
+        assert_eq!(admission.work().read_bytes, bytes.len() as u64);
+        assert_eq!(admission.work().hash_bytes, bytes.len() as u64);
+        assert!(
+            crate::declaration_context::certified_product_artifact_view_with_validation(
+                [3; 32],
+                &products,
+                &[],
+                None,
+                &mut admission,
+            )
+            .is_err(),
+            "a captured path does not confer another producer's authority"
+        );
+
+        // Another admission must really open/read even unchanged package bytes.
+        let mut next = PackageInterfaceValidation::default();
+        crate::declaration_context::certified_product_artifact_view_with_validation(
+            producer,
+            &products,
+            &[],
+            None,
+            &mut next,
+        )
+        .unwrap();
+        assert_eq!(next.package_interface_opens, 1);
+        assert_eq!(next.work().read_bytes, bytes.len() as u64);
+
+        let replacement = root.path().join("replacement.hi");
+        std::fs::write(&replacement, vec![0x43; bytes.len()]).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let mut changed = PackageInterfaceValidation::default();
+        assert!(
+            crate::declaration_context::certified_product_artifact_view_with_validation(
+                producer,
+                &products,
+                &[],
+                None,
+                &mut changed,
+            )
+            .is_err()
+        );
+        assert_eq!(changed.package_interface_opens, 1);
+        assert_eq!(changed.work().read_bytes, bytes.len() as u64);
+
+        let (replacement_products, _) = make_products(&["Replacement".into()]);
+        assert!(
+            crate::declaration_context::certified_product_artifact_view_with_validation(
+                producer,
+                &replacement_products,
+                &[],
+                None,
+                &mut admission,
+            )
+            .is_err(),
+            "the same path with a different expected digest cannot reuse a capture"
+        );
+        assert_eq!(admission.package_interface_opens, 1);
     }
 
     #[test]

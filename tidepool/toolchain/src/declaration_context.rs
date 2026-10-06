@@ -599,7 +599,11 @@ impl RecoveredArtifactInventory {
             if product.owner() != &requirements.owner {
                 return Err(failure("recovered original owner differs").into());
             }
-            let entry = ArtifactEntry::original(context.producer, product)?;
+            let entry = ArtifactEntry::original_with_validation(
+                context.producer,
+                product,
+                &mut validation,
+            )?;
             original_requirements.insert(entry.descriptor.id, requirements);
             entries.push(entry);
         }
@@ -2715,6 +2719,7 @@ impl ExactDeclarationContext {
                 .map(|product| identity(&product.owner().unit, &product.owner().module)),
         )?;
         let mut entries = Vec::new();
+        let mut validation = PackageInterfaceValidation::default();
         for product in products {
             let owner = identity(&product.owner().unit, &product.owner().module);
             if let Some(entry) = existing.get(&owner) {
@@ -2722,7 +2727,11 @@ impl ExactDeclarationContext {
                     if product.module_interface() != Some(interface) {
                         return Err(failure("supporting original differs from canonical module"));
                     }
-                    entries.push(ArtifactEntry::original(producer_sha256, product.clone())?);
+                    entries.push(ArtifactEntry::original_with_validation(
+                        producer_sha256,
+                        product.clone(),
+                        &mut validation,
+                    )?);
                     continue;
                 }
                 let ArtifactPayload::Original(previous) = &entry.payload else {
@@ -2740,7 +2749,11 @@ impl ExactDeclarationContext {
                 }
                 continue;
             }
-            entries.push(ArtifactEntry::original(producer_sha256, product.clone())?);
+            entries.push(ArtifactEntry::original_with_validation(
+                producer_sha256,
+                product.clone(),
+                &mut validation,
+            )?);
         }
         self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
         Ok(self)
@@ -4081,11 +4094,31 @@ impl ExactDeclarationContext {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn certified_product_artifact_view(
     producer: [u8; 32],
     products: &[CertifiedRecoveryProduct],
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
     baseline: Option<&ExactDeclarationContext>,
+) -> Result<ArtifactView, CompileError> {
+    certified_product_artifact_view_with_validation(
+        producer,
+        products,
+        interfaces,
+        baseline,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+// Product, target and inventory admission compare every witness against the
+// same bounded capture; inventory construction must not create one filesystem
+// observation per original module.
+pub(crate) fn certified_product_artifact_view_with_validation(
+    producer: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    interfaces: &[crate::certified_products::CertifiedModuleInterface],
+    baseline: Option<&ExactDeclarationContext>,
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
     let view = baseline.map_or_else(
         || ArtifactInventory::default().empty_view(),
@@ -4097,7 +4130,11 @@ pub(crate) fn certified_product_artifact_view(
         .map(ArtifactEntry::canonical)
         .collect::<Vec<_>>();
     for product in products {
-        entries.push(ArtifactEntry::original(producer, product.clone())?);
+        entries.push(ArtifactEntry::original_with_validation(
+            producer,
+            product.clone(),
+            validation,
+        )?);
     }
     view.inventory().admit(&view, entries)
 }
@@ -4114,10 +4151,12 @@ pub(crate) fn certified_artifact_view(
         || ArtifactInventory::default().empty_view(),
         |context| context.artifact_view().clone(),
     );
+    let mut validation = PackageInterfaceValidation::default();
     let selected = products
         .iter()
         .map(|product| {
-            ArtifactEntry::original(producer, product.clone()).map(|entry| entry.descriptor.id)
+            ArtifactEntry::original_with_validation(producer, product.clone(), &mut validation)
+                .map(|entry| entry.descriptor.id)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let view = view.merge(&compiled.select_roots(selected)?)?;
@@ -4128,7 +4167,11 @@ pub(crate) fn certified_artifact_view(
             .iter()
             .find(|interface| interface.owner == owner)
             .ok_or_else(|| failure("original interface metadata missing"))?;
-        entries.push(ArtifactEntry::original(producer, product.clone())?);
+        entries.push(ArtifactEntry::original_with_validation(
+            producer,
+            product.clone(),
+            &mut validation,
+        )?);
     }
     for join in joined {
         let owner = identity(join.unit(), join.module());
