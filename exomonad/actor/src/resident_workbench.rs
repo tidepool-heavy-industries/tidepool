@@ -384,6 +384,26 @@ pub struct ActorWorkbenchSource {
     toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
 }
 
+/// Immutable installer readiness. It owns source and native code, while each
+/// actor still executes its own installation in a fresh lexical scope.
+#[derive(Clone)]
+pub struct PreparedSourceToolset {
+    prepared: Arc<crate::agent_spec::preparation::PreparedToolset>,
+    effects: Vec<crate::ActorEffectKey>,
+}
+
+impl PreparedSourceToolset {
+    #[must_use]
+    pub fn source_revision(&self) -> &str {
+        &self.prepared.source_revision
+    }
+
+    #[must_use]
+    pub fn effects(&self) -> &[crate::ActorEffectKey] {
+        &self.effects
+    }
+}
+
 /// One prepared import environment for evaluation and inspection. Name
 /// resolution comes from the exact lexical view before either path builds
 /// a compiler request.
@@ -395,6 +415,81 @@ struct WorkbenchCompilation {
 }
 
 impl ActorWorkbenchSource {
+    /// Prepare one exact granted and supported row from an owned immutable run
+    /// source graph. Preparation does not install tools or borrow actor heaps.
+    /// The caller selects urgency; required startup is foreground and optional
+    /// warming is preparation work.
+    pub async fn prepare_source_toolset(
+        &self,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        source: crate::CheckpointSourceLayer,
+        granted_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+        registry: Arc<tidepool_runtime::session::ImageRegistry>,
+    ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        let mut effects = Vec::new();
+        for key in granted_effects {
+            if supported_effects.contains(&exomonad_tool::ToolEffectKey::Actor(*key))
+                && !effects.contains(key)
+            {
+                effects.push(*key);
+            }
+        }
+        let mut roots = self.toolset_support.to_vec();
+        roots.extend(source.include_paths().iter().cloned());
+        let roots = roots
+            .into_iter()
+            .map(std::fs::canonicalize)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let resolved = crate::agent_spec::resolve(roots.clone(), self.spec.as_deref());
+        let source_revision = resolved
+            .source_closure_revision()
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let entry = resolved.entry.clone().unwrap_or_else(|| {
+            if supported_effects.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
+                "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
+            } else {
+                "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
+            }
+        });
+        let mut imports = self.workbench_imports.clone();
+        if let Some((module, _)) = entry.rsplit_once('.') {
+            imports.extend_text(&format!("qualified {module}"));
+        }
+        imports.extend_text("qualified Tidepool.Agent.Contract");
+        imports.extend_text("qualified Tidepool.Effects.Core");
+        imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
+        imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+        let prepared = self
+            .toolset_preparation
+            .prepare(
+                workload,
+                crate::agent_spec::preparation::InstallerRecipe {
+                    source_revision,
+                    roots,
+                    preamble: self.preamble.to_string(),
+                    imports: imports.template_text(),
+                    entry,
+                    effects: effects.clone(),
+                },
+                resolved,
+                source,
+                registry,
+            )
+            .await
+            .map_err(|failure| match failure {
+                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) => {
+                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Source(detail)
+                | crate::agent_spec::preparation::PreparationFailure::Native(detail) => {
+                    ResidentActorWorkbenchError::ActorProtocol(detail)
+                }
+            })?;
+        Ok(PreparedSourceToolset { prepared, effects })
+    }
+
     fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
         WorkbenchCompilation {
             preamble: scope.shadow_preamble(&hide_preamble_exports(
@@ -4159,10 +4254,6 @@ where
                     Ok(support)
                 })
                 .await?;
-            let admitted_base: Vec<_> = granted_effects
-                .iter().copied()
-                .filter(|key| admitted_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
-                .collect();
             let authority = self.compilation_authority.as_ref().ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
                     "tool installation requires its admitted source authority".into(),
@@ -4170,58 +4261,22 @@ where
             })?;
             let toolset_source = authority.toolset_source()
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            let mut roots = self.access.source.toolset_support.to_vec();
-            roots.extend(toolset_source.include_paths().iter().cloned());
-            // Canonical paths bind this request to one immutable publication.
-            // Source installation never follows active/* while compilation runs.
-            let roots = roots.into_iter().map(std::fs::canonicalize)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-            let resolved = crate::agent_spec::resolve(roots.clone(), self.access.source.spec.as_deref());
-            let revision = resolved.source_closure_revision()
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            let entry = resolved.entry.clone().unwrap_or_else(|| {
-                if admitted_support.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
-                    "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
-                } else {
-                    "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
-                }
-            });
-            let installation = crate::agent_spec::installation_expression(&entry, &admitted_base);
+            let registry = self.access.image_registry.clone()
+                .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
+            let ready = self.access.source.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                toolset_source,
+                &granted_effects,
+                &admitted_support,
+                registry,
+            ).await?;
+            let admitted_base = ready.effects;
+            let prepared = ready.prepared;
+            let installation = crate::agent_spec::installation_expression(&prepared.entry_name, &admitted_base);
             let dispatcher_effects = format!(
                 "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
                 installation.effect_row,
             );
-            let mut imports = self.access.source.workbench_imports.clone();
-            if let Some((module, _)) = entry.rsplit_once('.') {
-                imports.extend_text(&format!("qualified {module}"));
-            }
-            imports.extend_text("qualified Tidepool.Agent.Contract");
-            imports.extend_text("qualified Tidepool.Effects.Core");
-            imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
-            imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
-            let registry = self.access.image_registry.clone()
-                .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
-            let prepared = self.access.source.toolset_preparation.prepare(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                crate::agent_spec::preparation::InstallerRecipe {
-                    source_revision: revision,
-                    roots,
-                    preamble: self.access.source.preamble.to_string(),
-                    imports: imports.template_text(),
-                    entry,
-                    effects: admitted_base.clone(),
-                },
-                resolved,
-                toolset_source,
-                registry,
-            ).await.map_err(|failure| match failure {
-                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) =>
-                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic),
-                crate::agent_spec::preparation::PreparationFailure::Source(detail)
-                | crate::agent_spec::preparation::PreparationFailure::Native(detail) =>
-                    ResidentActorWorkbenchError::ActorProtocol(detail),
-            })?;
             let revision = Some(prepared.source_revision.clone());
             let publication_resolved = prepared.resolved.clone();
             let mut compile_context = context.clone();

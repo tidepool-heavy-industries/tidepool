@@ -24,6 +24,7 @@ pub(crate) struct InstallerRecipe {
 
 pub(crate) struct PreparedToolset {
     pub(crate) entry: PreparedSourceEntry,
+    pub(crate) entry_name: String,
     pub(crate) resolved: ResolvedSpec,
     pub(crate) source_revision: String,
     /// Retains the published source owner for the complete installer lifetime.
@@ -392,6 +393,7 @@ fn compile_installer(
         .map_err(|error| PreparationFailure::Native(error.to_string()))?;
     Ok(Arc::new(PreparedToolset {
         entry,
+        entry_name: recipe.entry,
         resolved,
         source_revision: recipe.source_revision,
         _source: source,
