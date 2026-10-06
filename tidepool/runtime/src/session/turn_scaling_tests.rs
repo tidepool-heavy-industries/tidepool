@@ -2344,7 +2344,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         0,
         &ScalePublication::Ephemeral,
     );
-    let imports = SourceImports::from_specs(["qualified QuotedTemplateSupport as Q"]);
+    let imports = SourceImports::from_specs(["QuotedTemplateSupport"]);
     try_execute_cell_with_template_imports(
         &mut resident,
         public,
@@ -2352,7 +2352,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         &images,
         (0, 0),
         "quoted_template_value",
-        "let retainedTask = Q.taskValue 41",
+        "let retainedTask = taskValue 41",
         0,
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
@@ -2418,7 +2418,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         &images,
         (0, 0),
         "source_absent_quoted_template_original",
-        &guarded_integer_capture_source("Q.taskValue 41", 42),
+        &guarded_integer_capture_source("taskValue 41", 42),
         0,
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
