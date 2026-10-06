@@ -4,6 +4,7 @@ use std::path::PathBuf;
 enum Mode {
     Build,
     Inspect,
+    Entry,
 }
 
 impl Mode {
@@ -11,6 +12,7 @@ impl Mode {
         match value.and_then(std::ffi::OsStr::to_str) {
             Some("build") => Ok(Self::Build),
             Some("inspect") => Ok(Self::Inspect),
+            Some("entry") => Ok(Self::Entry),
             _ => Err("usage: tidepool-module-package (build|inspect) --source ABS --target NAME [--target NAME] --source-root SNAPSHOT_ABS --output-root ABS"),
         }
     }
@@ -125,6 +127,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &output_root,
             )?;
             println!("{}", report.display());
+        }
+        Mode::Entry => {
+            if targets != ["__prepared"] {
+                return Err("production entry requires exactly --target __prepared".into());
+            }
+            tidepool_toolchain::artifacts::build_production_entry(
+                &source,
+                &source_root,
+                scratch.path(),
+                &output_root,
+            )?;
+            println!("{}", output_root.join("entry.json").display());
         }
     }
     Ok(())

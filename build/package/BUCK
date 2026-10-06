@@ -1,6 +1,6 @@
 load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule")
 load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
-load(":native_catalog.bzl", "native_catalog", "native_catalog_sources", "native_runtime_bundle")
+load(":native_catalog.bzl", "native_catalog", "native_catalog_sources", "native_prepared_products", "native_runtime_bundle")
 load("//bridge/haskell:components.bzl", "NATIVE_CATALOG_COHORT")
 
 export_file(name = "qualification_script", src = "qualification.py", visibility = ["PUBLIC"])
@@ -15,8 +15,7 @@ native_catalog_sources(
     visibility = ["PUBLIC"],
 )
 
-native_catalog(
-    name = "native_catalog",
+native_prepared_products(
     snapshot = ":native_catalog_sources",
     source_root = read_root_config("nix", "native_catalog_source_root", ""),
     declared_source_root = "toolchains//:native_catalog_source_root",
@@ -104,6 +103,8 @@ cp "$PWD/$(location root//:embedded_web_provenance_script)" "$SOURCE/scripts/emb
 # Native compiler bytes travel with the host; the selected final bundle path
 # supplies deployment provenance when its frontend generates the manifest.
 
-native_runtime_bundle(name = "native_runtime_bundle", catalog_backed = False)
+native_runtime_bundle(name = "native_runtime_bundle", catalog_backed = True)
+
+native_runtime_bundle(name = "source_backed_developer_bundle", catalog_backed = False)
 
 native_runtime_bundle(name = "native_catalog_runtime_bundle", catalog_backed = True)

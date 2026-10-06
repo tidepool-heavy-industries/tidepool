@@ -36,7 +36,7 @@ DESCRIPTOR = "share/exomonad/qualification.json"
 UNSET_ENVIRONMENT = (
     "TIDEPOOL_CACHE_DIR", "TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR",
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT", "TIDEPOOL_COMPILER_MODULES",
-    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
+    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
     "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
@@ -49,11 +49,12 @@ ARTIFACT_TARGETS = {
     "bin/tidepool-tests": "//bridge/facade:tidepool_unit_tests",
 }
 EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
-BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "source_inputs", "source_inputs_sha256", "artifacts")
+BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts")
 CATALOG_SOURCE_METADATA = "catalog-sources.json"
 CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors", "jev": "jev/core"}
 RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
 NATIVE_CATALOG_BUILD = "native-catalog-build.json"
+NATIVE_ROOT_ENTRY_BUILD = "native-root-entry-build.json"
 NATIVE_SOURCE_ROLES = ["stable_effects", "stdlib", "actors", "jev"]
 CATALOG_TEST = "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs"
 REQUIRED_RUNTIME_EXECUTABLES = (
@@ -223,6 +224,7 @@ def snapshot_catalog_sources(args) -> None:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(args.effects.joinpath(*path.parts[1:]), destination)
     (root / "TidepoolCatalog.hs").write_text(catalog_probe(cohort["modules"]))
+    shutil.copyfile(args.root_entry_source, root / "actors/TidepoolPreparedDriver.hs")
     write_json(root / CATALOG_SOURCE_METADATA, {
         "schema": 1, "kind": "native-catalog-source-snapshot", **cohort,
         "roots": CATALOG_SOURCE_ROOTS, "probe": "TidepoolCatalog.hs", "targets": ["catalogSentinel"],
@@ -310,7 +312,13 @@ def verify_registered_gc_roots(tools: Path, pins: list[dict]) -> None:
 def native_catalog_selection(catalog: Path, original: Path) -> dict:
     value = json.loads(catalog.read_text())
     selection = value.get("source_selection")
-    if (value.get("schema") != 4 or not isinstance(selection, dict)
+    if value.get("schema") != 4:
+        raise ValueError("unsupported native catalog schema")
+    return native_source_selection(selection, original)
+
+
+def native_source_selection(selection: dict, original: Path) -> dict:
+    if (not isinstance(selection, dict)
             or set(selection) != {"snapshot_root", "roles", "source_files"}
             or selection["snapshot_root"] != str(original)
             or selection["roles"] != NATIVE_SOURCE_ROLES):
@@ -328,8 +336,8 @@ def native_catalog_selection(catalog: Path, original: Path) -> dict:
     return selection
 
 
-def native_catalog_products(root: Path) -> dict:
-    entries = inventory(root, [NATIVE_CATALOG_BUILD, "source-retention.json"])
+def native_catalog_products(root: Path, build_record: str = NATIVE_CATALOG_BUILD) -> dict:
+    entries = inventory(root, [build_record, "source-retention.json"])
     if any(item["kind"] == "symlink" for item in entries.values()):
         raise ValueError("native catalog products must be regular artifact bytes")
     return entries
@@ -380,6 +388,7 @@ def transfer_catalog_retention(root: Path, contract: dict, gc_roots: list[dict],
 class CatalogProducerOperation(Enum):
     BUILD = "build"
     INSPECT = "inspect"
+    ENTRY = "entry"
 
 
 def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) -> Path:
@@ -403,8 +412,10 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
         "PATH": str(tools / "bin"),
     }
     environment = execution_environment({"environment": declared_environment})
-    command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / "TidepoolCatalog.hs"),
-               "--target", "catalogSentinel", "--source-root", str(original), "--output-root", str(output)]
+    probe, target = (("actors/TidepoolPreparedDriver.hs", "__prepared")
+                     if operation is CatalogProducerOperation.ENTRY else ("TidepoolCatalog.hs", "catalogSentinel"))
+    command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / probe),
+               "--target", target, "--source-root", str(original), "--output-root", str(output)]
     invocation_root = output.with_name(output.name + ".invocation") if operation is CatalogProducerOperation.INSPECT else None
     primary = None
     secondary = None
@@ -485,6 +496,53 @@ def build_native_catalog(args) -> None:
         "retention_record_origin": str(args.retention_record_origin),
         "product_inventory": products, "product_inventory_sha256": digest_inventory(products),
     })
+
+
+def root_entry_selection(entry: Path, original: Path) -> dict:
+    manifest = json.loads(entry.read_text())
+    if (manifest.get("schema") != 1 or manifest.get("purpose") != "original_source"
+            or manifest.get("target") != "__prepared"
+            or manifest.get("source") != str(original / "actors/TidepoolPreparedDriver.hs")):
+        raise ValueError("root entry does not retain the declared original settled driver")
+    return native_source_selection(manifest.get("sources"), original)
+
+
+def build_native_root_entry(args) -> None:
+    original = invoke_retained_catalog_producer(args, CatalogProducerOperation.ENTRY)
+    output = args.output.absolute()
+    selection = root_entry_selection(output / "entry.json", original)
+    retained = json.loads(args.retention_record.read_text())
+    shutil.copy2(args.retention_record, output / "source-retention.json")
+    products = native_catalog_products(output, NATIVE_ROOT_ENTRY_BUILD)
+    write_json(output / NATIVE_ROOT_ENTRY_BUILD, {
+        "schema": 1, "kind": "native-root-entry-build",
+        "producer_target": "//tidepool/toolchain:tidepool-module-package",
+        "manifest_sha256": sha256(output / "entry.json"), "source_selection": selection,
+        "source_inventory_sha256": retained["inventory_sha256"],
+        "product_inventory": products, "product_inventory_sha256": digest_inventory(products),
+    })
+
+
+def verify_native_root_entry(root: Path, catalog: dict) -> dict:
+    directory = root / "share/exomonad/root-entry"
+    receipt = json.loads((directory / NATIVE_ROOT_ENTRY_BUILD).read_text())
+    selection = root_entry_selection(directory / "entry.json", Path(catalog["source_selection"]["snapshot_root"]))
+    products = native_catalog_products(directory, NATIVE_ROOT_ENTRY_BUILD)
+    expected = {"manifest_sha256": sha256(directory / "entry.json"), "source_selection": selection,
+                "source_inventory_sha256": catalog["source_inventory_sha256"],
+                "product_inventory_sha256": digest_inventory(products)}
+    if (not isinstance(receipt, dict)
+            or set(receipt) != {"schema", "kind", "producer_target", "manifest_sha256", "source_selection", "source_inventory_sha256", "product_inventory", "product_inventory_sha256"}
+            or receipt["schema"] != 1 or receipt["kind"] != "native-root-entry-build"
+            or receipt["producer_target"] != "//tidepool/toolchain:tidepool-module-package"
+            or receipt["product_inventory"] != products
+            or any(receipt.get(key) != value for key, value in expected.items())
+            or selection != catalog["source_selection"]):
+        raise ValueError("prepared root entry differs from the complete retained source and artifact selection")
+    contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    if contract.get("startup_mode") != "prepared" or contract.get("native_root_entry") != expected:
+        raise ValueError("prepared root entry differs from the owning build contract")
+    return expected
 
 
 def declared_haskell_sources(source: Path, bundle: Path, original_sources: Path | None = None) -> dict:
@@ -590,7 +648,9 @@ def native_environment(root: Path) -> dict:
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     if contract["stdlib_mode"] == "catalog-backed":
         selection = verify_native_catalog(root, tools)["source_selection"]
+        verify_native_root_entry(root, contract["native_catalog"])
         environment["TIDEPOOL_COMPILER_MODULES"] = str(root / "share/exomonad/catalog/catalog.json")
+        environment["TIDEPOOL_PREPARED_ROOT_ENTRY"] = str(root / "share/exomonad/root-entry")
         environment["TIDEPOOL_PRELUDE_DIR"] = str(Path(selection["snapshot_root"]) / "lib")
     elif contract["stdlib_mode"] != "source-backed":
         raise ValueError("unsupported native stdlib mode")
@@ -680,20 +740,28 @@ def assemble(args) -> None:
     source_inputs = {path.relative_to(args.build_sources).as_posix(): sha256(path)
                      for path in sorted(args.build_sources.rglob("*")) if path.is_file()}
     contract = {
-        "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed",
+        "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed", "startup_mode": "unprepared",
         "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
         "artifacts": {relative: {"target": target, "sha256": sha256(root / relative)}
                       for relative, target in ARTIFACT_TARGETS.items()},
     }
     if getattr(args, "catalog", None) is not None:
+        if getattr(args, "root_entry", None) is None:
+            raise ValueError("qualified catalog-backed assembly requires a complete prepared root entry")
         shutil.copytree(args.catalog, shared / "catalog", symlinks=False)
+        shutil.copytree(args.root_entry, shared / "root-entry", symlinks=False)
         receipt = json.loads((shared / "catalog" / NATIVE_CATALOG_BUILD).read_text())
         contract["stdlib_mode"] = "catalog-backed"
+        contract["startup_mode"] = "prepared"
         contract["native_catalog"] = {key: receipt[key] for key in
             ("catalog_sha256", "source_selection", "source_inventory_sha256", "product_inventory_sha256")}
+        entry_receipt = json.loads((shared / "root-entry" / NATIVE_ROOT_ENTRY_BUILD).read_text())
+        contract["native_root_entry"] = {key: entry_receipt[key] for key in
+            ("manifest_sha256", "source_selection", "source_inventory_sha256", "product_inventory_sha256")}
     write_json(shared / "native-build-contract.json", contract)
     if contract["stdlib_mode"] == "catalog-backed":
         verify_native_catalog(root, tools)
+        verify_native_root_entry(root, contract["native_catalog"])
 
 def freeze(args) -> Path:
     tools = native_runtime_tools(args.bundle / "share/exomonad/runtime-tools")
@@ -720,6 +788,7 @@ def freeze(args) -> Path:
     original_sources = None
     if contract["stdlib_mode"] == "catalog-backed":
         selection = verify_native_catalog(args.bundle, tools)["source_selection"]
+        verify_native_root_entry(args.bundle, contract["native_catalog"])
         original_sources = Path(selection["snapshot_root"])
     haskell_sources = declared_haskell_sources(source, args.bundle, original_sources)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
@@ -817,7 +886,7 @@ def verify(path: Path) -> dict:
         raise ValueError("qualification cannot replace its owned programs or mandatory test cohorts")
     verify_frozen_inventory(root, descriptor)
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
-    if any(descriptor.get(field) != contract.get(field) for field in (*BUILD_CONTRACT_FIELDS, "native_catalog")):
+    if any(descriptor.get(field) != contract.get(field) for field in (*BUILD_CONTRACT_FIELDS, "native_catalog", "native_root_entry")):
         raise ValueError("qualification differs from the owning native build contract")
     if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
         raise ValueError("native build source manifest is missing or has an invalid digest")
@@ -834,6 +903,7 @@ def verify(path: Path) -> dict:
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
     if descriptor["stdlib_mode"] == "catalog-backed":
         selection = verify_native_catalog(root, tools)["source_selection"]
+        verify_native_root_entry(root, contract["native_catalog"])
         expected_roots.add(str(Path(selection["snapshot_root"])))
     for item in descriptor["elf_runtime"].values():
         if item["linkage"] == "dynamic":
@@ -988,7 +1058,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     snapshot = commands.add_parser("snapshot-sources")
-    for key in ("sources", "effects", "jev-sources", "cohort", "output"):
+    for key in ("sources", "effects", "jev-sources", "cohort", "root-entry-source", "output"):
         snapshot.add_argument("--" + key, required=True, type=Path)
     retained = commands.add_parser("retain-sources")
     for key in ("snapshot", "output", "runtime-tools"):
@@ -997,7 +1067,7 @@ def main(argv=None) -> int:
     for key in ("record", "snapshot", "runtime-tools"):
         selected.add_argument("--" + key, required=True, type=Path)
     producer_inputs = ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "deployment", "ghc-libdir", "libraries", "output")
-    for name in ("build-catalog", "inspect-catalog"):
+    for name in ("build-catalog", "inspect-catalog", "build-root-entry"):
         catalog = commands.add_parser(name)
         for key in producer_inputs:
             catalog.add_argument("--" + key, required=True, type=Path)
@@ -1009,6 +1079,7 @@ def main(argv=None) -> int:
     gate.add_argument("--output", type=Path, required=True)
     stage = commands.add_parser("assemble")
     stage.add_argument("--catalog", type=Path)
+    stage.add_argument("--root-entry", type=Path)
     for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
@@ -1047,6 +1118,8 @@ def main(argv=None) -> int:
             print(verify_retained_catalog_sources(args.record, args.snapshot, nix_path(args.runtime_tools)))
         elif args.command == "build-catalog":
             build_native_catalog(args)
+        elif args.command == "build-root-entry":
+            build_native_root_entry(args)
         elif args.command == "inspect-catalog":
             print(inspect_native_catalog(args))
         elif args.command == "catalog-gate":

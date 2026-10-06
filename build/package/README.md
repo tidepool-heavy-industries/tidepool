@@ -1,13 +1,13 @@
-`//build/package:native_runtime_bundle` is the source-backed release target. It
+`//build/package:native_runtime_bundle` is the prepared release target. It
 carries Buck's host, libtest, extractor frontend and worker, declared shared
-libraries, Haskell sources, actors and browser assets. Retained catalog
-configuration does not change its mode.
+libraries, browser assets, the authenticated native catalog and a complete
+original root entry. It requires the retained source and compiler selection.
 
-`//build/package:native_catalog_runtime_bundle` explicitly selects catalog-backed
-assembly through `//build/package:native_catalog`. It requires the complete
-retained source and compiler selection; invalid inputs refuse assembly. This
-new bundle still requires native catalog build, freeze and consumer qualification
-before delivery. The old Nix matched bundle and its smoke targets are removed.
+`//build/package:native_catalog_runtime_bundle` selects the same prepared
+assembly. `//build/package:source_backed_developer_bundle` is an unprepared
+developer path and does not establish prepared startup acceptance. Build, freeze
+and consumer qualification of one exact prepared bundle remain required before
+delivery.
 
 Both native bundles require executable `bash`, `python3`, `dirname`, `git`,
 `bwrap`, `tmux`, `systemd-run`, `systemctl`, `nix` and `nix-store` in their declared
@@ -23,6 +23,12 @@ owners. Test-only source roots, test package dependencies, workspace-specific
 Orchestrate modules are excluded. `Tidepool.Effects` is a stable authored
 facade and belongs to the generated support selection. Production catalog admission still checks the actual compiler's
 complete closure; direct import selection alone is not passing evidence.
+
+The snapshot also includes `actors/TidepoolPreparedDriver.hs`, produced from
+the runtime's existing settled-entry renderer. Its fixed entry and effect row
+name `Tidepool.Actors.Internal.ExomonadDriver.rootDriver` and `RootEffects`.
+That source joins the same complete source inventory and Nix retention as the
+catalog; no build scratch path becomes a runtime source witness.
 
 `NATIVE_CATALOG_COHORT` in the generated `bridge/haskell/components.bzl` owns
 the direct import roster. The snapshot's `catalog-sources.json` preserves that
@@ -72,6 +78,22 @@ retention after production and binds the complete product inventory, catalog
 SHA-256 and schema-4 source selection. The roles are ordered as stable effects,
 stdlib, actors and Jev, under one original root. Producer/worker identities,
 source evidence and product metadata are copied without rewriting.
+
+`//build/package:native_root_entry` uses that same retained source and declared
+compiler boundary. Its separate production entry container preserves the full
+original metadata, target program, yield sites, certified groups, package and
+import owners, canonical interfaces and native products. The runtime loader
+validates this complete original container against the configured deployment
+and source selection through the existing original-output owner. Portable
+prepared fixtures carry no production authority. Loading the root entry does
+not execute source or require a live compiler.
+
+The prepared bundle's qualification contract retains the root entry inventory
+and selects `TIDEPOOL_PREPARED_ROOT_ENTRY`; root and child machines install fresh
+mutable state from the retained decoded entry and native images. General
+workspace entry export still requires a stable generated source snapshot from
+the workspace source owner; the native producer does not accept transient
+workspace source directories.
 
 The catalog-backed bundle retains those exact products and selection, with no
 unused stdlib or actor source copies. Freezing

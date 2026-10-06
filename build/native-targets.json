@@ -466,7 +466,13 @@
       }
     },
     "tidepool-runtime": {
-      "binaries": {},
+      "binaries": {
+        "tidepool-entry-source": {
+          "build": "//tidepool/runtime:tidepool-entry-source",
+          "test": "//tidepool/runtime:tidepool-entry-source_unit_tests",
+          "test_build": "//tidepool/runtime:tidepool-entry-source_unit_tests_binary"
+        }
+      },
       "directory": "tidepool/runtime",
       "integration": {
         "session": {

@@ -9,6 +9,17 @@ def _catalog_sources_impl(ctx):
         "modules": ctx.attrs.modules,
     })
     output = ctx.actions.declare_output("catalog-sources", dir = True)
+    entry = ctx.actions.declare_output("TidepoolPreparedDriver.hs")
+    ctx.actions.run(
+        cmd_args([
+            ctx.attrs.entry_source[RunInfo],
+            "--module", "TidepoolPreparedDriver",
+            "--entry", "Tidepool.Actors.Internal.ExomonadDriver.rootDriver",
+            "--effects", "Tidepool.Actors.Internal.ExomonadDriver.RootEffects",
+            "--output", entry.as_output(),
+        ]),
+        category = "native_root_entry_source",
+    )
     ctx.actions.run(
         cmd_args([
             ctx.attrs.python[RunInfo], ctx.attrs.qualification,
@@ -17,6 +28,7 @@ def _catalog_sources_impl(ctx):
             "--effects", ctx.attrs.effects,
             "--jev-sources", ctx.attrs.jev_sources,
             "--cohort", cohort,
+            "--root-entry-source", entry,
             "--output", output.as_output(),
         ]),
         category = "native_catalog_sources",
@@ -31,6 +43,7 @@ _catalog_sources = rule(
         "sources": attrs.source(),
         "effects": attrs.source(),
         "jev_sources": attrs.source(),
+        "entry_source": attrs.exec_dep(default = "//tidepool/runtime:tidepool-entry-source", providers = [RunInfo]),
         "qualification": attrs.source(default = "//build/package:qualification_script"),
         "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
     },
@@ -40,13 +53,13 @@ def native_catalog_sources(name, cohort, **kwargs):
     _catalog_sources(name = name, components = cohort["components"], modules = cohort["modules"], **kwargs)
 
 
-def _native_catalog_impl(ctx):
+def _native_products_impl(ctx, operation, output_name, category):
     if not ctx.attrs.source_root or not ctx.attrs.retention_record_origin:
-        fail("native catalog requires an explicitly retained source root and retention record; run qualification.py retain-sources and configure their exact selection")
-    output = ctx.actions.declare_output("native-catalog", dir = True)
+        fail("native products require the original retained source selection")
+    output = ctx.actions.declare_output(output_name, dir = True)
     ctx.actions.run(
         cmd_args([
-            ctx.attrs.python[RunInfo], ctx.attrs.qualification, "build-catalog",
+            ctx.attrs.python[RunInfo], ctx.attrs.qualification, operation,
             "--snapshot", ctx.attrs.snapshot,
             "--source-root", ctx.attrs.source_root,
             "--declared-source-root", ctx.attrs.declared_source_root,
@@ -61,31 +74,41 @@ def _native_catalog_impl(ctx):
             "--libraries", ctx.attrs.libraries,
             "--output", output.as_output(),
         ], hidden = [ctx.attrs.runtime_tools, ctx.attrs.declared_ghc_libdir]),
-        category = "native_catalog",
+        category = category,
     )
     return [DefaultInfo(default_output = output)]
 
-native_catalog = rule(
-    impl = _native_catalog_impl,
-    attrs = {
-        "snapshot": attrs.source(),
-        "source_root": attrs.string(),
-        "declared_source_root": attrs.source(),
-        "retention_record": attrs.source(),
-        "retention_record_origin": attrs.string(),
-        "runtime_tools": attrs.source(),
-        "runtime_tools_root": attrs.string(),
-        "producer": attrs.exec_dep(providers = [RunInfo]),
-        "frontend": attrs.exec_dep(providers = [RunInfo]),
-        "worker": attrs.exec_dep(providers = [RunInfo]),
-        "deployment": attrs.source(),
-        "ghc_libdir": attrs.string(),
-        "declared_ghc_libdir": attrs.source(),
-        "libraries": attrs.source(),
-        "qualification": attrs.source(default = "//build/package:qualification_script"),
-        "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
-    },
-)
+def _native_catalog_impl(ctx):
+    return _native_products_impl(ctx, "build-catalog", "native-catalog", "native_catalog")
+
+def _native_root_entry_impl(ctx):
+    return _native_products_impl(ctx, "build-root-entry", "prepared-root-entry", "native_root_entry")
+
+_native_products_attrs = {
+    "snapshot": attrs.source(),
+    "source_root": attrs.string(),
+    "declared_source_root": attrs.source(),
+    "retention_record": attrs.source(),
+    "retention_record_origin": attrs.string(),
+    "runtime_tools": attrs.source(),
+    "runtime_tools_root": attrs.string(),
+    "producer": attrs.exec_dep(providers = [RunInfo]),
+    "frontend": attrs.exec_dep(providers = [RunInfo]),
+    "worker": attrs.exec_dep(providers = [RunInfo]),
+    "deployment": attrs.source(),
+    "ghc_libdir": attrs.string(),
+    "declared_ghc_libdir": attrs.source(),
+    "libraries": attrs.source(),
+    "qualification": attrs.source(default = "//build/package:qualification_script"),
+    "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
+}
+
+native_catalog = rule(impl = _native_catalog_impl, attrs = _native_products_attrs)
+native_root_entry = rule(impl = _native_root_entry_impl, attrs = _native_products_attrs)
+
+def native_prepared_products(**kwargs):
+    native_catalog(name = "native_catalog", **kwargs)
+    native_root_entry(name = "native_root_entry", **kwargs)
 
 
 def native_runtime_bundle(name, catalog_backed):
@@ -107,14 +130,14 @@ def native_runtime_bundle(name, catalog_backed):
             "//build/rust:native_qualification_sources",
             "//build/rust:workspace_gitlink",
             "//build/rust:workspace_git_bundle",
-        ] + ([":native_catalog"] if catalog_backed else []),
+        ] + ([":native_catalog", ":native_root_entry"] if catalog_backed else []),
         out = ".",
         env = {
             "PACKAGE_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
             "PACKAGE_RUNTIME_TOOLS": read_root_config("nix", "exomonad_runtime_tools", ""),
             "PACKAGE_NATIVE_PROFILE": selected_native_profile(),
         },
-        bash = "set -euo pipefail\n" + ('CATALOG_ARGUMENTS=(--catalog "$PWD/$(location :native_catalog)")\n' if catalog_backed else 'CATALOG_ARGUMENTS=()\n') + """
+        bash = "set -euo pipefail\n" + ('CATALOG_ARGUMENTS=(--catalog "$PWD/$(location :native_catalog)" --root-entry "$PWD/$(location :native_root_entry)")\n' if catalog_backed else 'CATALOG_ARGUMENTS=()\n') + """
     "$(exe toolchains//:python)" "$PWD/$(location :qualification_script)" assemble \
       --output "$PWD/$OUT" \
       --host "$PWD/$(location //bridge/facade:exomonad)" \
