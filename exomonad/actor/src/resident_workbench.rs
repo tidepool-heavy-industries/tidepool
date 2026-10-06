@@ -20967,7 +20967,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 &runner,
                 &context,
                 &source,
-                "Contracts.actorDuplicateBegin",
+                "Contracts.actorTwoBegins",
             )
             .await;
             let ForkGroupBoundary::Begin {
@@ -20988,7 +20988,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                         .into_iter()
                         .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
                         .collect(),
-                    None,
+                    Some(1),
                 )
                 .expect("first external group admission commits");
             let next = runner
@@ -21024,9 +21024,18 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                         .into_iter()
                         .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
                         .collect(),
-                    None,
+                    Some(1),
                 )
-                .expect_err("duplicate path refuses without replacing its original admission");
+                .expect_err("the earlier admission exhausts the coordinator descendant budget");
+            assert!(matches!(
+                refusal,
+                crate::ForkGroupError::DescendantBudgetExceeded {
+                    coordinator,
+                    requested: 1,
+                    active: 1,
+                    maximum: 1,
+                } if coordinator == context.actor
+            ));
             let retry = ForkContinuation::actor(continuation.hole.clone());
             let id = continuation.hole.cont_id().to_owned();
             let failure = runner

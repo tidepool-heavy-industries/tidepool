@@ -43,10 +43,10 @@ forksAbort = do
     Right () -> pure ()
     _ -> error "wrong fallible abort reply"
 
-actorDuplicateBegin :: Eff Effects ()
-actorDuplicateBegin = do
+actorTwoBegins :: Eff Effects ()
+actorTwoBegins = do
   _ <- send (Core.ActorBeginForkGroupWith False "held" ["branch"])
-  _ <- send (Core.ActorBeginForkGroupWith False "held" ["branch"])
+  _ <- send (Core.ActorBeginForkGroupWith False "next" ["branch"])
   pure ()
 
 forksRefusal :: Eff Effects ()
