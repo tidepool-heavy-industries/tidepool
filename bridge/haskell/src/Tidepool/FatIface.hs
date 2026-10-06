@@ -9,6 +9,12 @@
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
+  , FatOriginalVersion, fatOriginalOwner, fatOriginalInterfaceHash
+  , FatIfaceComponent, fatComponentVersion, fatComponentOrdinals
+  , fatComponentBindings, fatComponentAllBinders, fatComponentOrdinal
+  , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
+  , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
+  , FatIfaceComponentLookup(..), lookupFatIfaceComponents
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
@@ -24,7 +30,8 @@ import GHC.Types.Var (Id, isId)
 import GHC.Types.Var (varName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
-import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls)
+import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls, mi_iface_hash, mi_final_exts)
+import GHC.Utils.Fingerprint (Fingerprint)
 import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
 
 import GHC.Iface.Load (findAndReadIface, readIface)
@@ -47,6 +54,7 @@ import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
+import qualified Data.IntSet as IntSet
 import qualified Data.Set as Set
 import System.IO (hPutStrLn, stderr)
 import System.Environment (lookupEnv)
@@ -66,9 +74,53 @@ data FatIfaceLookup
 -- become indistinguishable from a successfully loaded interface with no
 -- matching binding.
 data FatIfaceModule
-  = FatIfaceBindings (IntMap.IntMap CoreBind) (Map.Map Name Int)
+  = FatIfaceBindings
+      !FatOriginalVersion
+      !(IntMap.IntMap CoreBind)
+      !(Map.Map Name Int)
+      !(IntMap.IntMap [Int])
+      !(IntMap.IntMap Int)
+      !(IntMap.IntMap FatIfaceComponent)
   | FatIfaceNoExtraDeclarations
   | FatIfaceLoadFailureOutcome String
+
+-- | Exact identity of one decoded original interface. The fingerprint is
+-- taken from the actual ModIface retained by the loader.
+data FatOriginalVersion = FatOriginalVersion !Module !Fingerprint
+  deriving (Eq, Ord, Show)
+
+fatOriginalOwner :: FatOriginalVersion -> Module
+fatOriginalOwner (FatOriginalVersion owner _) = owner
+
+fatOriginalInterfaceHash :: FatOriginalVersion -> Fingerprint
+fatOriginalInterfaceHash (FatOriginalVersion _ fingerprint) = fingerprint
+
+-- | One canonical undirected connected component of private references in an
+-- original fat interface. Bindings retain their authoritative original group
+-- ordinals; allBinders is the complete original binder census for scope checks.
+data FatIfaceComponent = FatIfaceComponent
+  { fatComponentVersion :: !FatOriginalVersion
+  , fatComponentOrdinals :: ![Int]
+  , fatComponentBindings :: !(IntMap.IntMap CoreBind)
+  , fatComponentAllBinders :: !(Set.Set Name)
+  }
+
+fatComponentOrdinal :: FatIfaceComponent -> Int
+fatComponentOrdinal component = case fatComponentOrdinals component of
+  ordinal : _ -> ordinal
+  [] -> error "FatIfaceComponent invariant: empty ordinal roster"
+
+data FatIfaceSelection = FatIfaceSelection
+  { fatSelectionVersion :: !FatOriginalVersion
+  , fatSelectionComponents :: ![FatIfaceComponent]
+  , fatSelectionDemandedGroupCount :: !Int
+  , fatSelectionPreparedGroupCount :: !Int
+  }
+
+data FatIfaceComponentLookup
+  = FatIfaceComponents FatIfaceSelection
+  | FatIfaceComponentsMissing FatIfaceMissing
+  | FatIfaceComponentsLoadFailure Module String
 
 data ExactInterfaceFailure
   = ExactInterfaceFinderFailure String
@@ -88,7 +140,7 @@ lookupFatIfaceBodies :: HscEnv -> FatIfaceCache -> Module -> [Name] -> IO FatIfa
 lookupFatIfaceBodies hscEnv cache owner requested = do
   outcome <- lookupModuleOutcome hscEnv cache owner
   pure $ case outcome of
-    FatIfaceBindings groups names -> case traverse (`Map.lookup` names) requested of
+    FatIfaceBindings _ groups names dependencies _ _ -> case traverse (`Map.lookup` names) requested of
       Nothing -> FatIfaceMissing BindingAbsent
       Just roots ->
         let selected = close Set.empty roots
@@ -96,19 +148,43 @@ lookupFatIfaceBodies hscEnv cache owner requested = do
             close seen (ordinal : pending)
               | ordinal `Set.member` seen = close seen pending
               | otherwise = close (Set.insert ordinal seen)
-                  (privateDependencies (groups IntMap.! ordinal) ++ pending)
-            -- Every pending ordinal comes from this immutable index, which
-            -- is constructed alongside the complete original group table.
-            privateDependencies binding =
-              [ dependency
-              | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-              , identifier <- nonDetEltsUniqSet (exprSomeFreeVars privateId rhs)
-              , Just dependency <- [Map.lookup (varName identifier) names] ]
-            privateId identifier = isId identifier && not (isExternalName (varName identifier))
+                  (IntMap.findWithDefault [] ordinal dependencies ++ pending)
         in FatIfaceFound [binding | (ordinal, binding) <- IntMap.toAscList groups
              , ordinal `Set.member` selected]
     FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
     FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
+
+-- | Resolve requested roots and retain each root's full canonical private
+-- dependency component. The directed demand closure count preserves the
+-- previous lookup's preparation metric; it does not estimate bytes or work.
+lookupFatIfaceComponents
+  :: HscEnv -> FatIfaceCache -> Module -> [Name] -> IO FatIfaceComponentLookup
+lookupFatIfaceComponents hscEnv cache owner requested = do
+  outcome <- lookupModuleOutcome hscEnv cache owner
+  pure $ case outcome of
+    FatIfaceBindings version _groups names dependencies componentOf components ->
+      case traverse (`Map.lookup` names) requested of
+        Nothing -> FatIfaceComponentsMissing BindingAbsent
+        Just roots ->
+          let demanded = close Set.empty roots
+              close seen [] = seen
+              close seen (ordinal : pending)
+                | ordinal `Set.member` seen = close seen pending
+                | otherwise = close (Set.insert ordinal seen)
+                    (IntMap.findWithDefault [] ordinal dependencies ++ pending)
+              selectedComponentOrdinals = Set.fromList
+                [ componentOrdinal
+                | ordinal <- roots
+                , Just componentOrdinal <- [IntMap.lookup ordinal componentOf] ]
+              selectedComponents =
+                [ component
+                | componentOrdinal <- Set.toAscList selectedComponentOrdinals
+                , Just component <- [IntMap.lookup componentOrdinal components] ]
+              preparedCount = sum (map (length . fatComponentOrdinals) selectedComponents)
+          in FatIfaceComponents (FatIfaceSelection version selectedComponents
+               (Set.size demanded) preparedCount)
+    FatIfaceNoExtraDeclarations -> FatIfaceComponentsMissing NoExtraDeclarations
+    FatIfaceLoadFailureOutcome reason -> FatIfaceComponentsLoadFailure owner reason
 
 -- | Each stable resolution context owns its decoded Core cache. Sharing
 -- completion is an internal loading mechanism; callers cannot supply bodies.
@@ -207,6 +283,8 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Nothing -> pure ()
           return FatIfaceNoExtraDeclarations
         Just ifaceBinds -> do
+          let version = FatOriginalVersion modl (mi_iface_hash (mi_final_exts iface))
+          version `seq` pure ()
           coreBinds <- initIfaceCheck doc hscEnv $ do
             typeEnvRef <- liftIO $ newIORef emptyTypeEnv
             initIfaceLcl modl doc NotBoot $
@@ -215,7 +293,9 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Just _ -> hPutStrLn stderr $
               "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
             Nothing -> pure ()
-          return (FatIfaceBindings (IntMap.fromList (zip [0..] coreBinds)) (bindingsToMap coreBinds))
+          let (groups, names, dependencies, componentOf, components) =
+                indexOriginalBindings version coreBinds
+          return (FatIfaceBindings version groups names dependencies componentOf components)
 
 renderExactInterfaceFailure :: ExactInterfaceFailure -> String
 renderExactInterfaceFailure failure = case failure of
@@ -228,6 +308,62 @@ bindingsToMap = foldl' addBind Map.empty . zip [0..]
   where
     addBind m (ordinal, NonRec binder _) = Map.insert (varName binder) ordinal m
     addBind m (ordinal, Rec pairs) = foldl' (\m' (binder, _) -> Map.insert (varName binder) ordinal m') m pairs
+
+-- | Build all immutable ownership and graph indexes once, while the original
+-- decoded binding table is first admitted to the cache.
+indexOriginalBindings
+  :: FatOriginalVersion -> [CoreBind]
+  -> ( IntMap.IntMap CoreBind
+     , Map.Map Name Int
+     , IntMap.IntMap [Int]
+     , IntMap.IntMap Int
+     , IntMap.IntMap FatIfaceComponent
+     )
+indexOriginalBindings version coreBinds =
+  (groups, names, dependencies, componentOf, components)
+  where
+    groups = IntMap.fromList (zip [0..] coreBinds)
+    names = bindingsToMap coreBinds
+    ordinals = Set.fromList (IntMap.keys groups)
+    allBinders = Map.keysSet names
+    dependencySets = IntMap.mapWithKey privateDependencies groups
+    privateDependencies _ binding = Set.fromList
+      [ dependency
+      | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars privateId rhs)
+      , Just dependency <- [Map.lookup (varName identifier) names] ]
+    privateId identifier = isId identifier && not (isExternalName (varName identifier))
+    dependencies = IntMap.map Set.toAscList dependencySets
+    adjacency = IntMap.fromList [(ordinal, Set.empty) | ordinal <- Set.toAscList ordinals]
+    undirected = IntMap.foldlWithKey' addUndirected adjacency dependencySets
+    addUndirected graph ordinal targets = Set.foldl' (addEdge ordinal) graph targets
+    addEdge left graph right =
+      IntMap.adjust (Set.insert right) left (IntMap.adjust (Set.insert left) right graph)
+    rosters = connectedComponents undirected
+    componentOf = IntMap.fromList
+      [ (ordinal, componentOrdinal)
+      | roster <- rosters
+      , let componentOrdinal = head roster
+      , ordinal <- roster ]
+    components = IntMap.fromList
+      [ (head roster, FatIfaceComponent version roster
+          (IntMap.restrictKeys groups (IntSet.fromList roster)) allBinders)
+      | roster <- rosters ]
+
+connectedComponents :: IntMap.IntMap (Set.Set Int) -> [[Int]]
+connectedComponents adjacency = visitAll (Set.fromList (IntMap.keys adjacency)) []
+  where
+    visitAll remaining found = case Set.minView remaining of
+      Nothing -> reverse found
+      Just (seed, _) ->
+        let component = flood Set.empty [seed]
+            remaining' = remaining `Set.difference` component
+        in visitAll remaining' (Set.toAscList component : found)
+    flood seen [] = seen
+    flood seen (ordinal : pending)
+      | ordinal `Set.member` seen = flood seen pending
+      | otherwise = flood (Set.insert ordinal seen)
+          (Set.toAscList (IntMap.findWithDefault Set.empty ordinal adjacency) ++ pending)
 
 -- GHC exposes interface-read failures as a closed diagnostic type without an
 -- Outputable instance. Keep the reason typed at the lookup boundary while
