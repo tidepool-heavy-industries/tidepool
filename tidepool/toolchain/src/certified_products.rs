@@ -1659,6 +1659,17 @@ pub(crate) fn original_interface_requirements_with_operation(
 ) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
     match product.original_native() {
         Some(witness) if witness.matches_original(product) => {
+            // A retained proof avoids decoding, but admission still reserves
+            // its copied map nodes and owned text before cloning.
+            operation.reserve::<((String, String), [u8; 32])>(
+                witness.interface_requirements.len().checked_mul(4).ok_or(
+                    tidepool_repr::execution_schema::ParseError::LimitExceeded("work"),
+                )?,
+            )?;
+            for (unit, module) in witness.interface_requirements.keys() {
+                operation.charge(unit.len())?;
+                operation.charge(module.len())?;
+            }
             Ok(witness.interface_requirements.clone())
         }
         Some(_) => Err(CertificationError::Mismatch(
@@ -2677,6 +2688,7 @@ pub(crate) fn original_native_requirements_with_operation(
 ) -> CertResult<CertifiedNativeRequirements> {
     match product.original_native() {
         Some(witness) if witness.matches_original(product) => {
+            charge_native_requirements(operation, &witness.native_requirements)?;
             Ok(witness.native_requirements.clone())
         }
         Some(_) => Err(CertificationError::Mismatch(
@@ -2700,6 +2712,41 @@ pub(crate) struct CertifiedNativeRequirements {
         crate::artifact_inventory::ArtifactDependency,
     )>,
     pub retained_packages: Vec<crate::artifact_inventory::RetainedPackageDependency>,
+}
+
+fn charge_native_requirements(
+    operation: &InventoryOperation,
+    requirements: &CertifiedNativeRequirements,
+) -> CertResult<()> {
+    use crate::artifact_inventory::ArtifactDependency;
+    operation.reserve::<(
+        crate::declaration_join::ExactModuleIdentity,
+        ArtifactDependency,
+    )>(requirements.artifact_edges.len())?;
+    for (owner, dependency) in &requirements.artifact_edges {
+        operation.charge(owner.unit.len())?;
+        operation.charge(owner.module.len())?;
+        if let ArtifactDependency::NativeBinding {
+            namespace,
+            occurrence,
+            record_parent,
+            ..
+        } = dependency
+        {
+            operation.charge(namespace.len())?;
+            operation.charge(occurrence.len())?;
+            if let Some(parent) = record_parent {
+                operation.charge(parent.len())?;
+            }
+        }
+    }
+    operation.reserve::<crate::artifact_inventory::RetainedPackageDependency>(
+        requirements.retained_packages.len(),
+    )?;
+    for package in &requirements.retained_packages {
+        charge_symbol(operation, &package.identity)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn certified_native_requirements(

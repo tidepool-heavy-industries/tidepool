@@ -3565,14 +3565,14 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
-        if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
-            validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
-        }
         inventory_operation
             .charge(evidence_bytes.len().checked_mul(64).ok_or_else(|| {
                 CompileError::ExtractFailed("source evidence accounting overflow".into())
             })?)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
+            validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
+        }
         let exact_source = exact_request
             .as_ref()
             .map(|request| {
