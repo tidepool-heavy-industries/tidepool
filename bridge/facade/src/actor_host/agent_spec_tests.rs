@@ -51,7 +51,7 @@ probeBody :: Probe -> Eff effects Text
 probeBody _ = pure "{answer}"
 
 tools :: SpecTools (AsServerT (Eff effects))
-tools = SpecTools {{ probe = tool "{description}" probeBody }}
+tools = SpecTools {{ probe = presentWith id $ tool "{description}" probeBody }}
 
 agentSpec :: AgentSpec SpecTools effects
 agentSpec = defaultSpec {{ specTools = tools }}
