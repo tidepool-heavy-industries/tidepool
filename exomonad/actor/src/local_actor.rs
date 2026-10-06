@@ -5951,7 +5951,7 @@ mod tests {
             actor.drain(),
             actor.shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
-                summary: "owner stopped".into()
+                summary: "owner stopped".into(),
                 diagnostic: None,
             }),
         );
