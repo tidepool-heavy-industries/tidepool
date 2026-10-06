@@ -37,7 +37,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod, ms_mod_name, ms_location, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
+import GHC (runGhc, getSession, setSession, getSessionDynFlags, setSessionDynFlags, SafeHaskellMode(Sf_None), ms_mod, ms_mod_name, ms_location, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
@@ -5606,6 +5606,8 @@ packageFinderHistoryIsolation :: IO ()
 packageFinderHistoryIsolation = withScratch $ \work -> do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags flags
     initial <- getSession
     liftIO $ do
       packages <- newPackageFinderFacts initial
