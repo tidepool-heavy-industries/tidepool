@@ -2310,6 +2310,138 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
 }
 
 #[test]
+fn following_cells_preserve_quoted_template_original_without_lexical_promotion() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let support = root.path().join("QuotedTemplateSupport.hs");
+    std::fs::write(
+        &support,
+        include_str!("fixtures/quoted-template-support.hs"),
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1017),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "before_quoted_template_value",
+        "let smokeValue = (6 * 7 :: Int)",
+        0,
+        &ScalePublication::Ephemeral,
+    );
+    let imports = SourceImports::from_specs(["qualified QuotedTemplateSupport as Q"]);
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "quoted_template_value",
+        "let retainedTask = Q.taskValue 41",
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+    )
+    .unwrap();
+    let context = resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .expect("published binding retains its exact original support");
+    eprintln!(
+        "quoted-template retained inventory: {:?}; lexical: {:?}",
+        context.artifact_view().descriptors(),
+        context.lexical_graph(),
+    );
+    let owner = context
+        .recovery_products()
+        .into_iter()
+        .find(|product| product.owner().module == "QuotedTemplateSupport")
+        .expect("OPAQUE helper must retain the defining native original")
+        .owner()
+        .clone();
+    eprintln!("quoted-template retained helper original: {owner:?}");
+    assert!(context
+        .lexical_graph()
+        .iter()
+        .all(|node| node.owner.module != "QuotedTemplateSupport"));
+    for (label, expression, expected) in [
+        ("unrelated_cell_after_quoted_template", "smokeValue + 1", 43),
+        ("retained_quoted_template_value", "retainedTask", 42),
+    ] {
+        let view = resident.compile_view_in(public).unwrap();
+        eprintln!(
+            "quoted-template {label} current template: {}",
+            resident_cell_check_template(
+                effects.preamble(),
+                effects.row(),
+                &view.turn_imports(&imports),
+            ),
+        );
+        try_execute_cell_with_template_imports_expectation(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            label,
+            &guarded_integer_capture_source(expression, expected),
+            0,
+            &ScalePublication::Ephemeral,
+            AuthorityChecks::Configured,
+            &imports,
+            Some(expected),
+        )
+        .unwrap();
+    }
+    std::fs::remove_file(&support).unwrap();
+    try_execute_cell_with_template_imports_expectation(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "source_absent_quoted_template_original",
+        &guarded_integer_capture_source("Q.taskValue 41", 42),
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+        Some(42),
+    )
+    .unwrap();
+    let context = resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .unwrap();
+    assert!(context
+        .lexical_graph()
+        .iter()
+        .all(|node| node.owner.module != "QuotedTemplateSupport"));
+    assert!(context
+        .recovery_products()
+        .iter()
+        .any(|product| product.owner() == &owner));
+}
+
+#[test]
 fn late_record_selector_replaces_earlier_cell_value() {
     let names = simple_cell_vertical(
         "record_selector",
