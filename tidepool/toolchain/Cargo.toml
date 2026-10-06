@@ -28,6 +28,7 @@ libc.workspace = true
 petgraph = "0.8.3"
 
 [dev-dependencies]
+proptest.workspace = true
 tidepool-test-data.workspace = true
 serial_test.workspace = true
 

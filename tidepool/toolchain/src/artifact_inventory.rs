@@ -14,6 +14,9 @@ use crate::declaration_join::{ExactInterfaceOwner, ExactModuleIdentity};
 use crate::recovery_artifacts::{CertifiedJoinedInterface, CertifiedRecoveryProduct};
 use crate::CompileError;
 
+#[cfg(test)]
+mod properties;
+
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
