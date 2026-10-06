@@ -12515,7 +12515,7 @@ pub(crate) mod request_tests {
             retained.compiler_close_observations().as_slice(),
             [crate::termination::CompilerWorkClose::Pending]
         ));
-        let (entered, observed) = std::sync::mpsc::channel();
+        let (entered, observed) = tokio::sync::oneshot::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let (settled, completed) = std::sync::mpsc::channel();
         let waiter = tokio::spawn(async move {
@@ -12536,8 +12536,9 @@ pub(crate) mod request_tests {
             })
             .await
         });
-        observed
-            .recv_timeout(std::time::Duration::from_secs(5))
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+            .await
+            .unwrap()
             .unwrap();
         retained.retain_cleanup(crate::ResidentCleanupOutcome {
             actor: crate::ActorRef::first(crate::ActorId(1)),
