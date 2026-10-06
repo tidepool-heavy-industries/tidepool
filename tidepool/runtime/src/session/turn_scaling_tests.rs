@@ -1701,7 +1701,7 @@ fn demand_missing_retained(
 #[serial_test::serial]
 fn checked_cell_retained_policy_reuses_finalized_dependencies() {
     use super::tests::TestEnvGuard;
-    use tidepool_extract_cmd::request::ExtractRequest;
+    use tidepool_extract_cmd::ExtractRequest;
 
     tidepool_testing::eval_harness::require_extract();
     let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");

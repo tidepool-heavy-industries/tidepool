@@ -262,10 +262,10 @@ verifyGroupSelection context prepared = do
     collision (Just (Set.singleton 2)))
   assert (map (map symbolOccurrence . projectedBinders) collisionGroup == [["sat.2"]])
     "group selection rebuilt the identity universe after filtering"
-  forM_ [16, 64, 256] $ \count -> do
+  forM_ ([16, 64, 256] :: [Int]) $ \count -> do
     let workload = prepared
           { preparedBindings =
-              [(StgTopStringLit (binder (100 + index) ("group" ++ show index))
+              [(StgTopStringLit (binder (100 + fromIntegral index) ("group" ++ show index))
                   "small group", emptyVarSet) | index <- [1 .. count]]
           , preparedPreparedSites = [], preparedSiteRejections = [] }
         views = preparedBindingGroups workload
