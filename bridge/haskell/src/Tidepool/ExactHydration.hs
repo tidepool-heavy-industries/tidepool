@@ -793,8 +793,8 @@ withOriginalPreviewOrphans scopes original = env
               { renamedResultAction = \_ environment declarations ->
                   if tcg_mod environment /= target then pure (environment,declarations) else do
                     current <- getTopEnv
-                    unless (any (\case ModuleNode _ summary ->
-                        ms_mod summary == target && ms_hs_hash summary == fingerprint
+                    unless (any (\case
+                        ModuleNode _ summary -> ms_mod summary == target && ms_hs_hash summary == fingerprint
                         _ -> False) (mgModSummaries' (hsc_mod_graph current)))
                       (liftIO (fail "activation preview orphan callback target fingerprint changed"))
                     let imports = tcg_imports environment
