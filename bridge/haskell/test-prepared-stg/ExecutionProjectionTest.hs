@@ -1677,7 +1677,7 @@ faultJoinLiterals fault prepared = prepared
     change expression = expression
     replacement rest = case fault of
       NarrowJoinInteger -> StgLitArg (LitNumber LitNumInt32 1)
-      FloatingJoinArgument -> StgLitArg (LitFloat 1)
+      FloatingJoinArgument -> StgLitArg (LitDouble 1)
       LiftedJoinArgument -> case [argument | argument@StgVarArg{} <- rest] of
         argument : _ -> argument
         [] -> error "sum join fault lacks a genuine lifted payload reference"
