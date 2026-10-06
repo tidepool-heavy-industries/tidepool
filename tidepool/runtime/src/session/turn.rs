@@ -6144,6 +6144,152 @@ mod tests {
     }
 
     #[test]
+    fn checked_declaration_reaps_dropped_scope_before_visible_adoption() {
+        use crate::session::{
+            resident_cell_check_template, ModuleEnv, PersistentSession, SessionError, SessionLib,
+            SourceImports,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::{Generation, SessionId};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        // Each case needs its own compiler admission and fresh mutable session.
+        // A live lease first proves the genuine declaration can be adopted.
+        for drop_lease in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let lib = SessionLib::open(
+                SessionId(1016),
+                root.path(),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+            let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+            let lease = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+            let scope = lease.scope();
+            let view = session.compile_view_in(scope).unwrap();
+            let declaration_module = session.next_lib_module().unwrap();
+            assert_eq!(declaration_module.gen(), Generation(1));
+            let preamble = effects.preamble().replace(
+                "module Expr where",
+                &format!("module {} where", declaration_module.module_name()),
+            );
+            let template = resident_cell_check_template(
+                &preamble,
+                effects.row(),
+                &view.turn_imports(&SourceImports::new()),
+            );
+            let source = "data RetainedLeaseDeclaration = RetainedLeaseDeclaration";
+            let specification = CheckedCellSpecification {
+                admission_digest: [0; 32],
+                cell_source: source.into(),
+                template_source: template.clone(),
+                turn_templates: Vec::new(),
+                injected_modules: view.injected_module_names(),
+                reserved_declaration_modules: Vec::new(),
+            };
+            let include_paths = view.include_paths(effects.include_paths());
+            let admission = session
+                .admit_cell_in(
+                    scope,
+                    1,
+                    Arc::new(specification.clone()),
+                    specification.specification_digest(),
+                    [1; 32],
+                    include_paths,
+                )
+                .unwrap();
+            assert!(admission.private_execution().is_none());
+            let view = admission.view();
+            let include = admission
+                .include_paths()
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            let injected = view.injected_module_names();
+            let checked = check_cell_admitted(
+                CellCheckRequest {
+                    exact_context: view.exact_compile_context(),
+                    session_id: Some(view.session()),
+                    cell_text: source,
+                    template: &template,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    compile_generation: admission.initial_value_generation().0,
+                    compile_view_evidence: "",
+                },
+                admission.clone(),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(checked.items.len(), 1);
+            let item = checked.checked_item(0).unwrap();
+            assert!(item.planned_declaration().is_some());
+            let prefix = session
+                .begin_checked_prefix(admission, item.clone())
+                .unwrap();
+            let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
+            let original = session.public_visibility_snapshot_in(scope).unwrap();
+            assert_eq!(original.declaration_tip, Generation(0));
+            assert_eq!(original.epoch, 0);
+            assert!(session
+                .lib()
+                .log
+                .certified_authored_at(Generation(1))
+                .is_none());
+            let mut lease = Some(lease);
+            if drop_lease {
+                // Drop queues retirement; it does not mutate the checked view.
+                drop(lease.take());
+                assert!(session.scope_tree().is_live(scope));
+                assert_eq!(session.public_visibility_snapshot_in(scope), Some(original));
+            }
+            let result = session.adopt_checked_declaration(reservation);
+            if drop_lease {
+                let error = result.unwrap_err();
+                assert!(
+                    session
+                        .lib()
+                        .log
+                        .certified_authored_at(Generation(1))
+                        .is_none(),
+                    "a rejected original lease must not commit its declaration: {error:?}"
+                );
+                assert!(
+                    matches!(error, SessionError::StaleStagedDeclaration),
+                    "{error:?}"
+                );
+                assert!(error.published_declaration_commit().is_none());
+                assert!(!session.scope_tree().is_live(scope));
+                assert!(session.lib().log.is_reserved(Generation(1)));
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+            } else {
+                let commit = result.unwrap();
+                assert_eq!(commit.generation, Generation(1));
+                let visible = session.public_visibility_snapshot_in(scope).unwrap();
+                assert_eq!(visible.declaration_tip, Generation(1));
+                assert_eq!(visible.epoch, 1);
+                assert!(session
+                    .lib()
+                    .log
+                    .certified_authored_at(Generation(1))
+                    .is_some());
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+            }
+            assert_eq!(session.lib().scope_tip(ScopeId::ROOT), Generation(0));
+            assert_eq!(
+                session
+                    .public_visibility_snapshot_in(ScopeId::ROOT)
+                    .unwrap()
+                    .epoch,
+                0
+            );
+        }
+    }
+
+    #[test]
     fn admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression() {
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, ModuleEnv,
