@@ -872,7 +872,7 @@ pub struct RuntimeActivationPreviewAdmission {
     generation: Generation,
     digest: [u8; 32],
     exact_context: Arc<tidepool_toolchain::declaration_join::ExactCompileContext>,
-    _scope_lease: Arc<super::RuntimeLexicalScopeLease>,
+    scope_lease: Arc<super::RuntimeLexicalScopeLease>,
     consumed: AtomicBool,
 }
 
@@ -1701,7 +1701,7 @@ struct PreparedCheckedTurn {
 
 enum PreparedExecutionPurpose {
     Authored(Option<Arc<CheckedTurnCompletion>>),
-    HostActivationPreview,
+    HostActivationPreview(Arc<super::RuntimeLexicalScopeLease>),
 }
 
 fn checked_turn_plan(
@@ -5623,7 +5623,7 @@ where
             generation,
             digest: *hash.finalize().as_bytes(),
             exact_context,
-            _scope_lease: scope_lease,
+            scope_lease,
             consumed: AtomicBool::new(false),
         }))
     }
@@ -5680,7 +5680,7 @@ where
             compiled.compiled.into_code(),
             PreparedTurnMode::Value,
             Some(mounted.handle),
-            PreparedExecutionPurpose::HostActivationPreview,
+            PreparedExecutionPurpose::HostActivationPreview(admission.scope_lease.clone()),
             provenance,
         )
     }
@@ -5740,9 +5740,16 @@ where
         purpose: PreparedExecutionPurpose,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let checked = match purpose {
-            PreparedExecutionPurpose::Authored(checked) => checked,
-            PreparedExecutionPurpose::HostActivationPreview => None,
+        let (checked, lexical_scope, _execution_scope_lease) = match purpose {
+            PreparedExecutionPurpose::Authored(checked) => {
+                (checked, self.run_context.lexical_scope, None)
+            }
+            PreparedExecutionPurpose::HostActivationPreview(lease) => {
+                self.state
+                    .validate_lexical_scope_lease(lease.scope(), &lease)?;
+                let scope = lease.scope();
+                (None, scope, Some(lease))
+            }
         };
         let prepared = code.prepared.into_owned();
         self.state
@@ -5754,7 +5761,8 @@ where
             // Claim the value-module identity before the turn runs.
             self.state.set_val_gen(*generation);
         }
-        let lexical_scope = self.run_context.lexical_scope;
+        // Preview source instances belong to its detached authority, so dropping
+        // that lease releases them without changing the public source plane.
         let install_prepared_started = std::time::Instant::now();
         let (program, source_keys) = self.install_turn_program_in(
             lexical_scope,

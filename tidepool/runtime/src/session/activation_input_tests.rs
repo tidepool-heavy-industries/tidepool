@@ -1733,6 +1733,10 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         admission.exact_context().declarations(),
         &original_context
     ));
+    let handles = resident.value_handle_count();
+    let visibility = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
     let template = turn::assemble_activation_preview_module(512);
     let compiled = match turn::compile_activation_preview(admission, &template, 512, &includes)
         .expect("prepare a pure display from the original ordinary compiler evidence")
@@ -1759,6 +1763,15 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     assert!(
         resident.state.bindings().get(binding).is_some(),
         "preview keeps its committed input binding"
+    );
+    assert_eq!(
+        resident.value_handle_count(),
+        handles,
+        "pure preview releases its temporary native source roots"
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        Some(visibility)
     );
 }
 
@@ -1884,6 +1897,10 @@ fn execute_mounted_input_preview(
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let handles = resident.value_handle_count();
+    let visibility = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
     let template = turn::assemble_activation_preview_module(512);
     let compiled =
         match turn::compile_activation_preview(admission, &template, 512, &recipe.include)
@@ -1905,6 +1922,15 @@ fn execute_mounted_input_preview(
         panic!("pure display must complete")
     };
     assert!(resident.state.bindings().get(binding).is_some());
+    assert_eq!(
+        resident.value_handle_count(),
+        handles,
+        "pure preview releases its temporary native source roots"
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        Some(visibility)
+    );
     result.to_json()
 }
 
