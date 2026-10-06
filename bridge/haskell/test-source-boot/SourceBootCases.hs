@@ -2629,7 +2629,8 @@ originalProjectionProducts = withScratch $ \work -> do
     changed <- (BS.appendFile (canonicalCorePath core) "changed" >>
       try (demand executor)) `finally` BS.writeFile (canonicalCorePath core) originalCore
     case changed of
-      Left (_ :: IOException) -> pure ()
+      Left CandidateCoreBytesMismatch -> pure ()
+      Left failure -> fail ("cached original Core change returned another refusal: " ++ show failure)
       Right _ -> fail "cached original preparation bypassed current Core artifact validation"
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
   case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)

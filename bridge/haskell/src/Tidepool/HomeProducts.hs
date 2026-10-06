@@ -9,7 +9,7 @@ module Tidepool.HomeProducts
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
   , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope
-  , recoverAdmittedFinalizedOriginalWithPrevious ) where
+  , OriginalRecoveryScope, admitOriginalRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
@@ -139,17 +139,27 @@ originalVersionInScope scope owner = do
 recoverAdmittedFinalizedOriginal
   :: HscEnv -> ExactScope -> Module -> IO (Maybe AdmittedFinalizedOriginal)
 recoverAdmittedFinalizedOriginal env scope owner =
-  fmap (fmap snd) (recoverAdmittedFinalizedOriginalWithPrevious env scope owner Nothing)
+  admitOriginalRecoveryScope env scope >>= \admitted ->
+    fmap (fmap snd) (recoverAdmittedFinalizedOriginalWithPrevious admitted owner Nothing)
+
+-- Whole-scope certificate/interface validation is shared by one immutable
+-- acquisition stage. Defining Core bytes are still checked on every lookup,
+-- including hits; only their decoding and native lowering can be retained.
+data OriginalRecoveryScope = OriginalRecoveryScope HscEnv ExactScope
+
+admitOriginalRecoveryScope :: HscEnv -> ExactScope -> IO OriginalRecoveryScope
+admitOriginalRecoveryScope env scope = do
+  either (ioError . userError) pure =<< revalidateExactScope env scope
+  pure (OriginalRecoveryScope env scope)
 
 -- A retained body never suppresses current artifact validation. On a hit only
 -- immutable decoded Core is reused; proof, interface row and location belong
 -- to the current consuming scope, including relocated identical artifacts.
 recoverAdmittedFinalizedOriginalWithPrevious
-  :: HscEnv -> ExactScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
+  :: OriginalRecoveryScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
   -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
-recoverAdmittedFinalizedOriginalWithPrevious env scope owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
+recoverAdmittedFinalizedOriginalWithPrevious (OriginalRecoveryScope env scope) owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
   Just proof | isSourceOriginal (canonicalOrigin proof), Just _ <- canonicalCoreArtifact proof -> do
-    either (ioError . userError) pure =<< revalidateExactScope env scope
     row@(artifact,_,_) <- case [row | row@(selected,_,_) <- scopeInterfaces scope
         , (exactUnit selected,exactModule selected) == key] of
       [row] -> pure row
@@ -163,11 +173,10 @@ recoverAdmittedFinalizedOriginalWithPrevious env scope owner previous = case Map
         location = ms_location (exactInterfaceSummary env artifact)
     home <- admittedHomeInterface env admission owner
     version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInScope scope owner)
+    bytes <- readAdmittedCore admission
     original <- case previous of
       Just (oldVersion,old) | oldVersion == version -> pure (admittedOriginalModule old)
-      _ -> do
-        bytes <- readAdmittedCore admission
-        decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
+      _ -> decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
     pure (Just (version,AdmittedFinalizedOriginal original proof row location))
   _ -> pure Nothing
   where

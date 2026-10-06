@@ -299,7 +299,9 @@ prepareOriginalProductsUsingCollector collector stable executor env exact interf
   workRef <- newIORef (0 :: Integer,0 :: Integer)
   reuseRef <- newIORef (0 :: Integer,0 :: Integer)
   cache <- maybe newPreparedBodyCache pure stable
-  acquireOriginal <- newPreparedOriginalModuleTaskPreparer env cache
+  acquireOriginal <- case exact of
+    Nothing -> pure (\_ _ -> pure Nothing)
+    Just scope -> newPreparedOriginalModuleTaskPreparer env cache scope
   completedRaw <- maybe newOriginalProjectionCache pure collector
   modulesRef <- newIORef (Map.fromList [(pmModule prepared, prepared) | prepared <- initial])
   admittedRef <- newIORef Map.empty
@@ -325,10 +327,8 @@ prepareOriginalProductsUsingCollector collector stable executor env exact interf
                 , Map.notMember owner modules, owner `Set.notMember` attempted])
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
         let siblings = Map.unions (map pmSitedSiblings (Map.elems modules))
-        acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> case exact of
-          Nothing -> pure Nothing
-          Just scope -> fmap (fmap (\original -> (owner,original)))
-            (acquireOriginal scope siblings owner)
+        acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner ->
+          fmap (fmap (\original -> (owner,original))) (acquireOriginal siblings owner)
         admitted <- readIORef admittedRef
         let originals = Map.map (\(original,_,_) -> original) acquired
             allAdmitted = Map.union admitted originals

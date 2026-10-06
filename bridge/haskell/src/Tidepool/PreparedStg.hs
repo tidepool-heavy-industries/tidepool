@@ -76,7 +76,8 @@ import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.HomeProducts
   ( OriginalVersion, originalVersionOwner, originalVersionInScope, AdmittedFinalizedOriginal
-  , admittedOriginalModule, admittedOriginalLocation, recoverAdmittedFinalizedOriginalWithPrevious )
+  , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
+  , recoverAdmittedFinalizedOriginalWithPrevious )
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
@@ -293,18 +294,19 @@ evictPreparedBodyMatching cache stale = do
 -- Full original groups belong to the same retained body owner as recovered
 -- subsets. Only completed intrinsic-free preparation is shared across scopes;
 -- site-bearing bodies can reuse within this one acquired request preparer.
-newPreparedOriginalModuleTaskPreparer :: HscEnv -> PreparedBodyCache
-  -> IO (ExactScope -> Map String Id -> Module
+newPreparedOriginalModuleTaskPreparer :: HscEnv -> PreparedBodyCache -> ExactScope
+  -> IO (Map String Id -> Module
     -> IO (Maybe (AdmittedFinalizedOriginal,Bool,PreparedModuleTask)))
-newPreparedOriginalModuleTaskPreparer env cache = do
+newPreparedOriginalModuleTaskPreparer env cache scope = do
+  admittedScope <- admitOriginalRecoveryScope env scope
   scoped <- newMVar Map.empty
-  pure $ \scope siblings owner -> do
+  pure $ \siblings owner -> do
     let key = originalVersionInScope scope owner
     stableHit <- maybe (pure Nothing) (\version -> Map.lookup version <$> readMVar (cachedOriginalModules cache)) key
     scopedHit <- maybe (pure Nothing) (\version -> Map.lookup version <$> readMVar scoped) key
     let hit = case stableHit of Just found -> Just found; Nothing -> scopedHit
         previous = (,) <$> key <*> (fst <$> hit)
-    original <- recoverAdmittedFinalizedOriginalWithPrevious env scope owner previous
+    original <- recoverAdmittedFinalizedOriginalWithPrevious admittedScope owner previous
     case original of
       Nothing -> pure Nothing
       Just (version,admitted) -> case hit of
