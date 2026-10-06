@@ -139,7 +139,7 @@ library tidepool-extract-internal
     safe
   default-language: GHC2024
   default-extensions: OverloadedStrings
-  ghc-options:      -Wall
+  ghc-options:      -Wall -Werror=missing-fields
 
 -- Exposes only the model-facing name-error vocabulary ('renderNameError' and
 -- friends) to host-side tests, without adding the rest of 'lib/Tidepool' (the
@@ -155,7 +155,7 @@ library assignment-internal
     text
   default-language: GHC2024
   default-extensions: OverloadedStrings
-  ghc-options:      -Wall
+  ghc-options:      -Wall -Werror=missing-fields
 
 flag test-tools
   description: Build child-process helpers and the corpus compiler action for local test compatibility
@@ -171,6 +171,7 @@ common tasty-tests
   hs-source-dirs:   test-support
   other-modules:    Tidepool.Test.Runner
   build-depends:    tasty >= 1.5 && < 1.6, tasty-hunit
+  ghc-options:      -Werror=missing-fields
 
 test-suite cell-splitter-test
   import:           tasty-tests
@@ -292,7 +293,7 @@ executable tidepool-extract-bin
   -- flags from a caller. Without it, `Tidepool.Timing.readRtsStats` always
   -- reads `getRTSStatsEnabled == False` and every per-module timing record
   -- reports `rts=unavailable`.
-  ghc-options:      -Wall -threaded -with-rtsopts=-T
+  ghc-options:      -Wall -Werror=missing-fields -threaded -with-rtsopts=-T
 
 test-suite execution-inventory
   import:           tasty-tests
