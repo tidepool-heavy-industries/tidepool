@@ -7,8 +7,8 @@ import CompilerExecutionTest (compilerExecutionTests)
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
-import Control.Exception (bracket, evaluate, finally)
-import Control.Monad (forM, unless)
+import Control.Exception (bracket, evaluate, finally, try)
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
 import Data.Maybe (isJust)
@@ -17,7 +17,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC
-import GHC.Driver.Env (hsc_HPT)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import GHC.Driver.Main (hscTidy)
@@ -25,18 +25,22 @@ import GHC.Driver.Session (updOptLevel)
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
 import GHC.Types.Id (mkVanillaGlobal, setIdType, isDataConWorkId_maybe)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, varUnique)
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Types (unitString, toUnitId, GenWithIsBoot(..))
+import GHC.Unit.Module (mkModule)
+import GHC.Unit.Module.Location (ml_hi_file, ml_dyn_hi_file)
+import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Stg.Syntax qualified as Stg
 import System.Directory (getCurrentDirectory, removeFile)
 import System.Environment (setEnv)
-import System.IO (openTempFile, stderr, hClose, hFlush, hSeek, hGetContents, SeekMode(..))
+import System.IO (openTempFile, stderr, hClose, hFlush, hPutStr, hSeek, hGetContents, SeekMode(..))
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
@@ -53,9 +57,11 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), WireProgram(..) )
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
-  , FatIfaceComponentLookup(..), fatSelectionComponents )
+  , FatIfaceComponentLookup(..), fatSelectionComponents
+  , readExactInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..) )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
+  , RecoveryPublicationFailure(..), requirePreparedRecoveryPublication
   , recoverPreparedClosure, newPreparedRecovery, newPreparedRecoveryWithPackageRoots
   , preparedRecoveryClosure, growPreparedRecovery )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
@@ -144,6 +150,7 @@ scenario = do
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assertProjectionEquivalent context closure
+    liftIO $ verifyRecoveryPublication hsc context modules closure
     liftIO $ assertReachExpansion context closure
     liftIO $ assertRejectionBoundary context closure
     liftIO $ assert (all (not . namedResidual) (closureFailures closure))
@@ -617,6 +624,59 @@ scenario = do
 
     bindingBinders (Stg.StgNonRec binder _) = [binder]
     bindingBinders (Stg.StgRec pairs) = map fst pairs
+
+verifyRecoveryPublication :: HscEnv -> ProjectionContext -> [PreparedModule] -> RecoveredClosure -> IO ()
+verifyRecoveryPublication env context modules original = do
+  requirePreparedRecoveryPublication "caller" original
+  root <- case [binder | binder <- preparedTargetReferences context modules
+    , occNameString (nameOccName (varName binder)) == "fst"] of
+      [binder] -> pure binder
+      found -> fail ("expected one genuine fst recovery input, got " ++ show (length found))
+  owner <- maybe (fail "genuine fst input has no defining owner") pure
+    (nameModule_maybe (varName root))
+  (_,location) <- readExactInterface env owner >>= either (fail . show) pure
+  bracket (openTempFile "/tmp" "tidepool-recovery-broken-interface")
+    (\(path,handle) -> hClose handle >> removeFile path) $ \(path,handle) -> do
+      hPutStr handle "not-a-ghc-interface"
+      hFlush handle
+      finder <- initFinderCache
+      addModuleToFinder finder (GWIB (mkModule (toUnitId (moduleUnit owner)) (moduleName owner)) NotBoot)
+        location {ml_hi_file=path,ml_dyn_hi_file=path}
+      let broken = env {hsc_FC=finder}
+      forM_ [False,True] $ \preparedInterface -> do
+        cache <- newFatIfaceCache
+        when preparedInterface $ do
+          body <- lookupFatIfaceExact env cache (varName root)
+          case body of
+            FatIfaceFound _ -> pure ()
+            _ -> fail "genuine fst defining body could not seed the fault history"
+        owners <- newOwnerInterfaceCache
+        bodies <- newPreparedBodyCache
+        failed <- recoverPreparedClosure broken cache owners bodies context modules
+        let failures = closureFailures failed
+            relevant failure = case failure of
+              InterfaceLoadingFailure selected _ -> not preparedInterface && selected == owner
+              DefiningPreparationFailure (RecoveredModuleInterfaceFailure selected _) ->
+                preparedInterface && selected == owner
+              _ -> False
+        assert (any relevant failures)
+          ("corrupt defining interface lost its typed recovery failure: " ++ show failures)
+        published <- try (requirePreparedRecoveryPublication "caller" failed)
+        case published of
+          Left (RecoveryPublicationFailure target retained) ->
+            assert (target == "caller" && any relevant retained)
+              "publication did not retain its genuine defining failure"
+          Right () -> fail "publication accepted a corrupt defining interface"
+        assert (closureFailures failed == failures) "publication changed raw corpus residuals"
+      pure ()
+  -- These typed semantic residuals remain diagnostic evidence. They do not
+  -- claim that the genuine fst body has any of these unsupported properties.
+  let semantic = original {closureFailures =
+        [ MissingImplementation (varName root) NoExtraDeclarations
+        , UnsupportedExternalCapability (varName root)
+        , IncompatibleImplementation (varName root) "type refusal"
+        , MissingHomeImplementation (varName root) ]}
+  requirePreparedRecoveryPublication "caller" semantic
 
 assertOverlapMerge :: IO ()
 assertOverlapMerge = do

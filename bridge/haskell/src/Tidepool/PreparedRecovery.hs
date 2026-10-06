@@ -2,13 +2,14 @@
 -- remains a separate owner: this path never loads missing source-home bodies
 -- from an interface left by an earlier edit.
 module Tidepool.PreparedRecovery
-  ( RecoveryFailure(..), RecoveredClosure(..), recoverPreparedClosure
+  ( RecoveryFailure(..), RecoveryPublicationFailure(..), requirePreparedRecoveryPublication
+  , RecoveredClosure(..), recoverPreparedClosure
   , newPreparedRecovery, newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor
   , PreparedRecovery, preparedRecoveryClosure, growPreparedRecovery
   , insertGroup
   ) where
 
-import Control.Exception (evaluate, throwIO)
+import Control.Exception (Exception, evaluate, throwIO)
 import Control.Monad (unless, when)
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
@@ -86,6 +87,27 @@ data RecoveredClosure = RecoveredClosure
   -- | Final target-local closure over the modules in 'closureModules'.
   , closureReachability :: PreparedReachability
   }
+
+data RecoveryPublicationFailure = RecoveryPublicationFailure String [RecoveryFailure]
+  deriving (Show)
+
+instance Exception RecoveryPublicationFailure
+
+-- Corpus recovery retains every residual. Executable publication cannot
+-- proceed after a required interface or defining preparation failed.
+requirePreparedRecoveryPublication :: String -> RecoveredClosure -> IO ()
+requirePreparedRecoveryPublication target closure =
+  case filter hardFailure (closureFailures closure) of
+    [] -> pure ()
+    failures -> throwIO (RecoveryPublicationFailure target failures)
+  where
+    hardFailure failure = case failure of
+      InterfaceLoadingFailure{} -> True
+      DefiningPreparationFailure{} -> True
+      MissingImplementation{} -> False
+      IncompatibleImplementation{} -> False
+      UnsupportedExternalCapability{} -> False
+      MissingHomeImplementation{} -> False
 
 -- | One target's closed recovery state. The only continuation admits more
 -- package roots under the same home graph, exact interfaces and authority.

@@ -83,7 +83,7 @@ import Tidepool.PreparedStg
   ( pmModule, pmYieldSites )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor
-  , preparedRecoveryClosure, growPreparedRecovery )
+  , preparedRecoveryClosure, growPreparedRecovery, requirePreparedRecoveryPublication )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources )
 import Tidepool.CompileInput (writeCompileInputProof)
@@ -669,6 +669,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
           let recovered = preparedRecoveryClosure recoveryState
               finalContext = context
                 { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
+          requirePreparedRecoveryPublication target recovered
           selected <- timePhase timing "prepared_project" $
             project (prepareProjectionWithReachability finalContext
               (closureModules recovered) (closureReachability recovered))
