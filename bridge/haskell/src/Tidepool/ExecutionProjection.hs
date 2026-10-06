@@ -109,7 +109,8 @@ import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Types (Module, Unit, UnitId, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
-import Tidepool.ExecutionEncode (ProjectedGroupEncoding, prepareProjectedGroupEncoding)
+import Tidepool.ExecutionEncode
+  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingBytes)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -387,7 +388,9 @@ forceRawModuleProducts raw = do
   case rawOriginalProductGroups raw of
     Just _ -> do
       _ <- evaluate (Set.size (rawOriginalProductDemands raw)
-        + Set.size (rawOriginalProductBinders raw))
+        + Set.size (rawOriginalProductBinders raw)
+        + sum (map (BS.length . projectedGroupEncodingBytes)
+            (Map.elems (rawOriginalGroupEncodings raw))))
       pure ()
     Nothing -> do
       _ <- evaluate (rawExecutableProduct raw)

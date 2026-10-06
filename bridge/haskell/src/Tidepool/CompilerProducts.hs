@@ -297,7 +297,7 @@ prepareOriginalProductsUsingCollector
 prepareOriginalProductsUsingCollector collector stable executor env exact interfaces context external initial = do
   timing <- readTimingEnabled
   workRef <- newIORef (0 :: Integer,0 :: Integer)
-  reuseRef <- newIORef (0 :: Integer)
+  reuseRef <- newIORef (0 :: Integer,0 :: Integer)
   cache <- maybe newPreparedBodyCache pure stable
   acquireOriginal <- newPreparedOriginalModuleTaskPreparer env cache
   completedRaw <- maybe newOriginalProjectionCache pure collector
@@ -337,7 +337,9 @@ prepareOriginalProductsUsingCollector collector stable executor env exact interf
                 | (owner,original) <- Map.toAscList allAdmitted])
         modifyIORef' admittedRef (Map.union originals)
         let tasks = [(owner,task) | (owner,(_,_,task)) <- Map.toAscList acquired]
-        modifyIORef' reuseRef (+ fromIntegral (length [() | (_,True,_) <- Map.elems acquired]))
+        modifyIORef' reuseRef (\(hits,lowered) ->
+          (hits + fromIntegral (length [() | (_,True,_) <- Map.elems acquired]),
+           lowered + fromIntegral (length [() | (_,False,_) <- Map.elems acquired])))
         _ <- runCompilerTasks executor
           (\(_,task) -> do
             prepared <- runPreparedModuleTask task
@@ -356,8 +358,11 @@ prepareOriginalProductsUsingCollector collector stable executor env exact interf
   let (products,_) = settleOriginalHomeModuleProducts env external raw
   (projected,hits) <- readIORef workRef
   emitCount timing "original_raw_projected_modules" projected
-  emitCount timing "original_raw_seed_hits" hits
-  readIORef reuseRef >>= emitCount timing "original_prepared_cache_hits"
+  emitCount timing "original_raw_cache_hits" hits
+  (reused,lowered) <- readIORef reuseRef
+  emitCount timing "original_prepared_cache_hits" reused
+  emitCount timing "original_prepared_new_modules" lowered
+  emitCount timing "original_advertised_native_binders" (fromIntegral (Set.size external))
   pure (modules,PreparedProductContext products admitted modules (Just raw) external Nothing)
 
 -- Captures come from the exact scope, including its admitted checked values,
