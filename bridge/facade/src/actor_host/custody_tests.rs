@@ -748,6 +748,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         exomonad_actor::ActorTerminal {
             kind: exomonad_actor::ActorExitKind::Cancelled,
             summary: "forest host shutdown".into(),
+            diagnostic: None,
         },
     ))
     .chain(installed.iter().map(|child| {
@@ -756,6 +757,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
             exomonad_actor::ActorTerminal {
                 kind: exomonad_actor::ActorExitKind::Cancelled,
                 summary: "owner actor stopped".into(),
+                diagnostic: None,
             },
         )
     }))

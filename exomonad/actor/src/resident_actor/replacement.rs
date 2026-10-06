@@ -112,6 +112,7 @@ where
                 .resolve(kernel.identity())
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "replacement predecessor is absent from its directory".into(),
+                    diagnostic: None,
                 })
                 .and_then(|actor| actor.fence_replacement())
         };

@@ -2124,6 +2124,7 @@ async fn run_owned(
             root_actor.shutdown(ActorTerminal {
                 kind: ActorExitKind::Failed,
                 summary: summary.clone(),
+                diagnostic: None,
             }),
         )
         .await;

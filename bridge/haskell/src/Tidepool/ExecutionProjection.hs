@@ -9,9 +9,9 @@ module Tidepool.ExecutionProjection
   , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
-  , RawModuleProducts, projectRawOriginalHomeModuleProducts
+  , RawModuleProducts, projectRawOriginalHomeModuleProducts, forceRawModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
-  , settleOriginalHomeModuleProducts
+  , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
@@ -39,6 +39,7 @@ module Tidepool.ExecutionProjection
   , TextUnitAuthority(..)
   ) where
 
+import Control.Exception (evaluate)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
@@ -319,6 +320,20 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
       _ -> Nothing
     executable = projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing
 
+-- Force the local lowering on its executor worker, before incorporation.
+-- Failed groups remain values; only infrastructure exceptions abort the batch.
+forceRawModuleProducts :: RawModuleProducts -> IO RawModuleProducts
+forceRawModuleProducts raw = do
+  case rawOriginalProductGroups raw of
+    Just _ -> do
+      _ <- evaluate (Set.size (rawOriginalProductDemands raw)
+        + Set.size (rawOriginalProductBinders raw))
+      pure ()
+    Nothing -> do
+      _ <- evaluate (rawExecutableProduct raw)
+      pure ()
+  pure raw
+
 rawOriginalProductBinders :: RawModuleProducts -> Set SymbolIdentity
 rawOriginalProductBinders raw = Set.fromList
   [symbol | outcomes <- maybe [] pure (rawOriginalProductGroups raw)
@@ -335,10 +350,18 @@ rawOriginalProductDemands raw = Set.fromList
 -- are empty. Native cycles are ordinary identity edges, never scheduling gates.
 settleOriginalHomeModuleProducts :: HscEnv -> Set SymbolIdentity
   -> [RawModuleProducts] -> (PreparedModuleProducts, Set SymbolIdentity)
-settleOriginalHomeModuleProducts env externalBinders rows =
+settleOriginalHomeModuleProducts env externalBinders =
+  settleOriginalHomeModuleProductsWithoutOwners env externalBinders Set.empty
+
+-- Canonical admission may withdraw an owner with no captured native Core.
+-- Every consumer of a sibling binder sees the same atomic owner refusal.
+settleOriginalHomeModuleProductsWithoutOwners :: HscEnv -> Set SymbolIdentity
+  -> Set Module -> [RawModuleProducts] -> (PreparedModuleProducts, Set SymbolIdentity)
+settleOriginalHomeModuleProductsWithoutOwners env externalBinders withdrawn rows =
   let isHome owner = toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
       originalRows = [(rawOriginalProductOwner raw, outcomes)
-        | raw <- rows, Just outcomes <- [rawOriginalProductGroups raw]]
+        | raw <- rows, rawOriginalProductOwner raw `Set.notMember` withdrawn
+        , Just outcomes <- [rawOriginalProductGroups raw]]
       rowsByOwner = Map.fromList originalRows
       groupOwners = Map.fromList
         [(symbol, (owner, ordinal)) | (owner, outcomes) <- originalRows
@@ -354,7 +377,8 @@ settleOriginalHomeModuleProducts env externalBinders rows =
           | (owner, outcomes) <- originalRows, (_, _, Right projected) <- outcomes]
       unavailableHomeReferences = Set.filter
         (\identity -> isHome (symbolOwner identity) && identity `Set.notMember` knownBinders)
-        (Set.unions (map rawOriginalProductDemands rows))
+        (Set.unions [rawOriginalProductDemands raw | raw <- rows
+          , rawOriginalProductOwner raw `Set.notMember` withdrawn])
       blockedHome = closeUnavailableOriginalGroups dependencies groupOwners unavailableHomeReferences
       blocked = closeUnavailableOriginalGroups dependencies groupOwners
         (Set.union failedBinders unavailableHomeReferences)
@@ -363,6 +387,9 @@ settleOriginalHomeModuleProducts env externalBinders rows =
       unavailableOwners = closeUnavailableOriginalModules dependencies groupOwners
         (Set.fromList [(owner, ordinal) | owner <- Set.toList initialUnavailableOwners
           , (_, (owner', ordinal)) <- Map.toList groupOwners, owner' == owner])
+      finish raw | rawOriginalProductOwner raw `Set.member` withdrawn =
+        (rawOriginalProductOwner raw, Left (UnavailableOriginalHomeDependencies
+          (Set.toAscList (rawOriginalProductBinders raw))), [])
       finish raw = case rawOriginalProductGroups raw of
         Nothing -> (rawOriginalProductOwner raw, rawExecutableProduct raw, [])
         Just _ | rawOriginalProductOwner raw `Set.member` unavailableOwners ->
@@ -592,7 +619,8 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         boundJsonAuthority
         (projectionTextUnit context)
-        Set.empty ExecutableTarget DeferredEntryContracts []
+        (Set.fromList (Map.elems (projectionCurrentOriginals context)))
+        ExecutableTarget DeferredEntryContracts []
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
       -- module set (so a same-name internal identity cannot borrow home-module

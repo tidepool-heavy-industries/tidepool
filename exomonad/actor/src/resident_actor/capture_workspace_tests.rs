@@ -302,6 +302,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "issuer failed after admission".into(),
+            diagnostic: None,
         })
         .await
         .expect("actual issuer failure and root cleanup");
@@ -365,6 +366,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .shutdown_with_cleanup(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "workspace capture fixture done".into(),
+                diagnostic: None,
             })
             .await
             .expect("child shutdown");
@@ -604,6 +606,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .shutdown_with_cleanup(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "first captured reader done".into(),
+            diagnostic: None,
         })
         .await
         .expect("first reader shutdown");
@@ -615,6 +618,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .shutdown_with_cleanup(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "second captured reader done".into(),
+            diagnostic: None,
         })
         .await
         .expect("second reader shutdown");
@@ -626,6 +630,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .shutdown_with_cleanup(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "final captured reader done".into(),
+            diagnostic: None,
         })
         .await
         .expect("final reader shutdown");
@@ -1072,6 +1077,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         .shutdown_with_cleanup(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "surviving reader done".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();
@@ -1082,6 +1088,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         .shutdown_with_cleanup(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "fresh reader done".into(),
+            diagnostic: None,
         })
         .await
         .unwrap();

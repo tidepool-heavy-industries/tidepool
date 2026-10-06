@@ -620,6 +620,7 @@ mod tests {
             &crate::ActorTerminal {
                 kind: crate::ActorExitKind::Cancelled,
                 summary: "stop after indeterminate delivery".into(),
+                diagnostic: None,
             },
         );
         assert_eq!(

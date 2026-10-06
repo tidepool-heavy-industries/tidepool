@@ -169,6 +169,7 @@ async fn deferred_refusal_preserves_cancellation_and_retirement_priority() {
             fixture.retirement.request_shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "retirement before deferred refusal".into(),
+                diagnostic: None,
             });
         }
         let event = wait_watch_event(
@@ -399,6 +400,7 @@ async fn prior_retirement_wins_when_watch_settlement_is_also_ready() {
     let terminal = ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "owner retirement before ready watch".into(),
+        diagnostic: None,
     };
     fixture.retirement.request_shutdown(terminal.clone());
     fixture.complete();
@@ -429,6 +431,7 @@ async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledgi
     let terminal = ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "exact owning retirement".into(),
+        diagnostic: None,
     };
     retirement.request_shutdown(terminal.clone());
     let event = tokio::time::timeout(Duration::from_secs(2), wait)
@@ -791,6 +794,7 @@ fn channel_filler(owner: ActorRef) -> LocalResidentDeployment {
         terminal: ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "fill deployment channel".into(),
+            diagnostic: None,
         },
     }
 }

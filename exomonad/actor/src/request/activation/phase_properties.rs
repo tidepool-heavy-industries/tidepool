@@ -949,6 +949,7 @@ fn run_history(
                         retirements[index].request_shutdown(ActorTerminal {
                             kind: ActorExitKind::Completed,
                             summary: "shutdown".into(),
+                            diagnostic: None,
                         });
                         shutdown[index] = true;
                     }
@@ -1158,6 +1159,7 @@ fn run_history(
                 let terminal = ActorTerminal {
                     kind: ActorExitKind::Completed,
                     summary: "retired".into(),
+                    diagnostic: None,
                 };
                 prop_assert!(registry.actor_stopped(actor, &terminal).is_empty());
             }

@@ -298,6 +298,7 @@ impl WorkbenchExecutions {
         if has_pending_work() {
             return Err(KernelBehaviorError {
                 detail: "output abort has no exact admitted invocation owner".into(),
+                diagnostic: None,
             });
         }
         Ok(None)
@@ -357,6 +358,7 @@ impl WorkbenchExecutions {
             {
                 return Err(KernelBehaviorError {
                     detail: "fork boundary has conflicting publication source captures".into(),
+                    diagnostic: None,
                 });
             }
         }
@@ -775,6 +777,7 @@ mod tests {
                 receipts: Vec::new(),
                 actor: crate::ActorRef::first(crate::ActorId(1)),
                 detail: "fixture cleanup is not confirmed".into(),
+                diagnostic: None,
             }),
             crate::WorkbenchCancellationOutcome::NotSleeping {
                 execution: execution.clone(),
@@ -970,6 +973,7 @@ mod tests {
             receipts: Vec::new(),
             actor,
             detail: "intentional runtime failure".into(),
+            diagnostic: None,
         });
         let success = || {
             Ok(crate::KernelStep::Continue(WorkbenchResponse {

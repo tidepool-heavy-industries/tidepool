@@ -335,6 +335,7 @@ mod tests {
         root.terminal = Some(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "root completed".into(),
+            diagnostic: None,
         });
         let child = node(2, Some(actor(1)), true);
         let (actors, conversations) = projection
@@ -405,6 +406,7 @@ mod tests {
         root.terminal = Some(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "retired".into(),
+            diagnostic: None,
         });
         let (actors, _) = projection
             .projection(
@@ -458,6 +460,7 @@ mod tests {
             root.terminal = Some(ActorTerminal {
                 kind,
                 summary: "terminal".into(),
+                diagnostic: None,
             });
             let (actors, _) = projection
                 .projection(
@@ -504,6 +507,7 @@ mod tests {
         root.terminal = Some(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "cancelled".into(),
+            diagnostic: None,
         });
         let (actors, _) = projection
             .projection(

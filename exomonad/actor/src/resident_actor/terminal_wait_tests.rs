@@ -5,6 +5,7 @@ fn completed(summary: &str) -> ActorTerminal {
     ActorTerminal {
         kind: ActorExitKind::Completed,
         summary: summary.into(),
+        diagnostic: None,
     }
 }
 
@@ -62,6 +63,7 @@ async fn prior_owner_retirement_wins_when_target_exit_is_also_ready() {
     let owner_terminal = ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "owner retired before terminal observation".into(),
+        diagnostic: None,
     };
     retirement.request_shutdown(owner_terminal.clone());
     let target_terminal = completed("independent child");
@@ -84,6 +86,7 @@ async fn original_owner_retirement_does_not_establish_native_cleanup() {
     let terminal = ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "original owner retires".into(),
+        diagnostic: None,
     };
     retirement.request_shutdown(terminal.clone());
     let event = tokio::time::timeout(Duration::from_secs(2), wait)

@@ -529,6 +529,7 @@ impl InvocationWork {
                 let terminal = ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "owning tool invocation ended".into(),
+                    diagnostic: None,
                 };
                 let (kernel, retained_terminal) = match tokio::time::timeout(
                     crate::local_actor::SHUTDOWN_BUDGET,

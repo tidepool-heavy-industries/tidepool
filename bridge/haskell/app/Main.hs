@@ -66,7 +66,10 @@ import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, modulePr
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
-  , requireOriginalExecutableGlobals
+  , prepareOriginalProductsWithExecutor, prepareOriginalProductsWithCollector
+  , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
+  , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedRootIdentity)
@@ -80,7 +83,7 @@ import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( pmModule, pmYieldSites )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor
   , preparedRecoveryClosure, growPreparedRecovery )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources )
@@ -185,10 +188,11 @@ type Compiler =
 data RecoveryCaches = RecoveryCaches
   { acquireRecoveryCaches :: IO CompilerRecoveryCaches
   , recoveryExecutor :: Maybe CompilerExecutor
+  , recoveryOriginalProjection :: Maybe OriginalProjectionCollector
   }
 
 scopeRecoveryCaches :: CompilerScope -> RecoveryCaches
-scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope)
+scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope) Nothing
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
 -- stderr is the human-readable channel.
@@ -234,12 +238,22 @@ runParsedInvocation compilerScope caches parsedWorkerRequest = do
   bracket getNumCapabilities setNumCapabilities $ \_previous -> do
     setNumCapabilities (requestCompilerCapabilities parsedWorkerRequest)
     withCompilerExecutor grant $ \executor -> do
-      let scope = compilerScope
+      originalProjection <- newOriginalProjectionCollector
+      let completion = observeOriginalProjection originalProjection
+            (requestRetainedGenerations parsedWorkerRequest)
+            [preparedResumeTargetName,preparedApplyEntryTargetName,preparedApplyValueTargetName] Nothing
+          observeProducts :: PipelineSelection result -> PipelineSelection result
+          observeProducts selection = case selection of
+            PreparedStg -> WithPreparedModuleCompletion completion selection
+            PreparedProducts _ -> WithPreparedModuleCompletion completion selection
+            _ -> selection
+          scope = compilerScope
             { scopedCompile = \selection -> scopedCompile compilerScope
-                (WithCompilerExecution grant executor selection)
+                (WithCompilerExecution grant executor (observeProducts selection))
             , scopedExecutor = Just executor
             }
-      runGrantedInvocation scope (caches {recoveryExecutor=Just executor}) parsedWorkerRequest
+      runGrantedInvocation scope (caches
+        {recoveryExecutor=Just executor,recoveryOriginalProjection=Just originalProjection}) parsedWorkerRequest
 
 runGrantedInvocation
   :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
@@ -389,7 +403,7 @@ runActivationPreviewMode compiler caches args path = do
     encodedWitness <- maybe (fail "activation preview witness is unsealed") pure (encodeCheckedTypeWitness sealed)
     let witnessBytes = toStrictByteString encodedWitness
     projection <- try (prepareArtifactsWithProjection requirePreviewProjection
-      originalInterfaces caches prepared [preparedScaffoldTargetName]
+      originalInterfaces outDir caches prepared [preparedScaffoldTargetName]
       (standardAuxiliaryRoots binds) Map.empty [])
       :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedProductContext))
     validateDependencyEvidence (preparedFreshDependencies prepared)
@@ -534,7 +548,7 @@ processFile compiler caches timing args path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared preparedTargets
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
@@ -563,18 +577,18 @@ data PreparedArtifact = PreparedArtifact
 
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
+prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
 prepareArtifacts = prepareArtifactsWithProjection requireProjection
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
-  -> OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
+  -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifactsWithProjection project originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
+prepareArtifactsWithProjection _ _ _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifactsWithProjection project originalInterfaces outDir caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
   recoveryCaches <- acquireRecoveryCaches caches
   timing <- readTimingEnabled
   let result = pprPipelineResult prepared
@@ -601,25 +615,39 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
           , binder <- originalBinders group]
          ++ [binder | candidate <- candidates, group <- candidateGroups candidate
           , binder <- candidateGroupBinders group])
-      certifiedHomes = Set.fromList
-        ([(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
-         ++ [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- exactProducts])
       exactOriginals =
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
-  (originalModules,productContext@(products,_)) <- timePhase timing "prepared_original_demand" $
-    prepareOriginalProducts hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+  let prepareOriginal = case recoveryExecutor caches of
+        Nothing -> prepareOriginalProducts
+        Just executor -> case recoveryOriginalProjection caches of
+          Nothing -> prepareOriginalProductsWithExecutor executor
+          Just collector -> prepareOriginalProductsWithCollector collector executor
+  (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
+    prepareOriginal hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+  productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
+  inventory <- maybe (fail "current original admission did not issue its inventory") pure
+    (preparedCurrentOriginalInventory productContext)
+  let products = preparedProductInventory productContext
+      roots = Set.fromList (map (projectionEntry . contextFor) targets
+        ++ projectionAuxiliaryRoots firstContext)
+      originalBindings = currentOriginalBindingsExcept inventory roots
+      withOriginals context = context {projectionCurrentOriginals = originalBindings}
+      admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
   let originalProducts =
         [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
           either (Left . show) Right outcome)
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-  recover <- newPreparedRecoveryWithPackageRoots hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
-    (compilerPreparedBodies recoveryCaches) certifiedHomes (contextFor firstTarget) originalModules []
+  let newRecovery = case recoveryExecutor caches of
+        Nothing -> newPreparedRecoveryWithPackageRoots
+        Just executor -> newPreparedRecoveryWithExecutor executor
+  recover <- newRecovery hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
+    (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []
   artifacts <- forM targets $ \target -> do
-    let context = contextFor target
+    let context = withOriginals (contextFor target)
     -- Package roots grow only from the finite exact original-group inventory.
     -- Recovered package code may expose another original group; rescan each
     -- projected target before admitting the final executable closure.
@@ -633,14 +661,14 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
             project (prepareProjectionWithReachability finalContext
               (closureModules recovered) (closureReachability recovered))
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
+          project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders
+            (candidateGlobals candidate))
           required <- either (ioError . userError) pure
             (originalPackageGlobals (candidateGlobals candidate))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
           if nextRoots == roots
             then do
               (program, constructors) <- project (finalizePreparedCandidate candidate)
-              project (requireOriginalExecutableGlobals hscEnv externalOriginalBinders products
-                (programGlobals program))
               pure (recovered, program, constructors, roots)
             else do
               packageRoots <- forM nextRoots $ \identity -> do
@@ -1051,7 +1079,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           _ -> []
     sessionBindings <- prepareSessionBindings boundNames result
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
@@ -1564,7 +1592,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
   originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
-  (artifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
+  (artifacts, productContext) <- prepareArtifacts originalInterfaces directory caches prepared
     ["__result"] [] (requestRetainedGenerations args) []
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts

@@ -1246,7 +1246,9 @@ fn settle_checked_snapshot(
     // The next snapshot owns the complete exact dependency closure before
     // the previous snapshot can drop. Outstanding compiler owners
     // keep their own old snapshot and lexical lease until they finish.
-    let retained = session.retain_lexical_scope(scope)?;
+    // Settlement must retain the scope validated by this operation without
+    // retiring it through housekeeping after its visible writes have committed.
+    let retained = session.retain_current_lexical_scope(scope)?;
     let (native_imports, added_native) = match native_delta {
         Some(delta) => state
             .snapshot
@@ -1722,6 +1724,9 @@ impl PersistentSession {
         &mut self,
         admission: Arc<RuntimeCheckedItemAdmission>,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
+        // A lease dropped off checkout revokes its scope at the next entry,
+        // before any declaration can commit against that scope's old view.
+        self.reap_admission_leases();
         let prefix = &admission.prefix;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.visibility.scope;
@@ -1863,6 +1868,15 @@ impl PersistentSession {
         source: ScopeId,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         self.reap_admission_leases();
+        self.retain_current_lexical_scope(source)
+    }
+
+    /// Retain the current operation's scope without processing off-checkout
+    /// retirements in the middle of a commit and its snapshot settlement.
+    fn retain_current_lexical_scope(
+        &mut self,
+        source: ScopeId,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         let scope = self
             .mint_detached_scope(source)
             .ok_or(SessionError::DeadScope(source))?;

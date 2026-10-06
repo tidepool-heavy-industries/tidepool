@@ -755,6 +755,7 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                         ActorExitKind::Completed
                     },
                     summary: "target stopped".into(),
+                    diagnostic: None,
                 };
                 let mut changed = 0;
                 for (key, request) in requests.iter_mut().enumerate() {
@@ -787,6 +788,7 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                     &ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: "owner stopped".into(),
+                        diagnostic: None,
                     },
                 );
             }

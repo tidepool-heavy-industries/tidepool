@@ -117,7 +117,11 @@ pub enum KernelCallFailure {
     #[error("target actor {0} has closed mailbox admission")]
     MailboxClosed(ActorRef),
     #[error("target actor {actor:?} failed while handling the call: {detail}")]
-    Handler { actor: ActorRef, detail: String },
+    Handler {
+        actor: ActorRef,
+        detail: String,
+        diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+    },
 }
 
 pub type KernelCallReply = Result<MailboxValue, KernelCallFailure>;
@@ -131,12 +135,14 @@ pub enum KernelInvocationFailure {
         actor: ActorRef,
         detail: String,
         receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+        diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
     },
     #[error("actor {actor} invocation failed: {detail}")]
     Failed {
         actor: ActorRef,
         detail: String,
         receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+        diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
     },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
     CleanupUnconfirmed {
@@ -158,6 +164,20 @@ pub enum KernelInvocationFailure {
 }
 
 impl KernelInvocationFailure {
+    pub fn failure_diagnostic(&self) -> Option<&tidepool_toolchain::failclass::FailureEnvelope> {
+        match self {
+            Self::Failed { diagnostic, .. } | Self::Rejected { diagnostic, .. } => {
+                diagnostic.as_ref()
+            }
+            Self::Workbench(failure) => failure.diagnostic.as_ref(),
+            Self::TerminalTransferFailed { source, .. } => source.failure_diagnostic(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn into_behavior_error(self) -> KernelBehaviorError {
+        KernelBehaviorError::with_diagnostic(self.to_string(), self.failure_diagnostic().cloned())
+    }
     /// Receipts retained by the admitted execution, including terminal cleanup
     /// and transfer failures. The failure class remains independently typed.
     pub fn receipts(&self) -> &[tidepool_runtime::session::WorkbenchItemReceipt] {
@@ -1010,12 +1030,14 @@ impl LocalActorRef {
             })
             .map_err(|error| KernelBehaviorError {
                 detail: format!("prepared actor {:?}: {error}", self.identity),
+                diagnostic: None,
             })?;
         receive.await.map_err(|_| KernelBehaviorError {
             detail: format!(
                 "prepared actor {:?} cleanup outcome unavailable",
                 self.identity
             ),
+            diagnostic: None,
         })?
     }
     pub(crate) fn fence_replacement(&self) -> Result<(), KernelBehaviorError> {
@@ -1023,6 +1045,7 @@ impl LocalActorRef {
             .fence(&self.address, KernelMessage::ReplacementFence)
             .map_err(|error| KernelBehaviorError {
                 detail: error.to_string(),
+                diagnostic: None,
             })
     }
     /// Close admission after behavior validation. This acknowledges the fence;
@@ -1052,6 +1075,7 @@ impl LocalActorRef {
         receive.await.map_err(|_| KernelInvocationFailure::Failed { receipts: Vec::new(),
             actor: self.identity,
             detail: "replacement outcome unavailable; inspect retained actor state before further action".into(),
+            diagnostic: None,
         })?
     }
 
@@ -1069,6 +1093,7 @@ impl LocalActorRef {
                 receipts: Vec::new(),
                 actor: self.identity,
                 detail: error.detail,
+                diagnostic: error.diagnostic,
             })
     }
     #[must_use]
@@ -1159,6 +1184,7 @@ impl LocalActorRef {
             actor: self.identity,
             detail,
             receipts: Vec::new(),
+            diagnostic: None,
         };
         self.admission
             .claim_idle()

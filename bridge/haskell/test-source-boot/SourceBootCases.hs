@@ -19,6 +19,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (decodeListLen, decodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
+import Data.Bits (testBit)
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Data.IntMap.Strict qualified as IntMap
@@ -95,11 +96,14 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
-  , requireOriginalExecutableGlobals, certifiedExecutionSource )
+  , requireOriginalExecutableGlobals, certifiedExecutionSource
+  , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
+  , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts)
+import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
@@ -2344,8 +2348,56 @@ structuralCandidate work = do
     Left reason -> fail ("production structural candidate codec refused: " ++ reason)
     _ -> fail "structural producer-group candidate did not decode"
 
+-- Exhaust the three-group reference graphs and every failed-binder subset.
+-- The list-based oracle recomputes all facts until no owner changes; it shares
+-- neither the production reverse index nor its worklist traversal.
+originalGraphClosureProperties :: IO ()
+originalGraphClosureProperties = do
+  let binder name = SymbolIdentity "main" "GraphModel" "value" (T.pack name) Nothing
+      owned = [(binder "a",(0 :: Int,0 :: Int)),(binder "sibling",(0,1)),(binder "b",(1,0))]
+      missing = binder "missing"
+      groupKeys = map snd owned
+      symbols = map fst owned
+      recomputeGroups dependencies unavailable = close []
+        where
+          close blocked =
+            let unavailable' = unavailable ++ [symbol | (symbol,key) <- owned, key `elem` blocked]
+                expanded = [key | key <- groupKeys
+                  , key `elem` blocked
+                    || any (\(symbol,owner) -> owner == key && symbol `elem` unavailable') owned
+                    || any (`elem` unavailable') (maybe [] id (lookup key dependencies))]
+            in if expanded == blocked then blocked else close expanded
+      recomputeModules dependencies blocked = close [owner | (owner,_) <- blocked]
+        where
+          close modules =
+            let unavailable = [symbol | (symbol,(owner,_)) <- owned, owner `elem` modules]
+                expanded = Set.toAscList (Set.fromList (modules ++ [owner
+                  | ((owner,_),references) <- dependencies, any (`elem` unavailable) references]))
+            in if expanded == Set.toAscList (Set.fromList modules) then expanded else close expanded
+  forM_ [0 .. 511 :: Int] $ \edges ->
+    forM_ [0 .. 7 :: Int] $ \failures ->
+      forM_ [False,True] $ \externalMissing -> do
+        let dependencies = [(key,[symbol | (column,symbol) <- zip [0..] symbols
+                  , testBit edges (row * 3 + column)]
+                  ++ [missing | externalMissing && row == 0])
+              | (row,key) <- zip [0..] groupKeys]
+            unavailable = [symbol | (index,symbol) <- zip [0..] symbols, testBit failures index]
+              ++ [missing | externalMissing]
+            expectedGroups = Set.fromList (recomputeGroups dependencies unavailable)
+            expectedModules = Set.fromList (recomputeModules dependencies (Set.toList expectedGroups))
+            indexed = Map.fromList [(key,Set.fromList references) | (key,references) <- dependencies]
+            owners = Map.fromList owned
+            actualGroups = closeUnavailableOriginalGroups indexed owners (Set.fromList unavailable)
+            actualModules = closeUnavailableOriginalModules indexed owners actualGroups
+        unless (actualGroups == expectedGroups && actualModules == expectedModules) $
+          fail ("original graph closure differs from full recomputation: edges=" ++ show edges
+            ++ ", failures=" ++ show failures ++ ", external=" ++ show externalMissing
+            ++ ", expected=" ++ show (expectedGroups,expectedModules)
+            ++ ", actual=" ++ show (actualGroups,actualModules))
+
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
+  originalGraphClosureProperties
   let identity :: String -> String -> String -> SymbolIdentity
       identity unit moduleName' occurrence =
         SymbolIdentity (T.pack unit) (T.pack moduleName') (T.pack "value") (T.pack occurrence) Nothing
@@ -2440,6 +2492,10 @@ originalProjectionProducts = withScratch $ \work -> do
       incompleteProductContext =
         projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules
       incompleteProducts = preparedModuleProductOutcomes incompleteProductContext
+      availableOf productContext = Set.fromList
+        [binder | (_,Right groups) <- preparedModuleProductOutcomes productContext
+          , group <- groups, binder <- projectedBinders group]
+      incompleteBinders = availableOf incompleteProductContext
       moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
       rejectedByMissing prepared = case moduleOutcome prepared of
         Just (Left (UnavailableOriginalHomeDependencies identities)) -> any (`Set.member` providerBinders) identities
@@ -2450,7 +2506,7 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "unavailable module sibling did not reject its consumers while preserving an independent owner"
   let safeContext = pairedContext { projectionEntry = safe }
   safeProgram <- either (fail . show) pure (projectPrepared safeContext [independent])
-  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+  unless (requireOriginalExecutableGlobals pairedEnv incompleteBinders
       (programGlobals safeProgram) == Right ()) $
     fail "unselected unavailable home owner rejected an independent executable"
   bad <- findBinder ownerModule "bad"
@@ -2461,21 +2517,61 @@ originalProjectionProducts = withScratch $ \work -> do
           , globalIdentity global `Set.member` providerBinders]
   unless (not (Set.null demanded)) $
     fail "final executable availability control lost its genuine missing-provider demand"
-  case requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+  case requireOriginalExecutableGlobals pairedEnv incompleteBinders
       (programGlobals badProgram) of
     Left (UnavailableOriginalHomeDependencies missing)
       | Set.fromList missing == demanded -> pure ()
     other -> fail ("final emitted home demand lost its typed unavailable outcome: " ++ show other)
-  unless (requireOriginalExecutableGlobals pairedEnv providerBinders incompleteProductContext
+  unless (requireOriginalExecutableGlobals pairedEnv (Set.union providerBinders incompleteBinders)
       (programGlobals badProgram) == Right ()) $
     fail "native original binding census did not satisfy the emitted home demand"
   let completeProducts = projectOriginalHomeModuleProducts pairedEnv pairedInterfaces
         pairedContext mempty (pprModules paired)
-  unless (requireOriginalExecutableGlobals pairedEnv mempty completeProducts
+  unless (requireOriginalExecutableGlobals pairedEnv (availableOf completeProducts)
       (programGlobals badProgram) == Right ()) $
     fail "successfully projected original did not satisfy the emitted home demand"
+  -- The compiler issuer supplies the same native originals to projection and
+  -- publication. A current support owner becomes a source import, while the
+  -- actual entry's whole recursive group remains inline.
+  let captureDirectory = work </> "current-original-products"
+      entry = SymbolIdentity "main" "ProjectionConsumer" "value" "usesGood" Nothing
+  createDirectory captureDirectory
+  currentInterfaces <- newOriginalInterfaceArtifacts pairedEnv (pprFinalizedModules paired)
+    (retainedOriginalInterfaces paired) captureDirectory
+  currentContext <- prepareCompilerProjectionContext paired Map.empty (pmModule consumer)
+    "usesGood" [] Nothing
+  (currentModules,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
+    currentContext Set.empty (pprModules paired)
+  issuedContext <- admitCurrentOriginalProducts currentInterfaces captureDirectory paired rawContext
+  issued <- maybe (fail "genuine original issuer did not return its inventory") pure
+    (preparedCurrentOriginalInventory issuedContext)
+  let importedNames = currentOriginalBindingsExcept issued (Set.singleton entry)
+      importedSymbols = Set.fromList (Map.elems importedNames)
+      currentProjection = currentContext {projectionCurrentOriginals = importedNames}
+  unless (known `Set.member` importedSymbols && entry `Set.notMember` importedSymbols
+      && importedSymbols `Set.isSubsetOf` currentOriginalBinders issued) $
+    fail "current original boundary lost supported names or imported its own entry"
+  currentProgram <- either (fail . show) pure (projectPrepared currentProjection currentModules)
+  let currentGlobals = [global | global <- programGlobals currentProgram
+        , globalIdentity global `Set.member` importedSymbols]
+      currentDefinitions = Set.fromList [identity' | group <- programBindings currentProgram
+        , TopBinding identity' _ <- case group of
+            NonRecursive binding -> [binding]
+            Recursive bindings -> bindings]
+  unless (any ((== known) . globalIdentity) currentGlobals
+      && all ((== Nothing) . globalRequiredGeneration) currentGlobals
+      && Set.null (currentDefinitions `Set.intersection` importedSymbols)
+      && entry `Set.member` currentDefinitions) $
+    fail "target duplicated a current support group or assigned a retained generation"
+  currentCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    captureDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
+        , let (_,_,_,groups) = moduleProductInput product'
+        , group <- groups, binder <- projectedBinders group]
+  unless (emittedBinders == currentOriginalBinders issued) $
+    fail "writer changed the compiler-issued original availability boundary"
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
-  case requireOriginalExecutableGlobals pairedEnv wrongUnitBinders incompleteProductContext
+  case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
       (programGlobals badProgram) of
     Left (UnavailableOriginalHomeDependencies missing)
       | Set.fromList missing == demanded -> pure ()
@@ -2484,7 +2580,7 @@ originalProjectionProducts = withScratch $ \work -> do
         [if globalIdentity global `Set.member` demanded
           then global {globalRequiredGeneration = Just 7} else global
         | global <- programGlobals badProgram]
-  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext retainedGlobals
+  unless (requireOriginalExecutableGlobals pairedEnv incompleteBinders retainedGlobals
       == Right ()) $
     fail "retained generation reopened its original native implementation"
   _ <- certifyProjectedProducts work "independent-after-product-rejection" paired incompleteProducts

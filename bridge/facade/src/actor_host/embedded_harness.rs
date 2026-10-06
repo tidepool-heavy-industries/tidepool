@@ -709,6 +709,7 @@ impl HostActor for EmbeddedHostActor {
                     .shutdown(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: "embedded host requested retirement".into(),
+                        diagnostic: None,
                     })
                     .await
                     .map_err(|error| HostControlError::Unconfirmed(error.to_string()))?;
@@ -948,9 +949,7 @@ impl EmbeddedDispatcher {
 
 fn provider_tool_error(error: ResidentToolError) -> ProviderError {
     let diagnostic = match &error {
-        ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
-            failure,
-        )) => failure.diagnostic.as_ref(),
+        ResidentToolError::Invocation(failure) => failure.failure_diagnostic(),
         _ => None,
     };
     let invocation = match &error {
@@ -1487,6 +1486,7 @@ mod round_control_tests {
                     actor: ActorRef::first(exomonad_actor::ActorId(1)),
                     detail: "native abort with retained prefix".into(),
                     receipts: Vec::new(),
+                    diagnostic: None,
                 }),
             }),
         );
@@ -2173,6 +2173,7 @@ mod tests {
                 .shutdown(ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "request snapshot retirement race".into(),
+                    diagnostic: None,
                 })
                 .await
         });

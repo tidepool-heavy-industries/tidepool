@@ -205,6 +205,7 @@ where
                 receipts: Vec::new(),
                 actor: owned.state.effects.context.actor,
                 detail: "the active source installation vanished before spec preparation".into(),
+                diagnostic: None,
             }),
         };
         let (context, authority) = match selected {
