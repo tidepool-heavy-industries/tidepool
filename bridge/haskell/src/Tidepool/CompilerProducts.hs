@@ -92,7 +92,7 @@ import Tidepool.PreparedStg
 import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks)
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule
-  , admittedOriginalProof, admittedOriginalInterface, originalVersionInScope, originalVersionSeal )
+  , admittedOriginalProof, admittedOriginalInterface, originalVersionLookup, originalVersionSeal )
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing
@@ -372,10 +372,11 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
   attemptedRef <- newIORef Set.empty
   rawRef <- newIORef Map.empty
   knownRef <- newIORef external
-  let ownerVersion selected owner =
+  let canonicalVersion = maybe (const Nothing) originalVersionLookup exact
+      ownerVersion selected owner =
         let unit = unitString (moduleUnit owner)
             name = moduleNameString (moduleName owner)
-        in case exact >>= (`originalVersionInScope` owner) of
+        in case canonicalVersion owner of
           Just version -> Just (ReuseModule unit name CanonicalSeal (originalVersionSeal version))
           Nothing -> case Map.lookup (moduleName owner) selected of
             Just iface | mi_module iface == owner ->
@@ -491,11 +492,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         originals <- readIORef rawRef
         admitted <- readIORef admittedRef
         let owners = Set.fromList (map pmModule initial)
-            sameVersion owner = case (exact,selectedExact) of
-              (Just old,Just current) -> case
-                  (originalVersionInScope old owner,originalVersionInScope current owner) of
-                (Just previous,Just selectedVersion) -> previous == selectedVersion
-                _ -> False
+            selectedVersion = maybe (const Nothing) originalVersionLookup selectedExact
+            sameVersion owner = case (canonicalVersion owner,selectedVersion owner) of
+              (Just previous,Just current) -> previous == current
               _ -> False
             selected = Map.union selectedInterfaces (Map.fromList
               [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))

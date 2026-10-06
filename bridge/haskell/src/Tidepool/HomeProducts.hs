@@ -8,7 +8,7 @@ module Tidepool.HomeProducts
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
-  , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionSeal
+  , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionLookup, originalVersionSeal
   , OriginalRecoveryScope, admitOriginalRecoveryScope, originalVersionInRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
   , revalidateAdmittedCore ) where
 
@@ -137,6 +137,19 @@ originalVersionInScope scope owner = originalVersionFromRows scope owner
   [row | row@(artifact,_,_) <- scopeInterfaces scope
     , (exactUnit artifact,exactModule artifact) == originalOwnerKey owner]
 
+-- A descriptor-only view for callers comparing several owners. Acquiring
+-- this function once shares the scope index; it does not admit any body.
+originalVersionLookup :: ExactScope -> (Module -> Maybe OriginalVersion)
+originalVersionLookup scope =
+  let interfaces = originalInterfaceRows scope
+  in \owner -> originalVersionFromRows scope owner
+       (Map.findWithDefault [] (originalOwnerKey owner) interfaces)
+
+originalInterfaceRows :: ExactScope -> Map.Map (String,String) [(ExactIfaceArtifact,FilePath,String)]
+originalInterfaceRows scope = Map.fromListWith (++)
+  [((exactUnit artifact,exactModule artifact),[row])
+    | row@(artifact,_,_) <- scopeInterfaces scope]
+
 originalOwnerKey :: Module -> (String,String)
 originalOwnerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
 
@@ -170,9 +183,7 @@ data OriginalRecoveryScope = OriginalRecoveryScope HscEnv ExactScope
 admitOriginalRecoveryScope :: HscEnv -> ExactScope -> IO OriginalRecoveryScope
 admitOriginalRecoveryScope env scope = do
   either (ioError . userError) pure =<< revalidateExactScope env scope
-  let interfaces = Map.fromListWith (++)
-        [((exactUnit artifact,exactModule artifact),[row])
-          | row@(artifact,_,_) <- scopeInterfaces scope]
+  let interfaces = originalInterfaceRows scope
       seals = Map.fromList [((exactUnit artifact,exactModule artifact),exactSha256 artifact)
         | (artifact,_,_) <- scopeInterfaces scope]
   pure (OriginalRecoveryScope env scope interfaces seals)
