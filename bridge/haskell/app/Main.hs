@@ -253,8 +253,11 @@ runParsedInvocation compilerScope caches parsedWorkerRequest = do
             PreparedProducts _ -> WithPreparedModuleCompletion completion selection
             _ -> selection
           scope = compilerScope
-            { scopedCompile = \selection -> scopedCompile compilerScope
-                (WithCompilerExecution grant executor (observeProducts selection))
+            { scopedCompile = \selection retained purpose session source includes products -> do
+                writeIORef originalWorklist Nothing
+                scopedCompile compilerScope
+                  (WithCompilerExecution grant executor (observeProducts selection))
+                  retained purpose session source includes products
             , scopedExecutor = Just executor
             }
       runGrantedInvocation scope (caches
