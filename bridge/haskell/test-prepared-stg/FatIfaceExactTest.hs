@@ -188,7 +188,7 @@ scenario = do
         FatIfaceFound groups -> do
           let calls = [identifier | group <- groups
                 , rhs <- case group of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-                , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isFCallId rhs)]
+                , identifier <- nonDetEltsUniqSet (exprSomeFreeVars (\identifier -> isId identifier && isFCallId identifier) rhs)]
           assert (not (null calls) && all (not . isExternalName . varName) calls)
             "compiled FFI fixture did not decode a genuine internal-name operation Id"
           _ <- evaluate (sum (map Set.size (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] groups))))))
@@ -674,7 +674,7 @@ demandedOriginalGroups requested groups = Set.size (walk Set.empty roots)
       | (ordinal, binding) <- groups
       , rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
       , free <- nonDetEltsUniqSet (exprSomeFreeVars
-          (\identifier -> not (isFCallId identifier) && (isLocalId identifier ||
+          (\identifier -> isId identifier && not (isFCallId identifier) && (isLocalId identifier ||
             (isId identifier && not (isExternalName (varName identifier))))) rhs)
       , Just target <- [lookup (varName free) owners]]
     walk seen [] = seen
