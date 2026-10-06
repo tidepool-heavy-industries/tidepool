@@ -38,6 +38,45 @@ class NativeQualificationTests(unittest.TestCase):
                     qualification.run_cohort(SimpleNamespace())
                 verify.assert_not_called()
 
+    def test_frozen_cohort_rejects_otherwise_passing_diagnostic_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'descriptor.json'
+            descriptor_path.write_text('{}')
+            descriptor = {
+                'external_inputs': {'runtime_tools': {'path': str(root / 'tools')}},
+                'cohorts': {'m2': {'tests': ['suite::works'], 'expected_count': 1,
+                                  'timeout': 900, 'ignored': False}},
+                'programs': {'runner': '/declared/runner', 'libtest': '/declared/libtest'},
+                'source_oid': 'recorded-source', 'harness_revision': 'recorded-harness',
+                'profile': 'recorded-profile', 'stdlib_mode': 'source-backed',
+                'environment': {},
+            }
+            for label, marker, expected in [('standard', None, 0), ('diagnostic', '600', 1)]:
+                with self.subTest(label=label):
+                    output = root / label
+                    args = SimpleNamespace(jobs=1, service_slice=None, delegated_service=False,
+                                           descriptor=descriptor_path, cohort='m2', output=output)
+                    execution = {'executed_test_count': 1, 'exit_code': 0}
+                    if marker is not None:
+                        execution['startup_diagnostic_seconds'] = marker
+                    receipt = {'test': 'suite::works', 'passed': True, 'execution': execution}
+                    def run(command, **kwargs):
+                        tests = output / 'tests'
+                        tests.mkdir()
+                        (tests / 'case.json').write_text(json.dumps(receipt))
+                        return subprocess.CompletedProcess(command, 0)
+                    with patch.dict(os.environ, {}, clear=True), \
+                         patch.object(qualification, 'verify', return_value=descriptor), \
+                         patch.object(qualification.subprocess, 'run', side_effect=run):
+                        code = qualification.run_cohort(args)
+                    report = json.loads((output / 'report.json').read_text())
+                    self.assertEqual(code, expected)
+                    self.assertEqual(report['completed'], expected == 0)
+                    self.assertEqual(report['runner_exit_code'], 0)
+                    self.assertEqual(report['executed_test_count'], 1)
+                    self.assertTrue(report['tests'][0]['passed'])
+
     def test_runtime_tool_owner_checks_declared_executable_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
