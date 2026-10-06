@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -37,6 +38,29 @@ def sha(path):
 def available():
     return int(next(row.split()[1] for row in Path("/proc/meminfo").read_text().splitlines()
                     if row.startswith("MemAvailable:"))) * 1024
+
+
+def settle(process, *, grace=10, stop=False):
+    """Reap one owned helper; compiler shutdown is still the frontend's job."""
+    if process is None:
+        return None
+    forced = False
+    if stop and process.poll() is None:
+        process.terminate()
+    try:
+        code = process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        forced = True
+        process.kill()
+        code = process.wait(timeout=5)
+    return {"exit_code": code, "forced_kill": forced}
+
+
+def check_running(out, deadline):
+    if (out / "cancel").exists():
+        raise ValueError("campaign cancelled; settle through existing process owners")
+    if time.monotonic() >= deadline:
+        raise TimeoutError("bounded campaign deadline expired")
 
 
 class Trace:
@@ -80,6 +104,18 @@ def physical(rows):
         digest = row.get("compile_request")
         if not isinstance(identity, str) or not identity or not isinstance(digest, str) or not digest:
             raise ValueError("missing typed physical request identity")
+        for field in ("admission_id", "request_ordinal", "compiler_jobs", "compiler_capabilities"):
+            if type(row.get(field)) is not int or row[field] <= 0:
+                raise ValueError("missing actual positive identity/grant: " + field)
+        if type(row.get("worker")) is not int or row["worker"] < 0:
+            raise ValueError("missing actual worker slot")
+        epoch = row.get("daemon_epoch")
+        if not isinstance(epoch, str) or not epoch:
+            raise ValueError("missing actual daemon epoch")
+        if row.get("compiler_workload") not in {"foreground", "preparation"}:
+            raise ValueError("missing closed workload class")
+        if identity != f'{epoch}:{row["admission_id"]}:{row["request_ordinal"]}':
+            raise ValueError("physical identity disagrees with actual ownership tuple")
         entry = requests.setdefault(identity, {})
         kind = "start" if row["message"].endswith("started") else "finish"
         if kind in entry:
@@ -92,11 +128,8 @@ def physical(rows):
                       "daemon_epoch", "request_ordinal", "compiler_jobs", "compiler_capabilities"):
             if field not in entry["start"] or entry["start"][field] != entry["finish"].get(field):
                 raise ValueError("request ownership/grant changed: " + field)
-        if entry["finish"].get("exit_code") != 0:
+        if type(entry["finish"].get("exit_code")) is not int or entry["finish"]["exit_code"] != 0:
             raise ValueError("actual compiler failure")
-        for field in ("compiler_jobs", "compiler_capabilities"):
-            if type(entry["start"][field]) is not int or entry["start"][field] <= 0:
-                raise ValueError("missing actual positive grant")
         if stamp(entry["finish"]) < stamp(entry["start"]):
             raise ValueError("negative physical service interval")
     return list(requests.values())
@@ -165,6 +198,7 @@ def inside(plan):
         warm = []
         try:
             while time.monotonic() < deadline and foreground.poll() is None:
+                check_running(out, deadline)
                 trace.poll()
                 warm = [r for r in trace.rows if r["message"] == "compiler request finished"
                         and r.get("compiler_workload") == "foreground"]
@@ -176,6 +210,7 @@ def inside(plan):
             if len(warm) < 2:
                 raise ValueError("native warmup did not settle")
             for iteration in range(plan["maximum_preparation_requests"]):
+                check_running(out, deadline)
                 if foreground.poll() is not None:
                     break
                 if available() < RESERVE:
@@ -192,23 +227,32 @@ def inside(plan):
                 save(out / "preparation-execution.json", rows)
                 with (out / f"preparation-{iteration:02}.stdout").open("xb") as bg_out, \
                      (out / f"preparation-{iteration:02}.stderr").open("xb") as bg_err:
-                    result = subprocess.run(command, stdout=bg_out, stderr=bg_err,
-                                            timeout=min(300, max(.1, deadline - time.monotonic())))
-                row.update(exit_code=result.returncode, finished_ns=time.monotonic_ns())
+                    background = subprocess.Popen(command, stdout=bg_out, stderr=bg_err)
+                    try:
+                        bg_deadline = min(deadline, time.monotonic() + 300)
+                        while background.poll() is None:
+                            check_running(out, bg_deadline)
+                            if foreground.poll() not in (None, 0):
+                                raise ValueError("foreground failed while preparation was active")
+                            time.sleep(.05)
+                    finally:
+                        row["client_settlement"] = settle(background, grace=30, stop=True)
+                        save(out / "preparation-execution.json", rows)
+                row.update(exit_code=background.returncode, finished_ns=time.monotonic_ns())
                 save(out / "preparation-execution.json", rows)
-                if result.returncode or (foreground.poll() not in (None, 0)):
+                if background.returncode or (foreground.poll() not in (None, 0)):
                     raise ValueError("first actual compiler/notebook failure; stop variants")
-            code = foreground.wait(timeout=max(.1, deadline - time.monotonic()))
+            while foreground.poll() is None:
+                check_running(out, deadline)
+                time.sleep(.05)
+            code = foreground.returncode
             if code:
                 raise ValueError(f"counted native workload failed: {code}")
         finally:
-            if foreground.poll() is None:
-                foreground.terminate()
-                try:
-                    foreground.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    foreground.kill()
-                    foreground.wait()
+            # The counted runner's existing SIGTERM handler stops its delegated
+            # service/process groups. Do not terminate the compiler frontend:
+            # it must observe this child exit and acknowledge STOP/reap itself.
+            save(out / "foreground-settlement.json", settle(foreground, grace=30, stop=True))
     return 0
 
 
@@ -289,29 +333,60 @@ def main():
                       "--cases", str(output / "counted-results"), "--output", str(output / "authored-sources"),
                       "--finished", str(output / "finished"),
                       "--recipe", str(support / "guarded50-source-recipe/manifest.json")]
-    source_observer = subprocess.Popen(source_command, stdout=subprocess.DEVNULL)
-    with (output / "owner.stdout").open("xb") as stdout, (output / "owner.stderr").open("xb") as stderr:
-        owner = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
-        observer = subprocess.Popen([sys.executable, str(support / "observe-resources.py"),
-                                     "--pid", str(owner.pid), "--seconds", "1900",
-                                     "--output", str(output / "resources.jsonl")], stdout=subprocess.DEVNULL)
-        try:
-            code = owner.wait(timeout=1900)
-        except subprocess.TimeoutExpired:
-            owner.terminate()
-            try:
-                owner.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                owner.kill()
-                owner.wait()
-            code = 124
-    (output / "finished").write_text(str(code))
-    source_observer.wait(timeout=10)
+    source_observer = owner = observer = None
+    settlement, failure, code = {}, None, 1
+    old_term = signal.getsignal(signal.SIGTERM)
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt("campaign cancellation requested")
+    signal.signal(signal.SIGTERM, interrupted)
     try:
-        observer.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        observer.terminate()
-        observer.wait(timeout=5)
+        source_observer = subprocess.Popen(source_command, stdout=subprocess.DEVNULL)
+        with (output / "owner.stdout").open("xb") as stdout, (output / "owner.stderr").open("xb") as stderr:
+            owner = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
+            observer = subprocess.Popen([sys.executable, str(support / "observe-resources.py"),
+                                         "--pid", str(owner.pid), "--seconds", "1900",
+                                         "--output", str(output / "resources.jsonl")], stdout=subprocess.DEVNULL)
+            code = owner.wait(timeout=1900)
+    except BaseException as error:
+        failure = f"{type(error).__name__}: {error}"
+    finally:
+        # The inner workflow polls this marker even during an active request,
+        # settles its clients/runner, and returns to the frontend shutdown owner.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            try:
+                (output / "cancel").touch()
+            except OSError as error:
+                settlement["cancellation_marker"] = {"error": str(error)}
+            try:
+                (output / "finished").write_text(str(code))
+            except OSError as error:
+                settlement["finished_marker"] = {"error": str(error)}
+            for name, process, grace in (("owner", owner, 90),
+                                         ("source_observer", source_observer, 10),
+                                         ("resource_observer", observer, 5)):
+                try:
+                    settlement[name] = settle(process, grace=grace)
+                except BaseException as error:
+                    settlement[name] = {"error": f"{type(error).__name__}: {error}"}
+        finally:
+            signal.signal(signal.SIGINT, old_int)
+            signal.signal(signal.SIGTERM, old_term)
+            save(output / "process-settlement.json", settlement)
+    if failure or any(row and (row.get("forced_kill") or row.get("error") or row.get("exit_code", 0) != 0)
+                      for row in settlement.values()):
+        receipt = None
+        try:
+            receipt = json.loads((output / "compiler/lifecycle.json").read_text())
+        except (OSError, ValueError):
+            pass
+        save(output / "summary.json", {"status": "failed", "exception": failure,
+                                       "process_settlement": settlement,
+                                       "actual_frontend_lifecycle": receipt,
+                                       "cleanup_confirmed": receipt.get("cleanup_confirmed")
+                                       if isinstance(receipt, dict) else None})
+        return 1
     lifecycle = json.loads((output / "compiler/lifecycle.json").read_text())
     trace = Trace(output / "compiler/compiler.jsonl")
     trace.poll(final=True)

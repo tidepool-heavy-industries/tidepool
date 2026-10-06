@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 import json
+import subprocess
+import sys
 
 SPEC = importlib.util.spec_from_file_location("contention", Path(__file__).with_name("compiler-warm-contention.py"))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -12,9 +14,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 def envelope(index, workload, start, end):
-    base = {"physical_execution": f"epoch:{index}:1", "compile_request": f"request-{index}",
+    base = {"physical_execution": f"epoch:{index + 1}:1", "compile_request": f"request-{index}",
             "compiler_workload": workload, "worker": 0 if workload == "foreground" else 1,
-            "admission_id": index, "daemon_epoch": "epoch", "request_ordinal": 1,
+            "admission_id": index + 1, "daemon_epoch": "epoch", "request_ordinal": 1,
             "compiler_jobs": 2, "compiler_capabilities": 2}
     return [{**base, "message": "compiler request started", "observed_timestamp": start},
             {**base, "message": "compiler request finished", "observed_timestamp": end, "exit_code": 0}]
@@ -61,6 +63,28 @@ class EvidenceControls(unittest.TestCase):
         rows[-2]["worker"] = rows[-1]["worker"] = 0
         with self.assertRaises(ValueError):
             MODULE.analyze(rows)
+
+    def test_paired_malformed_ownership_and_tuple_refuse(self):
+        for field in ("worker", "admission_id", "request_ordinal", "daemon_epoch"):
+            for malformed in (None, False, [], ""):
+                rows = workload()
+                rows[0][field] = rows[1][field] = malformed
+                with self.assertRaises(ValueError):
+                    MODULE.analyze(rows)
+        rows = workload()
+        rows[0]["physical_execution"] = rows[1]["physical_execution"] = "different:1:1"
+        with self.assertRaises(ValueError):
+            MODULE.analyze(rows)
+
+    def test_local_helper_is_reaped_after_stop_and_forced_fallback(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+        row = MODULE.settle(child, grace=1, stop=True)
+        self.assertIsNotNone(child.poll())
+        self.assertFalse(row["forced_kill"])
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+        row = MODULE.settle(child, grace=.01)
+        self.assertIsNotNone(child.poll())
+        self.assertTrue(row["forced_kill"])
 
     def test_partial_live_line_waits_but_final_line_refuses(self):
         with tempfile.TemporaryDirectory() as root:
