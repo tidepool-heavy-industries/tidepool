@@ -182,9 +182,11 @@ def delegated_command(args, timeout, service_slice, record, environment=None, de
     return command, unit
 
 
-def observe_delegated_admission(unit, record, finished):
+def observe_delegated_admission(unit, record, finished, final=False):
     """A registered transient invocation proves this launch reached the manager."""
-    while not finished.is_set():
+    first = True
+    while first or (not final and not finished.is_set()):
+        first = False
         try:
             observed = subprocess.run([
                 record.get('systemd_tools', {}).get('systemctl', 'systemctl'),
@@ -200,6 +202,8 @@ def observe_delegated_admission(unit, record, finished):
                 return
         except (OSError, subprocess.SubprocessError) as error:
             record['manager_observation_error'] = str(error)
+        if final:
+            return
         finished.wait(0.05)
 
 
@@ -233,7 +237,8 @@ def stop_delegated_service(unit, record):
         wait_fenced = record.get('manager_wait_success') is True
         service_stopped = (
             observed.returncode == 0 and state.get('LoadState') == 'not-found'
-            and (wait_fenced or (stopped.returncode == 0 and reset_failed_exit_code == 0))
+            and (wait_fenced or (stopped.returncode == 0
+                                 and reset_failed_exit_code in (None, 0)))
         ) or (
             stopped.returncode == 0 and observed.returncode == 0
             and state.get('LoadState') == 'loaded' and state.get('ActiveState') == 'inactive'
@@ -298,6 +303,13 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
             if observer is not None:
                 observer.join(timeout=2)
             service_record['admission_observer_stopped'] = observer is None or not observer.is_alive()
+            if (not service_record.get('manager_admission')
+                    and service_record.get('manager_wait_success') is not True):
+                # The polling observer can finish just before systemd retains
+                # a fast failed unit. Query once synchronously before stop or
+                # reset-failed can erase the exact invocation receipt.
+                observe_delegated_admission(unit, service_record,
+                                            observer_finished, final=True)
             stop_delegated_service(unit, service_record)
     # Test leaders sometimes leave a detached same-group child after a passing
     # result. The process group remains the cleanup owner through this point.

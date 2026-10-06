@@ -706,6 +706,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         runner.INTERRUPT_SIGNAL = None
         with patch.object(runner.subprocess, 'Popen', side_effect=spawn), \
              patch.object(runner.os, 'killpg'), \
+             patch.object(runner, 'observe_delegated_admission'), \
              patch.object(runner, 'stop_delegated_service') as stop, \
              self.assertRaises(runner.RunnerInterrupted):
             runner.execute(['fake-test'], 1, 'app.slice', {})
@@ -744,6 +745,15 @@ class IsolatedLibtestTests(unittest.TestCase):
                 [], 0, 'LoadState=loaded\nActiveState=active\n', '')):
             runner.stop_delegated_service(unit, record)
         self.assertFalse(record['cleanup_confirmed'])
+        record = {'manager_admission': {'Id': unit, 'Transient': 'yes',
+                                        'InvocationID': 'ab' * 16}}
+        def collected_after_stop(args, **_kwargs):
+            output = 'LoadState=not-found\nActiveState=inactive\n' if 'show' in args else ''
+            return completed_process(args, 0, output, '')
+        with patch.object(runner.subprocess, 'run', side_effect=collected_after_stop):
+            runner.stop_delegated_service(unit, record)
+        self.assertTrue(record['cleanup_confirmed'])
+        self.assertIsNone(record['reset_failed_exit_code'])
 
     def test_delegated_options_do_not_apply_to_discovery(self):
         calls = []
@@ -889,6 +899,60 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(record['state'], {'LoadState': 'not-found', 'ActiveState': 'inactive'})
         unit = record['unit']
         self.assertTrue(all(args[-1] == unit for args in calls))
+
+    def test_final_admission_observation_catches_failure_after_initial_not_found(self):
+        first_query = runner.threading.Event()
+        calls = []
+        admission_queries = 0
+        state_queries = 0
+
+        class Process:
+            pid = 781239
+            stdout = None
+            stderr = None
+            returncode = 101
+
+            def communicate(self, timeout=None):
+                if not first_query.wait(2):
+                    raise AssertionError('observer did not perform its initial query')
+                return 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', ''
+
+        def control(args, **_kwargs):
+            nonlocal admission_queries
+            nonlocal state_queries
+            calls.append(args)
+            if '--property=InvocationID' in args:
+                admission_queries += 1
+                if admission_queries == 1:
+                    first_query.set()
+                    return completed_process(args, 1,
+                        'LoadState=not-found\nActiveState=inactive\n', '')
+                unit = args[-1]
+                return completed_process(args, 0,
+                    f'Id={unit}\nLoadState=loaded\nTransient=yes\nInvocationID={"ab" * 16}\n', '')
+            if 'stop' in args or 'reset-failed' in args:
+                return completed_process(args, 0, '', '')
+            state_queries += 1
+            if state_queries == 1:
+                return completed_process(args, 0,
+                    'LoadState=loaded\nActiveState=failed\n', '')
+            return completed_process(args, 0,
+                'LoadState=not-found\nActiveState=inactive\n', '')
+
+        record = {}
+        with patch.object(runner.subprocess, 'Popen', return_value=Process()), \
+             patch.object(runner.subprocess, 'run', side_effect=control):
+            result = runner.execute(['fake-libtest'], 2, 'app.slice', record)
+
+        unit = record['unit']
+        final_query = next(index for index, args in enumerate(calls)
+                           if '--property=InvocationID' in args and index > 0)
+        stop = next(index for index, args in enumerate(calls) if 'stop' in args)
+        self.assertEqual(admission_queries, 2)
+        self.assertLess(final_query, stop)
+        self.assertEqual(record['manager_admission']['Id'], unit)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertEqual(record['reset_failed_exit_code'], 0)
 
     def test_interrupted_launched_future_retains_unconfirmed_service_receipt(self):
         retained = Path(self.tmp.name) / 'interrupted'
