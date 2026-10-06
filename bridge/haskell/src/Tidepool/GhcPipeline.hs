@@ -2621,11 +2621,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     , occNameString (nameOccName (idName identifier)) `elem` cpResultBinders plan
                     , nameModule_maybe (idName identifier) == Just (ms_mod summaryC)]
               modifyIORef' (tcg_keep tcg) (`extendNameSetList` resultRoots)
-              (desugared, dsWarnings) <- runHsc' env (hscDesugar' (ms_location summaryC) tcg)
+              (desugared, dsWarnings) <- timeDetailPhase timing "ghc_load_desugar"
+                (moduleNameString (ms_mod_name summaryC)) $
+                runHsc' env (hscDesugar' (ms_location summaryC) tcg)
               printOrThrowDiagnostics (hsc_logger env) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
               plugins <- readIORef (tcg_th_coreplugins tcg)
-              simplified <- hscSimplify env plugins desugared
+              simplified <- timeDetailPhase timing "ghc_load_simplify"
+                (moduleNameString (ms_mod_name summaryC)) (hscSimplify env plugins desugared)
               (tidy, details) <- hscTidy env simplified
               roots <- directPackageImports env tcg
               files <- readIORef (tcg_dependent_files tcg)
@@ -2803,8 +2806,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           -- frontend work performed by the load hooks belongs to 'ghc_load'.
           tcMsRef <- liftIO (newIORef (0 :: Integer))
           loweringMsRef <- liftIO (newIORef (0 :: Integer))
-          -- The existing diagnostic row separates deferred desugaring,
-          -- simplification and selected STG counts; it is not a speedup metric.
+          -- Deferred desugaring and simplification retain their summed wall
+          -- counters; per-module detail spans identify the actual GHC work.
           dsMsRef  <- liftIO (newIORef (0 :: Integer))
           c2cMsRef <- liftIO (newIORef (0 :: Integer))
           frontCountRef <- liftIO (newIORef (0 :: Int))
@@ -2877,7 +2880,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       , occNameString (nameOccName (idName identifier)) `elem` cpResultBinders plan
                       , nameModule_maybe (idName identifier) == Just (ms_mod modSum)]
                 liftIO $ modifyIORef' (tcg_keep tcGblEnv) (`extendNameSetList` resultRoots)
-                (desugared0, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
+                (desugared0, dsMs) <- timeSection $
+                  timeDetailPhase timing "deferred_desugar" (moduleNameString (ms_mod_name modSum)) $
+                    liftIO (hscDesugar hscEnv modSum tcGblEnv)
                 let retainResult identifier = if idName identifier `elem` resultRoots
                       then setIdExported identifier else identifier
                     retainBinding (NonRec identifier rhs) = NonRec (retainResult identifier) rhs
@@ -2904,9 +2909,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               -- result; the memo retains the interface alongside its prepared body.
               compileBack interfaceUse mf = do
                 liftIO (modifyIORef' backCountRef (+ 1))
-                (simplified, coreMs) <- timeSection $ liftIO $ do
-                  plugins <- readIORef (tcg_th_coreplugins (mfTcGblEnv mf))
-                  hscSimplify (mfHscEnv mf) plugins (mfDesugared mf)
+                (simplified, coreMs) <- timeSection $
+                  timeDetailPhase timing "deferred_simplify" (moduleNameString (ms_mod_name (mfSummary mf))) $
+                    liftIO $ do
+                      plugins <- readIORef (tcg_th_coreplugins (mfTcGblEnv mf))
+                      hscSimplify (mfHscEnv mf) plugins (mfDesugared mf)
                 liftIO (modifyIORef' loweringMsRef (+ coreMs))
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
@@ -3319,11 +3326,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               totalTcMs totalLoweringMs interfaceTotal frontCount backCount (Map.size moduleInterfaces) topModules topInterfaces
             emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
               (sortOn (negate . snd) (Map.toList moduleInterfaces))
-          -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
-          -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
-          -- it and there is nothing to keep in sync there. Emitted only under
-          -- 'OptimizeCoreReachable' (there is no tier to report otherwise), and
-          -- AFTER the phase lines, exactly where it has always been.
+          -- These sums cover only deferred GHC passes. Canonical load passes
+          -- have their own detail spans, and parallel detail wall time overlaps.
+          liftIO $ do
+            readIORef dsMsRef >>= emitPhase timing "deferred_desugar"
+            readIORef c2cMsRef >>= emitPhase timing "deferred_simplify"
           case mReachable of
             Just reachableMods | timing -> liftIO $ do
               totalDsMs  <- readIORef dsMsRef
@@ -3575,7 +3582,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       emitReuseComplete timing reuseContext SourceFrontend
       emitReuseComplete timing reuseContext FinalizedCore
       case preparation of
-        PrepareStg -> emitReuseComplete timing reuseContext PreparedBody
+        PrepareStg | isNothing (completionFactoryFor selection) ->
+          emitReuseComplete timing reuseContext PreparedBody
+        PrepareStg -> pure ()
         CheckOnly -> pure ()
     getSession >>= liftIO . recordCompilerInterpreter interpreterState selectedExecutables
     pure result
