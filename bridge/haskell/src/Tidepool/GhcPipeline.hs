@@ -194,7 +194,10 @@ import Tidepool.Timing
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
   , newTimingRequestIdentity
   , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
-import Tidepool.PreparedStg (PreparedModule, pmSitedSiblings, preparedUsesSiteAuthority, prepareModule)
+import Tidepool.PreparedStg (PreparedModule, pmSitedSiblings, preparedUsesSiteAuthority, prepareModule, acquirePreparedModule, runPreparedModuleTask)
+import Tidepool.CompilerExecution
+  ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks )
 import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -248,6 +251,7 @@ data PipelineSelection result where
   PreparedProducts :: Maybe FilePath -> PipelineSelection PreparedPipelineResult
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
   CheckedEnvironmentProducts :: FilePath -> PipelineSelection CheckedEnvironmentResult
+  WithCompilerExecution :: CompilerExecutionGrant -> CompilerExecutor -> PipelineSelection result -> PipelineSelection result
 
 data PreparationKind = CheckOnly | PrepareStg
 
@@ -511,9 +515,11 @@ selectionKind PreparedStg = PrepareStg
 selectionKind (PreparedProducts _) = PrepareStg
 selectionKind CheckedEnvironment = CheckOnly
 selectionKind (CheckedEnvironmentProducts _) = CheckOnly
+selectionKind (WithCompilerExecution _ _ selection) = selectionKind selection
 
 capturesProductInterfaces :: PipelineSelection result -> Bool
 capturesProductInterfaces (PreparedProducts _) = True
+capturesProductInterfaces (WithCompilerExecution _ _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces _ = False
 
 data PipelineResult = PipelineResult
@@ -932,7 +938,16 @@ data PipelineVariant = PipelineVariant
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
 candidateManifestFor (CheckedEnvironmentProducts path) = Just path
+candidateManifestFor (WithCompilerExecution _ _ selection) = candidateManifestFor selection
 candidateManifestFor _ = Nothing
+
+executionGrantFor :: PipelineSelection result -> CompilerExecutionGrant
+executionGrantFor (WithCompilerExecution grant _ _) = grant
+executionGrantFor _ = serialCompilerExecutionGrant
+
+executorFor :: PipelineSelection result -> Maybe CompilerExecutor
+executorFor (WithCompilerExecution _ executor _) = Just executor
+executorFor _ = Nothing
 
 -- Body demand is a property of the request, not of whether its environment
 -- came from a session. GHC still loads and finalizes the complete selected
@@ -1708,7 +1723,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         Just producer -> unless (producer == scopeProducerSha256 scope)
           (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
-    let preparation = selectionKind selection
+    let executionGrant = executionGrantFor selection
+        preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
         candidateManifest = candidateManifestFor selection
         exactCycle = exactCompileCycle selection variant
@@ -2391,9 +2407,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     loadFlag <- reifyGhc $ \session -> bracket
       (reflectGhc (getSession >>= \env -> setSession env
         { hsc_hooks = (hsc_hooks env)
-            { runPhaseHook = Just (PhaseHook captureCanonicalFailure) } }) session)
+            { runPhaseHook = Just (PhaseHook captureCanonicalFailure) }
+        , hsc_dflags = (hsc_dflags env)
+            { parMakeCount = Just (ParMakeThisMany (compilerModuleJobs executionGrant)) } }) session)
       (const (reflectGhc (getSession >>= \env -> setSession env
-        { hsc_hooks = hsc_hooks beforeLoad }) session))
+        { hsc_hooks = hsc_hooks beforeLoad
+        , hsc_dflags = (hsc_dflags env)
+            { parMakeCount = parMakeCount (hsc_dflags beforeLoad) } }) session))
       (const (reflectGhc (load' mCache loadHowMuch
         dependencyDiagnostic (Just batchMsg)
         (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))) session))
@@ -2602,21 +2622,23 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       }
                   , registration
                   )
+              acquireFinalized loaded = do
+                current <- getSession
+                let summary = canonicalSummary (loadedSummary loaded)
+                    env = scopeRetainedSummaryHscEnv summary current
+                    cgGuts = finalizedTidyGuts (loadedFinalized loaded)
+                    ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
+                    importedSiblings = resolvePreparedInterfaceSiblings env
+                known <- liftIO (readIORef preparedSiblingsRef)
+                let siblings = Map.unions [ownedSiblings, known, importedSiblings]
+                liftIO (acquirePreparedModule env (ms_location summary) siblings
+                  (loadedFinalized loaded))
               prepareFinalized loaded = case preparation of
                 CheckOnly -> pure Nothing
                 PrepareStg -> do
                   liftIO (modifyIORef' preparedCountRef (+ 1))
-                  current <- getSession
-                  let summary = canonicalSummary (loadedSummary loaded)
-                      env = scopeRetainedSummaryHscEnv summary current
-                      cgGuts = finalizedTidyGuts (loadedFinalized loaded)
-                      ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
-                      importedSiblings = resolvePreparedInterfaceSiblings env
-                  siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
-                    let known' = Map.union ownedSiblings (Map.union known importedSiblings)
-                    in (known', known')
-                  Just <$> liftIO (prepareModule env (ms_location summary) siblings
-                    (loadedFinalized loaded))
+                  task <- acquireFinalized loaded
+                  Just <$> liftIO (runPreparedModuleTask task)
               finalizeCurrent interfaceUse summary = do
                 captured <- liftIO (Map.lookup (ms_mod summary) <$> readIORef loadedModulesRef)
                 case captured of
@@ -2735,6 +2757,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         rememberFinalized loaded
                         pure (LoadedObservation loaded)
               facts <- liftIO (mapM observationFacts observations')
+              -- Sibling identities belong to finalized Core, not STG task
+              -- completion. Include every selected finalization before lowering
+              -- any owner, including a later sibling in a native cycle.
+              let finalizedSiblings = Map.unions
+                    [ resolvePreparedSiblings (cg_binds (finalizedTidyGuts finalized))
+                    | observation <- observations'
+                    , finalized <- case observation of
+                        LoadedObservation loaded -> [loadedFinalized loaded]
+                        CachedObservation summary entry ->
+                          [loadedFinalized (payloadLoaded summary (gmePayload entry))]
+                        HydratedObservation{} -> [] ]
+              liftIO (writeIORef preparedSiblingsRef finalizedSiblings)
               -- Fresh Core and admitted native outlines retain defining owners,
               -- including dictionaries and reexports. All source owners have
               -- been checked; this closure selects only fresh STG work.
@@ -2749,21 +2783,65 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   -- the same Core graph that selects STG, including dictionaries
                   -- and names reached through reexports. Compile-time and type-only
                   -- imports need their canonical facts, but no prepared body.
-                  executableDepsValid modSum = liftIO $ do
-                    validMap <- readIORef executableValidRef
-                    let name = ms_mod_name modSum
-                    pure $ case Map.lookup name referencesByMod of
-                      Nothing -> False
-                      Just referenced -> all (\owner -> Map.member owner referencesByMod
-                        && Map.findWithDefault False owner validMap)
-                        (Set.toList (Set.delete name referenced))
+                  -- Freeze reuse before tasks run. A native reference cycle
+                  -- may be reusable as a whole; source boot/TH scheduling stays
+                  -- with GHC. Removing locally invalid owners to a fixed point
+                  -- prevents task completion order from deciding validity.
+                  locallyReusable = Set.fromList
+                    [ ms_mod_name (observationSummary observation)
+                    | (observation, interfaceUse) <- zip observations' interfaceUses
+                    , case observation of
+                        HydratedObservation{} -> True
+                        CachedObservation summary entry ->
+                          case payloadProduct (gmePayload entry) of
+                            Just product' -> preparedReusable entry product'
+                              && interfaceReady interfaceUse summary entry
+                            Nothing -> False
+                        LoadedObservation{} -> False ]
+                  reusableOwners = closeReusable locallyReusable
+                  closeReusable owners =
+                    let next = Set.filter (\owner -> case Map.lookup owner referencesByMod of
+                          Nothing -> False
+                          Just referenced -> Set.delete owner referenced `Set.isSubsetOf` owners) owners
+                    in if next == owners then owners else closeReusable next
+                  executableDepsValid modSum = pure $ case
+                      Map.lookup (ms_mod_name modSum) referencesByMod of
+                    Nothing -> False
+                    Just referenced -> Set.delete (ms_mod_name modSum) referenced
+                      `Set.isSubsetOf` reusableOwners
                   reachableMods0 = reachableModuleClosure targetModName' referencesByMod
                   -- A focused fault-injection test can omit one real reachable
                   -- owner from STG preparation without changing its finalization.
                   reachableMods = case forceValidationOnly of
                     Just m  -> Set.delete (mkModuleName m) reachableMods0
                     Nothing -> reachableMods0
-              let rememberExecutable modSum output prepared finalized moduleFacts = do
+              -- All live Session work finishes before independent lowering.
+              -- Frozen reuse and reachability select exactly the required jobs.
+              tasks <- case preparation of
+                CheckOnly -> pure []
+                PrepareStg -> fmap catMaybes $ forM observations' $ \observation -> do
+                  let summary = observationSummary observation
+                      name = ms_mod_name summary
+                  if name `Set.notMember` reachableMods || name `Set.member` reusableOwners
+                    then pure Nothing
+                    else case observation of
+                      HydratedObservation{} -> pure Nothing
+                      LoadedObservation loaded -> (\task -> Just (name, task)) <$> acquireFinalized loaded
+                      CachedObservation _ entry -> (\task -> Just (name, task)) <$> acquireFinalized
+                        (payloadLoaded summary (gmePayload entry))
+              liftIO (modifyIORef' preparedCountRef (+ length tasks))
+              let lowerWith executor = runCompilerTasks executor
+                    (runPreparedModuleTask . snd) (\_ _ -> pure ()) tasks
+              preparedResults <- liftIO $ case executorFor selection of
+                Just executor -> lowerWith executor
+                Nothing -> withCompilerExecutor executionGrant lowerWith
+              let preparedByName = Map.fromList (zip (map fst tasks) preparedResults)
+                  prepareReachable loaded = case preparation of
+                    CheckOnly -> pure Nothing
+                    PrepareStg -> case Map.lookup (ms_mod_name (loadedSummary loaded)) preparedByName of
+                      Just prepared -> pure (Just prepared)
+                      Nothing -> liftIO (ioError (userError "selected prepared module task is absent"))
+                  rememberExecutable modSum output prepared finalized moduleFacts = do
                     moduleProduct <- requireProduct moduleFacts output prepared finalized
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
@@ -2783,7 +2861,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     rememberFinalized loaded
                     let r = loadedOutput loaded
                         finalized = loadedFinalized loaded
-                    prepared <- prepareFinalized loaded
+                    prepared <- prepareReachable loaded
                     rememberExecutable modSum r prepared finalized moduleFacts
                     pure [(r, prepared)]
                   validationOnly loaded moduleFacts = do
@@ -3094,38 +3172,41 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 , crWarnings = map snd warnings
                 }
             _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
-    case selection of
-      PreparedStg -> do
-        (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
-        capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
-          (pvSourceImportIntents variant) dependencies exactCompilation)
-        pure PreparedPipelineResult
-          { pprPipelineResult = result
-          , pprModules = modules
-          , pprDependencies = capturedDependencies
-          , pprProductInterfaces = productInterfaces
-          , pprFinalizedModules = finalizedModules
-          , pprPackageImports = packageRoots
-          , pprAcceptedCandidates = []
-          }
-      PreparedProducts _ -> do
-        (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
-        valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
-        when (not valid) $ liftIO $ ioError $ userError
-          "accepted module candidate changed before artifact publication"
-        capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
-          (pvSourceImportIntents variant) dependencies exactCompilation)
-        pure PreparedPipelineResult
-          { pprPipelineResult = result
-          , pprModules = modules
-          , pprDependencies = capturedDependencies
-          , pprProductInterfaces = productInterfaces
-          , pprFinalizedModules = finalizedModules
-          , pprPackageImports = packageRoots
-          , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
-          }
-      CheckedEnvironment -> compileChecked
-      CheckedEnvironmentProducts _ -> compileChecked
+    let finish :: PipelineSelection output -> Ghc output
+        finish selected = case selected of
+          PreparedStg -> do
+            (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
+            capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
+              (pvSourceImportIntents variant) dependencies exactCompilation)
+            pure PreparedPipelineResult
+              { pprPipelineResult = result
+              , pprModules = modules
+              , pprDependencies = capturedDependencies
+              , pprProductInterfaces = productInterfaces
+              , pprFinalizedModules = finalizedModules
+              , pprPackageImports = packageRoots
+              , pprAcceptedCandidates = []
+              }
+          PreparedProducts _ -> do
+            (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
+            valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
+            when (not valid) $ liftIO $ ioError $ userError
+              "accepted module candidate changed before artifact publication"
+            capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
+              (pvSourceImportIntents variant) dependencies exactCompilation)
+            pure PreparedPipelineResult
+              { pprPipelineResult = result
+              , pprModules = modules
+              , pprDependencies = capturedDependencies
+              , pprProductInterfaces = productInterfaces
+              , pprFinalizedModules = finalizedModules
+              , pprPackageImports = packageRoots
+              , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
+              }
+          CheckedEnvironment -> compileChecked
+          CheckedEnvironmentProducts _ -> compileChecked
+          WithCompilerExecution _ _ inner -> finish inner
+    finish selection
 
 -- | Hash every source and compare it with the fingerprint captured by GHC's
 -- downsweep. A mismatch makes the evidence incomplete; publication re-hashes

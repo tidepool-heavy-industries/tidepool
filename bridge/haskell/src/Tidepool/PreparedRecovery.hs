@@ -146,7 +146,7 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHomes baseContext home initialRoots = do
+newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache _certifiedHomes baseContext home initialRoots = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -263,9 +263,8 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
               lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
                 | Just _ <- wiredInErrorKind binder = pure (groups, dirty, failures)
                 | Just _ <- deferredFunction binder = pure (groups, dirty, failures)
-                | Just owner <- nameModule_maybe (varName binder)
-                , (unitString (moduleUnit owner), moduleNameString (moduleName owner))
-                    `Set.member` certifiedHomes = pure (groups, dirty, failures)
+                | Map.member (varName binder) (projectionCurrentOriginals context) =
+                    pure (groups, dirty, failures)
                 | maybe False (`Set.member` homeOwnersRef) (nameModule_maybe (varName binder)) =
                     pure (groups, dirty, failures ++ [MissingHomeImplementation (varName binder)])
                 | otherwise = do
