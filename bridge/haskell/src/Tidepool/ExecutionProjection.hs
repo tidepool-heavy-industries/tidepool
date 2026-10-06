@@ -337,10 +337,19 @@ projectCachedOriginalHomeModuleProducts (OriginalProjectionCache entries) env in
   let owner = pmModule prepared
       homes = hsc_all_home_unit_ids env
       hasInterface = maybe False ((== owner) . mi_module) (Map.lookup (moduleName owner) interfaces)
+      identities = preparedTopIdentityBindings [prepared]
+      facts = extractPreparedFacts owner (map fst (pmBindings prepared))
+      identifiers = preparedReferencedIds facts
+        ++ concatMap snd (preparedClosureCaptures facts)
+        ++ [binder | (binding,_) <- pmBindings prepared, binder <- topBinders binding]
+      names = Set.fromList (map varName identifiers)
+      symbols = Set.fromList (Map.elems identities ++ map (idSymbol "value") identifiers)
       normalized = context
         { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
+        , projectionRetainedGenerations = Map.restrictKeys (projectionRetainedGenerations context) symbols
+        , projectionCurrentOriginals = Map.restrictKeys (projectionCurrentOriginals context) names
         , projectionAuxiliaryRoots = Set.toAscList (Set.fromList (projectionAuxiliaryRoots context)
-            `Set.intersection` Set.fromList (Map.elems (preparedTopIdentityBindings [prepared]))) }
+            `Set.intersection` Set.fromList (Map.elems identities)) }
       matches (OriginalProjectionEntry old oldContext oldHomes oldInterface _) =
         identity == old && normalized == oldContext && homes == oldHomes && hasInterface == oldInterface
   known <- Map.findWithDefault [] owner <$> readMVar entries

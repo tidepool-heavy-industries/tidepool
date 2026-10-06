@@ -98,6 +98,7 @@ import Tidepool.CompilerProducts
   ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
   , requireOriginalExecutableGlobals, certifiedExecutionSource
   , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
+  , prepareOriginalProductsWithCache, newOriginalProjectionCollector
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
@@ -109,7 +110,10 @@ import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
-import Tidepool.ExecutionProjection (resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
+import Tidepool.PreparedStg (newPreparedBodyCache)
+import Tidepool.CompilerExecution (withCompilerExecutor, serialCompilerExecutionGrant)
+import System.Mem.StableName (makeStableName)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
@@ -2570,6 +2574,59 @@ originalProjectionProducts = withScratch $ \work -> do
         , group <- groups, binder <- projectedBinders group]
   unless (emittedBinders == currentOriginalBinders issued) $
     fail "writer changed the compiler-issued original availability boundary"
+  -- Repeated native/display demand consumes the same completed canonical
+  -- bodies, not just a projection of the original frontend result.
+  capturedFixture <- capturePreparedFixture work paired
+  capturedScopePath <- writeGenuineCandidateLexicalScope []
+    ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"] work capturedFixture
+  capturedScope <- readExactScope capturedScopePath >>= either fail pure
+  let sourceFreeScope = emptySessionScope {ssRoot=work,ssExactScope=Just capturedScopePath}
+  captured <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
+    (Just sourceFreeScope) (work </> "ProjectionConsumer.hs") [work] Nothing
+  unless (preparedNames captured == ["ProjectionConsumer"]) $
+    fail "original cache fixture unexpectedly supplied recovered source bodies"
+  bodyCache <- newPreparedBodyCache
+  rawCache <- newOriginalProjectionCollector
+  capturedContext <- prepareCompilerProjectionContext captured Map.empty (pmModule consumer)
+    "usesGood" [] Nothing
+  let capturedEnv = prHscEnv (pprPipelineResult captured)
+      demand executor = prepareOriginalProductsWithCache bodyCache (Just rawCache) executor
+        capturedEnv (Just capturedScope) (pprProductInterfaces captured) capturedContext
+        Set.empty (pprModules captured)
+      recoveredIdentities originals = fmap Map.fromList $ forM
+        [value | value <- originals, pmModule value /= pmModule consumer] $ \value -> do
+          stable <- makeStableName value
+          pure (pmModule value,stable)
+  withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
+    (firstDemand,_) <- demand executor
+    (secondDemand,_) <- demand executor
+    firstBodies <- recoveredIdentities firstDemand
+    secondBodies <- recoveredIdentities secondDemand
+    unless (Map.keysSet firstBodies == Set.fromList [pmModule ownerModule,pmModule provider]
+        && firstBodies == secondBodies) $
+      fail "repeat original demand rebuilt a completed canonical owner or lost its transitive group"
+    capturedConsumer <- case pprModules captured of
+      [value] -> pure value
+      _ -> fail "raw cache control requires its actual source target"
+    let unrelated = SymbolIdentity "main" "UnrelatedNewCell" "value" "fresh" Nothing
+        projectRaw chosen = projectCachedOriginalHomeModuleProducts rawCache capturedEnv
+          (pprProductInterfaces captured) chosen capturedConsumer
+    (unrelatedHit,_) <- projectRaw (capturedContext
+      {projectionRetainedGenerations=Map.singleton unrelated 1})
+    (relevantHit,_) <- projectRaw (capturedContext
+      {projectionRetainedGenerations=Map.singleton known 1})
+    unless (unrelatedHit && not relevantHit) $
+      fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
+    -- A completed cached body is not authority to use changed artifacts.
+    ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
+      (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))
+    core <- maybe (fail "cache fixture lacks original Core") pure (canonicalCoreArtifact ownerProof)
+    originalCore <- BS.readFile (canonicalCorePath core)
+    changed <- (BS.appendFile (canonicalCorePath core) "changed" >>
+      try (demand executor)) `finally` BS.writeFile (canonicalCorePath core) originalCore
+    case changed of
+      Left (_ :: IOException) -> pure ()
+      Right _ -> fail "cached original preparation bypassed current Core artifact validation"
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
   case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
       (programGlobals badProgram) of
