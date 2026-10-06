@@ -162,7 +162,7 @@ import Tidepool.ExactScope
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
-  , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, canonicalSourceImports
+  , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
   , originalGroupFromCandidate
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -615,7 +615,10 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   putStrLn "canonical current source: captured and persisted interface-only proofs, exact imports, duplicate imports, dependency/source drift and missing refusal"
 
 completedProgramSourceImports :: IO ()
-completedProgramSourceImports = withTiming $ withScratch $ \work -> do
+completedProgramSourceImports = forM_ [False,True] completedProgramSourceImportsWithCandidates
+
+completedProgramSourceImportsWithCandidates :: Bool -> IO ()
+completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   let marker = work </> "completed-original-quoter"
@@ -630,6 +633,10 @@ completedProgramSourceImports = withTiming $ withScratch $ \work -> do
         , "__result :: Int"
         , "__result = 7"
         ]
+  when reuseCandidate $ do
+    producer <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoter.hs") includes
+    fixture <- capturePreparedFixture work producer
+    writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work fixture
   quoter <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuoter.hs")
   writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
     "quoteExp = \\_ -> pure"
@@ -651,8 +658,11 @@ completedProgramSourceImports = withTiming $ withScratch $ \work -> do
   flags <- defaultParserDynFlags
   requested <- parsedPurpose flags "import MetadataQuotedTarget\n(7 :: Int)"
   withResidentPipelineSelected includes $ \compile -> do
-    completed <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile requested admitted)
-      (Just session) target includes Nothing
+    completed <- compile (PreparedProducts (if reuseCandidate then Just (manifest work) else Nothing))
+      Set.empty (CellProgramCompile requested admitted) (Just session) target includes Nothing
+    unless (map candidateModule (pprAcceptedCandidates completed)
+        == (if reuseCandidate then ["MetadataQuoteSupport"] else []))
+      (fail "completed import fixture did not exercise its selected cached provider")
     unless (not (dependencyCacheSafe (preparedFreshDependencies completed)))
       (fail "instrumented arbitrary runIO quoter was treated as cache-safe")
     let directory = work </> "completed-originals"
@@ -666,10 +676,29 @@ completedProgramSourceImports = withTiming $ withScratch $ \work -> do
       admission <- maybe (fail "completed original lost finalized interface") pure (Map.lookup key admissions)
       lexical <- either fail pure (preparedHomeRequirements completed (fst key) (snd key))
       pure (key,localFinalizedInterface admission,lexical)
+    cachedRows <- forM (pprAcceptedCandidates completed) $ \candidate -> do
+      let key = (candidateUnit candidate,candidateModule candidate)
+          row = (ExactIfaceArtifact (fst key) (snd key) (candidateInterface candidate)
+            (candidateInterfaceSha256 candidate) (candidateInterfaceRequirements candidate),
+            candidatePackageImports candidate,candidatePackageImportsSha256 candidate)
+      lexical <- either fail pure (preparedHomeRequirements completed (fst key) (snd key))
+      pure (key,row,lexical)
+    let allRows = rows ++ cachedRows
+        interfaces = [row | (_,row,_) <- allRows]
+    cachedProofs <- forM (pprAcceptedCandidates completed) $ \candidate -> do
+      proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 admitted) interfaces candidate
+        >>= either fail pure
+      pure ((candidateUnit candidate,candidateModule candidate),proof)
     let retained = admitted
-          { scopeInterfaces = [row | (_,row,_) <- rows]
-          , scopeInterfaceEvidence = Map.map ModuleInterfaceEvidence proofs
-          , scopeLexical = [(key,lexical) | (key,_,lexical) <- rows] }
+          { scopeInterfaces = interfaces
+          , scopeInterfaceEvidence = Map.map ModuleInterfaceEvidence
+              (Map.union proofs (Map.fromList cachedProofs))
+          , scopeLexical = [(key,lexical) | (key,_,lexical) <- allRows] }
+    when reuseCandidate $ do
+      unaccepted <- retainProgramSourceImports Nothing (completed {pprAcceptedCandidates=[]})
+        (certifiedFinalizedArtifacts certified) retained
+      unless (isNothing unaccepted)
+        (fail "unaccepted cached provider issued a completed import decision")
     imports <- retainProgramSourceImports Nothing completed (certifiedFinalizedArtifacts certified) retained
     unless (isJust imports) (fail "fresh authored root did not retain its completed decision")
     initialRuns <- lines <$> readFile marker
@@ -730,7 +759,18 @@ completedProgramSourceImports = withTiming $ withScratch $ \work -> do
       (work </> "MetadataQuotedTarget.hs") (digest originalBytes)
       (compile CheckedEnvironment Set.empty (CellProgramCompile requested retained)
         (Just session) target includes Nothing)
-  putStrLn "completed program imports: arbitrary runIO original retained once, alias reuse, new cell/qualifier/hidden/new-demand and current drift controls"
+    writeFile (work </> "MetadataQuotedTarget.hs") (T.unpack (TE.decodeUtf8 originalBytes))
+    let helper = work </> "MetadataQuoteSupport.hs"
+    helperBytes <- BS.readFile helper
+    BS.appendFile helper "\n-- current dependency changed\n"
+    writeFile target (targetSource "import MetadataQuoteSupport")
+    helperPurpose <- parsedPurpose flags "import MetadataQuoteSupport\n(7 :: Int)"
+    requireOriginalSourceBytesChanged "new demand rechecks changed completed dependency"
+      ("main","MetadataQuoteSupport") helper (digest helperBytes)
+      (compile CheckedEnvironment Set.empty
+        (CellProgramCompile (withProgramSourceImports imports helperPurpose) retained)
+        (Just session) target includes Nothing)
+  putStrLn "completed program imports: fresh/cached providers, arbitrary runIO original retained once, alias reuse, unaccepted provider, new cell/qualifier/hidden/new-demand and source/dependency drift controls"
   where
     firstOwner (owner,_,_,_) = owner
 

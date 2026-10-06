@@ -436,6 +436,24 @@ retainProgramSourceImports previous prepared captured retained = do
                           , dependencySourcePath source == dependencyModuleSource node]
                     , packageSha == hexBytes (SHA256.hash (encodePackageImports iface packages)) ->
                         matchesCapturedFinalization finalized original
+                  (Just node, ModuleInterfaceEvidence canonical)
+                    | [candidate] <- [candidate | candidate <- pprAcceptedCandidates prepared
+                        , (candidateUnit candidate,candidateModule candidate) == key]
+                    , candidateSource candidate == dependencyModuleSource node
+                    , Right imports <- compilationOriginalSourceImports compilation fresh key
+                    , canonicalSourceImports canonical == Just imports
+                    , not (any (\(_,_,boot,_) -> boot) imports)
+                    , sort lexical == sort (nub [(unit,name) | (_,name,False,Just unit) <- imports])
+                    , [canonicalSourceSha256 canonical] ==
+                        [dependencySourceSha256 source | source <- dependencySources fresh
+                          , dependencySourcePath source == dependencyModuleSource node] -> do
+                        -- Accepted cached providers keep their original canonical
+                        -- capture; they cannot supply a fresh finalization object.
+                        -- Bind that capture to this completed pass's source imports
+                        -- and independently retained exact interface closure.
+                        proof <- validateCandidateCanonicalInterfaceProof
+                          (scopeProducerSha256 retained) (scopeInterfaces retained) candidate
+                        pure (proof == Right canonical)
                   _ -> pure False
           granted <- fmap catMaybes $ forM roots $ \root@(_,key) -> case programImportClosure retained key of
             Just originals
