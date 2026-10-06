@@ -9750,17 +9750,20 @@ mod authored_publication_tests {
     #[test]
     fn staged_authored_uncertainty_finalizes_binding_visibility_and_epoch() {
         let root = tempfile::tempdir().unwrap();
-        let mut lib = authored_lib(root.path());
-        let receipt = lib
+        let lib = authored_lib(root.path());
+        let mut session = resident_with_replaced_binding(lib);
+        let receipt = session
+            .state
+            .lib()
             .declaration_receipt(&["answer :: Int\nanswer = 42"])
             .unwrap()
             .unwrap();
-        let candidate = lib
-            .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
-            .unwrap();
-        let staged =
-            crate::session::validate_declaration_candidate(candidate, root.path()).unwrap();
-        let mut session = resident_with_replaced_binding(lib);
+        let staged = session
+            .stage_declarations_in(ScopeId::ROOT, &receipt, &SourceImports::new(), &[])
+            .unwrap_or_else(|error| {
+                panic!("stage against the actual binding environment: {error:?}")
+            });
+        assert_eq!(staged.generation(), Generation(1));
         let before = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap();
