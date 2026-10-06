@@ -278,6 +278,10 @@ runGrantedInvocation compilerScope caches parsedWorkerRequest = do
   dispatch compilerScope caches timing args
 
 -- | Dispatch one decoded worker request.
+-- The request owner decodes the offered metadata once. Compiler stages still
+-- authenticate its current bytes and resolution before consuming it.
+newtype AdmittedRequest = AdmittedRequest { admittedRequestScope :: Maybe ExactScope }
+
 dispatch
   :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compilerScope caches timing args = do
@@ -286,7 +290,7 @@ dispatch compilerScope caches timing args = do
       Left InvalidSourceCheckShape -> fail "source checking cannot carry product or notebook authority"
       Left InvalidCellPlanShape -> throwIO InvalidCellPlanRequest
       Right () -> pure ()
-    forM_ (requestSessionArtifacts args) $ \manifest -> do
+    exact <- forM (requestSessionArtifacts args) $ \manifest -> do
       scope <- readExactScope manifest >>= either fail pure
       forM_ (scopeIncludePaths scope) $ \includes ->
         unless (requestIncludes args == includes)
@@ -320,16 +324,24 @@ dispatch compilerScope caches timing args = do
             && not (isJust (requestTarget args)) && null (requestInjectVals args)
             && Map.null (requestRetainedGenerations args))
             (throwIO CheckedPurposeMismatch)
+      pure scope
+    pure (AdmittedRequest exact)
   case admitted of
     Left failure -> reportDiags (Left failure)
-    Right () -> case requestDeclarationJoin args of
+    Right request -> case requestDeclarationJoin args of
       Just manifest -> runDeclarationOperation compilerScope args manifest
-      Nothing -> dispatchSource compilerScope caches timing args
+      Nothing -> dispatchSource compilerScope caches timing request args
 
-dispatchSource :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
-dispatchSource compilerScope caches timing args =
-  let compiler :: Compiler
-      compiler = scopedCompile compilerScope
+dispatchSource :: CompilerScope -> RecoveryCaches -> Bool -> AdmittedRequest -> WorkerRequest -> IO ExitCode
+dispatchSource compilerScope caches timing request args =
+  let admittedScope = compilerScope
+        { scopedCompile = \selection retained purpose session source includes products ->
+            scopedCompile compilerScope selection retained
+              (maybe purpose (CellProgramCompile purpose) (admittedRequestScope request))
+              session source includes products
+        }
+      compiler :: Compiler
+      compiler = scopedCompile admittedScope
   in
   case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
@@ -338,14 +350,14 @@ dispatchSource compilerScope caches timing args =
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
-        | requestActivationPreview args          -> runActivationPreviewMode compiler caches args file
+        | requestActivationPreview args          -> runActivationPreviewMode compiler caches request args file
         | requestCheckSource args                 -> runSourceCheckMode compiler args file
         | requestCellPlan args                    -> runCellPlanMode (scopedParserFlags compilerScope) args file
-        | requestCell args                        -> runCellMode compilerScope caches args file
+        | requestCell args                        -> runCellMode admittedScope caches request args file
         | requestClassify args                    -> runClassifyMode (scopedParserFlags compilerScope) timing args
-        | not (null (requestInspections args))    -> runInspectionMode compilerScope args file
+        | not (null (requestInspections args))    -> runInspectionMode admittedScope args file
         -- A turn may also carry session fields, so it precedes session dispatch.
-        | requestTurn args                        -> runTurnMode compilerScope caches args file
+        | requestTurn args                        -> runTurnMode admittedScope caches request args file
         -- Multi-target compilation may also carry a stable-value scope.
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
         -- Normal one-shot extraction.
@@ -353,13 +365,12 @@ dispatchSource compilerScope caches timing args =
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
-runActivationPreviewMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runActivationPreviewMode compiler caches args path = do
+runActivationPreviewMode :: Compiler -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
+runActivationPreviewMode compiler caches request args path = do
   timing <- readTimingEnabled
   lastAttempt <- newIORef Nothing
   result <- timePhase timing "total" $ trySynchronous $ do
-    manifest <- requireArg "--session-artifacts" (requestSessionArtifacts args)
-    exact <- readExactScope manifest >>= either fail pure
+    exact <- requireArg "--session-artifacts" (admittedRequestScope request)
     admission <- maybe (throwIO CheckedPurposeMismatch) pure (scopeActivationPreview exact)
     let readTemplate = withBinaryFile path ReadMode $ \handle -> do
           bytes <- BS.hGet handle ((32 * 1024 * 1024) + 1)
@@ -819,8 +830,8 @@ reportRecoveryResiduals target failures =
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode :: CompilerScope -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runTurnMode compilerScope caches args path = do
+runTurnMode :: CompilerScope -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
+runTurnMode compilerScope caches request args path = do
   let compiler :: Compiler
       compiler = scopedCompile compilerScope
   timing <- readTimingEnabled
@@ -840,7 +851,7 @@ runTurnMode compilerScope caches args path = do
       Just verdict -> pure verdict
       Nothing -> timePhase timing "classify"
         (evaluate (classifyWithFlags parserFlags turnSrc))
-    exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
+    let exact = admittedRequestScope request
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
@@ -861,7 +872,7 @@ runTurnMode compilerScope caches args path = do
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
       _kind -> do
-        compileClassifiedTurn parserFlags compiler caches args timing outDir turnSrc sb bindersStr admittedItem lastAttempt
+        compileClassifiedTurn parserFlags compiler caches args timing outDir turnSrc sb bindersStr admittedItem lastAttempt exact
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -904,9 +915,10 @@ compileClassifiedTurn
   :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
   -> IORef (Maybe (FilePath, String))
+  -> Maybe ExactScope
   -> IO TurnOut
-compileClassifiedTurn flags compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt =
-  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt [] (StandaloneTurnParse flags)
+compileClassifiedTurn flags compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt exact =
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt [] (StandaloneTurnParse flags) exact
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -922,20 +934,18 @@ data TurnParseContext
 compileClassifiedTurnKeeping
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
-  -> IORef (Maybe (FilePath, String)) -> [String] -> TurnParseContext -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt programImports parseContext = do
+  -> IORef (Maybe (FilePath, String)) -> [String] -> TurnParseContext -> Maybe ExactScope -> IO CompiledTurnOutput
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt programImports parseContext exact = do
     let (parserFlags, prologue) = case parseContext of
           StandaloneTurnParse flags -> (flags, Nothing)
           PlannedTurnParse flags authored -> (flags, Just authored)
-    semanticScopeFields <- case requestSessionArtifacts args of
-      Just manifest -> do
-        exact <- readExactScope manifest >>= either fail pure
-        pure ["exact-scope-semantic", scopeSemanticSha256 exact]
-      Nothing -> do
-        let scope = scopeFromWorkerRequest args
-        pure (["session-scope-root", ssRoot scope]
-          ++ maybe ["session-incarnation-absent"] (\value -> ["session-incarnation", value]) (ssIncarnation scope)
-          ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
+        semanticScopeFields = case exact of
+          Just selected -> ["exact-scope-semantic", scopeSemanticSha256 selected]
+          Nothing ->
+            let scope = scopeFromWorkerRequest args
+            in (["session-scope-root", ssRoot scope]
+              ++ maybe ["session-incarnation-absent"] (\value -> ["session-incarnation", value]) (ssIncarnation scope)
+              ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
     let templates = requestTurnTemplates args
         protectedTemplates = itemTurnTemplates <$> admitted
         templateInterfaces = maybe [] itemTemplateInterfaces admitted
@@ -1153,22 +1163,21 @@ runCellPlanMode parserFlags args cellPath = do
     BS.writeFile out (toStrictByteString receipt)
   reportDiags result
 
-runCellMode :: CompilerScope -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runCellMode compilerScope caches args cellPath = do
-  exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
+runCellMode :: CompilerScope -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
+runCellMode compilerScope caches request args cellPath = do
+  let exact = admittedRequestScope request
   case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
     Just (scope, planned) -> runCellProgramMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches args cellPath scope planned
-    Nothing -> runLegacyCellMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches args cellPath
+    Nothing -> runLegacyCellMode (scopedParserFlags compilerScope) (scopedCompile compilerScope) caches request args cellPath
 
-runLegacyCellMode :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
-runLegacyCellMode parserFlags compiler caches args cellPath = do
+runLegacyCellMode :: DynFlags -> Compiler -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
+runLegacyCellMode parserFlags compiler caches request args cellPath = do
   provisionalOutput <- newIORef Nothing
   res <- trySynchronous $ do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
     template <- readFile templatePath
-    admittedScope <- traverse (\manifest -> readExactScope manifest >>= either fail pure)
-      (requestSessionArtifacts args)
+    let admittedScope = admittedRequestScope request
     forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
       validateCheckedCellAdmission args admission cellSource template
     checkingTemplate <- case admittedScope >>= scopeCheckedCell of
@@ -1393,7 +1402,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
       validateCheckedItemAdmission localArgs itemAdmission source verdict
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) lastAttempt (priorProgramImports state) (PlannedTurnParse parserFlags (programPrologue state))
+        source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) lastAttempt (priorProgramImports state) (PlannedTurnParse parserFlags (programPrologue state)) (Just scope)
       extended <- retainProgramProducts directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
       retainedImports <- retainProgramSourceImports (programSourceImports state) (compiledPipeline output)

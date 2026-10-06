@@ -3971,10 +3971,30 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         ,ssIncarnation=Just "exact-transaction-reuse"}
       relocated = scope {ssExactScope=Just relocatedPath}
   copyFile scopePath relocatedPath
+  admitted <- readExactScope scopePath >>= either fail pure
+  originalScopeBytes <- BS.readFile scopePath
   withResidentPipelineSelectedRequests [work] $ \runRequest -> do
     originalIdentity <- runRequest (pure ()) $ \compile -> do
       let check session = compile CheckedEnvironment Set.empty GeneralCompile
             (Just session) target [work] Nothing
+          admittedCheck session = compile CheckedEnvironment Set.empty
+            (CellProgramCompile (CellProgramCompile GeneralCompile admitted) admitted)
+            (Just session) target [work] Nothing
+          requireAdmissionRefusal label expected operation = do
+            (refused,diagnostics) <- captureDiagnostics
+              (try operation :: IO (Either SomeException CheckedEnvironmentResult))
+            case refused of
+              Left reason | expected `isInfixOf` show reason
+                  , frontends diagnostics == 0 -> pure ()
+              Left reason -> fail (label ++ " had another refusal: " ++ show reason)
+              Right _ -> fail (label ++ " accepted a scope outside its original offer")
+      requireAdmissionRefusal "carried scope with another offer path"
+        "planned declaration leaves its original compiler offer" (admittedCheck relocated)
+      (do
+        BS.writeFile scopePath (BS.snoc originalScopeBytes 0)
+        requireAdmissionRefusal "manifest changed after metadata admission"
+          "exact scope request changed" (admittedCheck scope)
+        ) `finally` BS.writeFile scopePath originalScopeBytes
       (cold,coldDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt cold && frontends coldDiagnostics == 1) $
         fail "cold exact transaction did not compile its real source dependency"
@@ -3984,6 +4004,12 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
         fail "identical empty exact scopes repeated a dependency frontend"
       requireCheckedApplicability "warm check" warmDiagnostics
+      (carried,carriedDiagnostics) <- captureDiagnostics (admittedCheck scope)
+      unless (isInt carried && frontends carriedDiagnostics == 0
+          && null (counterValues ("hash_bytes.scope_metadata." ++ scopeRequestSha256 admitted) carriedDiagnostics)
+          && length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 3) $
+        fail "carried admission decoded its manifest again or omitted a compiler proof barrier"
+      requireCheckedApplicability "carried check" carriedDiagnostics
       (native,nativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing

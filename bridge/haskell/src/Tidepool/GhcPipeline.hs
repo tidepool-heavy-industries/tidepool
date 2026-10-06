@@ -1191,11 +1191,16 @@ generatedInstanceRecipe (GeneratedScaffoldCompile _ inner) = generatedInstanceRe
 generatedInstanceRecipe (CellProgramCompile inner _) = generatedInstanceRecipe inner
 generatedInstanceRecipe _ = Nothing
 
-withoutGeneratedInstanceCheck :: CompilePurpose -> CompilePurpose
-withoutGeneratedInstanceCheck (ParsedImportSelection _ inner) = withoutGeneratedInstanceCheck inner
-withoutGeneratedInstanceCheck (CompletedProgramImports _ inner) = withoutGeneratedInstanceCheck inner
-withoutGeneratedInstanceCheck (GeneratedInstanceCheck _ inner) = withoutGeneratedInstanceCheck inner
-withoutGeneratedInstanceCheck purpose = purpose
+-- A request supplies its admitted baseline; an inner ordered-cell stage may
+-- carry a scope extended with freshly admitted originals from that request.
+purposeExactScope :: CompilePurpose -> Maybe ExactScope
+purposeExactScope (ParsedImportSelection _ inner) = purposeExactScope inner
+purposeExactScope (CompletedProgramImports _ inner) = purposeExactScope inner
+purposeExactScope (GeneratedInstanceCheck _ inner) = purposeExactScope inner
+purposeExactScope (GeneratedScaffoldCompile _ inner) = purposeExactScope inner
+purposeExactScope (CellProgramCompile inner scope) = purposeExactScope inner <|> Just scope
+purposeExactScope (PlannedDeclarationCheck _ scope) = Just scope
+purposeExactScope _ = Nothing
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
 generatedRecipe (ParsedImportSelection _ inner) = generatedRecipe inner
@@ -5434,21 +5439,22 @@ sessionVariant purpose scope path = do
         CheckedItemCompile _ _ values -> values
         ProgramItemCompile _ _ _ values -> values
         _ -> []
-  capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
-    (ssExactScope scope)
-  let exact = case withoutGeneratedInstanceCheck purpose of
-        PlannedDeclarationCheck _ admitted -> Just admitted
-        CellProgramCompile _ admitted -> Just admitted
-        _ -> capturedExact
+  exact <- case purposeExactScope purpose of
+    Just admitted -> do
+      -- The compiler entry revalidates this manifest's current digest and
+      -- entire closure before exposing it to compiler/plugin execution.
+      -- Path equality also binds the carried scope to this SessionScope offer.
+      unless (ssExactScope scope == Just (scopeManifestPath admitted))
+        (ioError (userError "planned declaration leaves its original compiler offer"))
+      pure (Just admitted)
+    Nothing -> traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
+      (ssExactScope scope)
   let previewPurpose = case effectivePurpose of
         HostActivationPreviewCompile signature -> Just signature
         _ -> Nothing
       previewAdmission = previewInputSignature <$> (exact >>= scopeActivationPreview)
   unless (previewPurpose == previewAdmission)
     (fail "activation preview has another compiler purpose")
-  forM_ exact $ \admitted -> case capturedExact of
-    Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
-    _ -> ioError (userError "planned declaration leaves its original compiler offer")
   -- The injected source-less @Val.G<g>@ modules: excluded from the
   -- downsweep (no source to summarise) — a deferred module's @import@ of
   -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
