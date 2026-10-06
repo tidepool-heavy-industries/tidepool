@@ -26,7 +26,7 @@ import Control.Exception
 import Control.Monad (unless, forM)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Data.List (foldl', partition, sortOn)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, isJust)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -43,7 +43,7 @@ import GHC.Core.Opt.Pipeline.Types (CoreToDo(CorePrep))
 import GHC.Core.Opt.Arity (etaExpand)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Id
-  ( idArity, idType, idDmdSig, idCprSig
+  ( idArity, idType, idDmdSig, idCprSig, isDataConWorkId_maybe
   , setIdArity, setIdDmdSig, setIdCprSig )
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
@@ -255,10 +255,14 @@ acquireRecoveredModule = acquireRecoveredModuleUsingSiteEnvironment Nothing
 
 acquireRecoveredModuleUsingSiteEnvironment :: Maybe PreparedSiteEnvironment
   -> HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
-acquireRecoveredModuleUsingSiteEnvironment environment hscEnv input = do
+acquireRecoveredModuleUsingSiteEnvironment = acquireRecoveredModuleWithWorkers IncludeConstructorWorkers
+
+acquireRecoveredModuleWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment
+  -> HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
+acquireRecoveredModuleWithWorkers workers environment hscEnv input = do
   let entries = Map.fromList [(varName identifier, identifier) | identifier <- recoveredEntries input]
   bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
-  task <- acquireTypedBindingsWithSiteEnvironment environment ExactBodySubset
+  task <- acquireTypedBindingsWithWorkers workers environment ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) Map.empty bindings
   pure $ PreparedModuleTask $ do
@@ -293,7 +297,19 @@ acquireTypedBindings coverage env owner location tycons imported bindings = do
 
 acquireTypedBindingsWithSiteEnvironment :: Maybe PreparedSiteEnvironment -> PreparedCoverage
   -> HscEnv -> Module -> ModLocation -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
-acquireTypedBindingsWithSiteEnvironment selected coverage env owner location tycons imported bindings = do
+acquireTypedBindingsWithSiteEnvironment = acquireTypedBindingsWithWorkers IncludeConstructorWorkers
+
+-- Canonical components own original groups; the defining constructor workers
+-- are prepared once as a separate unit, rather than injected in every subset.
+data ConstructorWorkerPolicy = IncludeConstructorWorkers | OmitConstructorWorkers
+  deriving (Eq, Ord)
+
+data FatPreparationUnit = OriginalComponent Int | ConstructorWorkers
+  deriving (Eq, Ord)
+
+acquireTypedBindingsWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment -> PreparedCoverage
+  -> HscEnv -> Module -> ModLocation -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
+acquireTypedBindingsWithWorkers workers selected coverage env owner location tycons imported bindings = do
   timing <- readTimingEnabled
   let census = censusPreparedIntrinsics tycons bindings
       ownedSiblings = resolvePreparedSiblings bindings
@@ -308,7 +324,7 @@ acquireTypedBindingsWithSiteEnvironment selected coverage env owner location tyc
   let subset = case coverage of
         CompleteSourceModule -> []
         ExactBodySubset -> recoveredSubsetScope owner rewritten
-  acquireBindingsWithScope timing subset env owner location tycons
+  acquireBindingsWithScope workers timing subset env owner location tycons
     rewritten coverage ownedSiblings sites preparedSites graph rejections carrier dependencies census
 
 -- | An exact subset can reference other external tops in its defining module.
@@ -333,15 +349,15 @@ recoveredSubsetScope owner bindings =
 data PreparedBodyCache = PreparedBodyCache
   { cachedExactBodies :: MVar (Map Module (Map PreparedBodyKey [PreparedModule]))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
-  , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule))
+  , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, FatPreparationUnit) PreparedModule))
   }
 
 -- Defining-context wrappers retain their exact binder census. Canonical fat
 -- selections additionally seal the original body version, so identical Names
 -- and consumed site facts cannot admit another version's prepared batch.
 data PreparedBodyKey
-  = ContextBodyKey [[Word64]]
-  | FatBodyKey FatOriginalVersion [[Word64]]
+  = ContextBodyKey ConstructorWorkerPolicy [[Word64]]
+  | FatBodyKey ConstructorWorkerPolicy FatOriginalVersion [[Word64]]
   deriving (Eq, Ord)
 
 newPreparedBodyCache :: IO PreparedBodyCache
@@ -383,8 +399,8 @@ selectPreparedBodyCaches sources = do
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
-mergeComponentBuckets :: [Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule)]
-  -> IO (Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule))
+mergeComponentBuckets :: [Map Module (Shared.LoadCache (FatOriginalVersion, FatPreparationUnit) PreparedModule)]
+  -> IO (Map Module (Shared.LoadCache (FatOriginalVersion, FatPreparationUnit) PreparedModule))
 mergeComponentBuckets sources = mapM
   (Shared.mergeLoadCaches . map (\cache -> (cache,const True)))
   (Map.unionsWith (++) (map (Map.map pure) sources))
@@ -476,10 +492,10 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
               (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
-preparedBodyKey :: Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
-preparedBodyKey version bindings = case version of
-  Nothing -> ContextBodyKey census
-  Just original -> FatBodyKey original census
+preparedBodyKey :: ConstructorWorkerPolicy -> Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
+preparedBodyKey workers version bindings = case version of
+  Nothing -> ContextBodyKey workers census
+  Just original -> FatBodyKey workers original census
   where
     census = [map (getKey . varUnique) (bindersOf binding) | binding <- bindings]
     bindersOf (NonRec binder _) = [binder]
@@ -517,7 +533,7 @@ newPreparedComponentTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBod
 newPreparedComponentTaskPreparer env owners stable = do
   disabled <- bodyReuseDisabled
   environment <- resolvePreparedSiteEnvironment env
-  acquireSiteBatch <- newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners stable
+  acquireSiteBatch <- newPreparedBodyTaskPreparerWithWorkers OmitConstructorWorkers environment env owners stable
   timing <- readTimingEnabled
   pure $ \selection -> do
     let version = fatSelectionVersion selection
@@ -537,11 +553,11 @@ newPreparedComponentTaskPreparer env owners stable = do
               (ownerInterfaceTyCons context) (IntMap.elems (fatComponentBindings component)))
             (plain, siteBearing) = partition pureUnit components
         acquired <- forM plain $ \component -> do
-          let key = (version,fatComponentOrdinal component)
+          let key = (version,OriginalComponent (fatComponentOrdinal component))
           completed <- Shared.lookupCompletedLoadCache bucket key
           task <- case completed of
             Just prepared | not disabled -> pure (Right (PreparedModuleTask (pure prepared)))
-            _ -> acquireRecoveredWithSiteContext (Just environment) env owner context
+            _ -> acquireRecoveredWithWorkers OmitConstructorWorkers (Just environment) env owner context
               (IntMap.elems (fatComponentBindings component))
           pure ((component,key,disabled && maybe False (const True) completed),task)
         -- Site graphs have owner-local indexes. Until their owning type policy
@@ -550,10 +566,19 @@ newPreparedComponentTaskPreparer env owners stable = do
         siteTask <- if null siteBearing then pure (Right Nothing) else
           fmap (fmap Just) (acquireSiteBatch (Just version) owner (IntMap.elems (IntMap.unions
             (map fatComponentBindings siteBearing))))
-        case (sequence [fmap ((,) pair) task | (pair,task) <- acquired], siteTask) of
-          (Left failure, _) -> pure (Left failure)
-          (_, Left failure) -> pure (Left failure)
-          (Right tasks, Right site) -> pure (Right (PreparedBodyTask $ do
+        -- CorePrep injects every defining constructor worker independently of
+        -- the original body subset. Give that implicit arena one version-bound
+        -- cache key and one place in assembly, including for site-bearing units.
+        workerTask <- case disabled of
+          False -> Shared.lookupCompletedLoadCache bucket (version,ConstructorWorkers) >>= \case
+            Just completed -> pure (Right (PreparedModuleTask (pure completed)))
+            Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context []
+          True -> acquireRecoveredWithSiteContext (Just environment) env owner context []
+        case (sequence [fmap ((,) pair) task | (pair,task) <- acquired], siteTask, workerTask) of
+          (Left failure, _, _) -> pure (Left failure)
+          (_, Left failure, _) -> pure (Left failure)
+          (_, _, Left failure) -> pure (Left failure)
+          (Right tasks, Right site, Right workers) -> pure (Right (PreparedBodyTask $ do
             outcome <- trySynchronous $ do
               pureResults <- forM tasks $ \((component,key,normalHitDisabled),task) -> do
                 let lower = do
@@ -572,7 +597,9 @@ newPreparedComponentTaskPreparer env owners stable = do
                 Just task -> do
                   result <- runPreparedBodyTask task >>= either (ioError . userError . show) pure
                   pure [(concatMap fatComponentOrdinals siteBearing,result)]
-              assembled <- assembleComponentSelection selection (pureResults ++ siteResult)
+              workerResult <- if disabled then runPreparedModuleTask workers else
+                Shared.lookupLoadCache bucket (version,ConstructorWorkers) (runPreparedModuleTask workers)
+              assembled <- assembleComponentSelection selection workerResult (pureResults ++ siteResult)
               emitCount timing "prepared_recover_component_demanded_groups"
                 (fromIntegral (fatSelectionDemandedGroupCount selection))
               emitCount timing "prepared_recover_component_prepared_groups"
@@ -605,15 +632,16 @@ preparedTopBinders (StgTopLifted (StgRec pairs)) = map fst pairs
 
 -- Assembly is private to this preparation owner. Every supplied unit must be
 -- an exact, disjoint part of the issued roster with disjoint emitted binders
--- and tag evidence. The single site batch supplies the owner-local type graph.
-assembleComponentSelection :: FatIfaceSelection -> [([Int],PreparedModule)] -> IO PreparedModule
-assembleComponentSelection selection units = do
+-- and tag evidence. The separate implicit arena contains only the defining
+-- constructor workers; the single site batch supplies the owner-local type graph.
+assembleComponentSelection :: FatIfaceSelection -> PreparedModule -> [([Int],PreparedModule)] -> IO PreparedModule
+assembleComponentSelection selection workers units = do
   let version = fatSelectionVersion selection
       owner = fatOriginalOwner version
       rosters = map fst units
       expected = Set.fromList (concatMap fatComponentOrdinals (fatSelectionComponents selection))
       supplied = concat rosters
-      prepared = map snd (sortOn (minimum . fst) units)
+      prepared = workers : map snd (sortOn (minimum . fst) units)
       names = concatMap (concatMap (map varName . preparedTopBinders . fst) . pmBindings) prepared
       spellings = concatMap (Map.elems . pmStableTopSpellings) prepared
       siteUnits = filter preparedUsesSiteAuthority prepared
@@ -622,7 +650,11 @@ assembleComponentSelection selection units = do
         (emptyNameEnv,True) prepared)
       siblings = mergeConsistentIds (map pmSitedSiblings prepared)
       entries = mergeConsistentIds (map preparedExpectedEntries prepared)
-  unless (not (null prepared)
+  unless (not (null units)
+      && all (isJust . isDataConWorkId_maybe)
+        (concatMap (preparedTopBinders . fst) (pmBindings workers))
+      && not (preparedUsesSiteAuthority workers)
+      && Map.null (pmStableTopSpellings workers)
       && all ((== version) . fatComponentVersion) (fatSelectionComponents selection)
       && all ((== owner) . pmModule) prepared
       && all ((== ExactBodySubset) . pmCoverage) prepared
@@ -666,13 +698,18 @@ newPreparedBodyTaskPreparer env owners bodyCache = do
 newPreparedBodyTaskPreparerWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv
   -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (Maybe FatOriginalVersion -> Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
-newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache = do
+newPreparedBodyTaskPreparerWithSiteEnvironment = newPreparedBodyTaskPreparerWithWorkers IncludeConstructorWorkers
+
+newPreparedBodyTaskPreparerWithWorkers :: ConstructorWorkerPolicy -> PreparedSiteEnvironment -> HscEnv
+  -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (Maybe FatOriginalVersion -> Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
+newPreparedBodyTaskPreparerWithWorkers workers environment env owners bodyCache = do
   disabled <- bodyReuseDisabled
   timing <- readTimingEnabled
   scoped <- newMVar Map.empty
   pure $ \version owner bindings -> do
     let stable = cachedExactBodies bodyCache
-        key = preparedBodyKey version bindings
+        key = preparedBodyKey workers version bindings
     stableHit <- lookupOwnerEntry owner key <$> readMVar stable
     scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
     let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
@@ -686,7 +723,7 @@ newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache 
         resolved <- acquireRecoveredContext env owners owner
         acquired <- case resolved of
           Left failure -> pure (Left failure)
-          Right context -> acquireRecoveredWithSiteContext (Just environment) env owner context bindings
+          Right context -> acquireRecoveredWithWorkers workers (Just environment) env owner context bindings
         pure $ fmap (\task -> PreparedBodyTask $ do
           outcome <- trySynchronous (runPreparedModuleTask task)
           case outcome of
@@ -715,8 +752,12 @@ newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache 
 -- read+typecheck is cached; see 'OwnerInterfaceCache'.
 acquireRecoveredWithSiteContext :: Maybe PreparedSiteEnvironment -> HscEnv -> Module
   -> OwnerInterfaceContext -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModuleTask)
-acquireRecoveredWithSiteContext environment hscEnv owner context bindings = do
-  prepared <- trySynchronous (acquireRecoveredModuleUsingSiteEnvironment environment hscEnv
+acquireRecoveredWithSiteContext = acquireRecoveredWithWorkers IncludeConstructorWorkers
+
+acquireRecoveredWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment -> HscEnv -> Module
+  -> OwnerInterfaceContext -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModuleTask)
+acquireRecoveredWithWorkers workers environment hscEnv owner context bindings = do
+  prepared <- trySynchronous (acquireRecoveredModuleWithWorkers workers environment hscEnv
     (RecoveredModuleInput owner (ownerInterfaceLocation context)
       (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
   pure $ case prepared of
@@ -763,10 +804,10 @@ trySynchronous action = do
       Nothing -> pure (Left (displayException (exception :: SomeException)))
     Right value -> pure (Right value)
 
-acquireBindingsWithScope :: Bool -> [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
+acquireBindingsWithScope :: ConstructorWorkerPolicy -> Bool -> [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
   -> [SiteRejection] -> Maybe TyCon -> Maybe PreparedSiteDependencies -> IntrinsicCensus -> IO PreparedModuleTask
-acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons optimizedCore coverage
+acquireBindingsWithScope workers timing subsetScope hscEnv thisModule location tycons optimizedCore coverage
     siblings yieldSites sites graph rejections carrierTyCon dependencies census = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
@@ -780,7 +821,9 @@ acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons op
             Opt_DoCoreLinting)
           Opt_DoStgLinting
       logger = hsc_logger hscEnv
-      dataTyCons = filter isDataTyCon tycons
+      dataTyCons = case workers of
+        IncludeConstructorWorkers -> filter isDataTyCon tycons
+        OmitConstructorWorkers -> []
       interactiveVars = subsetScope ++ interactiveInScope (hsc_IC hscEnv)
       coreLint = lintCoreBindings preparedFlags CorePrep [] optimizedCore
       stgOptions = initStgPipelineOpts preparedFlags False

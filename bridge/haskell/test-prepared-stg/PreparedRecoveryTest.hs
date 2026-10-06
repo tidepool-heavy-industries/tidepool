@@ -11,6 +11,8 @@ import Control.Exception (bracket, evaluate, finally)
 import Control.Monad (forM, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
+import Data.Maybe (isJust)
+import System.Mem.StableName (makeStableName)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
@@ -22,7 +24,7 @@ import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel)
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
-import GHC.Types.Id (mkVanillaGlobal, setIdType)
+import GHC.Types.Id (mkVanillaGlobal, setIdType, isDataConWorkId_maybe)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -49,7 +51,9 @@ import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
   , TopBinding(..), WireProgram(..) )
-import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
+import Tidepool.FatIface
+  ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
+  , FatIfaceComponentLookup(..), fatSelectionComponents )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
   , recoverPreparedClosure, newPreparedRecovery, newPreparedRecoveryWithPackageRoots
@@ -58,7 +62,7 @@ import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
-  , newPreparedBodyCache, prepareModule )
+  , newPreparedBodyCache, prepareModule, newPreparedComponentTaskPreparer, runPreparedBodyTask )
 import Tidepool.PreparedSites (SiteRejection(..))
 
 assert :: Bool -> String -> IO ()
@@ -106,6 +110,7 @@ scenario = do
           , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
               (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
+          , projectionCurrentOriginals = mempty
           , projectionEntry = entry
           , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
@@ -149,9 +154,67 @@ scenario = do
     liftIO $ incompleteSubsetContract home context
     hiddenClosure <- liftIO $ hidden_defining_module hsc context hidden
     liftIO $ growing_original_packages hsc context home hidden hiddenClosure closure
+    queueOwner <- findModule (mkModuleName "Data.FTCQueue") Nothing
+    liftIO $ constructor_component_recovery hsc context queueOwner root source
     liftIO $ retainedProjectionBoundary hsc context modules
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
+    constructor_component_recovery hsc context owner root source = do
+      let symbol occurrence = SymbolIdentity
+            (Text.pack (unitString (moduleUnit owner))) (Text.pack (moduleNameString (moduleName owner)))
+            "value" occurrence Nothing
+          workerRoot = symbol "$WNode"
+          viewRoot = symbol "tviewl_go"
+          packageContext = context
+            { projectionEntry = viewRoot, projectionAuxiliaryRoots = [workerRoot] }
+      identifiers <- forM [viewRoot, workerRoot] $ \identity -> do
+        (identifier, _) <- resolvePackageGlobal hsc identity >>= either fail pure
+        assert (preparedRootIdentity identifier == identity) "queue root differs from canonical package Id"
+        pure identifier
+      cache <- newFatIfaceCache
+      owners <- newOwnerInterfaceCache
+      bodies <- newPreparedBodyCache
+      acquire <- newPreparedComponentTaskPreparer hsc owners bodies
+      let prepare roots = do
+            selection <- lookupFatIfaceComponents hsc cache owner (map varName roots) >>= \case
+              FatIfaceComponents selected -> pure selected
+              _ -> fail "real FTCQueue component selection failed"
+            task <- acquire selection >>= either (fail . show) pure
+            prepared <- runPreparedBodyTask task >>= either (fail . show) pure
+            pure (selection, prepared)
+          bindings prepared = fmap Map.fromList $ fmap concat $ forM (pmBindings prepared) $ \(binding, _) -> do
+            physical <- evaluate binding >>= makeStableName
+            pure [(varName binder, physical) | binder <- topBinders binding]
+          workerNames prepared = [varName binder | (binding, _) <- pmBindings prepared
+            , binder <- topBinders binding, isJust (isDataConWorkId_maybe binder)]
+      (_, first) <- prepare (take 1 identifiers)
+      firstBindings <- bindings first
+      (selection, grown) <- prepare identifiers
+      assert (length (fatSelectionComponents selection) > 1)
+        "queue regression did not select independent components sharing a datatype"
+      let names = map varName (topBindersOfModule grown)
+          workers = workerNames grown
+      assert (length names == Set.size (Set.fromList names)) "queue assembly duplicated a top"
+      assert (not (null workers) && length workers == Set.size (Set.fromList workers))
+        "queue assembly lost or duplicated defining constructor workers"
+      grownBindings <- bindings grown
+      assert (all (\(name, physical) -> Map.lookup name grownBindings == Just physical)
+        (Map.toList firstBindings)) "queue growth re-lowered completed component or constructor workers"
+      (_, repeated) <- prepare (reverse identifiers ++ identifiers)
+      repeatedBindings <- bindings repeated
+      assert (grownBindings == repeatedBindings) "queue root permutation re-lowered completed units"
+      projected <- either (fail . show) pure (projectPreparedTarget packageContext [grown])
+      repeatedProgram <- either (fail . show) pure (projectPreparedTarget packageContext [repeated])
+      assert (projected == repeatedProgram) "queue root permutation changed executable identities"
+      let defined = Set.fromList [identity | group <- programBindings projected
+            , TopBinding identity _ <- case group of NonRecursive top -> [top]; Recursive tops -> tops]
+      assert (viewRoot `Set.member` defined && workerRoot `Set.member` defined)
+        "projected queue package closure lacks demanded executable definitions"
+      -- The same authored producer builds and deconstructs a Node and Leaf;
+      -- the central resident smoke supplies native execution of this package.
+      output <- readProcessGhc ["-v0", "-i" ++ (root </> "test-prepared-stg"), source, "-e", "queueProbe"]
+      assert (trim output == "42") "GHC queue constructor oracle changed"
+
     projectionResult projection = fmap fst (projection >>= projectSelected)
 
     assertProjectionEquivalent context closure = do
