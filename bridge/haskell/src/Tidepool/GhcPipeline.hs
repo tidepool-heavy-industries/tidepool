@@ -203,7 +203,7 @@ import Tidepool.Session
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
-  , timeDetailPhase, ResourceTimingStart, beginResourceTiming, endResourceTiming
+  , timeDetailPhase, timeModuleDetailPhase, ResourceTimingStart, beginResourceTiming, endResourceTiming
   , monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
@@ -2751,13 +2751,23 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         targetPhase (T_HscBackend _ _ name _ _ _) = name == targetName
         targetPhase _ = False
         captureCanonicalFailure :: TPhase a -> IO a
-        captureCanonicalFailure phase = canonicalLoadPhase phase
+        captureCanonicalFailure phase = observedCanonicalLoad phase
           `catch` (\failure -> do
             when (targetPhase phase) (writeIORef targetLoadFailure (Just (failure :: SourceError)))
             throwIO failure)
           `catch` (\failure -> do
             writeIORef canonicalFailureRef (Just (failure :: CanonicalFrontendFailure))
             throwIO failure)
+        observedCanonicalLoad :: TPhase a -> IO a
+        observedCanonicalLoad phase@(T_Hsc _ summary)
+          | ms_hsc_src summary == HsSrcFile = timeModuleDetailPhase timing
+              "ghc_load" "source_frontend_task_service" (ms_mod summary)
+              (canonicalLoadPhase phase)
+        observedCanonicalLoad phase@(T_HscPostTc _ summary (FrontendTypecheck _) _ _)
+          | ms_hsc_src summary == HsSrcFile = timeModuleDetailPhase timing
+              "ghc_load" "source_finalization_task_service" (ms_mod summary)
+              (canonicalLoadPhase phase)
+        observedCanonicalLoad phase = canonicalLoadPhase phase
     when (isJust originalPhaseHook) (liftIO (throwIO CustomLoadPhaseHook))
     when (isJust (hscFrontendHook (hsc_hooks beforeLoad))) (liftIO (throwIO CustomLoadFrontendHook))
     loadT0 <- monotonicTime

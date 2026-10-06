@@ -1,4 +1,6 @@
 import importlib.util
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import unittest
@@ -34,6 +36,23 @@ def trace(packets, ordinal=1, digest='request'):
 
 def completed(packets, stage='source_frontend'):
     return packets + [packet('complete', stage, 0)]
+
+
+def timing_detail(phase='prepared_stg_task_service', start=10, end=20, **changes):
+    fields = {'parent': 'prepared_graph', 'phase': phase, 'owner_unit': 'main',
+              'owner_module': changes.pop('owner_module', 'Support'), 'ms': 1, 'start_ns': start,
+              'end_ns': end, 'wall_ns': end - start, 'cpu_ns': end - start,
+              'allocated_bytes': 7}
+    fields.update(changes)
+    return 'tidepool-timing-detail ' + ' '.join(f'{key}={value}' for key, value in fields.items())
+
+
+def with_detail_lines(lines):
+    rows = trace([])
+    span = rows[0]['span']
+    rows[1:1] = [{'fields': {'message': 'compiler timing', 'line': line}, 'span': span}
+                 for line in lines]
+    return rows
 
 
 class ReuseEvidenceControls(unittest.TestCase):
@@ -112,6 +131,223 @@ class ReuseEvidenceControls(unittest.TestCase):
         result = REPORT.analyze(rows)
         self.assertEqual(result['requests'][0]['phases_ms']['lowering'], [11470])
         self.assertIn('nonexclusive', result['interpretation'])
+
+    def test_task_overlap_sweep_distinguishes_disjoint_from_overlapping_intervals(self):
+        disjoint = REPORT.analyze(with_detail_lines([
+            timing_detail(start=10, end=20), timing_detail(start=20, end=30)]))['requests'][0]['task_overlap']
+        self.assertEqual(disjoint['status'], 'observed')
+        self.assertEqual(disjoint['maximum_simultaneous_tasks'], 1)
+        self.assertEqual(disjoint['overlapping_wall_ns'], 0)
+        overlap = REPORT.analyze(with_detail_lines([
+            timing_detail(start=10, end=30, owner_module='PreparedA'),
+            timing_detail(phase='raw_projection_task_service', start=20, end=40, owner_module='RawA'),
+            timing_detail(phase='raw_projection_task_service', start=25, end=28, owner_module='RawB')]))['requests'][0]['task_overlap']
+        self.assertEqual(overlap['maximum_simultaneous_tasks'], 3)
+        self.assertEqual(overlap['overlapping_wall_ns'], 10)
+        self.assertEqual(overlap['by_phase']['prepared_stg_task_service']['maximum_simultaneous_tasks'], 1)
+        self.assertEqual(overlap['by_phase']['raw_projection_task_service']['maximum_simultaneous_tasks'], 2)
+        self.assertEqual(overlap['by_phase']['raw_projection_task_service']['overlapping_wall_ns'], 3)
+        self.assertFalse(overlap['mixed_phase_overlap_is_independent_cpu_proof'])
+        same_owner = REPORT.analyze(with_detail_lines([
+            timing_detail(start=10, end=30, owner_module='Shared'),
+            timing_detail(phase='raw_projection_task_service', start=20, end=40, owner_module='Shared')]))['requests'][0]['task_overlap']
+        self.assertEqual(same_owner['maximum_simultaneous_tasks'], 1)
+        self.assertEqual(same_owner['overlapping_wall_ns'], 0)
+        self.assertNotIn('cpu_ns', overlap)
+        self.assertNotIn('allocated_bytes', overlap)
+
+    def test_task_overlap_ignores_nested_non_task_parent_span(self):
+        report = REPORT.analyze(with_detail_lines([
+            timing_detail(start=10, end=30),
+            timing_detail(phase='prepared_graph', start=0, end=100, owner_unit='other', owner_module='Parent')]))
+        overlap = report['requests'][0]['task_overlap']
+        self.assertEqual(overlap['status'], 'observed')
+        self.assertEqual(len(overlap['qualified_spans']), 1)
+        self.assertEqual(overlap['maximum_simultaneous_tasks'], 1)
+
+    def test_actual_source_phase_overlap_requires_its_ghc_load_parent(self):
+        for phase in ('source_frontend_task_service', 'source_finalization_task_service'):
+            with self.subTest(phase=phase):
+                lines = [timing_detail(phase=phase, parent='ghc_load', start=10, end=30,
+                                       owner_module='First'),
+                         timing_detail(phase=phase, parent='ghc_load', start=20, end=40,
+                                       owner_module='Second')]
+                overlap = REPORT.analyze(with_detail_lines(lines))['requests'][0]['task_overlap']
+                self.assertEqual(overlap['by_phase'][phase]['maximum_simultaneous_distinct_owners'], 2)
+                self.assertEqual(overlap['by_phase'][phase]['overlapping_wall_ns'], 10)
+                invalid = REPORT.analyze(with_detail_lines([
+                    timing_detail(phase=phase, parent='prepared_graph')]))['requests'][0]['task_overlap']
+                self.assertEqual(invalid['status'], 'UNKNOWN')
+
+    def test_task_overlap_missing_or_invalid_owner_and_endpoints_is_unknown(self):
+        for changes in ({'owner_unit': ''}, {'owner_module': ''}, {'start_ns': 'bad'}, {'end_ns': 9}):
+            with self.subTest(changes=changes):
+                report = REPORT.analyze(with_detail_lines([timing_detail(start=10, end=20, **changes)]))
+                overlap = report['requests'][0]['task_overlap']
+                self.assertEqual(overlap['status'], 'UNKNOWN')
+                self.assertIsNone(overlap['maximum_simultaneous_tasks'])
+                self.assertIsNone(overlap['overlapping_wall_ns'])
+
+    def test_zero_length_task_span_has_no_positive_overlap(self):
+        overlap = REPORT.analyze(with_detail_lines([timing_detail(start=10, end=10)]))['requests'][0]['task_overlap']
+        self.assertEqual(overlap['status'], 'observed')
+        self.assertEqual(overlap['maximum_simultaneous_tasks'], 0)
+        self.assertEqual(overlap['overlapping_wall_ns'], 0)
+
+    def test_task_overlap_refuses_mismatched_physical_envelope(self):
+        rows = with_detail_lines([timing_detail()])
+        rows[1]['fields']['compile_request'] = 'different-request'
+        report = REPORT.analyze(rows)
+        self.assertEqual(report['requests'][0]['task_overlap']['status'], 'UNKNOWN')
+        self.assertTrue(any('digest conflicts with physical invocation' in problem
+                            for problem in report['problems']))
+        rows = with_detail_lines([timing_detail()])
+        rows[1]['fields']['worker_pid'] = 999
+        report = REPORT.analyze(rows)
+        self.assertEqual(report['requests'][0]['task_overlap']['status'], 'UNKNOWN')
+        self.assertTrue(report['unlinked_events'])
+
+    def test_task_detail_rejects_duplicate_fields_wrong_parent_and_bad_wall(self):
+        controls = [
+            timing_detail().replace(' owner_module=Support', ''),
+            timing_detail().replace(' end_ns=20', ''),
+            timing_detail().replace(' wall_ns=10', ''),
+            timing_detail() + ' owner_unit=other',
+            timing_detail() + ' start_ns=10',
+            timing_detail(parent='wrong_owner'),
+            timing_detail(wall_ns=11),
+            timing_detail(cpu_ns='bad'),
+        ]
+        for line in controls:
+            with self.subTest(line=line):
+                overlap = REPORT.analyze(with_detail_lines([line]))['requests'][0]['task_overlap']
+                self.assertEqual(overlap['status'], 'UNKNOWN')
+                self.assertIsNone(overlap['maximum_simultaneous_tasks'])
+
+    def test_identical_task_interval_rows_do_not_create_concurrency(self):
+        overlap = REPORT.analyze(with_detail_lines([timing_detail(), timing_detail()]))['requests'][0]['task_overlap']
+        self.assertEqual(overlap['status'], 'UNKNOWN')
+        self.assertTrue(any('duplicate task interval rows' in problem for problem in overlap['problems']))
+
+    def test_same_owner_overlapping_intervals_within_one_phase_are_unknown(self):
+        overlap = REPORT.analyze(with_detail_lines([
+            timing_detail(start=10, end=30, owner_module='Repeated'),
+            timing_detail(start=20, end=40, owner_module='Repeated')]))['requests'][0]['task_overlap']
+        self.assertEqual(overlap['status'], 'UNKNOWN')
+        self.assertTrue(any('overlapping intervals for owner' in problem for problem in overlap['problems']))
+
+    def test_task_timing_detail_must_be_inside_request_boundaries(self):
+        rows = trace([])
+        span = rows[0]['span']
+        detail_row = {'fields': {'message': 'compiler timing', 'line': timing_detail()}, 'span': span}
+        for location in ('before', 'after'):
+            with self.subTest(location=location):
+                rows = trace([])
+                if location == 'before':
+                    rows.insert(0, dict(detail_row))
+                else:
+                    rows.append(dict(detail_row))
+                report = REPORT.analyze(rows)
+                overlap = report['requests'][0]['task_overlap']
+                self.assertEqual(overlap['status'], 'UNKNOWN')
+                self.assertTrue(any('outside request boundaries' in problem
+                                    for problem in report['requests'][0]['problems']))
+
+    def test_cell_correlation_joins_all_requests_and_excludes_warmup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'cell.hs'
+            source.write_text('main = 42\n')
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            rows = trace([], ordinal=1, digest='request') + trace([], ordinal=2, digest='request2')
+            report = REPORT.analyze(rows)
+            def link(ordinal, compile_request):
+                return {'daemon_epoch': 'epoch', 'admission_id': 4,
+                        'request_ordinal': ordinal, 'compile_request': compile_request}
+            correlation_rows = [
+                {'line': 1, 'raw': 'warmup', 'row': {'schema': 1, 'phase': 'warmup'}},
+                {'line': 2, 'raw': 'measured', 'row': {'schema': 1, 'phase': 'measured',
+                 'index': 0, 'label': 'cell', 'source_path': str(source), 'source_sha256': digest,
+                 'completed': True, 'compiler_requests': [link(1, 'request'), link(2, 'request2')]}}]
+            workload, evidence = REPORT.cell_correlation_workload(correlation_rows, report['requests'], 'repeat')
+            self.assertEqual(len(workload['cases']), 2)
+            self.assertEqual(workload['cases'][0]['source'], workload['cases'][1]['source'])
+            self.assertEqual(evidence['observed_counts']['authored_cells'], 1)
+            self.assertEqual(evidence['observed_counts']['compiler_request_references'], 2)
+            self.assertEqual(evidence['observed_counts']['unique_joined_physical_requests'], 2)
+            self.assertEqual(evidence['observed_counts']['warmup_rows_excluded'], 1)
+            self.assertIsNone(evidence['configured_demand_counts'])
+            _, duplicate = REPORT.cell_correlation_workload(
+                correlation_rows + [correlation_rows[-1]], report['requests'], 'repeat')
+            self.assertEqual(duplicate['status'], 'incomplete')
+            self.assertTrue(any('duplicate authored cell correlation record' in problem
+                                for problem in duplicate['problems']))
+
+    def test_cell_correlation_requires_unique_physical_start_and_source_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'cell.hs'
+            source.write_text('main = 42\n')
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            duplicate = trace([], ordinal=1, digest='request')
+            second = trace([], ordinal=1, digest='request')
+            second[0]['span']['worker_pid'] = 124
+            second[-1]['span']['worker_pid'] = 124
+            report = REPORT.analyze(duplicate + second)
+            row = {'schema': 1, 'phase': 'measured', 'index': 0, 'label': 'cell',
+                   'source_path': str(source), 'source_sha256': digest, 'completed': True,
+                   'compiler_requests': [{'daemon_epoch': 'epoch', 'admission_id': 4,
+                                          'request_ordinal': 1, 'compile_request': 'request'}]}
+            workload, evidence = REPORT.cell_correlation_workload(
+                [{'line': 1, 'raw': 'row', 'row': row}], report['requests'], 'distinct')
+            self.assertEqual(workload['cases'], [])
+            self.assertEqual(evidence['status'], 'incomplete')
+            self.assertTrue(any('joined 2 daemon starts' in problem for problem in evidence['problems']))
+            row['source_sha256'] = '0' * 64
+            _, evidence = REPORT.cell_correlation_workload(
+                [{'line': 1, 'raw': 'row', 'row': row}], report['requests'], 'distinct')
+            self.assertTrue(any('source path/hash missing or changed' in problem
+                                for problem in evidence['problems']))
+
+    def test_cell_correlation_log_retains_bounded_prefixed_rows_and_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'cells.log'
+            content = ('noise\n' + REPORT.CELL_PREFIX + json.dumps({'schema': 1, 'phase': 'warmup'}) + '\n').encode()
+            path.write_bytes(content)
+            rows, reference = REPORT.load_cell_correlations(path)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['row']['phase'], 'warmup')
+            self.assertEqual(reference['sha256'], hashlib.sha256(content).hexdigest())
+
+    def test_cli_generates_workload_from_cell_correlation_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources, cases, requests = [], [], []
+            for index, (name, digest_text) in enumerate((('A.hs', 'main = 1\n'), ('B.hs', 'main = 2\n'))):
+                source = root / name
+                source.write_text(digest_text)
+                digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                sources.append(source)
+                rows = trace([packet('complete', 'source_frontend', 0)],
+                             ordinal=index + 1, digest=f'request{index}')
+                requests.extend(rows)
+                cases.append({'schema': 1, 'index': index, 'label': name, 'phase': 'measured',
+                              'completed': True, 'source_path': str(source), 'source_sha256': digest,
+                              'compiler_requests': [{'daemon_epoch': 'epoch', 'admission_id': 4,
+                                  'request_ordinal': index + 1, 'compile_request': f'request{index}'}]})
+            trace_path, cell_path = root / 'trace.jsonl', root / 'cells.log'
+            output_path, workload_path = root / 'report.json', root / 'workload.json'
+            trace_path.write_text(''.join(json.dumps(row) + '\n' for row in requests))
+            cell_path.write_text(''.join(REPORT.CELL_PREFIX + json.dumps(row) + '\n' for row in cases))
+            argv = ['compiler-reuse-report.py', '--trace', str(trace_path), '--output', str(output_path),
+                    '--cell-log', str(cell_path), '--scenario', 'distinct', '--write-workload', str(workload_path)]
+            with patch('sys.argv', argv), redirect_stdout(io.StringIO()):
+                exit_code = REPORT.main()
+            self.assertEqual(exit_code, 1)  # One cohort is intentionally incomplete without the other scenarios/controls.
+            report = json.loads(output_path.read_text())
+            workload = json.loads(workload_path.read_text())
+            self.assertEqual(report['cell_correlation']['observed_counts']['authored_cells'], 2)
+            self.assertEqual(report['cell_correlation']['observed_counts']['unique_joined_physical_requests'], 2)
+            self.assertEqual([case['identity']['worker_pid'] for case in workload['cases']], [123, 123])
+            self.assertEqual(report['workload']['status'], 'incomplete')
 
     def test_malformed_counts_identity_and_completion_fail_closed(self):
         for key, value in [('items', True), ('items', -1), ('version_kind', 'invented'), ('version', ''), ('schema', True)]:
