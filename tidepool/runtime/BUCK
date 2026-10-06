@@ -914,30 +914,35 @@ tidepool_rust_isolated_test(
 export_file(
     name = "activation_input_function_fixture",
     src = "src/session/fixtures/activation-input-function.hs",
+    out = "activation-input-function.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "activation_input_receiver_fixture",
     src = "src/session/fixtures/activation-input-receiver.hs",
+    out = "activation-input-receiver.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "activation_input_resident_original_fixture",
     src = "src/session/fixtures/activation-input-resident-original.hs",
+    out = "activation-input-resident-original.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "activation_input_resident_request_fixture",
     src = "src/session/fixtures/activation-input-resident-request.hs",
+    out = "activation-input-resident-request.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "activation_input_resident_shadow_fixture",
     src = "src/session/fixtures/activation-input-resident-shadow.hs",
+    out = "activation-input-resident-shadow.hs",
     visibility = ["PUBLIC"],
 )
 

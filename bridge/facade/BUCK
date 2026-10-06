@@ -2485,6 +2485,7 @@ tidepool_rust_isolated_test(
 export_file(
     name = "workspace_pinned_check_source",
     src = "src/exomonad/workspace_pinned_check.hs",
+    out = "workspace_pinned_check.hs",
     visibility = ["PUBLIC"],
 )
 
