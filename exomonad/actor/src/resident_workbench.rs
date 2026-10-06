@@ -95,38 +95,52 @@ impl CompilerCloseOwner {
 
 fn register_compiler_work(
 ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-    let owner = COMPILER_CLOSE_OWNER
-        .try_with(Clone::clone)
-        .ok()
-        .or_else(|| execution_control().map(CompilerCloseOwner::Hosted))
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "compiler work requires an invocation or initialization cleanup owner".into(),
-            )
-        })?;
-    let receipt = crate::termination::CompilerWorkReceipt::pending();
-    let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), owner.clone());
-    let admitted = match &owner {
-        CompilerCloseOwner::Initialization(owner) => owner.register_compiler_work(receipt),
-        CompilerCloseOwner::Hosted(owner) => owner.register_compiler_work(receipt),
-        CompilerCloseOwner::Invocation { work, control } => {
-            work.register_compiler_work(receipt.clone())
-                && control
-                    .as_ref()
-                    .is_none_or(|owner| owner.register_compiler_work(receipt))
-        }
-    };
-    if admitted {
-        return Ok(ticket);
+    CompilerCloseOwner::current()?.register_work()
+}
+
+impl CompilerCloseOwner {
+    /// Capture before spawning a task; Tokio task-local owners are not inherited.
+    pub(crate) fn current() -> Result<Self, ResidentActorWorkbenchError> {
+        COMPILER_CLOSE_OWNER
+            .try_with(Clone::clone)
+            .ok()
+            .or_else(|| execution_control().map(Self::Hosted))
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "compiler work requires an invocation or initialization cleanup owner".into(),
+                )
+            })
     }
-    // No native work has started. Revoke any partial metadata admission cleanly.
-    ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
-        action: (),
-        close: tidepool_runtime::CompilerTransactionClose::NotStarted,
-    });
-    Err(ResidentActorWorkbenchError::ActorProtocol(
-        "compiler cleanup owner has closed native work admission".into(),
-    ))
+
+    /// Admit before spawning native work. The affine ticket retains this exact
+    /// lifetime and settles it even if every async waiter disappears.
+    pub(crate) fn register_work(
+        &self,
+    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
+        let receipt = crate::termination::CompilerWorkReceipt::pending();
+        let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), self.clone());
+        let admitted = match self {
+            CompilerCloseOwner::Initialization(owner) => owner.register_compiler_work(receipt),
+            CompilerCloseOwner::Hosted(owner) => owner.register_compiler_work(receipt),
+            CompilerCloseOwner::Invocation { work, control } => {
+                work.register_compiler_work(receipt.clone())
+                    && control
+                        .as_ref()
+                        .is_none_or(|owner| owner.register_compiler_work(receipt))
+            }
+        };
+        if admitted {
+            return Ok(ticket);
+        }
+        // No native work has started. Revoke any partial metadata admission cleanly.
+        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+            action: (),
+            close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+        });
+        Err(ResidentActorWorkbenchError::ActorProtocol(
+            "compiler cleanup owner has closed native work admission".into(),
+        ))
+    }
 }
 
 /// Direct fixtures supply the existing lifecycle owner explicitly.
@@ -12487,6 +12501,96 @@ pub(crate) mod request_tests {
             retained.get().unwrap().kind,
             crate::ActorExitKind::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn captured_preparation_owner_survives_waiter_loss_and_retirement() {
+        let retained = crate::RetainedActorExit::new();
+        let captured = CompilerCloseOwner::Initialization(retained.clone())
+            .scope(async { CompilerCloseOwner::current().unwrap() })
+            .await;
+        // Register before the task exists, using its captured actual owner.
+        let ticket = captured.register_work().unwrap();
+        assert!(matches!(
+            retained.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let (settled, completed) = std::sync::mpsc::channel();
+        let waiter = tokio::spawn(async move {
+            assert!(CompilerCloseOwner::current().is_err());
+            spawn_blocking_in_span(move || {
+                let action = ticket.run_for_workload(
+                    tidepool_extract_cmd::CompileWorkload::Preparation,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    || {
+                        entered.send(()).unwrap();
+                        proceed
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        Err::<(), _>("preparation action refused before compiler bind")
+                    },
+                );
+                settled.send(action).unwrap();
+            })
+            .await
+        });
+        observed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        retained.retain_cleanup(crate::ResidentCleanupOutcome {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            hook: crate::CleanupComponentOutcome::Confirmed,
+            realm: crate::CleanupComponentOutcome::Confirmed,
+            children: crate::CleanupComponentOutcome::Confirmed,
+        });
+        retained
+            .publish(crate::ActorTerminal {
+                kind: crate::ActorExitKind::Cancelled,
+                summary: "retired with source preparation pending".into(),
+                diagnostic: None,
+            })
+            .unwrap();
+        assert!(!retained.cleanup().unwrap().is_confirmed());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(!retained.cleanup().unwrap().is_confirmed());
+        release.send(()).unwrap();
+        assert_eq!(
+            completed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Err("preparation action refused before compiler bind")
+        );
+        assert!(retained.cleanup().unwrap().is_confirmed());
+        assert!(matches!(
+            retained.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        ));
+        assert_eq!(
+            retained.get().unwrap().kind,
+            crate::ActorExitKind::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn captured_preparation_owner_refuses_admission_after_retirement() {
+        let retained = crate::RetainedActorExit::new();
+        let captured = CompilerCloseOwner::Initialization(retained.clone())
+            .scope(async { CompilerCloseOwner::current().unwrap() })
+            .await;
+        retained.retain_cleanup(crate::ResidentCleanupOutcome {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            hook: crate::CleanupComponentOutcome::Confirmed,
+            realm: crate::CleanupComponentOutcome::Confirmed,
+            children: crate::CleanupComponentOutcome::Confirmed,
+        });
+        assert!(captured.register_work().is_err());
+        assert!(retained.compiler_close_observations().is_empty());
+        assert!(retained.cleanup().unwrap().is_confirmed());
     }
 
     #[tokio::test]

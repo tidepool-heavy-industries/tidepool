@@ -207,7 +207,23 @@ impl CompilerWorkTicket {
         cancellation: tidepool_runtime::CompilerTransactionCancellation,
         action: impl FnOnce() -> T,
     ) -> T {
-        tidepool_runtime::with_compiler_transaction_cancellable(
+        self.run_for_workload(
+            tidepool_extract_cmd::CompileWorkload::Foreground,
+            cancellation,
+            action,
+        )
+    }
+
+    /// Own the complete compiler scope with its declared admission workload.
+    /// Borrowed commands inside the action do not settle this ticket early.
+    pub(crate) fn run_for_workload<T>(
+        self,
+        workload: tidepool_extract_cmd::CompileWorkload,
+        cancellation: tidepool_runtime::CompilerTransactionCancellation,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        tidepool_extract_cmd::with_compiler_transaction_cancellable_for_workload(
+            workload,
             cancellation,
             move |close| {
                 self.consume(tidepool_runtime::CompilerTransactionOutcome { action: (), close })

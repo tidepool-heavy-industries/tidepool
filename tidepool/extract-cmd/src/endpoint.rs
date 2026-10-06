@@ -2410,16 +2410,45 @@ mod tests {
     }
 
     #[test]
-    fn nested_default_transaction_keeps_explicit_outer_workload() {
-        with_compiler_transaction_for_workload(CompileWorkload::Preparation, || {
-            with_compiler_transaction(|| {
-                assert_eq!(
-                    TRANSACTION_SCOPE.with(|scope| scope.borrow().as_ref().unwrap().workload),
-                    CompileWorkload::Preparation
-                );
-            });
-            assert!(TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()));
-        });
+    fn scoped_endpoints_borrow_preparation_owner_without_finishing_close() {
+        assert!(
+            std::env::var_os(crate::DAEMON_SOCKET_ENV).is_none()
+                && std::env::var_os(crate::REQUIRED_DAEMON_ENDPOINT_ENV).is_none(),
+            "transport fixture requires the runner's explicit direct compiler mode"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let launch = direct_handshake_fixture(directory.path(), 5);
+        let command = ExtractCmd {
+            program: launch.program,
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+        };
+        let retained = RefCell::new(None);
+        let outcome = with_compiler_transaction_for_workload(
+            CompileWorkload::Preparation,
+            |close| *retained.borrow_mut() = Some(close),
+            || {
+                for expected in [b"1", b"2"] {
+                    let borrowed = command.bind().unwrap();
+                    assert!(matches!(borrowed.transport, Transport::Scoped));
+                    let body = borrowed.execute(&command).unwrap();
+                    assert_eq!(body.output.stdout.as_slice(), expected);
+                    drop(borrowed);
+                    assert!(retained.borrow().is_none());
+                    TRANSACTION_SCOPE.with(|scope| {
+                        let scope = scope.borrow();
+                        let scope = scope.as_ref().unwrap();
+                        assert_eq!(scope.workload, CompileWorkload::Preparation);
+                        assert_eq!(
+                            scope.transaction.as_ref().unwrap().workload,
+                            CompileWorkload::Preparation
+                        );
+                    });
+                }
+            },
+        );
+        assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+        assert_eq!(retained.into_inner(), Some(outcome.close));
         assert!(TRANSACTION_SCOPE.with(|scope| scope.borrow().is_none()));
         let error = SpawnError::capacity_refusal("daemon.sock", "no background capacity".into());
         assert!(!error.permits_rebind());
