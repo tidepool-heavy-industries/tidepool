@@ -4557,9 +4557,10 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
         , let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         , Just digest <- [Map.lookup (exactUnit artifact,exactModule artifact) originals]
         , Just node <- [Map.lookup (owner,digest,localIncarnation owner) (universeOriginalVersions universe)]]
-      initialHomes = foldr (\node homes -> let home =
-            if completedOriginalEpoch node == initialEpoch then completedOriginalHome node
-              else withoutBytecode (completedOriginalHome node)
+      initialHomes = foldr (\node homes ->
+          let home =
+                if completedOriginalEpoch node == initialEpoch then completedOriginalHome node
+                  else withoutBytecode (completedOriginalHome node)
           in addToHpt homes (moduleName (mi_module (hm_iface home))) home)
         emptyHomePackageTable (Map.elems originalNodes)
       attempt = installRetainedUnfoldingsPlugin policy
