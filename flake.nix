@@ -68,11 +68,12 @@
                   postPatch = (old.postPatch or "") + ''
                     TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
 
-                    # Inject fat interface flags via OPTIONS_GHC into boot libraries.
+                    # Inject fat interface flags into Haskell and hsc2hs boot inputs.
+                    # hsc2hs preserves OPTIONS_GHC in the generated Haskell source.
                     # ghc-internal, ghc-bignum, ghc-prim: safe to prepend (no exotic extensions).
                     for dir in libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim; do
                       if [ -d "$dir" ]; then
-                        find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
+                        find "$dir" \( -name '*.hs' -o -name '*.hsc' \) -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
                         echo "tidepool: injected OPTIONS_GHC into $dir"
                       fi
                     done
@@ -88,7 +89,7 @@
                                libraries/exceptions libraries/time libraries/hpc \
                                libraries/Cabal libraries/Cabal-syntax libraries/text; do
                       if [ -d "$lib" ]; then
-                        find "$lib" -name '*.hs' -exec sed -i '/^module /i {-# OPTIONS_GHC '"$TIDEPOOL_GHC_OPTS"' #-}' {} +
+                        find "$lib" \( -name '*.hs' -o -name '*.hsc' \) -exec sed -i '/^module /i {-# OPTIONS_GHC '"$TIDEPOOL_GHC_OPTS"' #-}' {} +
                         echo "tidepool: injected OPTIONS_GHC before module decl in $lib"
                       fi
                     done
