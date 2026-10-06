@@ -17,9 +17,9 @@ JSON shape through their existing tracing owner. Each diagnostic line is
 Stage tags are `source_frontend`, `interface`, `finalized_core`, `prepared_body`,
 `site_witness`, `original_recovery`, `raw_projection`, `artifact_reference`,
 `artifact_transfer`, and `native_image`. Decisions are `hit`, `miss`, `work`,
-`disabled`, `evicted`, `epoch_rotated`, and `complete`. Reasons are `matched`,
+`disabled`, `evicted`, `epoch_rotated`, `complete`, and `not_applicable`. Reasons are `matched`,
 `absent`, `changed_source`, `changed_dependency`, `changed_authority`, `th_fresh`,
-`epoch`, `recovery`, `cache_disabled`, `evicted`, and `stage_complete`.
+`epoch`, `recovery`, `cache_disabled`, `evicted`, `stage_complete`, and `check_only`.
 Emit reasons where the owner makes the decision. A miss is not work: emit actual
 frontend/lowering/preparation work separately when it occurs.
 
@@ -36,12 +36,28 @@ or null when unaccounted.
 Reference reuse and retransferred bytes remain separate stages; required validation
 reads must not be labeled transfer avoidance.
 
-Call `emitReuseComplete` exactly once after the final event of each instrumented
-stage for every worker cycle. Each physical worker cycle has one purpose;
+Call `emitReuseComplete` exactly once after the final event of each applicable
+instrumented stage for every worker cycle. Each physical worker cycle has one purpose;
 conflicting purposes, duplicate completion, or later stage work are refused.
 Emit completion including zero work. It emits `complete`/`stage_complete`, zero items, null bytes
-and null module fields. A stage without that completion is **UNKNOWN**, not zero.
+and null module fields. A stage without completion or explicit applicability is **UNKNOWN**, not zero.
 Completion does not manufacture hit/work events or qualify a whole compile.
+
+After a successful checked-environment cycle, `emitCheckOnlyReuseApplicability`
+emits `not_applicable`/`check_only` for `prepared_body`, `site_witness`,
+`original_recovery`, and `raw_projection`. These terminal observations have zero
+items, null bytes and null owner fields. They must be the stage's only event in
+that cycle; decisions, duplicate or contradictory terminal observations are refused.
+Refused or interrupted cycles do not emit applicability. Request reports retain
+completion and inapplicability cycle counts separately: mixed check/native stages
+count only native decisions, and wholly inapplicable stages have status
+`not_applicable` with null counts. Purpose names alone never infer applicability.
+The schema-1 diagnostic shape is unchanged; this extends its closed decision and
+reason tags. Older strict reporters reject the new tags. Historical traces with
+no applicability evidence retain their original completion requirements.
+Only a successful physical request terminal can qualify the request; a completed
+checking cycle does not hide a later failed native operation.
+
 Counters should be cheap; per-owner detail remains opt-in through the existing
 timing switch. There is no telemetry registry or independent validity identifier.
 

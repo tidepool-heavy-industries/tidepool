@@ -24,7 +24,7 @@ module Tidepool.Timing
   , monotonicTime
   , elapsedMs
   , ReuseStage(..), ReuseDecision(..), ReuseReason(..), ReuseVersionKind(..)
-  , ReuseModule(..), ReuseContext(..), emitReuse, emitReuseComplete
+  , ReuseModule(..), ReuseContext(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
     -- * Opt-in memo trace (TIDEPOOL_MEMO_TRACE=1)
   , readMemoTraceEnabled
   , emitMemoCycleGraph
@@ -51,10 +51,10 @@ data ReuseStage = SourceFrontend | Interface | FinalizedCore | PreparedBody
   | SiteWitness | OriginalRecovery | RawProjection | ArtifactReference
   | ArtifactTransfer | NativeImage deriving (Eq, Show)
 data ReuseDecision = ReuseHit | ReuseMiss | ReuseWork | ReuseDisabled
-  | ReuseEvicted | ReuseEpochRotated | ReuseComplete deriving (Eq, Show)
+  | ReuseEvicted | ReuseEpochRotated | ReuseComplete | ReuseNotApplicable deriving (Eq, Show)
 data ReuseReason = Matched | Absent | ChangedSource | ChangedDependency
   | ChangedAuthority | ThFresh | Epoch | Recovery | CacheDisabled | Evicted
-  | StageComplete deriving (Eq, Show)
+  | StageComplete | CheckOnlyStage deriving (Eq, Show)
 data ReuseVersionKind = SourceFingerprint | CanonicalSeal | PreparedIdentity
   | InterfaceFingerprint | ImageIdentity deriving (Eq, Show)
 data ReuseModule = ReuseModule String String ReuseVersionKind String | ReuseImage String
@@ -73,6 +73,7 @@ reuseDecisionName decision = case decision of
   ReuseHit -> "hit"; ReuseMiss -> "miss"; ReuseWork -> "work"
   ReuseDisabled -> "disabled"; ReuseEvicted -> "evicted"
   ReuseEpochRotated -> "epoch_rotated"; ReuseComplete -> "complete"
+  ReuseNotApplicable -> "not_applicable"
 
 reuseReasonName :: ReuseReason -> String
 reuseReasonName reason = case reason of
@@ -80,6 +81,7 @@ reuseReasonName reason = case reason of
   ChangedDependency -> "changed_dependency"; ChangedAuthority -> "changed_authority"
   ThFresh -> "th_fresh"; Epoch -> "epoch"; Recovery -> "recovery"
   CacheDisabled -> "cache_disabled"; Evicted -> "evicted"; StageComplete -> "stage_complete"
+  CheckOnlyStage -> "check_only"
 
 reuseVersionName :: ReuseVersionKind -> String
 reuseVersionName kind = case kind of
@@ -110,6 +112,14 @@ emitReuse True (ReuseContext cycleId purpose) stage decision reason owner items 
 emitReuseComplete :: Bool -> ReuseContext -> ReuseStage -> IO ()
 emitReuseComplete enabled context stage =
   emitReuse enabled context stage ReuseComplete StageComplete Nothing 0 Nothing
+
+-- A successful checked-environment cycle never enters native preparation,
+-- site classification, original recovery or raw projection. This terminal
+-- evidence describes applicability, not completed work or a cache decision.
+emitCheckOnlyReuseApplicability :: Bool -> ReuseContext -> IO ()
+emitCheckOnlyReuseApplicability enabled context =
+  mapM_ (\stage -> emitReuse enabled context stage ReuseNotApplicable CheckOnlyStage Nothing 0 Nothing)
+    [PreparedBody, SiteWitness, OriginalRecovery, RawProjection]
 
 -- | Read the @TIDEPOOL_TIMING@ env var. On iff exactly @"1"@; unset or any
 -- other value is off.

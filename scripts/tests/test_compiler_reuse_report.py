@@ -15,13 +15,14 @@ SPEC.loader.exec_module(REPORT)
 
 def packet(decision='hit', stage='source_frontend', items=1, reason=None):
     reasons = {'hit': 'matched', 'miss': 'absent', 'work': 'absent',
-               'disabled': 'cache_disabled', 'complete': 'stage_complete'}
+               'disabled': 'cache_disabled', 'complete': 'stage_complete', 'not_applicable': 'check_only'}
+    terminal = decision in ('complete', 'not_applicable')
     return {'schema': 1, 'cycle': 7, 'purpose': 'cell_program', 'observed_ns': 100,
             'stage': stage, 'decision': decision, 'reason': reason or reasons[decision],
-            'unit': None if decision == 'complete' else 'main',
-            'module': None if decision == 'complete' else 'Support',
-            'version_kind': None if decision == 'complete' else 'source_fingerprint',
-            'version': None if decision == 'complete' else 'abcdef', 'items': items, 'bytes': None}
+            'unit': None if terminal else 'main',
+            'module': None if terminal else 'Support',
+            'version_kind': None if terminal else 'source_fingerprint',
+            'version': None if terminal else 'abcdef', 'items': items, 'bytes': None}
 
 
 def trace(packets, ordinal=1, digest='request'):
@@ -93,6 +94,87 @@ class ReuseEvidenceControls(unittest.TestCase):
         request = REPORT.analyze(trace([packet('complete', items=0)]))['requests'][0]
         self.assertEqual(request['stages']['source_frontend']['counts'], {})
         self.assertEqual(request['stages']['source_frontend']['status'], 'observed')
+
+    def test_checked_then_native_cycle_preserves_actual_work(self):
+        stages = ('prepared_body', 'site_witness', 'original_recovery', 'raw_projection')
+        checked = [packet('complete', items=0)]
+        native = [packet('complete', items=0)]
+        for stage in stages:
+            checked.append(packet('not_applicable', stage, 0))
+            native += completed([packet('hit', stage, 32), packet('work', stage)], stage)
+        for event in native:
+            event['cycle'] = 8
+        report = REPORT.analyze(trace(checked + native))
+        self.assertEqual(report['status'], 'observed')
+        self.assertEqual(report['problems'], [])
+        for stage in stages:
+            observed = report['requests'][0]['stages'][stage]
+            self.assertEqual(observed['status'], 'observed')
+            self.assertEqual(observed['counts'], {'hit': 32, 'work': 1})
+            self.assertEqual(observed['completion_cycles'], 1)
+            self.assertEqual(observed['not_applicable_cycles'], 1)
+            self.assertEqual(observed['reasons'], {'matched': 32, 'absent': 1})
+
+    def test_check_only_stage_is_inapplicable_not_observed_zero(self):
+        report = REPORT.analyze(trace([packet('not_applicable', 'prepared_body', 0)]))
+        self.assertEqual(report['status'], 'observed')
+        stage = report['requests'][0]['stages']['prepared_body']
+        self.assertEqual(stage['status'], 'not_applicable')
+        self.assertIsNone(stage['counts'])
+        self.assertEqual(stage['completion_cycles'], 0)
+        self.assertEqual(stage['not_applicable_cycles'], 1)
+
+    def test_stage_applicability_cannot_be_inferred_from_other_cycle(self):
+        native = completed([packet('work', 'prepared_body')], 'prepared_body')
+        for event in native:
+            event['cycle'] = 8
+        report = REPORT.analyze(trace([packet('complete', items=0)] + native))
+        self.assertEqual(report['status'], 'incomplete')
+        self.assertEqual(report['requests'][0]['stages']['prepared_body']['status'], 'UNKNOWN')
+        self.assertTrue(any('missing stage completion or applicability' in problem
+                            for problem in report['problems']))
+
+    def test_applicability_refuses_decisions_and_contradictory_terminals(self):
+        not_applicable = packet('not_applicable', 'prepared_body', 0)
+        for events in ([packet('work', 'prepared_body'), not_applicable],
+                       [not_applicable, packet('hit', 'prepared_body')],
+                       [not_applicable, not_applicable],
+                       [not_applicable, packet('complete', 'prepared_body', 0)],
+                       [packet('complete', 'prepared_body', 0), not_applicable]):
+            with self.subTest(events=events):
+                report = REPORT.analyze(trace(events))
+                self.assertEqual(report['status'], 'incomplete')
+                self.assertEqual(report['requests'][0]['stages']['prepared_body']['status'], 'UNKNOWN')
+
+    def test_applicability_wire_requires_check_only_native_stage_and_empty_owner(self):
+        for changes in ({'stage': 'source_frontend'}, {'stage': 'future_stage'},
+                        {'reason': 'stage_complete'}, {'items': 1}, {'bytes': 0},
+                        {'unit': 'main'}, {'version': 'actual-owner'}, {'schema': 2}):
+            with self.subTest(changes=changes):
+                event = packet('not_applicable', 'prepared_body', 0)
+                event.update(changes)
+                self.assertEqual(REPORT.analyze(trace([event]))['status'], 'incomplete')
+        event = packet('work', 'prepared_body', reason='check_only')
+        self.assertEqual(REPORT.analyze(trace(completed([event], 'prepared_body')))['status'], 'incomplete')
+
+    def test_failed_request_does_not_gain_applicability_from_successful_check_cycle(self):
+        checked = [packet('not_applicable', 'prepared_body', 0)]
+        native = packet('work', 'prepared_body')
+        native['cycle'] = 8
+        for native_events in ([], [native]):
+            with self.subTest(native_events=native_events):
+                rows = trace(checked + native_events)
+                rows[-1]['fields'].update(message='compiler request failed', exit_code=1)
+                report = REPORT.analyze(rows)
+                self.assertEqual(report['status'], 'incomplete')
+                self.assertEqual(report['requests'][0]['status'], 'UNKNOWN')
+                self.assertIsNone(report['requests'][0]['stages']['prepared_body']['counts'])
+        for terminal in ({'message': 'compiler request abandoned by client', 'exit_code': 0},
+                         {'exit_code': None}, {'exit_code': True}, {'exit_code': 1}):
+            with self.subTest(terminal=terminal):
+                rows = trace(checked)
+                rows[-1]['fields'].update(terminal)
+                self.assertEqual(REPORT.analyze(rows)['status'], 'incomplete')
 
     def test_native_image_identity_does_not_need_fabricated_module(self):
         event = packet(stage='native_image')

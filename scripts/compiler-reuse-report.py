@@ -11,10 +11,11 @@ import re
 STAGES = ('source_frontend', 'interface', 'finalized_core', 'prepared_body',
           'site_witness', 'original_recovery', 'raw_projection',
           'artifact_reference', 'artifact_transfer', 'native_image')
-DECISIONS = {'hit', 'miss', 'work', 'disabled', 'evicted', 'epoch_rotated', 'complete'}
+DECISIONS = {'hit', 'miss', 'work', 'disabled', 'evicted', 'epoch_rotated', 'complete', 'not_applicable'}
 REASONS = {'matched', 'absent', 'changed_source', 'changed_dependency',
            'changed_authority', 'th_fresh', 'epoch', 'recovery',
-           'cache_disabled', 'evicted', 'stage_complete'}
+           'cache_disabled', 'evicted', 'stage_complete', 'check_only'}
+CHECK_ONLY_STAGES = {'prepared_body', 'site_witness', 'original_recovery', 'raw_projection'}
 KINDS = {'source_fingerprint', 'canonical_seal', 'prepared_identity', 'interface_fingerprint', 'image_identity'}
 KEY_FIELDS = ('daemon_epoch', 'worker_pid', 'admission_id', 'request_ordinal')
 PREFIX = 'tidepool-reuse '
@@ -66,11 +67,14 @@ def validate_event(event):
         image = owner[:2] == [None, None] and owner[2] == 'image_identity' and text(owner[3])
         if not image and (not all(text(value) for value in owner) or owner[2] not in KINDS):
             raise ValueError('incomplete exact owner identity')
-    if event['decision'] == 'complete':
-        if event['reason'] != 'stage_complete' or event['items'] != 0 or any(owner) or event['bytes'] is not None:
-            raise ValueError('invalid stage completion')
-    elif event['reason'] == 'stage_complete':
-        raise ValueError('completion reason on decision event')
+    if event['decision'] in ('complete', 'not_applicable'):
+        expected_reason = 'stage_complete' if event['decision'] == 'complete' else 'check_only'
+        if (event['reason'] != expected_reason or event['items'] != 0 or any(owner)
+                or event['bytes'] is not None
+                or (event['decision'] == 'not_applicable' and event['stage'] not in CHECK_ONLY_STAGES)):
+            raise ValueError('invalid stage terminal observation')
+    elif event['reason'] in ('stage_complete', 'check_only'):
+        raise ValueError('terminal reason on decision event')
     expected = {'hit': 'matched', 'disabled': 'cache_disabled', 'evicted': 'evicted', 'epoch_rotated': 'epoch'}
     if event['decision'] in expected and event['reason'] != expected[event['decision']]:
         raise ValueError('decision contradicts reason')
@@ -264,6 +268,7 @@ def analyze(events):
             request['terminal_rows'].append(index)
             request['service_ms'] = row.get('elapsed_ms')
             request['exit_code'] = row.get('exit_code')
+            request['terminal_message'] = row['message']
         phase = re.fullmatch(r'tidepool-timing phase=([a-zA-Z0-9_]+) ms=([0-9]+)', line)
         if phase:
             request['phases_ms'].setdefault(phase[1], []).append(int(phase[2]))
@@ -296,6 +301,9 @@ def analyze(events):
         terminals = request['terminal_rows']
         if len(terminals) != 1:
             request_problems.append('expected one request terminal')
+        elif (request.get('terminal_message') != 'compiler request finished'
+                or type(request.get('exit_code')) is not int or request['exit_code'] != 0):
+            request_problems.append('request did not finish successfully')
         for detail in request['timing_details']:
             if detail['row'] <= request['start_row']:
                 detail['_boundary_problem'] = 'task timing detail outside request boundaries'
@@ -314,18 +322,28 @@ def analyze(events):
         for stage in STAGES:
             selected = [event for event in request['events'] if event['stage'] == stage]
             complete = {(event['cycle'], event['purpose']) for event in selected if event['decision'] == 'complete'}
+            not_applicable = {(event['cycle'], event['purpose']) for event in selected
+                              if event['decision'] == 'not_applicable'}
             touched = {(event['cycle'], event['purpose']) for event in selected}
             final = True
             for cycle in touched:
                 ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
-                closures = [event for event in ordered if event['decision'] == 'complete']
-                if len(closures) != 1 or ordered[-1]['decision'] != 'complete':
+                closures = [event for event in ordered if event['decision'] in ('complete', 'not_applicable')]
+                if (len(closures) != 1 or ordered[-1]['decision'] not in ('complete', 'not_applicable')
+                        or (closures[0]['decision'] == 'not_applicable' and len(ordered) != 1)):
                     final = False
-                    request_problems.append(f'{stage} cycle {cycle[0]}: expected exactly one final stage completion')
-            status = 'observed' if final and complete and complete == touched and complete == set(cycles) else 'UNKNOWN'
+                    request_problems.append(f'{stage} cycle {cycle[0]}: expected exactly one final stage completion '
+                                            'or applicability observation without decisions')
+            covered = complete | not_applicable
+            if selected and covered != set(cycles):
+                final = False
+                request_problems.append(f'{stage}: missing stage completion or applicability for request cycles')
+            status = 'UNKNOWN'
+            if final and covered and covered == touched and covered == set(cycles):
+                status = 'observed' if complete else 'not_applicable'
             counts, byte_counts, reasons, accounted = Counter(), Counter(), Counter(), 0
             for event in selected:
-                if event['decision'] == 'complete':
+                if event['decision'] in ('complete', 'not_applicable'):
                     continue
                 counts[event['decision']] += event['items']
                 reasons[event['reason']] += event['items']
@@ -335,7 +353,8 @@ def analyze(events):
             request['stages'][stage] = {'status': status, 'counts': dict(counts) if status == 'observed' else None,
                                         'bytes': dict(byte_counts) if status == 'observed' and accounted else None,
                                         'byte_accounted_events': accounted,
-                                        'reasons': dict(reasons), 'completion_cycles': len(complete)}
+                                        'reasons': dict(reasons), 'completion_cycles': len(complete),
+                                        'not_applicable_cycles': len(not_applicable)}
         request['problems'] = sorted(set(request_problems))
         request['task_overlap'] = task_overlap(request['timing_details'])
         problems.extend(f'{key}: {problem}' for problem in request['problems'])
@@ -346,7 +365,7 @@ def analyze(events):
             'problems': problems, 'requests': list(requests.values()), 'unlinked_events': unlinked,
             'phase_meanings': {'lowering': 'GHC hscDesugar and hscSimplify; excludes prepared STG',
                                'prepared_stg': 'GHC CorePrep, coreToStg and stg2stg'},
-            'interpretation': 'Hits name one stage only. Missing stage completion is UNKNOWN. Admission queue times are shared by the transaction, not additive per request. Phase totals without interval boundaries remain nonexclusive; do not sum overlapping timers. task_overlap uses only qualified postload task-service intervals; UNKNOWN is not zero.'}
+            'interpretation': 'Hits name one stage only. Each request cycle requires stage completion or explicit applicability evidence; missing evidence is UNKNOWN. A not_applicable cycle supplies no work count. Admission queue times are shared by the transaction, not additive per request. Phase totals without interval boundaries remain nonexclusive; do not sum overlapping timers. task_overlap uses only qualified postload task-service intervals; UNKNOWN is not zero.'}
 
 
 def compare_control(normal, disabled, stage):

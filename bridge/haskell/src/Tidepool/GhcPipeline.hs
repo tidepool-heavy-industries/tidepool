@@ -209,7 +209,7 @@ import Tidepool.Timing
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
   , newTimingRequestIdentity
   , ReuseContext(..), ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
-  , ReuseVersionKind(..), emitReuse, emitReuseComplete
+  , ReuseVersionKind(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
   , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
   , PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
@@ -3719,7 +3719,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         PrepareStg | isNothing (completionFactoryFor selection) ->
           emitReuseComplete timing reuseContext PreparedBody
         PrepareStg -> pure ()
-        CheckOnly -> pure ()
+        CheckOnly -> emitCheckOnlyReuseApplicability timing reuseContext
     getSession >>= liftIO . recordCompilerInterpreter interpreterState selectedExecutables
     pure result
 

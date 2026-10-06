@@ -3752,10 +3752,11 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         , line == "tidepool-canonical-frontend module=MetadataOwner"
           || line == "tidepool-checked module=MetadataOwner target=False"]
       isInt checked = maybe False (`eqType` intTy) (crResultType checked)
-      interfaceEvents diagnostics =
+      stageEvents stage diagnostics =
         [line | line <- lines diagnostics
         , "tidepool-reuse {" `isPrefixOf` line
-        , "\"stage\":\"interface\"" `isInfixOf` line]
+        , ("\"stage\":\"" ++ stage ++ "\"") `isInfixOf` line]
+      interfaceEvents = stageEvents "interface"
       ownerIdentity prepared = case Map.lookup (mkModuleName "MetadataOwner") (pprFinalizedModules prepared) of
         Just finalized | mi_module (hm_iface (finalizedHomeModInfo finalized)) ==
             mkModule (stringToUnit "main") (mkModuleName "MetadataOwner") ->
@@ -3765,13 +3766,25 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           && counterValues "transaction_reused_source_products" diagnostics == [1]) $
         fail (label ++ " did not reuse its completed dependency: " ++ diagnostics)
       isComplete = isInfixOf "\"decision\":\"complete\""
+      isNotApplicable = isInfixOf "\"decision\":\"not_applicable\""
+      eventContext = fst . T.breakOn ",\"stage\":" . T.pack
+      requireCheckedApplicability label diagnostics = do
+        requireInterfaceComplete label diagnostics
+        forM_ ["prepared_body", "site_witness", "original_recovery", "raw_projection"] $ \stage ->
+          case stageEvents stage diagnostics of
+            [event] | isNotApplicable event
+                , "\"reason\":\"check_only\"" `isInfixOf` event
+                , eventContext event == eventContext (last (interfaceEvents diagnostics)) -> pure ()
+            _ -> fail (label ++ " did not retain checked-cycle applicability for " ++ stage)
+      requireNoApplicability label diagnostics =
+        when (any isNotApplicable (lines diagnostics)) $
+          fail (label ++ " fabricated checked-cycle applicability")
       requireInterfaceComplete label diagnostics = case interfaceEvents diagnostics of
         [] -> fail (label ++ " omitted interface observation")
         events -> do
           let closures = filter isComplete events
-              context = fst . T.breakOn ",\"stage\":" . T.pack
           unless (length closures == 1 && isComplete (last events)
-              && all ((== context (last events)) . context) events) $
+              && all ((== eventContext (last events)) . eventContext) events) $
             fail (label ++ " did not close exactly one interface cycle after its decisions")
   installOwner
   copyFile (fixture "MetadataTarget.hs") target
@@ -3788,12 +3801,12 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       (cold,coldDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt cold && frontends coldDiagnostics == 1) $
         fail "cold exact transaction did not compile its real source dependency"
-      requireInterfaceComplete "cold check" coldDiagnostics
+      requireCheckedApplicability "cold check" coldDiagnostics
       (warm,warmDiagnostics) <- captureDiagnostics (check relocated)
       unless (isInt warm && frontends warmDiagnostics == 0
           && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
         fail "identical empty exact scopes repeated a dependency frontend"
-      requireInterfaceComplete "warm check" warmDiagnostics
+      requireCheckedApplicability "warm check" warmDiagnostics
       (native,nativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing
@@ -3803,6 +3816,7 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           && Map.member (mkModuleName "MetadataOwner") (pprFinalizedModules native)) $
         fail "check to native preparation replayed its dependency or lost original42"
       requireInterfaceComplete "native preparation" nativeDiagnostics
+      requireNoApplicability "native preparation" nativeDiagnostics
       identityA <- ownerIdentity native
       copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
       let requireRefusal label = do
@@ -3815,13 +3829,14 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
             unless (not (null (interfaceEvents diagnostics))
                 && not (any isComplete (interfaceEvents diagnostics))) $
               fail (label ++ " fabricated an interface completion or omitted partial work")
+            requireNoApplicability label diagnostics
       requireRefusal "changed B"
       requireRefusal "repeated refused B"
       installOwner
       (recovered,recoveryDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt recovered) $ fail "restored A lost its Int result type"
       requireReuse "restored A check" recoveryDiagnostics
-      requireInterfaceComplete "recovered check" recoveryDiagnostics
+      requireCheckedApplicability "recovered check" recoveryDiagnostics
       (restored,restoredDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing
@@ -3831,6 +3846,7 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "refusal recovery lost the completed A object or native result42"
       requireReuse "restored A native" restoredDiagnostics
       requireInterfaceComplete "restored native preparation" restoredDiagnostics
+      requireNoApplicability "restored native preparation" restoredDiagnostics
       pure identityA
     runRequest (pure ()) $ \compile -> do
       (next,nextDiagnostics) <- captureDiagnostics $
@@ -3838,7 +3854,7 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           target [work] Nothing
       unless (isInt next) $ fail "new request lost the restored Int result type"
       requireReuse "new request A check" nextDiagnostics
-      requireInterfaceComplete "new transaction check" nextDiagnostics
+      requireCheckedApplicability "new transaction check" nextDiagnostics
       (nextNative,nextNativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just relocated)
           target [work] Nothing
@@ -3848,6 +3864,7 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "new request lost the completed A object or native result42"
       requireReuse "new request A native" nextNativeDiagnostics
       requireInterfaceComplete "new request native preparation" nextNativeDiagnostics
+      requireNoApplicability "new request native preparation" nextNativeDiagnostics
   putStrLn "exact transaction reuse: completed A survives refused B and request close; repeated B refuses, exact A identity and native42 passed"
 
 -- Current candidate admission is dependency evidence for fresh importers;
