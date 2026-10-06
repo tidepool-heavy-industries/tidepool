@@ -8,7 +8,7 @@ module Tidepool.HomeProducts
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
-  , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope
+  , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionSeal
   , OriginalRecoveryScope, admitOriginalRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
   , revalidateAdmittedCore ) where
 
@@ -18,6 +18,9 @@ import Control.Monad (forM, forM_, unless, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
+import Tidepool.ExtractUtil (shaHex)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -120,6 +123,14 @@ data OriginalVersion = OriginalVersion Module String String String String String
 
 originalVersionOwner :: OriginalVersion -> Module
 originalVersionOwner (OriginalVersion owner _ _ _ _ _) = owner
+
+-- Diagnostic rendering of the same complete canonical cache identity. The
+-- length-delimited representation excludes paths and request-local identity.
+originalVersionSeal :: OriginalVersion -> String
+originalVersionSeal (OriginalVersion owner producer certificate core interface packages) =
+  shaHex (TextEncoding.encodeUtf8 (Text.pack (show
+    [unitString (moduleUnit owner),moduleNameString (moduleName owner)
+    ,producer,certificate,core,interface,packages])))
 
 originalVersionInScope :: ExactScope -> Module -> Maybe OriginalVersion
 originalVersionInScope scope owner = do
