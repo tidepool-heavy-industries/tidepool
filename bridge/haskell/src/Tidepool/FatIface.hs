@@ -7,11 +7,11 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, evictFatIfaceMatching
+  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
-  , copyOwnerInterfaceCache, lookupOwnerInterface
+  , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
@@ -119,6 +119,10 @@ newFatIfaceCache = FatIfaceCache <$> Shared.newLoadCache
 
 copyFatIfaceCache :: FatIfaceCache -> IO FatIfaceCache
 copyFatIfaceCache (FatIfaceCache cache) = FatIfaceCache <$> Shared.copyLoadCache cache
+
+mergeFatIfaceCaches :: [(FatIfaceCache, Module -> Bool)] -> IO FatIfaceCache
+mergeFatIfaceCaches sources = FatIfaceCache <$> Shared.mergeLoadCaches
+  [(cache, keep) | (FatIfaceCache cache, keep) <- sources]
 
 -- | Request-owned targets and changed private contexts can evict acceleration
 -- without replacing another in-flight generation's eventual publication.
@@ -270,6 +274,14 @@ newOwnerInterfaceCache = OwnerInterfaceCache <$> newMVar Map.empty
 copyOwnerInterfaceCache :: OwnerInterfaceCache -> IO OwnerInterfaceCache
 copyOwnerInterfaceCache (OwnerInterfaceCache cacheRef) =
   OwnerInterfaceCache <$> (readMVar cacheRef >>= newMVar)
+
+-- | Completed defining contexts are selected before their maps are combined.
+-- Earlier sources win a selected duplicate owner.
+mergeOwnerInterfaceCaches :: [(OwnerInterfaceCache, Module -> Bool)] -> IO OwnerInterfaceCache
+mergeOwnerInterfaceCaches sources = do
+  selected <- mapM (\(OwnerInterfaceCache ref, keep) ->
+    Map.filterWithKey (\owner _ -> keep owner) <$> readMVar ref) sources
+  OwnerInterfaceCache <$> newMVar (Map.unions selected)
 
 lookupOwnerInterface :: OwnerInterfaceCache -> Module
   -> IO (Maybe OwnerInterfaceContext)

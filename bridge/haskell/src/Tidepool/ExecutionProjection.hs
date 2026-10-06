@@ -10,7 +10,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
   , RawModuleProducts, projectRawOriginalHomeModuleProducts, forceRawModuleProducts
-  , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache
+  , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache, mergeOriginalProjectionCaches
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , rawOriginalGroupEncodings
@@ -329,6 +329,14 @@ newOriginalProjectionCache = OriginalProjectionCache <$> newMVar Map.empty
 copyOriginalProjectionCache :: OriginalProjectionCache -> IO OriginalProjectionCache
 copyOriginalProjectionCache (OriginalProjectionCache entries) =
   OriginalProjectionCache <$> (readMVar entries >>= newMVar)
+
+-- | Keep all selected immutable projection alternatives. Entries from earlier
+-- sources precede later ones, preserving first matching-entry priority.
+mergeOriginalProjectionCaches :: [(OriginalProjectionCache, Module -> Bool)] -> IO OriginalProjectionCache
+mergeOriginalProjectionCaches sources = do
+  selected <- mapM (\(OriginalProjectionCache ref, keep) ->
+    Map.filterWithKey (\owner _ -> keep owner) <$> readMVar ref) sources
+  OriginalProjectionCache <$> newMVar (Map.unionsWith (++) selected)
 
 evictOriginalProjectionMatching :: OriginalProjectionCache -> (Module -> Bool) -> IO ()
 evictOriginalProjectionMatching (OriginalProjectionCache entries) stale =

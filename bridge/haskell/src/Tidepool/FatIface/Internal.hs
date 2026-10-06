@@ -1,7 +1,7 @@
 -- | Per-key loading shared by a defining interface's immutable outcomes.
 -- This module owns completion only; it cannot issue executable Core authority.
 module Tidepool.FatIface.Internal
-  ( LoadCache, newLoadCache, copyLoadCache, evictLoadCache, lookupLoadCache ) where
+  ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, evictLoadCache, lookupLoadCache ) where
 
 import Control.Concurrent.MVar
   (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
@@ -20,10 +20,20 @@ newLoadCache = LoadCache <$> newMVar Map.empty
 copyLoadCache :: LoadCache key value -> IO (LoadCache key value)
 copyLoadCache (LoadCache ref) = do
   entries <- readMVar ref
-  LoadCache <$> newMVar (Map.mapMaybe completed entries)
+  LoadCache <$> newMVar (completedEntries (const True) entries)
+
+-- | Select completed entries from each source before combining them. Earlier
+-- sources win duplicate keys; in-flight ownership is never transferred.
+mergeLoadCaches :: Ord key => [(LoadCache key value, key -> Bool)] -> IO (LoadCache key value)
+mergeLoadCaches sources = do
+  selected <- mapM (\(LoadCache ref, keep) -> completedEntries keep <$> readMVar ref) sources
+  LoadCache <$> newMVar (Map.unions selected)
+
+completedEntries :: (key -> Bool) -> Map.Map key (Entry value) -> Map.Map key (Entry value)
+completedEntries keep = Map.mapMaybeWithKey completed
   where
-    completed (Cached value) = Just (Cached value)
-    completed Loading{} = Nothing
+    completed key (Cached value) | keep key = Just (Cached value)
+    completed _ _ = Nothing
 
 evictLoadCache :: LoadCache key value -> (key -> Bool) -> IO ()
 evictLoadCache (LoadCache ref) stale =

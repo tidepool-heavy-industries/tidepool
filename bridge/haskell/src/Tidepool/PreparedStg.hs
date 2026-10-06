@@ -12,7 +12,7 @@ module Tidepool.PreparedStg
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
   , prepareRecoveredBodies
-  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, evictPreparedBodyMatching
+  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, evictPreparedBodyMatching
   , newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   ) where
@@ -284,6 +284,18 @@ copyPreparedBodyCache :: PreparedBodyCache -> IO PreparedBodyCache
 copyPreparedBodyCache cache = PreparedBodyCache
   <$> (readMVar (cachedExactBodies cache) >>= newMVar)
   <*> (readMVar (cachedOriginalModules cache) >>= newMVar)
+
+-- | Select completed acceleration for the validated owner roster. Both exact
+-- subsets and full canonical versions retain earlier-input key priority.
+mergePreparedBodyCaches :: [(PreparedBodyCache, Module -> Bool)] -> IO PreparedBodyCache
+mergePreparedBodyCaches sources = do
+  selected <- mapM (\(cache, keep) -> do
+    exact <- Map.filterWithKey (\(owner, _) _ -> keep owner) <$> readMVar (cachedExactBodies cache)
+    originals <- Map.filterWithKey (\version _ -> keep (originalVersionOwner version))
+      <$> readMVar (cachedOriginalModules cache)
+    pure (exact, originals)) sources
+  PreparedBodyCache <$> newMVar (Map.unions (map fst selected))
+    <*> newMVar (Map.unions (map snd selected))
 
 evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
 evictPreparedBodyMatching cache stale = do
