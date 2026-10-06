@@ -9,7 +9,7 @@ use tidepool_codegen::prepared_program::{
     PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, RunOptions, RunResult,
 };
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue,
+    link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
     MachineImports, PreparedProgram, ProgramRequirements, SymbolIdentity, TargetDescriptor,
     TopBinding, ValueId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
@@ -87,6 +87,16 @@ fn artifact() -> &'static [u8] {
         tidepool_test_data::prepared_resources::read_target("TIDEPOOL_M3_FIXTURE_DIR", "result")
     })
 }
+fn imported_reverse_artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target(
+            "TIDEPOOL_M3_FIXTURE_DIR",
+            "importedReverse",
+        )
+    })
+}
+
 fn freer_retention_artifact() -> &'static [u8] {
     static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     BYTES.get_or_init(|| {
@@ -874,8 +884,7 @@ fn requirements() -> ProgramRequirements {
     }
 }
 
-fn imports() -> MachineImports {
-    let prepared = parse_program(artifact(), &requirements(), DecodeLimits::default()).unwrap();
+fn import_facts(prepared: &PreparedProgram) -> MachineImports {
     MachineImports {
         values: prepared
             .globals()
@@ -931,14 +940,33 @@ fn one_shot_runs_closed_compiled_program_and_returns_values() {
 #[test]
 fn one_shot_rejects_missing_import_malformed_and_precancel() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let missing = run_prepared_once(
-        artifact(),
+    let imported = parse_program(
+        imported_reverse_artifact(),
         &requirements(),
         DecodeLimits::default(),
-        MachineImports::default(),
+    )
+    .unwrap();
+    let demanded = imported
+        .globals()
+        .iter()
+        .find(|global| global.identity.occurrence == "reverse")
+        .expect("importedReverse demands the genuine package reverse entry");
+    let mut remaining_imports = import_facts(&imported);
+    assert!(remaining_imports
+        .values
+        .remove(&demanded.identity)
+        .is_some());
+    let missing = run_prepared_once(
+        imported_reverse_artifact(),
+        &requirements(),
+        DecodeLimits::default(),
+        remaining_imports,
         Arc::clone(&cancel),
     )
     .unwrap_err();
+    assert!(matches!(&missing,
+        PreparedRuntimeError::Link(error) if matches!(error.as_ref(),
+            LinkError::MissingImport(identity) if identity == &demanded.identity)));
     assert_eq!(missing.kind(), PreparedFailureKind::Rejected);
 
     let malformed = run_prepared_once(
@@ -956,7 +984,7 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
         artifact(),
         &requirements(),
         DecodeLimits::default(),
-        imports(),
+        MachineImports::default(),
         Arc::clone(&cancel),
     )
     .unwrap_err();
@@ -995,24 +1023,40 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     ));
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    // `imports()` builds a `MachineImports` whose facts satisfy `artifact()`'s
-    // own declared globals exactly (so `link_program` succeeds), but no real
-    // `PreparedHandle` backs any of those identities: `install_program`
-    // refuses with `ExecutionError::UnknownPreparedHandle`, the same
-    // `PreparedFailureKind::Rejected` classification. An artifact whose
-    // declared imports have no live handles must be rejected by installation.
-    // Installing it as a second program on an already-open,
-    // already-working machine also proves that the refusal leaves the
-    // existing machine reusable.
-    let (mut unclosed_machine, _first) = open_strict_machine();
-    let unclosed_linked = link_program(
-        parse_program(artifact(), &requirements(), DecodeLimits::default()).unwrap(),
-        &imports(),
+    // Exact declared import facts can satisfy linking without granting a live
+    // handle. Installation must refuse the demanded package import while the
+    // machine's previously working program remains executable.
+    let (mut unclosed_machine, prior_program) = open_strict_machine();
+    let before = unclosed_machine
+        .run_entry(
+            prior_program,
+            ValueId(0),
+            &[],
+            call_options(true),
+            RealmId::ROOT,
+        )
+        .unwrap();
+    assert!(matches!(before.values.as_slice(),
+        [HaskellValue::Con(DataConId(100), fields)] if fields.is_empty()));
+    let imported = parse_program(
+        imported_reverse_artifact(),
+        &requirements(),
+        DecodeLimits::default(),
     )
-    .expect("artifact()'s declared globals satisfy imports()'s fabricated facts");
+    .unwrap();
+    assert!(
+        imported
+            .globals()
+            .iter()
+            .any(|global| global.identity.occurrence == "reverse"),
+        "importedReverse must demand a real package import"
+    );
+    let facts = import_facts(&imported);
+    let unclosed_linked = link_program(imported, &facts)
+        .expect("the importer declares exactly the supplied link facts");
     let unclosed_compiled = unclosed_machine
         .compile_for_install(&unclosed_linked)
-        .expect("artifact() compiles");
+        .expect("the demanded importer compiles");
     let rejected = unclosed_machine
         .install_program(unclosed_compiled, ImportBindings::new())
         .unwrap_err();
@@ -1020,6 +1064,18 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         matches!(rejected, ExecutionError::UnknownPreparedHandle),
         "an unclosed artifact is refused, not run: {rejected:?}"
     );
+    assert_eq!(unclosed_machine.disposition(), MachineDisposition::Reusable);
+    let after = unclosed_machine
+        .run_entry(
+            prior_program,
+            ValueId(0),
+            &[],
+            call_options(true),
+            RealmId::ROOT,
+        )
+        .unwrap();
+    assert!(matches!(after.values.as_slice(),
+        [HaskellValue::Con(DataConId(100), fields)] if fields.is_empty()));
     assert_eq!(unclosed_machine.disposition(), MachineDisposition::Reusable);
 
     let (mut cancel_machine, cancel_program) = open_strict_machine();
@@ -2783,42 +2839,77 @@ fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
     }
 }
 
-#[test]
-fn generated_haskell_fixtures_round_trip_through_the_current_typed_codec() {
-    let mut round_trips = 0;
-    for (directory, targets) in [
-        ("TIDEPOOL_M3_FIXTURE_DIR", &["result"][..]),
-        (
-            "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
-            &["freerRequest"][..],
-        ),
-        (
-            "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
-            &[
-                "program",
-                "resumeInt",
-                "freerResumeEntries",
-                "askArgument",
-                "valResult",
-            ][..],
-        ),
-    ] {
-        for target in targets {
-            let bytes = tidepool_test_data::prepared_resources::read_target(directory, target);
-            let produced = parse_program(&bytes, &requirements(), DecodeLimits::default()).unwrap();
-            let typed = tidepool_test_data::prepared::wire_from_prepared(&produced);
-            let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&typed);
-            let decoded =
-                parse_program(&encoded, &requirements(), DecodeLimits::default()).unwrap();
-            assert_eq!(
-                decoded, produced,
-                "independent Haskell producer target {target}"
-            );
-            round_trips += 1;
-        }
-    }
+fn assert_generated_fixture_codec_round_trip(directory: &str, target: &str) -> PreparedProgram {
+    let bytes = tidepool_test_data::prepared_resources::read_target(directory, target);
+    let produced = parse_program(&bytes, &requirements(), DecodeLimits::default()).unwrap();
+    let typed = tidepool_test_data::prepared::wire_from_prepared(&produced);
+    let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&typed);
+    let decoded = parse_program(&encoded, &requirements(), DecodeLimits::default()).unwrap();
     assert_eq!(
-        round_trips, 7,
-        "every declared generated artifact round-trips"
+        decoded, produced,
+        "independent Haskell producer target {target}"
     );
+    produced
+}
+
+#[test]
+fn generated_haskell_fixture_codec_m3_result() {
+    assert_generated_fixture_codec_round_trip("TIDEPOOL_M3_FIXTURE_DIR", "result");
+}
+
+#[test]
+fn generated_haskell_fixture_codec_freer_retention_request() {
+    assert_generated_fixture_codec_round_trip(
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
+        "freerRequest",
+    );
+}
+
+#[test]
+fn generated_haskell_fixture_codec_freer_resume_program() {
+    assert_generated_fixture_codec_round_trip("TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "program");
+}
+
+#[test]
+fn generated_haskell_fixture_codec_freer_resume_int() {
+    assert_generated_fixture_codec_round_trip("TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "resumeInt");
+}
+
+#[test]
+fn generated_haskell_fixture_codec_freer_resume_entries() {
+    assert_generated_fixture_codec_round_trip(
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+        "freerResumeEntries",
+    );
+}
+
+#[test]
+fn generated_haskell_fixture_codec_freer_resume_ask_argument() {
+    assert_generated_fixture_codec_round_trip("TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "askArgument");
+}
+
+#[test]
+fn generated_haskell_fixture_codec_freer_resume_val_result() {
+    assert_generated_fixture_codec_round_trip("TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "valResult");
+}
+
+#[test]
+fn generated_importer_codec_preserves_and_requires_package_entry() {
+    let produced =
+        assert_generated_fixture_codec_round_trip("TIDEPOOL_M3_FIXTURE_DIR", "importedReverse");
+    let reverse = produced
+        .globals()
+        .iter()
+        .find(|global| global.identity.occurrence == "reverse")
+        .expect("the importedReverse target retains the demanded package entry");
+    let identity = reverse.identity.clone();
+    assert!(reverse.entry_signature.is_some());
+    assert!(reverse.required_evaluated);
+    assert_eq!(reverse.required_generation, None);
+    assert_eq!(reverse.identity.record_parent, None);
+    let mut facts = import_facts(&produced);
+    assert!(link_program(produced.clone(), &facts).is_ok());
+    facts.values.get_mut(&identity).unwrap().entry_signature = None;
+    assert!(matches!(link_program(produced, &facts),
+        Err(LinkError::ImportContract(ref refused)) if refused == &identity));
 }

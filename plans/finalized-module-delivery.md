@@ -151,11 +151,29 @@ fill worker slots.
    task with its narrower effect row and original typed reply. The historical
    descendant test is gated out of this native
    profile; a zero-match selection cannot substitute for live recursion.
-4. Run the structural prepared corpus and validate all seven generated artifacts
-   through `generated_haskell_fixtures_round_trip_through_the_current_typed_codec`
-   in [prepared_execution.rs](../tidepool/runtime/tests/prepared_execution.rs).
-   Their current source and target sets belong to the declared prepared fixture
-   producers in [bridge/haskell/BUCK](../bridge/haskell/BUCK).
+4. Run the structural prepared corpus and validate the original seven generated
+   artifacts in seven separate codec cases, plus the demanded `importedReverse`
+   artifact and its import refusals. The current source and target sets belong
+   to the declared prepared fixture producers in
+   [bridge/haskell/BUCK](../bridge/haskell/BUCK); the consuming cases belong to
+   [prepared_execution.rs](../tidepool/runtime/tests/prepared_execution.rs).
+   Select all ten cases so an early failure cannot hide later artifact outcomes:
+
+   ```sh
+   swarm-build just test-target tidepool-runtime session \
+     --exact prepared_execution::generated_haskell_fixture_codec_m3_result \
+     --exact prepared_execution::generated_haskell_fixture_codec_freer_retention_request \
+     --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_program \
+     --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_int \
+     --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_entries \
+     --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_ask_argument \
+     --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_val_result \
+     --exact prepared_execution::generated_importer_codec_preserves_and_requires_package_entry \
+     --exact prepared_execution::one_shot_rejects_missing_import_malformed_and_precancel \
+     --exact prepared_execution::retained_session_caches_closed_program_and_rejects_unclosed_artifact \
+     --expected-count 10
+   ```
+
    Use the same matched compiler/resource closure, not a historical cohort.
    Regenerate artifacts through their declared producer when required by the
    schema/ABI migration; never edit version bytes. Retain the corpus and artifact

@@ -164,7 +164,7 @@ filegroup(
 tidepool_prepared_fixture(
     name = "m3_vertical_prepared",
     source = "test-prepared-stg/M3Vertical.hs",
-    targets = ["result"],
+    targets = ["result", "importedReverse"],
     visibility = ["PUBLIC"],
 )
 
