@@ -1098,7 +1098,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::actor_local_decl()]).unwrap();
     let recipe = InputRecipe {
         preamble: insert_preamble_imports(
-            surface.preamble(),
+            &insert_preamble_imports(surface.preamble(), "Tidepool.Actor (receive)"),
             "qualified Tidepool.Aeson.Value as Json",
         ),
         row: surface.row().into(),
