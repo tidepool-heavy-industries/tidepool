@@ -197,12 +197,14 @@ fn decode_json<T: DeserializeOwned>(
     inventory: &InventoryOperation,
     format: &'static str,
 ) -> Result<T, ModulePackageError> {
-    // Account the input visit and decoded string copies before deserialization.
+    // Empty String/PathBuf rows occupy 24 bytes from only three JSON bytes.
+    // Reserve conservative container, payload and visit units for these catalog
+    // shapes before serde allocates; retained typed copies are charged separately.
     inventory
         .charge(
             bytes
                 .len()
-                .checked_mul(2)
+                .checked_mul(32)
                 .ok_or(ModulePackageError::Bounds)?,
         )
         .map_err(|_| ModulePackageError::Bounds)?;
