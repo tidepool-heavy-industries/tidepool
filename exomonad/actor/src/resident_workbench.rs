@@ -1883,6 +1883,63 @@ pub(crate) enum ActivationInputPublication {
     PublishedUnconfirmed { detail: String },
 }
 
+/// Initial owner publication carries the capability issued by its native
+/// checkout. Established owners retain their original capability instead.
+pub(crate) enum NativePublicOwnerPublication {
+    Durable(Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>),
+    PublishedUnconfirmed { detail: String },
+    BeforeRename { detail: String },
+    Cancelled,
+    Stale,
+}
+
+impl NativePublicOwnerPublication {
+    fn capture(
+        outcome: tidepool_runtime::session::PublicManifestCommit,
+        issue: impl FnOnce() -> Result<
+            Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+            tidepool_runtime::session::SessionError,
+        >,
+    ) -> Result<Self, ResidentActorWorkbenchError> {
+        use tidepool_runtime::session::PublicManifestCommit;
+        Ok(match outcome {
+            PublicManifestCommit::Durable => Self::Durable(issue().map_err(|error| {
+                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+            })?),
+            PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } => {
+                Self::PublishedUnconfirmed { detail }
+            }
+            PublicManifestCommit::BeforeRename { detail } => Self::BeforeRename { detail },
+            PublicManifestCommit::Cancelled => Self::Cancelled,
+            PublicManifestCommit::Stale => Self::Stale,
+            PublicManifestCommit::Ephemeral => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "durable initial owner publication returned an ephemeral outcome".into(),
+                ));
+            }
+        })
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        tidepool_runtime::session::PublicManifestCommit,
+        Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
+    ) {
+        use tidepool_runtime::session::PublicManifestCommit;
+        match self {
+            Self::Durable(capability) => (PublicManifestCommit::Durable, Some(capability)),
+            Self::PublishedUnconfirmed { detail } => (
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
+                None,
+            ),
+            Self::BeforeRename { detail } => (PublicManifestCommit::BeforeRename { detail }, None),
+            Self::Cancelled => (PublicManifestCommit::Cancelled, None),
+            Self::Stale => (PublicManifestCommit::Stale, None),
+        }
+    }
+}
+
 pub(crate) struct ExecutionPrivateScope {
     pub owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
     pub public_scope: tidepool_codegen::scope::ScopeId,
@@ -6918,14 +6975,18 @@ where
         &self,
         context: crate::ActorSessionContext,
         owner: tidepool_runtime::session::RecoveryPublicOwner,
-    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+    ) -> Result<NativePublicOwnerPublication, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, _| {
-                session
-                    .initialize_durable_public_scope(owner, context.placement.lexical_scope)
+                let scope = context.placement.lexical_scope;
+                let outcome = session
+                    .initialize_durable_public_scope(owner.clone(), scope)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
+                    })?;
+                NativePublicOwnerPublication::capture(outcome, || {
+                    session.durable_public_readiness(&owner, scope)
+                })
             })
             .await
     }
@@ -6938,7 +6999,7 @@ where
         owner: tidepool_runtime::session::RecoveryPublicOwner,
         lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
         retirement: crate::RetainedActorExit,
-    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+    ) -> Result<NativePublicOwnerPublication, ResidentActorWorkbenchError> {
         self.access
             .with_machine_wait(
                 context,
@@ -6946,32 +7007,16 @@ where
                 move |session, context, _| {
                     let scope = context.placement.lexical_scope;
                     session.validate_lexical_scope_lease(scope, &lease)?;
-                    session
-                        .initialize_durable_public_scope(owner, scope)
+                    let outcome = session
+                        .initialize_durable_public_scope(owner.clone(), scope)
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
+                        })?;
+                    NativePublicOwnerPublication::capture(outcome, || {
+                        session.durable_public_readiness(&owner, scope)
+                    })
                 },
             )
-            .await
-    }
-
-    pub(crate) async fn durable_public_readiness(
-        &self,
-        context: crate::ActorSessionContext,
-        owner: tidepool_runtime::session::RecoveryPublicOwner,
-    ) -> Result<
-        Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
-        ResidentActorWorkbenchError,
-    > {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                session
-                    .durable_public_readiness(&owner, context.placement.lexical_scope)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-            })
             .await
     }
 
@@ -7066,20 +7111,24 @@ where
         predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
         successor: tidepool_runtime::session::RecoveryPublicOwner,
         authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
-    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+    ) -> Result<NativePublicOwnerPublication, ResidentActorWorkbenchError> {
         let predecessor = predecessor.clone();
         self.access
             .with_machine(context, move |session, context, _| {
-                session
+                let scope = context.placement.lexical_scope;
+                let outcome = session
                     .transfer_recovered_public_owner(
                         &predecessor,
-                        successor,
-                        context.placement.lexical_scope,
+                        successor.clone(),
+                        scope,
                         authority,
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
+                    })?;
+                NativePublicOwnerPublication::capture(outcome, || {
+                    session.durable_public_readiness(&successor, scope)
+                })
             })
             .await
     }
@@ -7262,6 +7311,33 @@ where
             .with_machine(context, move |session, context, _| {
                 session
                     .confirm_durable_public_scope(&owner, context.placement.lexical_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
+    /// Initial placement has no readiness capability yet. Confirm and issue
+    /// it before releasing the native checkout; later confirmations reuse it.
+    pub(crate) async fn confirm_initial_durable_public_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> Result<
+        Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+        ResidentActorWorkbenchError,
+    > {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                session
+                    .confirm_durable_public_scope(&owner, scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                session
+                    .durable_public_readiness(&owner, scope)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })

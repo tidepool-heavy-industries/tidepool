@@ -24,6 +24,12 @@ pub struct RuntimeDurablePublicReadiness {
 }
 
 impl RuntimeDurablePublicReadiness {
+    /// Confirmation can temporarily block an otherwise current owner. Currency
+    /// alone permits retaining its original placement, never executing work.
+    pub fn is_current(&self) -> bool {
+        self.owner.epoch() == self.owner_epoch && self.confirmation.upgrade().is_some()
+    }
+
     pub fn is_ready(&self) -> bool {
         self.owner.epoch() == self.owner_epoch
             && self

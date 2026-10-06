@@ -9894,10 +9894,13 @@ mod authored_publication_tests {
             .invalidate_execution_admissions_after_owner_transfer(next);
         assert!(!readiness.is_ready());
         assert!(!sibling.is_ready());
+        assert!(!readiness.is_current());
+        assert!(!sibling.is_current());
         let current = session.durable_public_readiness(&owner, public).unwrap();
         assert!(current.is_ready());
         drop(session);
         assert!(!current.is_ready());
+        assert!(!current.is_current());
     }
 }
 

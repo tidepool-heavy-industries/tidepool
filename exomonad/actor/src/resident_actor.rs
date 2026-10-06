@@ -1649,11 +1649,11 @@ fn settle_root_public_owner_record(
     match outcome {
         tidepool_runtime::session::PublicManifestCommit::Durable => {
             if let ActorPublicOwnerPlane::DurableReady(owner) = &record.public_owner {
-                return if owner.is_ready() {
+                return if owner.is_current() {
                     Ok(())
                 } else {
                     Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "original native readiness remains unavailable after confirmation".into(),
+                        "original native owner was revoked before confirmation settlement".into(),
                     ))
                 };
             }
@@ -8372,23 +8372,11 @@ where
                             retirement,
                         )
                         .await;
-                    let result = if matches!(
-                        result,
-                        Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
-                    ) {
-                        match runner
-                            .durable_public_readiness(frame.context.clone(), owner)
-                            .await
-                        {
-                            Ok(readiness) => {
-                                frame.readiness = Some(readiness);
-                                result
-                            }
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        result
-                    };
+                    let result = result.map(|publication| {
+                        let (outcome, readiness) = publication.into_parts();
+                        frame.readiness = readiness;
+                        outcome
+                    });
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durable_initialization_returned", "actor phase");
                     crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
                         behavior.advance_child_public_initialization(kernel, frame, result)
@@ -8596,7 +8584,7 @@ where
                     biased;
                     terminal = retirement.wait_requested_shutdown() => Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
                     result = tokio::time::timeout(std::time::Duration::from_secs(5),
-                        runner.confirm_durable_public_owner(pending.frame.context.clone(), owner.clone())) => {
+                        runner.confirm_initial_durable_public_owner(pending.frame.context.clone(), owner.clone())) => {
                         result.unwrap_or_else(|_| Err(ResidentActorWorkbenchError::ActorProtocol("child durability confirmation timed out".into())))
                     },
                 };
@@ -8615,20 +8603,9 @@ where
                     _ = tokio::time::sleep(std::time::Duration::from_millis(25 * attempts)) => {},
                 }
             };
-            let result = if result.is_ok() {
-                match runner
-                    .durable_public_readiness(pending.frame.context.clone(), owner)
-                    .await
-                {
-                    Ok(readiness) => {
-                        pending.frame.readiness = Some(readiness);
-                        Ok(())
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                result
-            };
+            let result = result.map(|readiness| {
+                pending.frame.readiness = Some(readiness);
+            });
             tracing::info!(target: "exomonad_actor::workbench_phase", actor = %pending.frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durability_confirmation_returned", "actor phase");
             crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
                 behavior.advance_child_confirmation(kernel, pending, result)
@@ -12140,24 +12117,13 @@ where
                         }
                     }
                 };
-                let outcome = self
+                let (outcome, readiness) = self
                     .environment
                     .runner
                     .bind_durable_root_public_owner(context.clone(), owner.clone())
                     .await
-                    .map_err(Self::failure)?;
-                let readiness =
-                    if outcome == tidepool_runtime::session::PublicManifestCommit::Durable {
-                        Some(
-                            self.environment
-                                .runner
-                                .durable_public_readiness(context.clone(), owner.clone())
-                                .await
-                                .map_err(Self::failure)?,
-                        )
-                    } else {
-                        None
-                    };
+                    .map_err(Self::failure)?
+                    .into_parts();
                 {
                     let mut records = self.environment.actors.lock();
                     let record = records.get_mut(&context.actor).ok_or_else(|| {
@@ -12169,10 +12135,9 @@ where
                 match outcome {
                     tidepool_runtime::session::PublicManifestCommit::Durable => {},
                     tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
-                        self.environment.runner.confirm_durable_public_owner(
+                        let readiness = self.environment.runner.confirm_initial_durable_public_owner(
                             context.clone(), owner.clone(),
                         ).await.map_err(Self::failure)?;
-                        let readiness = self.environment.runner.durable_public_readiness(context.clone(), owner.clone()).await.map_err(Self::failure)?;
                         let mut records = self.environment.actors.lock();
                         let record = records.get_mut(&context.actor).ok_or_else(|| Self::failure(
                             "prepared root allocation retired before confirmation",
@@ -14184,27 +14149,13 @@ where
         }
     }
 
-    async fn settle_root_public_owner(
+    fn settle_root_public_owner(
         &self,
         placement: &crate::RootRecoveryPlacement,
         outcome: &tidepool_runtime::session::PublicManifestCommit,
+        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let context = self.root_recovery_context(placement)?;
-        let established = self.environment.actors.lock().get(&placement.actor())
-            .is_some_and(|record| matches!(&record.public_owner,
-                ActorPublicOwnerPlane::DurableReady(owner) if owner.durable() == Some(placement.owner())));
-        let readiness = if !established
-            && *outcome == tidepool_runtime::session::PublicManifestCommit::Durable
-        {
-            Some(
-                self.environment
-                    .runner
-                    .durable_public_readiness(context.clone(), placement.owner().clone())
-                    .await?,
-            )
-        } else {
-            None
-        };
         let mut records = self.environment.actors.lock();
         let record = records.get_mut(&placement.actor()).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
@@ -14233,12 +14184,25 @@ where
             RootPublicOwnerPosture::PublishedUnconfirmed => {}
         }
         let context = self.root_recovery_context(&placement)?;
-        self.environment
-            .runner
-            .confirm_durable_public_owner(context, placement.owner().clone())
-            .await?;
+        let established = self.environment.actors.lock().get(&actor)
+            .is_some_and(|record| matches!(&record.public_owner,
+                ActorPublicOwnerPlane::DurableReady(owner) if owner.durable() == Some(placement.owner())));
+        let readiness = if established {
+            self.environment
+                .runner
+                .confirm_durable_public_owner(context, placement.owner().clone())
+                .await?;
+            None
+        } else {
+            Some(
+                self.environment
+                    .runner
+                    .confirm_initial_durable_public_owner(context, placement.owner().clone())
+                    .await?,
+            )
+        };
         let outcome = tidepool_runtime::session::PublicManifestCommit::Durable;
-        self.settle_root_public_owner(&placement, &outcome).await?;
+        self.settle_root_public_owner(&placement, &outcome, readiness)?;
         Ok(outcome)
     }
 
@@ -14260,12 +14224,13 @@ where
             RootPublicOwnerPosture::Pending => {}
         }
         let context = self.root_recovery_context(&placement)?;
-        let outcome = self
+        let (outcome, readiness) = self
             .environment
             .runner
             .bind_durable_root_public_owner(context, placement.owner().clone())
-            .await?;
-        self.settle_root_public_owner(&placement, &outcome).await?;
+            .await?
+            .into_parts();
+        self.settle_root_public_owner(&placement, &outcome, readiness)?;
         Ok(outcome)
     }
 
@@ -14289,7 +14254,7 @@ where
             RootPublicOwnerPosture::Pending => {}
         }
         let context = self.root_recovery_context(&placement)?;
-        let outcome = self
+        let (outcome, readiness) = self
             .environment
             .runner
             .transfer_recovered_root_public_owner(
@@ -14298,8 +14263,9 @@ where
                 placement.owner().clone(),
                 authority,
             )
-            .await?;
-        self.settle_root_public_owner(&placement, &outcome).await?;
+            .await?
+            .into_parts();
+        self.settle_root_public_owner(&placement, &outcome, readiness)?;
         Ok(outcome)
     }
 

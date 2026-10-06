@@ -228,10 +228,10 @@ impl WorkbenchPublicOwner {
                 }
                 if native.session() != context.placement.session
                     || native.scope() != context.placement.lexical_scope
-                    || !native.is_ready()
+                    || !native.is_current()
                 {
                     return Err(refuse(
-                        "durable publication owner has no exact native readiness",
+                        "durable publication owner has no current native capability",
                     ));
                 }
             }
@@ -255,6 +255,12 @@ impl WorkbenchPublicOwner {
         self.readiness
             .as_ref()
             .is_none_or(|native| native.is_ready())
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        self.readiness
+            .as_ref()
+            .is_none_or(|native| native.is_current())
     }
 
     pub(crate) fn matches_context(&self, context: &ActorSessionContext) -> bool {

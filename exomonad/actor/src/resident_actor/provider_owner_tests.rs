@@ -330,6 +330,17 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
     assert!(resident
         .confirm_durable_public_scope(&owner, sibling_scope)
         .is_err());
+    let initial_capability = resident
+        .durable_public_readiness(&owner, context.placement.lexical_scope)
+        .unwrap();
+    let descriptor = forest
+        .environment
+        .actors
+        .lock()
+        .get(&actor.identity())
+        .unwrap()
+        .descriptor
+        .clone();
     let private = resident
         .begin_durable_private_execution(&owner, context.placement.lexical_scope)
         .unwrap();
@@ -353,6 +364,11 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
     ));
     assert!(!provider.owner.is_ready());
     assert!(!sibling.is_ready());
+    assert!(initial_capability.is_current());
+    let delayed_initial_owner =
+        WorkbenchPublicOwner::issue(&context, &descriptor, Some(initial_capability))
+            .expect("sibling uncertainty blocks readiness without revoking initial placement");
+    assert!(!delayed_initial_owner.is_ready());
     assert!(matches!(
         resident.begin_durable_private_execution(&sibling_owner, sibling_scope),
         Err(
@@ -391,6 +407,7 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
         PublicManifestCommit::Durable
     );
     assert!(sibling.is_ready());
+    assert!(delayed_initial_owner.is_ready());
     forest
         .validate_provider_attachment(&provider)
         .expect("confirmation preserves exact provider owner Arc");
@@ -407,4 +424,5 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
         !sibling.is_ready(),
         "native graph destruction revokes retained readiness"
     );
+    assert!(!delayed_initial_owner.is_current());
 }
