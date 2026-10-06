@@ -16,7 +16,7 @@ module Tidepool.ExecutionProjection
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
-  , preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedModuleProductConstructors
+  , preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
   , prepareProjection
@@ -286,6 +286,7 @@ data OriginalGroupOmission = OriginalGroupOmission
 data ProjectedGroupEvidence = ProjectedGroupEvidence
   { projectedGroupWire :: ProjectedGroup
   , projectedGroupConstructors :: [DataCon]
+  , projectedGroupYieldSites :: [Effect.YieldSite]
   }
 
 newtype PreparedModuleProducts = PreparedModuleProducts
@@ -446,15 +447,30 @@ forceRawModuleProducts raw = do
   -- Consume the census spine and exact compiler identities on the worker,
   -- releasing the lazy traversal of the completed projection state. DataCons
   -- themselves remain paired with their original compiler environment lifetime.
-  forM_ selected $ \group -> forM_ (projectedGroupConstructors group) $ \con -> do
-    let identity = nameSymbol "constructor" (dataConName con)
-    _ <- evaluate (varId (dataConWorkId con))
-    _ <- evaluate (dataConTag con)
-    _ <- evaluate (Text.length (symbolUnit identity) + Text.length (symbolModule identity)
-      + Text.length (symbolNamespace identity) + Text.length (symbolOccurrence identity)
-      + maybe 0 Text.length (symbolRecordParent identity))
-    pure ()
+  forM_ selected $ \group -> do
+    forM_ (projectedGroupConstructors group) $ \con -> do
+      let identity = nameSymbol "constructor" (dataConName con)
+      _ <- evaluate (varId (dataConWorkId con))
+      _ <- evaluate (dataConTag con)
+      _ <- evaluate (Text.length (symbolUnit identity) + Text.length (symbolModule identity)
+        + Text.length (symbolNamespace identity) + Text.length (symbolOccurrence identity)
+        + maybe 0 Text.length (symbolRecordParent identity))
+      pure ()
+    forM_ (projectedGroupYieldSites group) $ \site -> do
+      _ <- evaluate (Effect.ysSite site)
+      _ <- evaluate (Effect.ysOrdinal site)
+      _ <- evaluate (Text.length (Effect.ysOrigin site)
+        + siteTypeSize (Effect.ysAnswer site)
+        + sum (map siteTypeSize (Effect.ysInputs site))
+        + length (Effect.ysInputTypeWitnesses site)
+        + maybe 0 Text.length (Effect.ysReplyDeclaration site))
+      pure ()
   pure raw
+ where
+  siteTypeSize siteType = Text.length (Effect.stType siteType)
+    + sum (map Text.length (Effect.stModules siteType))
+    + sum [Text.length unit + Text.length owner + Text.length occurrence
+          | Effect.NominalHead unit owner occurrence <- Effect.stHeads siteType]
 
 rawOriginalProductBinders :: RawModuleProducts -> Set SymbolIdentity
 rawOriginalProductBinders raw = Set.fromList
@@ -578,6 +594,25 @@ preparedModuleProductConstructors (PreparedModuleProducts outcomes) = do
       Just previous | previous /= identity ->
         Left (InvalidPreparedIdentity "distinct original constructor identities share one runtime host id")
       _ -> Right (Map.insert hostId identity known)
+
+-- | Native site metadata and the wire site/type graph come from the same
+-- selected tops. Withdrawing a group withdraws both, including on cache hits.
+preparedModuleProductYieldSites :: PreparedModuleProducts -> Either ProjectionError [Effect.YieldSite]
+preparedModuleProductYieldSites (PreparedModuleProducts outcomes) = do
+  selected <- fmap concat $ forM outcomes $ \(_,outcome,_) -> case outcome of
+    Left _ -> pure []
+    Right groups -> fmap concat $ forM groups $ \evidence -> do
+      let rows = projectedSites (projectedBody (projectedGroupWire evidence))
+          sites = projectedGroupYieldSites evidence
+          agrees row site = siteId row == Effect.ysSite site
+            && siteOrigin row == Effect.ysOrigin site
+            && siteOrdinal row == Effect.ysOrdinal site
+            && length (siteInputs row) == length (Effect.ysInputs site)
+      unless (length rows == length sites && and (zipWith agrees rows sites)) $
+        Left (InvalidPreparedIdentity "published original site differs from its compiler provenance")
+      pure sites
+  either (Left . InvalidPreparedIdentity . ("conflicting original site metadata: " <>) . Text.pack . show)
+    Right (Effect.mergeYieldSites selected)
 
 -- | Find every projected original group that transitively imports an
 -- unavailable original binder. Dependency edges are identities emitted by
@@ -711,7 +746,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             , projectedConstructorReplies = verbSites
             , projectedJsonLayout = jsonLayout
             }
-        }) (map fst (toList (constructors final))))
+        }) (map fst (toList (constructors final))) (map psSite (selectedEvidenceSites evidence)))
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.
@@ -1431,12 +1466,36 @@ indexPreparedEvidence :: PreparedModule -> PreparedEvidenceIndex
 indexPreparedEvidence prepared = PreparedEvidenceIndex
   { evidenceGraph = pmTypeGraph prepared
   , evidenceSitesByOwner = Map.fromListWith (<>)
-      [ (getKey (varUnique (psOwner site)), [(ordinal, site)])
-      | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared) ]
+      [ (owner, [(ordinal, site)])
+      | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared)
+      , owner <- Set.toList (ownedTops (psOwner site)) ]
   , evidenceRejectionsByOwner = Map.fromListWith (<>)
-      [ (getKey (varUnique (srBinder rejection)), [(ordinal, rejection)])
-      | (ordinal, rejection) <- zip [0 :: Int ..] (pmSiteRejections prepared) ]
+      [ (owner, [(ordinal, rejection)])
+      | (ordinal, rejection) <- zip [0 :: Int ..] (pmSiteRejections prepared)
+      , owner <- Set.toList (ownedTops (srBinder rejection)) ]
   }
+ where
+  -- CorePrep/STG can float a site's computation into a separate original
+  -- top. The exact source owner's top dependency closure owns its site
+  -- evidence too: a captured floated closure must not depend on the source
+  -- owner's native image remaining code-reachable. No scalar literal or
+  -- rendered binder spelling is used to recover this relationship.
+  bindings = map fst (pmBindings prepared)
+  topUniverse = mkUniqSet [varUnique binder | binding <- bindings, binder <- topBinders binding]
+  dependencies = Map.fromList
+    [ (getKey (varUnique binder), Set.fromList (map getKey (nonDetEltsUniqSet
+        (topBindingReferences (pmModule prepared) topUniverse binding)))
+        `Set.union` Set.fromList (map (getKey . varUnique) (topBinders binding)))
+    | binding <- bindings, binder <- topBinders binding ]
+  ownedTops binder = Map.findWithDefault Set.empty (getKey (varUnique binder)) closures
+  closures = Map.fromSet (\owner -> go [owner] Set.empty) (Set.fromList
+    (map (getKey . varUnique . psOwner) (pmPreparedSites prepared)
+      ++ map (getKey . varUnique . srBinder) (pmSiteRejections prepared)))
+  go [] visited = visited
+  go (owner:pending) visited
+    | owner `Set.member` visited = go pending visited
+    | otherwise = go (Set.toList (Map.findWithDefault Set.empty owner dependencies) ++ pending)
+        (Set.insert owner visited)
 
 selectPreparedEvidence :: PreparedEvidenceIndex -> [Id]
   -> Either ProjectionError SelectedPreparedEvidence

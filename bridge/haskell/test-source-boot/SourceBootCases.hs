@@ -123,7 +123,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
@@ -141,7 +141,7 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.PreparedSites (SiteRejection(..), resolvePreparedInterfaceSiblings, lookupPreparedVerb)
 import Tidepool.SiteClassifier (SiteFailure(..), classifySiteOccurrence)
-import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
+import Tidepool.EffectSchema (YieldSite(..), SiteType(..), mergeYieldSites)
 import GHC.Driver.Env (hsc_home_unit)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
@@ -2277,7 +2277,7 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
       interfaces = pprProductInterfaces produced
       entryOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextConsumer")
       requestOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextRequest")
-  context <- prepareCompilerProjectionContext produced Map.empty entryOwner "result" [] Nothing
+  context <- prepareCompilerProjectionContext produced Map.empty entryOwner "sitedResult" [] Nothing
   (modules, _) <- prepareOriginalProducts env Nothing interfaces context Set.empty (pprModules produced)
   cache <- newOriginalProjectionCollector
   cold <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
@@ -2297,9 +2297,51 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
         unless (Set.union declared (Set.fromList (map dcmId wiredInDataCons)) == issued) $
           fail (label ++ " metadata omitted an actual executable original constructor")
         pure (cons,rows)
+  target <- either (fail . show) pure (projectPrepared context (filter ((== entryOwner) . pmModule) modules))
+  unless (null (programSites target) && any (\global ->
+      globalIdentity global == SymbolIdentity "main" "OriginalTextRequest" "value" "siteRequest" Nothing)
+      (programGlobals target)) $
+    fail "site closure control did not import the effectful original from a site-free target"
   (cons,coldRows) <- check "cold" coldProducts
   (_,warmRows) <- check "warm" warmProducts
   unless (coldRows == warmRows) $ fail "warm original projection lost compiler constructor provenance"
+  coldSites <- either (fail . show) pure (preparedModuleProductYieldSites coldProducts)
+  warmSites <- either (fail . show) pure (preparedModuleProductYieldSites warmProducts)
+  let expectedSites = concatMap pmYieldSites (filter ((== requestOwner) . pmModule) modules)
+      wireSites products = [siteId site
+        | (owner,Right groups) <- preparedModuleProductOutcomes products
+        , owner == requestOwner, group <- groups, site <- projectedSites (projectedBody group)]
+      nativeSites = [site | site <- coldSites, ysOrigin site `elem` map ysOrigin expectedSites]
+  unless (not (null expectedSites)
+      && Map.fromList [(ysSite site,site) | site <- nativeSites]
+         == Map.fromList [(ysSite site,site) | site <- expectedSites]
+      && coldSites == warmSites
+      && Set.fromList (wireSites coldProducts) == Set.fromList (map ysSite expectedSites)
+      && all (isJust . ysRequestTypeSignatures) expectedSites
+      && all (not . null . ysInputs) expectedSites) $
+    fail "effectful original lost its paired wire sites or native request metadata on cold/warm lowering"
+  let floatedGroups = [group
+        | (owner,Right groups) <- preparedModuleProductOutcomes coldProducts
+        , owner == requestOwner, group <- groups
+        , any ((== "local") . symbolNamespace) (projectedBinders group)
+        , any ((`Set.member` Set.fromList (map ysSite expectedSites)) . siteId)
+            (projectedSites (projectedBody group))]
+  unless (not (null floatedGroups)) $
+    fail "captured floated original closure lacks its source owner's issued site/type graph"
+  withdrawnSites <- either (fail . show) pure
+    (preparedModuleProductYieldSites (settled warm (Set.singleton requestOwner)))
+  unless (Set.null (Set.fromList (map ysSite withdrawnSites)
+      `Set.intersection` Set.fromList (map ysSite expectedSites))) $
+    fail "withdrawn original retained native site authority"
+  mergedSites <- either (fail . show) pure (mergeYieldSites (coldSites ++ warmSites))
+  unless (mergedSites == coldSites) $ fail "equal original site evidence changed its issued metadata"
+  forM_ expectedSites $ \site ->
+    forM_ [[site,site {ysOrdinal=ysOrdinal site + 1}],
+           [site {ysOrdinal=ysOrdinal site + 1},site],
+           [site,site {ysRequestTypeSignatures=Nothing}],
+           [site {ysRequestTypeSignatures=Nothing},site]] $ \conflict ->
+      unless (mergeYieldSites conflict == Left (ysSite site)) $
+        fail "conflicting site metadata silently replaced the exact original"
   let textRows = [row | row <- coldRows, dcmQualName row == "Data.Text.Text"]
   case textRows of
     [row] | dcmArity row == 3 && dcmFieldTypes row == ["Array","Int","Int"] -> pure ()

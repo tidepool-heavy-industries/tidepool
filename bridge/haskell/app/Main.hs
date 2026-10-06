@@ -71,7 +71,7 @@ import Tidepool.CompilerProducts
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedRootIdentity)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
@@ -658,6 +658,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
   inventory <- maybe (fail "current original admission did not issue its inventory") pure
     (preparedCurrentOriginalInventory productContext)
   originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
+  originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
   let products = preparedProductInventory productContext
       roots = Set.fromList (map (projectionEntry . contextFor) targets
         ++ projectionAuxiliaryRoots firstContext)
@@ -727,7 +728,9 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
           , site <- pmYieldSites preparedModule'
           , Tidepool.EffectSchema.ysSite site `Set.member` admitted
           ]
-    sealedSites <- forM yieldSites $ \site -> do
+    allSites <- either (fail . ("conflicting executable site metadata: " ++) . show) pure
+      (Tidepool.EffectSchema.mergeYieldSites (yieldSites ++ originalSites))
+    sealedSites <- forM allSites $ \site -> do
       witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
         maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
       pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }

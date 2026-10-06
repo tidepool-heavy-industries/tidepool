@@ -6,6 +6,7 @@ module Tidepool.EffectSchema
   , NominalHead(..)
   , SiteType(..)
   , YieldSite(..)
+  , mergeYieldSites
   , SiteTypePosition(..)
   , polymorphicSiteMessage
   , sitedVerbs
@@ -13,6 +14,8 @@ module Tidepool.EffectSchema
 
 import Data.Text (Text)
 import Data.Word (Word64)
+import Control.Monad (foldM)
+import Data.Map.Strict qualified as Map
 import Tidepool.CheckedCell (CheckedTypeWitness, RequestTypeSignatures)
 import Tidepool.TypePolicy (NominalHead(..))
 
@@ -39,6 +42,15 @@ data YieldSite = YieldSite
   , ysRequestTypeSignatures :: Maybe RequestTypeSignatures
   }
   deriving (Eq, Show)
+
+-- | One site identity owns its complete compiler metadata. Repeated exact
+-- evidence is shared; conflicting inputs, signatures or presentation refuse.
+mergeYieldSites :: [YieldSite] -> Either Word64 [YieldSite]
+mergeYieldSites sites = Map.elems <$> foldM admit Map.empty sites
+  where
+    admit known site = case Map.lookup (ysSite site) known of
+      Just previous | previous /= site -> Left (ysSite site)
+      _ -> Right (Map.insert (ysSite site) site known)
 
 -- | Which type of a suspension site failed the monomorphism requirement.
 data SiteTypePosition = SiteInput | SiteResult
