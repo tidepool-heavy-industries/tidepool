@@ -5,6 +5,125 @@ pub(super) use super::test_campaign::{
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use exomonad_worktree::WorktreeSpec;
+use std::error::Error as _;
+
+#[derive(Debug, PartialEq, Eq)]
+struct HandoffTestError(&'static str);
+
+impl std::fmt::Display for HandoffTestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for HandoffTestError {}
+
+async fn finished_application_task() -> tokio::task::JoinHandle<Result<(), String>> {
+    let task = tokio::spawn(async { Ok(()) });
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    task
+}
+
+#[tokio::test]
+async fn application_handoff_keeps_both_typed_failures_and_primary_source() {
+    let owners = Arc::new(Mutex::new(HashMap::new()));
+    assert!(handoff_application_owners(
+        owners.clone(),
+        finished_application_task().await,
+        Ok(()),
+        Ok(()),
+    )
+    .is_ok());
+
+    let cleanup_only = handoff_application_owners(
+        owners.clone(),
+        finished_application_task().await,
+        Err(Box::new(HandoffTestError("cleanup only"))),
+        Ok(()),
+    )
+    .expect_err("cleanup failure is propagated");
+    assert_eq!(
+        cleanup_only.downcast_ref::<HandoffTestError>(),
+        Some(&HandoffTestError("cleanup only"))
+    );
+
+    let run_only = handoff_application_owners(
+        owners.clone(),
+        finished_application_task().await,
+        Ok(()),
+        Err(Box::new(HandoffTestError("run only"))),
+    )
+    .expect_err("run failure is propagated");
+    assert_eq!(
+        run_only.downcast_ref::<HandoffTestError>(),
+        Some(&HandoffTestError("run only"))
+    );
+
+    let both = handoff_application_owners(
+        owners.clone(),
+        finished_application_task().await,
+        Err(Box::new(HandoffTestError("cleanup detail"))),
+        Err(Box::new(HandoffTestError("run detail"))),
+    )
+    .expect_err("run failure remains visible when cleanup also fails");
+    let pair = both
+        .downcast::<ApplicationRunCleanupError>()
+        .expect("both non-retained failures have an error-pair owner");
+    assert_eq!(
+        pair.run.downcast_ref::<HandoffTestError>(),
+        Some(&HandoffTestError("run detail"))
+    );
+    assert_eq!(
+        pair.cleanup.downcast_ref::<HandoffTestError>(),
+        Some(&HandoffTestError("cleanup detail"))
+    );
+    assert_eq!(
+        pair.source()
+            .and_then(|source| source.downcast_ref::<HandoffTestError>()),
+        Some(&HandoffTestError("run detail"))
+    );
+    assert_eq!(
+        pair.to_string(),
+        "application run failed: run detail; application cleanup failed: cleanup detail"
+    );
+
+    let unfinished =
+        tokio::spawn(async { futures_util::future::pending::<Result<(), String>>().await });
+    let both = handoff_application_owners(
+        owners,
+        unfinished,
+        Err(Box::new(HandoffTestError("cleanup detail"))),
+        Err(Box::new(HandoffTestError("run detail"))),
+    )
+    .expect_err("unfinished application resources retain the handoff error");
+    let retained = both
+        .downcast::<RetainedInteractiveFleet>()
+        .expect("retained resources keep their carrier");
+    assert_eq!(retained.failures.len(), 1);
+    let pair = retained.failures[0]
+        .downcast_ref::<ApplicationRunCleanupError>()
+        .expect("both failures are represented by their owning error pair");
+    assert_eq!(
+        pair.run.downcast_ref::<HandoffTestError>(),
+        Some(&HandoffTestError("run detail"))
+    );
+    assert_eq!(
+        pair.cleanup.downcast_ref::<HandoffTestError>(),
+        Some(&HandoffTestError("cleanup detail"))
+    );
+    assert_eq!(
+        pair.source()
+            .and_then(|source| source.downcast_ref::<HandoffTestError>()),
+        Some(&HandoffTestError("run detail"))
+    );
+    assert_eq!(
+        pair.to_string(),
+        "application run failed: run detail; application cleanup failed: cleanup detail"
+    );
+    retained.unfinished.as_ref().unwrap().abort();
+}
 
 #[tokio::test]
 async fn unbounded_repository_event_await_joins_before_actor_retirement() {

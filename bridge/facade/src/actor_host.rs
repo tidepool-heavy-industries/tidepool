@@ -1482,6 +1482,48 @@ impl std::error::Error for RetainedInteractiveFleet {
     }
 }
 
+struct ApplicationRunCleanupError {
+    run: Box<dyn std::error::Error>,
+    cleanup: Box<dyn std::error::Error>,
+}
+
+impl fmt::Display for ApplicationRunCleanupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "application run failed: {}; application cleanup failed: {}",
+            self.run, self.cleanup
+        )
+    }
+}
+
+impl fmt::Debug for ApplicationRunCleanupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApplicationRunCleanupError")
+            .field("run", &self.run)
+            .field("cleanup", &self.cleanup)
+            .finish()
+    }
+}
+
+impl std::error::Error for ApplicationRunCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.run.as_ref())
+    }
+}
+
+fn application_run_cleanup_error(
+    cleanup: Result<(), Box<dyn std::error::Error>>,
+    run: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match (run, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(run), Ok(())) => Err(run),
+        (Err(run), Err(cleanup)) => Err(Box::new(ApplicationRunCleanupError { run, cleanup })),
+    }
+}
+
 /// Host-only operations. These never select a launch mode, release the command
 /// gate, establish host-work quiescence, or settle workspace custody.
 #[cfg(test)]
@@ -1642,15 +1684,17 @@ fn handoff_application_owners(
         .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
     let unfinished = !task.is_finished();
     if retained || unfinished {
+        let failures = application_run_cleanup_error(cleanup, run_result)
+            .err()
+            .into_iter()
+            .collect();
         return Err(Box::new(RetainedInteractiveFleet {
             owners,
             unfinished: unfinished.then_some(task),
-            // Preserve the errors themselves: they may own resources too.
-            failures: cleanup.err().into_iter().chain(run_result.err()).collect(),
+            failures,
         }));
     }
-    cleanup?;
-    run_result
+    application_run_cleanup_error(cleanup, run_result)
 }
 
 async fn apply_application_failure(
