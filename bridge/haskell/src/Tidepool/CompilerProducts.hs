@@ -419,8 +419,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         known <- readIORef knownRef
         let pending = Set.toAscList (Set.fromList
               [owner | identity <- Set.toAscList (rawOriginalProductDemands raw `Set.difference` known)
-                , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
-                      (mkModuleName (T.unpack (symbolModule identity)))
+                , let owner = mkModule
+                        (stringToUnit (T.unpack (symbolUnit identity)))
+                        (mkModuleName (T.unpack (symbolModule identity)))
                 , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
                 , owner `Set.notMember` sourceOwners
                 , Map.notMember owner modules, owner `Set.notMember` attempted])
