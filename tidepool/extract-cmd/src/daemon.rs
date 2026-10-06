@@ -2270,15 +2270,25 @@ fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     }
 }
 
-/// The content digest shared by the client and daemon compile spans.
+/// The logical request digest shared by the client and daemon compile spans.
 /// Equivalent inputs have the same digest; exact executions are identified
 /// separately by daemon epoch, admission ID and request ordinal.
-/// Both sides hash the same bytes: the client sends
-/// `ExtractRequest::worker_argv`, which is already the two-element typed form
-/// `normalize_worker_argv` returns unchanged. The digest is reconstructed
-/// independently of the daemon-issued invocation identity.
+/// The daemon replaces the typed execution grant before worker submission.
+/// Normalize only that grant for diagnostic correlation; actual worker bytes
+/// retain the admitted allowance, reported separately in the physical span.
+/// Untyped diagnostic inputs retain their raw digest. This hash grants no
+/// authority and is not an artifact or endpoint identity.
 pub(crate) fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
-    let digest = blake3::hash(&encode_request(cwd, worker_argv));
+    let logical_argv = ExtractRequest::decode_worker_argv(worker_argv)
+        .ok()
+        .map(|mut request| {
+            request.set_execution_grant(ExecutionGrant::default());
+            request.worker_argv()
+        });
+    let digest = blake3::hash(&encode_request(
+        cwd,
+        logical_argv.as_deref().unwrap_or(worker_argv),
+    ));
     hex(&digest.as_bytes()[..8])
 }
 
@@ -4196,17 +4206,44 @@ mod tests {
 
     #[test]
     fn the_client_and_the_daemon_name_one_compile_request_identically() {
-        // The client hashes what it is about to send; the daemon hashes what
-        // it normalized after reading. For the typed worker form those are
-        // the same bytes, so both traces retain the same content digest.
         let cwd = Path::new("/tmp/work");
+        for workload in [CompileWorkload::Foreground, CompileWorkload::Preparation] {
+            let mut request =
+                ExtractRequest::from_cli(&["Expr.hs".into(), "--turn".into()]).unwrap();
+            request.set_workload(workload);
+            let client_argv = request.worker_argv();
+            let logical_digest = compile_request_correlation(cwd, &client_argv);
+            for jobs in [2, 4, 8, 16] {
+                let grant = ExecutionGrant {
+                    jobs,
+                    capabilities: jobs + 1,
+                };
+                let daemon_argv = grant_worker_argv(
+                    &normalize_worker_argv(client_argv.clone()).unwrap(),
+                    workload,
+                    grant,
+                )
+                .unwrap();
+                assert_ne!(client_argv, daemon_argv);
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&daemon_argv)
+                        .unwrap()
+                        .execution_grant(),
+                    grant
+                );
+                assert_eq!(
+                    compile_request_correlation(cwd, &daemon_argv),
+                    logical_digest
+                );
+            }
+        }
         let request = ExtractRequest::from_cli(&["Expr.hs".into(), "--turn".into()]).unwrap();
         let client_argv = request.worker_argv();
-        let daemon_argv = normalize_worker_argv(client_argv.clone()).unwrap();
-        assert_eq!(client_argv, daemon_argv);
-        assert_eq!(
+        let mut preparation = request.clone();
+        preparation.set_workload(CompileWorkload::Preparation);
+        assert_ne!(
             compile_request_correlation(cwd, &client_argv),
-            compile_request_correlation(cwd, &daemon_argv)
+            compile_request_correlation(cwd, &preparation.worker_argv())
         );
         let other = ExtractRequest::from_cli(&["Other.hs".into()]).unwrap();
         assert_ne!(
@@ -4728,6 +4765,20 @@ tidepool-target phase=desugar module=Execute\n",
     fn transaction_queue_and_repeated_requests_have_exact_identities() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec![OsString::from("Expr.hs")];
+        let client_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let client_digest = compile_request_correlation(dir.path(), &client_argv);
+        let grant = ExecutionGrant {
+            jobs: 2,
+            capabilities: 2,
+        };
+        let granted_argv =
+            grant_worker_argv(&client_argv, CompileWorkload::Foreground, grant).unwrap();
+        assert_eq!(
+            ExtractRequest::decode_worker_argv(&granted_argv)
+                .unwrap()
+                .execution_grant(),
+            grant
+        );
         let worker_bin = compile_sleepy_fake_worker(dir.path(), &argv, 0);
         let prepared = PreparedWorker::for_test(worker_bin).unwrap();
         let mut worker = Worker::spawn(&prepared).unwrap();
@@ -4769,10 +4820,7 @@ tidepool-target phase=desugar module=Execute\n",
                     Duration::from_millis(17),
                     AdmissionId(admission),
                     CompileWorkload::Foreground,
-                    ExecutionGrant {
-                        jobs: 2,
-                        capabilities: 2,
-                    },
+                    grant,
                     Duration::from_secs(10),
                     100,
                     u64::MAX,
@@ -4785,10 +4833,14 @@ tidepool-target phase=desugar module=Execute\n",
                             RequestStep::End
                         } else {
                             remaining -= 1;
-                            RequestStep::Request(
-                                dir.path().to_path_buf(),
-                                normalize_worker_argv(argv.clone()).unwrap(),
-                            )
+                            identify_request(
+                                DaemonEpoch([9; 32]),
+                                AdmissionId(admission),
+                                RequestOrdinal(request_count - remaining),
+                                dir.path(),
+                                &client_argv,
+                            );
+                            RequestStep::Request(dir.path().to_path_buf(), granted_argv.clone())
                         }
                     },
                 )
@@ -4823,7 +4875,24 @@ tidepool-target phase=desugar module=Execute\n",
             .filter(|row| row["fields"]["message"] == "compiler request finished")
             .collect();
         assert_eq!(finished.len(), 2);
+        let identified: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler request identified")
+            .collect();
+        assert_eq!(identified.len(), finished.len());
+        for (client, physical) in identified.iter().zip(&finished) {
+            for field in [
+                "compile_request",
+                "daemon_epoch",
+                "admission_id",
+                "request_ordinal",
+            ] {
+                assert_eq!(client["fields"][field], physical["span"][field]);
+            }
+        }
         for (row, ordinal) in finished.iter().zip([1, 2]) {
+            assert_eq!(row["span"]["compile_request"], client_digest);
+            assert_eq!(row["fields"]["compile_request"], client_digest);
             assert_eq!(row["span"]["admission_id"], 41);
             assert_eq!(row["span"]["request_ordinal"], ordinal);
             assert_eq!(row["span"]["daemon_epoch"], hex(&[9; 32]));
