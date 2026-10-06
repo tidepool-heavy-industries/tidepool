@@ -4850,6 +4850,8 @@ mod tests {
     use super::*;
     use crate::artifact_inventory::ArtifactKind;
 
+    include!("declaration_context/program_source_support_history.rs");
+
     #[test]
     fn lexical_composition_retains_shared_owners_idempotently() {
         let node = ExactLexicalNode {
