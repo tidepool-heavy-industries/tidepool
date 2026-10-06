@@ -32,7 +32,9 @@ use crate::{
 mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
+mod production_entry;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
+pub use production_entry::{build_production_entry, load_production_entry, ProductionEntryOutput};
 
 static HOST_BINDING_INTERFACE_REQUESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -854,6 +856,7 @@ impl ModuleCandidateOffer {
             "__prepared",
             issue_identity.then_some((&table, sites.as_slice())),
             None,
+            OriginalOutputPublication::Transaction,
         )?
         .map(Arc::new);
         Ok((
@@ -2117,6 +2120,7 @@ impl ModuleCandidateOffer {
             "__result",
             None,
             Some(&authored),
+            OriginalOutputPublication::Transaction,
         )?
         .ok_or_else(fail)?;
         let products = sealed
@@ -2428,7 +2432,14 @@ pub fn seal_turn_outputs(
         target,
         None,
         None,
+        OriginalOutputPublication::Transaction,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OriginalOutputPublication {
+    Transaction,
+    RetainedEntry,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2441,6 +2452,7 @@ fn seal_turn_outputs_inner(
     target: &str,
     identity_metadata: Option<(&DataConTable, &[YieldSite])>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
+    publication: OriginalOutputPublication,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
@@ -2571,11 +2583,14 @@ fn seal_turn_outputs_inner(
         0,
         receipt.targets.len(),
     );
-    module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
-    if offer
-        .exact
-        .as_ref()
-        .is_none_or(|exact| empty_exact_context(&exact.context))
+    if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
+    }
+    if publication == OriginalOutputPublication::Transaction
+        && offer
+            .exact
+            .as_ref()
+            .is_none_or(|exact| empty_exact_context(&exact.context))
     {
         let (_, publication) = module_candidates::prepare_publication(
             &offer.producer,
@@ -2592,7 +2607,7 @@ fn seal_turn_outputs_inner(
             &certified.recovery_products,
         );
         module_candidates::publish_prepared(publication);
-    } else {
+    } else if publication == OriginalOutputPublication::Transaction {
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
@@ -3013,6 +3028,10 @@ enum BuildActionExport<'a> {
         output_root: &'a Path,
         source_selection: &'a module_candidates::deployment::NativeCatalogSourceSelection,
     },
+    ProductionEntry {
+        output_root: &'a Path,
+        source_selection: &'a module_candidates::deployment::NativeCatalogSourceSelection,
+    },
 }
 
 /// Compile one declared module and target set for an immutable build action.
@@ -3176,7 +3195,9 @@ fn compile_invocation_inner(
         CompilationPolicy::Runtime
         | CompilationPolicy::BuildAction {
             export:
-                BuildActionExport::PreparedFixture { .. } | BuildActionExport::CatalogInventory { .. },
+                BuildActionExport::PreparedFixture { .. }
+                | BuildActionExport::CatalogInventory { .. }
+                | BuildActionExport::ProductionEntry { .. },
             ..
         } => (None, None, None, None),
         CompilationPolicy::Exact { context } => (None, Some(context), None, None),
@@ -3248,7 +3269,16 @@ fn compile_invocation_inner(
     if let Some(root) = session_root {
         cmd.session_root(root).certify_home_products();
     }
-    if deployment_export.is_some() || inventory_export.is_some() {
+    if deployment_export.is_some()
+        || inventory_export.is_some()
+        || matches!(
+            &policy,
+            CompilationPolicy::BuildAction {
+                export: BuildActionExport::ProductionEntry { .. },
+                ..
+            }
+        )
+    {
         cmd.certify_home_products();
     }
     let exact_request = if let Some(context) = exact_context {
@@ -3783,6 +3813,25 @@ fn compile_invocation_inner(
                 &target.asks_bytes,
             )?;
         }
+    }
+    if let CompilationPolicy::BuildAction {
+        source_path,
+        export:
+            BuildActionExport::ProductionEntry {
+                output_root,
+                source_selection,
+            },
+        ..
+    } = &policy
+    {
+        production_entry::export(
+            temp_dir.path(),
+            output_root,
+            source_path,
+            source_selection,
+            &deployment,
+            inv.targets,
+        )?;
     }
     Ok(artifacts)
 }

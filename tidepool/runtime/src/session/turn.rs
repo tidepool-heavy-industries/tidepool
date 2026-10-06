@@ -1878,6 +1878,22 @@ pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
 }
 
 impl CompiledTurn {
+    /// Reconstruct a fresh runtime installation from a complete original entry.
+    /// Its original custody is checked by the toolchain loader; mutable runtime
+    /// state is created only when this turn is installed in a session.
+    pub fn from_production_entry(
+        entry: &tidepool_toolchain::artifacts::ProductionEntryOutput,
+    ) -> Result<Self, CompileError> {
+        compiled_native_output(
+            entry.table(),
+            entry.warnings(),
+            entry.yield_sites().to_vec(),
+            entry.target_owned(),
+            Some(entry.products()),
+            None,
+        )
+    }
+
     /// Completed-original custody, independent of new source replay eligibility.
     pub fn original_compile_input(
         &self,
@@ -3449,13 +3465,30 @@ fn retained_compiled_turn(
             "admitted native source differs from observation".into(),
         ));
     }
-    let compiled = CompiledTurn {
-        table: native.table().clone(),
-        warnings: native.warnings().clone(),
+    compiled_native_output(
+        native.table(),
+        native.warnings(),
         asks,
-        prepared: native.target_owned(),
-        certification: native
-            .products()
+        native.target_owned(),
+        native.products(),
+        admission,
+    )
+}
+
+fn compiled_native_output(
+    table: &DataConTable,
+    warnings: &MetaWarnings,
+    asks: Vec<YieldSite>,
+    prepared: Arc<PreparedProgram>,
+    products: Option<&tidepool_toolchain::artifacts::SealedTurnProducts>,
+    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
+) -> Result<CompiledTurn, CompileError> {
+    let compiled = CompiledTurn {
+        table: table.clone(),
+        warnings: warnings.clone(),
+        asks,
+        prepared,
+        certification: products
             .map(|products| -> Result<_, CompileError> {
                 Ok(TurnCertification {
                     artifact_view: products.artifact_view.clone(),
