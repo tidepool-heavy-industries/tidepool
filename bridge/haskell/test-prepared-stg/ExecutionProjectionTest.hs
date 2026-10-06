@@ -1640,6 +1640,14 @@ verifyUnboxedSumJoinProjection = do
     unless (length literalJumps >= 2 && all (\(literal,rep) ->
       literalRep literal == rep && rep == expectedRep) literalJumps) $
       fail ("compiled join literal conventions differ: " ++ show (entry,literalJumps))
+    let payload (IntLiteral _ bytes) = bytes
+        payload (WordLiteral _ bytes) = bytes
+        payload _ = error "integer join fixture emitted a noninteger literal"
+        small value = BS.replicate 7 0 <> BS.singleton value
+        expectedBytes = if entry == "sumJoin" then [small 1, small 2]
+          else [BS.replicate 8 255, small 2]
+    unless (Set.fromList (map (payload . fst) literalJumps) == Set.fromList expectedBytes) $
+      fail "join signedness normalization changed the native literal bit payload"
 
 -- Faults alter only actual compiler-produced argument occurrences, retaining
 -- their join's original parameter authority. Narrow integers, floating point,
