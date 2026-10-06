@@ -230,12 +230,24 @@ pub struct FrozenWorkspace {
 }
 
 impl FrozenWorkspace {
+    /// Reopen a qualified run's exact consumed deployment. Loss of this
+    /// selection is a refusal; a running host cannot admit a new source capture.
+    pub(crate) fn load_prepared_run(workspace: &Path, run_root: &Path) -> Result<Self> {
+        let path = run_root.join("workspace-prepared.json");
+        if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err("prepared run selection is not a regular file".into());
+        }
+        let pointer: PreparedWorkspacePointer = serde_json::from_slice(&std::fs::read(path)?)?;
+        Self::load_prepared(workspace, pointer, false)
+    }
+
+    /// Explicit source capture for preparation, checks and developer consumers.
     pub(crate) fn load(workspace: &Path, run_root: &Path) -> Result<Self> {
         let pointer = run_root.join("workspace-prepared.json");
-        if pointer.exists() {
-            let pointer: PreparedWorkspacePointer =
-                serde_json::from_slice(&std::fs::read(pointer)?)?;
-            return Self::load_prepared(workspace, pointer, false);
+        match std::fs::symlink_metadata(&pointer) {
+            Ok(_) => return Self::load_prepared_run(workspace, run_root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
@@ -1531,6 +1543,48 @@ mod tests {
             std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn qualified_run_refuses_lost_or_unreadable_selection_without_source_capture() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let run = tempfile::tempdir().unwrap();
+        let pointer = run.path().join("workspace-prepared.json");
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let refuse = || {
+            assert!(FrozenWorkspace::load_prepared_run(project.path(), run.path()).is_err());
+            assert!(std::fs::read_dir(run.path())
+                .unwrap()
+                .all(|entry| { entry.unwrap().file_name() == "workspace-prepared.json" }));
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        };
+        // A consumed selection that disappears cannot become a fresh capture.
+        std::fs::write(&pointer, b"prior consumed selection").unwrap();
+        std::fs::remove_file(&pointer).unwrap();
+        refuse();
+
+        std::os::unix::fs::symlink(run.path().join("missing-selection"), &pointer).unwrap();
+        refuse();
+        assert!(FrozenWorkspace::load(project.path(), run.path()).is_err());
+        assert!(!run.path().join("workspace").exists());
+        std::fs::remove_file(&pointer).unwrap();
+
+        std::fs::create_dir(&pointer).unwrap();
+        refuse();
+        std::fs::remove_dir(&pointer).unwrap();
+
+        std::fs::write(&pointer, b"malformed pointer").unwrap();
+        refuse();
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0)).unwrap();
+        assert_eq!(
+            std::fs::read(&pointer).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "this qualification runs under the supported unprivileged account"
+        );
+        refuse();
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]

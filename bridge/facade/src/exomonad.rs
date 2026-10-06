@@ -1589,7 +1589,8 @@ async fn run_host(
         std::fs::create_dir_all(parent)?;
     }
 
-    let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
+    let workspace_inputs =
+        workspace::FrozenWorkspace::load_prepared_run(&options.workspace, &options.run_root)?;
     if !options.resume_root && workspace_inputs.preparation.is_some() {
         workspace_inputs.verify_current_inputs(&options.workspace)?;
     }
