@@ -644,7 +644,8 @@ class CatalogSourceTests(unittest.TestCase):
         qualification.write_json(entry / 'entry.json', {
             'schema': 1, 'purpose': 'original_source', 'target': '__prepared',
             'source': str(original / qualification.ROOT_ENTRY_SOURCE),
-            'sources': self.selection(original), 'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
+            'sources': {'kind': 'native_catalog', 'selection': self.selection(original)},
+            'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
         shutil.copy2(record, entry / 'source-retention.json')
         entry_products = qualification.native_catalog_products(entry, qualification.NATIVE_ROOT_ENTRY_BUILD)
         selected_entry = {'manifest_sha256': qualification.sha256(entry / 'entry.json'),

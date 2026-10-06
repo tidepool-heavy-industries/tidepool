@@ -13,6 +13,100 @@ use crate::toolchain::{
     AdmittedCompilerDeployment, CompilerDeploymentAuthority, CompilerDeploymentConfiguration,
 };
 
+/// Observations of an existing source owner's immutable ordered snapshot.
+/// These are expected inputs, not compilation authority: loading still requires
+/// the complete original output and the existing original-product validator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenEntrySources {
+    roots: Vec<FrozenEntryRoot>,
+    source: PathBuf,
+    source_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenEntryRoot {
+    path: PathBuf,
+    files: Vec<(PathBuf, String)>,
+}
+
+impl FrozenEntrySources {
+    pub fn capture(roots: &[PathBuf], source: &Path) -> Result<Self, CompileError> {
+        let roots = roots
+            .iter()
+            .map(|root| {
+                let path = std::fs::canonicalize(root)?;
+                Ok(FrozenEntryRoot {
+                    files: crate::cache::source_root_manifest(&path).map_err(invalid)?,
+                    path,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let source = std::fs::canonicalize(source)?;
+        let source_sha256 = hex_sha256(&std::fs::read(&source)?);
+        Ok(Self {
+            roots,
+            source,
+            source_sha256,
+        })
+    }
+
+    fn revalidate(&self) -> Result<(), CompileError> {
+        if Self::capture(&self.include_roots(), &self.source)? != *self {
+            return Err(invalid("frozen original source snapshot changed"));
+        }
+        Ok(())
+    }
+
+    pub fn include_roots(&self) -> Vec<PathBuf> {
+        self.roots.iter().map(|root| root.path.clone()).collect()
+    }
+
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "selection", rename_all = "snake_case")]
+pub enum ProductionEntrySources {
+    NativeCatalog(NativeCatalogSourceSelection),
+    FrozenWorkspace(FrozenEntrySources),
+}
+
+impl ProductionEntrySources {
+    fn include_roots(&self) -> Vec<PathBuf> {
+        match self {
+            Self::NativeCatalog(selection) => selection.include_roots(),
+            Self::FrozenWorkspace(selection) => selection.include_roots(),
+        }
+    }
+
+    fn revalidate(&self, source: &Path) -> Result<(), CompileError> {
+        match self {
+            Self::NativeCatalog(selection) => {
+                if NativeCatalogSourceSelection::capture(&selection.snapshot_root)? != *selection
+                    || !selection.contains_source(source)
+                    || !selection
+                        .source_files
+                        .iter()
+                        .any(|file| selection.snapshot_root.join(&file.path) == source)
+                {
+                    return Err(invalid("retained original source selection changed"));
+                }
+            }
+            Self::FrozenWorkspace(selection) => {
+                if source != selection.source() {
+                    return Err(invalid("original frozen wrapper differs"));
+                }
+                selection.revalidate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Owned decoded program and complete original compiler custody. Opening this
 /// entry does not execute source, select runtime candidates, or start a compiler.
 #[derive(Debug)]
@@ -55,7 +149,7 @@ struct EntryManifest {
     worker: [u8; 32],
     target: String,
     source: PathBuf,
-    sources: NativeCatalogSourceSelection,
+    sources: ProductionEntrySources,
     files: BTreeMap<PathBuf, String>,
 }
 
@@ -72,6 +166,50 @@ const MAX_CONTAINER_BYTES: u64 = 2 << 30;
 
 fn invalid(detail: impl std::fmt::Display) -> CompileError {
     CompileError::ExtractFailed(format!("production entry: {detail}"))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").ok();
+            hex
+        })
+}
+
+/// Execute fresh source into one complete retained entry through the runtime
+/// compiler endpoint. Source replay and module candidate caches are unavailable.
+pub fn prepare_frozen_production_entry(
+    sources: &FrozenEntrySources,
+    scratch: &Path,
+    output: &Path,
+) -> Result<(), CompileError> {
+    sources.revalidate()?;
+    if output.exists() || !scratch.is_dir() {
+        return Err(invalid(
+            "requires private scratch and an absent entry output",
+        ));
+    }
+    let source = std::fs::read_to_string(sources.source())?;
+    let include = sources.include_roots();
+    let invocation = CompileInvocation {
+        source: &source,
+        targets: &["__prepared"],
+        include: &include,
+        fallback_module_name: "Input",
+    };
+    compile_invocation_inner(
+        &invocation,
+        &mut |_, _, _| {},
+        CompilationPolicy::RetainedEntry {
+            source_path: sources.source(),
+            scratch,
+            output,
+            sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
+        },
+    )?;
+    Ok(())
 }
 
 /// Compile a settled entry under one declared frozen native source selection.
@@ -108,7 +246,7 @@ pub fn build_production_entry(
         scratch,
         BuildActionExport::ProductionEntry {
             output_root: output,
-            source_selection: &selection,
+            source_selection: &ProductionEntrySources::NativeCatalog(selection.clone()),
         },
     )
 }
@@ -117,7 +255,7 @@ pub(super) fn export(
     original: &Path,
     output: &Path,
     source: &Path,
-    sources: &NativeCatalogSourceSelection,
+    sources: &ProductionEntrySources,
     deployment: &AdmittedCompilerDeployment,
     targets: &[&str],
 ) -> Result<(), CompileError> {
@@ -162,7 +300,7 @@ pub(super) fn export(
     else {
         return Err(invalid("configured compiler deployment unavailable"));
     };
-    load_production_entry(staging.path(), &authority, sources)?;
+    load_selected_production_entry(staging.path(), &authority, sources)?;
     std::fs::rename(staging.path(), output)?;
     Ok(())
 }
@@ -174,6 +312,20 @@ pub fn load_production_entry(
     directory: &Path,
     authority: &CompilerDeploymentAuthority,
     sources: &NativeCatalogSourceSelection,
+) -> Result<ProductionEntryOutput, CompileError> {
+    load_selected_production_entry(
+        directory,
+        authority,
+        &ProductionEntrySources::NativeCatalog(sources.clone()),
+    )
+}
+
+/// Open an explicitly selected completed artifact. Snapshot equality does not
+/// claim that a fresh compilation with untracked inputs would yield this output.
+pub fn load_selected_production_entry(
+    directory: &Path,
+    authority: &CompilerDeploymentAuthority,
+    sources: &ProductionEntrySources,
 ) -> Result<ProductionEntryOutput, CompileError> {
     let bytes = crate::checked_cell::read(directory.join(MANIFEST), 16 << 20)?;
     let manifest: EntryManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
@@ -189,15 +341,7 @@ pub fn load_production_entry(
     CompilerDeploymentConfiguration::Configured(authority.clone())
         .admit(manifest.producer, manifest.worker)
         .map_err(invalid)?;
-    if NativeCatalogSourceSelection::capture(&sources.snapshot_root)? != *sources
-        || !sources.contains_source(&manifest.source)
-        || !sources
-            .source_files
-            .iter()
-            .any(|file| sources.snapshot_root.join(&file.path) == manifest.source)
-    {
-        return Err(invalid("retained original source selection changed"));
-    }
+    sources.revalidate(&manifest.source)?;
     let raw = directory.join("raw");
     if inventory(&raw)? != manifest.files {
         return Err(invalid("complete original container differs"));

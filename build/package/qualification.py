@@ -519,7 +519,10 @@ def root_entry_selection(entry: Path, original: Path) -> dict:
             or manifest.get("target") != "__prepared"
             or manifest.get("source") != str(original / "actors/TidepoolPreparedDriver.hs")):
         raise ValueError("root entry does not retain the declared original settled driver")
-    return native_source_selection(manifest.get("sources"), original)
+    sources = manifest.get("sources")
+    if not isinstance(sources, dict) or set(sources) != {"kind", "selection"} or sources["kind"] != "native_catalog":
+        raise ValueError("root entry requires the retained native source selection")
+    return native_source_selection(sources["selection"], original)
 
 
 def build_native_root_entry(args) -> None:

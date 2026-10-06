@@ -91,9 +91,13 @@ not execute source or require a live compiler.
 The prepared bundle's qualification contract retains the root entry inventory
 and selects `TIDEPOOL_PREPARED_ROOT_ENTRY`; root and child machines install fresh
 mutable state from the retained decoded entry and native images. General
-workspace entry export still requires a stable generated source snapshot from
-the workspace source owner; the native producer does not accept transient
-workspace source directories.
+workspace entry export uses the same container with a typed ordered frozen
+source selection. Its source owner must retain the original generated wrapper
+and every selected root. The runtime compiler endpoint can then publish a
+complete entry, including completed quotations, without making source replay
+eligible. The native producer retains its declared Nix source contract; it does
+not accept transient workspace source directories. Durable workspace selection
+and CLI preparation remain separate consumer obligations.
 
 The catalog-backed bundle retains those exact products and selection, with no
 unused stdlib or actor source copies. Freezing
