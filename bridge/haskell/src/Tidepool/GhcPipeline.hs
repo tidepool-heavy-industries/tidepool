@@ -51,7 +51,7 @@ import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Iface.Load (loadInterface, WhereFrom(..))
 import GHC.Rename.Names (renameRawPkgQual)
-import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
+import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache, filterModIfaceCache)
 import qualified GHC.Linker.Loader as Linker
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
@@ -2389,13 +2389,20 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     when (isJust (hscFrontendHook (hsc_hooks beforeLoad))) (liftIO (throwIO CustomLoadFrontendHook))
     loadT0 <- monotonicTime
     loadResources <- beginResourceTiming timing
+    -- Make prefers its cached interface over the current summary's staged
+    -- interface. An admitted original owns that choice now; remove its prior
+    -- interface and linkable together while preserving every other cache entry.
+    let candidateOwners = Set.fromList
+          [ms_mod (admittedCandidateView candidate) | candidate <- Map.elems acceptedCandidates]
+        loadCache = fmap (filterModIfaceCache
+          (\iface -> mi_module iface `Set.notMember` candidateOwners)) mCache
     loadFlag <- reifyGhc $ \session -> bracket
       (reflectGhc (getSession >>= \env -> setSession env
         { hsc_hooks = (hsc_hooks env)
             { runPhaseHook = Just (PhaseHook captureCanonicalFailure) } }) session)
       (const (reflectGhc (getSession >>= \env -> setSession env
         { hsc_hooks = hsc_hooks beforeLoad }) session))
-      (const (reflectGhc (load' mCache loadHowMuch
+      (const (reflectGhc (load' loadCache loadHowMuch
         dependencyDiagnostic (Just batchMsg)
         (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))) session))
     loadT1 <- monotonicTime

@@ -1,0 +1,24 @@
+--- a/compiler/GHC/Driver/Make.hs
++++ b/compiler/GHC/Driver/Make.hs
+@@ -16,7 +16,7 @@
+ -- -----------------------------------------------------------------------------
+ module GHC.Driver.Make (
+         depanal, depanalE, depanalPartial, checkHomeUnitsClosed,
+-        load, loadWithCache, load', AnyGhcDiagnostic, LoadHowMuch(..), ModIfaceCache(..), noIfaceCache, newIfaceCache,
++        load, loadWithCache, load', AnyGhcDiagnostic, LoadHowMuch(..), ModIfaceCache(..), noIfaceCache, newIfaceCache, filterModIfaceCache,
+         instantiationNodes,
+ 
+         downsweep,
+@@ -447,6 +447,12 @@
+ 
+ instance Outputable CachedIface where
+   ppr (CachedIface mi ln) = hsep [text "CachedIface", ppr (miKey mi), ppr ln]
++
++-- | Restrict the interfaces offered to the next make invocation. A rejected
++-- interface and its linkable are removed together; cache publication is unchanged.
++filterModIfaceCache :: (ModIface -> Bool) -> ModIfaceCache -> ModIfaceCache
++filterModIfaceCache keep cache = cache
++  { iface_clearCache = filter (keep . cached_modiface) <$> iface_clearCache cache }
+ 
+ noIfaceCache :: Maybe ModIfaceCache
+ noIfaceCache = Nothing
