@@ -988,25 +988,9 @@ impl<'code> PreparedMachine<'code> {
         self.header_owners.get(&header).copied()
     }
 
-    /// Resolve an exported static object through the existing catalog and
-    /// reverse owner map. Export has already validated its original tag.
-    pub(super) fn owner_of_static(
-        &self,
-        address: usize,
-        metrics: &tidepool_heap::static_region::StaticLookupMetrics,
-    ) -> Result<Option<ProgramId>, ExecutionError> {
-        let Some(catalog) = &self.static_catalog else {
-            return Ok(None);
-        };
-        let catalog = catalog.borrow();
-        let region = catalog
-            .admit(address, metrics)
-            .map_err(ExecutionError::Evacuation)?;
-        Ok(region.and_then(|region| {
-            self.region_owners
-                .get(&region.address_range().start)
-                .copied()
-        }))
+    /// Owner of a region whose exact static admission already succeeded.
+    pub(super) fn owner_of_static_region(&self, start: usize) -> Option<ProgramId> {
+        self.region_owners.get(&start).copied()
     }
 
     /// The shareable image of an installed program, with the current value
@@ -2462,7 +2446,9 @@ impl<'code> PreparedMachine<'code> {
     /// re-verification. Requires a live heap (at least one program already
     /// installed); [`Self::install`] only reaches this after a declared
     /// import's handle has resolved, which itself requires a live heap.
-    fn observation_heap(&self) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
+    pub(super) fn observation_heap(
+        &self,
+    ) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
         self.observation_heap_and_starts().map(|(heap, _, _)| heap)
     }
 
@@ -3545,6 +3531,7 @@ mod tests {
     use crate::prepared_program::{
         ExecutionError, PreparedCallOptions, PreparedMachineOptions, RunOptions,
     };
+    use tidepool_heap::execution_descriptor::DescriptorTraceError;
     use tidepool_repr::execution_schema::{
         link_program, parse_program, testing, Alternative, AlternativePattern, Architecture, Atom,
         CaseKind, CheckedLayout, ConstructorDecl, ConstructorId, DecodeLimits, Endianness,
@@ -4931,6 +4918,645 @@ mod tests {
             format!("{before:?}")
         );
         assert!(right.release(arrived));
+    }
+
+    #[test]
+    fn a_parcel_follows_more_than_sixty_four_instances_and_runs_after_source_drop() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let (mut source, terminal) =
+            PreparedMachine::new_shared(Arc::new(scalar_returning_function_program()), options)
+                .unwrap();
+        let next = testing::identity("ParcelChain", "next");
+        let linked = s3_import_consumer_program(next.clone(), RuntimeRep::LiftedRef, true);
+        let code = Arc::new(source.compile_for_install(&linked).unwrap());
+        let mut value = source.retain_top(terminal, ValueId(0)).unwrap();
+        let mut expected = vec![terminal];
+        for _ in 0..70 {
+            let program = source
+                .install_shared(
+                    Arc::clone(&code),
+                    [(next.clone(), value)].into_iter().collect(),
+                )
+                .unwrap();
+            let previous = value;
+            value = source.retain_top(program, ValueId(0)).unwrap();
+            assert!(source.release(previous));
+            expected.push(program);
+        }
+        let parcel = source.export_parcel(value).unwrap();
+        assert_eq!(parcel.images().len(), expected.len());
+        for program in expected {
+            let (_, instance, _) = source.image_with_imports(program).unwrap();
+            assert!(parcel
+                .images()
+                .iter()
+                .any(|image| image.names_instance(&instance)));
+        }
+        let (mut destination, scalar_call) = PreparedMachine::new_shared(
+            Arc::new(CompiledProgram::compile(&scalar_dynamic_caller_program()).unwrap()),
+            options,
+        )
+        .unwrap();
+        let closure_call = install_linked(
+            &mut destination,
+            &closure_caller_program(),
+            ImportBindings::new(),
+        )
+        .unwrap();
+        let imported = destination.import_parcel(parcel, RealmId::ROOT).unwrap();
+        drop(source);
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let mut value = imported.value;
+        for _ in 0..70 {
+            let result = destination
+                .run_entry_retained(
+                    closure_call,
+                    ValueId(0),
+                    &[PreparedInput::Managed(value)],
+                    call,
+                    RealmId::ROOT,
+                )
+                .unwrap();
+            let [PreparedResult::Managed(next)] = result.values.as_slice() else {
+                panic!("next closure")
+            };
+            assert!(destination.release(value));
+            value = *next;
+        }
+        let result = destination
+            .run_entry_retained(
+                scalar_call,
+                ValueId(0),
+                &[PreparedInput::Managed(value)],
+                call,
+                RealmId::ROOT,
+            )
+            .unwrap();
+        assert_eq!(result.values, vec![PreparedResult::Scalar(7)]);
+        assert!(destination.release(value));
+        for (_, handle) in imported.imports {
+            assert!(destination.release(handle));
+        }
+        assert_eq!(destination.handle_count(), 0);
+    }
+
+    fn parcel_binary_import_program() -> tidepool_repr::execution_schema::LinkedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        let mut imports = MachineImports::default();
+        wire.globals = ["left", "right"]
+            .into_iter()
+            .map(|name| {
+                let identity = testing::identity("ParcelGraph", name);
+                imports.values.insert(
+                    identity.clone(),
+                    ImportedValue {
+                        identity: identity.clone(),
+                        rep: RuntimeRep::LiftedRef,
+                        entry_signature: None,
+                        evaluated: true,
+                        generation: 0,
+                    },
+                );
+                GlobalDecl {
+                    identity,
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: true,
+                    required_generation: None,
+                }
+            })
+            .collect();
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let prepared = testing::prepare(wire).unwrap();
+        link_program(prepared, &imports).unwrap()
+    }
+
+    // The oracle walks authored instance adjacency, independent of heap
+    // descriptors, root blocks, static catalogs, or the export traversal.
+    fn reference_reachable_instances(
+        edges: &[Option<(usize, usize)>],
+        root: usize,
+    ) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if !found.insert(node) {
+                continue;
+            }
+            if let Some((left, right)) = edges[node] {
+                pending.extend([left, right]);
+            }
+        }
+        found
+    }
+
+    fn assert_parcel_instance_graph(
+        edges: &[Option<(usize, usize)>],
+        root: usize,
+    ) -> BTreeSet<usize> {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let terminal_code = Arc::new(scalar_returning_function_program());
+        let (mut source, first) =
+            PreparedMachine::new_shared(Arc::clone(&terminal_code), options).unwrap();
+        let branch_code = Arc::new(
+            source
+                .compile_for_install(&parcel_binary_import_program())
+                .unwrap(),
+        );
+        let mut programs = vec![first];
+        let mut values = vec![source.retain_top(first, ValueId(0)).unwrap()];
+        assert!(edges[0].is_none());
+        for edge in &edges[1..] {
+            let program = if let Some((left, right)) = edge {
+                source
+                    .install_shared(
+                        Arc::clone(&branch_code),
+                        [
+                            (testing::identity("ParcelGraph", "left"), values[*left]),
+                            (testing::identity("ParcelGraph", "right"), values[*right]),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )
+                    .unwrap()
+            } else {
+                source
+                    .install_shared(Arc::clone(&terminal_code), ImportBindings::new())
+                    .unwrap()
+            };
+            programs.push(program);
+            values.push(source.retain_top(program, ValueId(0)).unwrap());
+        }
+        let expected = reference_reachable_instances(edges, root);
+        let parcel = source.export_parcel(values[root]).unwrap();
+        let actual = programs
+            .iter()
+            .enumerate()
+            .filter_map(|(node, program)| {
+                let (_, instance, _) = source.image_with_imports(*program).unwrap();
+                parcel
+                    .images()
+                    .iter()
+                    .any(|image| image.names_instance(&instance))
+                    .then_some(node)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual, expected,
+            "instance adjacency: {edges:?}, root {root}"
+        );
+        assert_eq!(
+            parcel.images().len(),
+            expected.len(),
+            "no duplicate manifest instances"
+        );
+        actual
+    }
+
+    #[test]
+    fn parcel_manifest_matches_independent_reachability_with_sharing_and_edge_mutation() {
+        let original = vec![None, None, None, Some((0, 0)), Some((3, 3))];
+        let before = assert_parcel_instance_graph(&original, 4);
+        let mut changed = original.clone();
+        changed[3] = Some((0, 1));
+        let after = assert_parcel_instance_graph(&changed, 4);
+        assert_eq!(before, [0, 3, 4].into_iter().collect());
+        assert_eq!(after, [0, 1, 3, 4].into_iter().collect());
+        // A deterministic generated cohort varies diamonds, repeated edges
+        // and unreachable installed instances without recompiling per node.
+        for seed in 1_u64..=6 {
+            let mut state = seed;
+            let mut edges = vec![None, None, None];
+            for node in 3..24 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let left = state as usize % node;
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let right = state as usize % node;
+                edges.push(Some((left, right)));
+            }
+            assert_parcel_instance_graph(&edges, 23);
+        }
+    }
+
+    #[test]
+    fn a_large_shared_graph_copies_each_reachable_object_once() {
+        let options = PreparedMachineOptions { nursery_bytes: 256 };
+        let (mut source, _) = PreparedMachine::new(boxed_shape_program(930, 931), options).unwrap();
+        let depth = 3000;
+        let mut builder = source.managed_builder().unwrap();
+        let mut node = builder.constructor(DataConId(930), &[]).unwrap();
+        for _ in 0..depth {
+            node = builder
+                .constructor(
+                    DataConId(932),
+                    &[ManagedField::Node(node), ManagedField::Node(node)],
+                )
+                .unwrap();
+        }
+        let value = builder.finish(RealmId::ROOT, node).unwrap();
+        let parcel = source.export_parcel(value).unwrap();
+        // One Unit (16 bytes) and one Pair (24 bytes) per authored level,
+        // despite exponentially many paths through the shared graph.
+        assert_eq!(parcel.bytes(), 16 + depth * 24);
+        assert!(parcel.bytes() > 64 * 1024);
+        assert!(parcel.images().is_empty());
+        let (mut destination, _) =
+            PreparedMachine::new(boxed_shape_program(930, 931), options).unwrap();
+        let mut value = destination
+            .import_parcel(parcel, RealmId::ROOT)
+            .unwrap()
+            .value;
+        drop(source);
+        for _ in 0..depth {
+            let PreparedOuter::Constructor { identity, fields } =
+                destination.inspect_outer(value, RealmId::ROOT).unwrap();
+            assert_eq!(identity, DataConId(932));
+            let [PreparedResult::Managed(left), PreparedResult::Managed(right)] = fields.as_slice()
+            else {
+                panic!("pair fields")
+            };
+            assert_eq!(
+                destination.handle_current_pointer(*left),
+                destination.handle_current_pointer(*right)
+            );
+            assert!(destination.release(value));
+            assert!(destination.release(*right));
+            value = *left;
+        }
+        let PreparedOuter::Constructor { identity, fields } =
+            destination.inspect_outer(value, RealmId::ROOT).unwrap();
+        assert_eq!(identity, DataConId(930));
+        assert!(fields.is_empty());
+        assert!(destination.release(value));
+        assert_eq!(destination.handle_count(), 0);
+    }
+
+    fn parcel_mut_var_program() -> CompiledProgram {
+        use tidepool_repr::execution_schema::{OperationDecl, OperationIdentity};
+        let mut wire = testing::wire_program();
+        wire.signatures = vec![
+            Signature {
+                arguments: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+        ];
+        wire.operations = ["newMutVar#", "readMutVar#"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| OperationDecl {
+                identity: OperationIdentity::PrimOp(name.into()),
+                signature: SignatureId((index * 2 + 1) as u32),
+            })
+            .collect();
+        wire.expressions.nodes = [ValueId(50), ValueId(51)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, parameter)| ExprFrame::Operation {
+                operation: tidepool_repr::execution_schema::OperationId(index as u32),
+                arguments: vec![Atom::Ref(ValueRef::Local(parameter)), Atom::Void],
+            })
+            .collect();
+        wire.bindings = [ValueId(50), ValueId(51)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                Group::NonRecursive(TopBinding {
+                    identity: testing::identity("ParcelMutVar", &format!("entry{index}")),
+                    binding: HeapBinding {
+                        id: ValueId(index as u32),
+                        rhs: HeapRhs::Function {
+                            signature: SignatureId((index * 2) as u32),
+                            parameters: vec![parameter],
+                            captures: vec![],
+                            body: index,
+                        },
+                    },
+                })
+            })
+            .collect();
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        CompiledProgram::compile(&linked).unwrap()
+    }
+
+    #[test]
+    fn a_native_mut_var_cycle_closes_the_image_manifest_once() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let code = Arc::new(parcel_mut_var_program());
+        let (mut source, producer) =
+            PreparedMachine::new_shared(Arc::clone(&code), options).unwrap();
+        let initial = source.retain_top(producer, ValueId(1)).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let result = source
+            .run_entry_retained(
+                producer,
+                ValueId(0),
+                &[PreparedInput::Managed(initial)],
+                call,
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(cell)] = result.values.as_slice() else {
+            panic!("native MutVar#")
+        };
+        assert_eq!(cell.rep(), RuntimeRep::UnliftedRef);
+        assert!(source.release(initial));
+        let identity = testing::identity("ParcelCycle", "cell");
+        let owner = install_linked(
+            &mut source,
+            &s3_import_consumer_program(identity.clone(), RuntimeRep::UnliftedRef, false),
+            [(identity.clone(), *cell)].into_iter().collect(),
+        )
+        .unwrap();
+        let closure = source.retain_top(owner, ValueId(0)).unwrap();
+        let address =
+            tidepool_heap::managed_reference::untag(source.handle_current_pointer(*cell).unwrap());
+        let header = unsafe { (address as *const usize).read() };
+        let descriptor = &source.descriptor_registry[&(header & !7)].descriptor;
+        let payload = unsafe {
+            descriptor
+                .external_payload_slot(address as *mut u8, descriptor.allocation_extent() as usize)
+                .unwrap()
+                .read()
+        };
+        // The machine's authenticated store publishes the back edge. The
+        // closure's image imports this cell; the cell now points to that
+        // closure, closing both the physical and image dependency cycle.
+        source
+            .machine
+            .store_external_element(
+                payload,
+                0,
+                source.handle_current_pointer(closure).unwrap() as *mut u8,
+            )
+            .unwrap();
+        let parcel = source.export_parcel(closure).unwrap();
+        assert_eq!(parcel.images().len(), 1);
+        let (_, instance, _) = source.image_with_imports(owner).unwrap();
+        assert!(parcel.images()[0].names_instance(&instance));
+        assert_eq!(parcel.bytes(), 16);
+        let (mut destination, reader) = PreparedMachine::new_shared(code, options).unwrap();
+        let caller = destination
+            .install_shared(Arc::new(unlifted_parcel_program()), ImportBindings::new())
+            .unwrap();
+        let imported = destination.import_parcel(parcel, RealmId::ROOT).unwrap();
+        drop(source);
+        let [(imported_identity, cell)] = imported.imports.as_slice() else {
+            panic!("one unlifted cycle root")
+        };
+        assert_eq!(imported_identity, &identity);
+        assert_eq!(cell.rep(), RuntimeRep::UnliftedRef);
+        let read = destination
+            .run_entry_retained(
+                reader,
+                ValueId(1),
+                &[PreparedInput::Managed(*cell)],
+                call,
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(back)] = read.values.as_slice() else {
+            panic!("lifted back edge")
+        };
+        assert_eq!(
+            destination.handle_current_pointer(*back),
+            destination.handle_current_pointer(imported.value)
+        );
+        let returned = destination
+            .run_entry_retained(
+                caller,
+                ValueId(2),
+                &[PreparedInput::Managed(*back)],
+                call,
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(returned_cell)] = returned.values.as_slice() else {
+            panic!("closure returns cell")
+        };
+        assert_eq!(returned_cell.rep(), RuntimeRep::UnliftedRef);
+        assert_eq!(
+            destination.handle_current_pointer(*returned_cell),
+            destination.handle_current_pointer(*cell)
+        );
+        assert!(destination.release(*back));
+        assert!(destination.release(*returned_cell));
+        assert!(destination.release(*cell));
+        assert!(destination.release(imported.value));
+        assert_eq!(destination.handle_count(), 0);
+    }
+
+    fn recursive_pair_program() -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors = vec![ConstructorDecl {
+            identity: testing::identity("ParcelCycle", "Pair"),
+            family: testing::identity("ParcelCycle", "Pair"),
+            host_id: DataConId(935),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            strict_fields: vec![false, false],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 8,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 16,
+                root_mask: vec![true, true],
+            },
+        }];
+        wire.expressions.nodes = vec![
+            ExprFrame::Let {
+                bindings: Group::Recursive(vec![HeapBinding {
+                    id: ValueId(10),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![
+                            Atom::Ref(ValueRef::Local(ValueId(10))),
+                            Atom::Ref(ValueRef::Local(ValueId(10))),
+                        ],
+                    },
+                }]),
+                body: 1,
+            },
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(10)))]),
+        ];
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        CompiledProgram::compile(&linked).unwrap()
+    }
+
+    #[test]
+    fn a_recursive_native_object_graph_transfers_with_one_shared_cycle() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let (mut source, producer) =
+            PreparedMachine::new(recursive_pair_program(), options).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let result = source
+            .run_entry_retained(producer, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(value)] = result.values.as_slice() else {
+            panic!("recursive Pair")
+        };
+        // Independent authored adjacency is one node with two self edges.
+        assert_eq!(reference_reachable_instances(&[Some((0, 0))], 0).len(), 1);
+        let parcel = source.export_parcel(*value).unwrap();
+        assert_eq!(parcel.bytes(), 24);
+        assert!(parcel.images().is_empty());
+        let (mut destination, _) = machine();
+        let arrived = destination
+            .import_parcel(parcel, RealmId::ROOT)
+            .unwrap()
+            .value;
+        drop(source);
+        let token = destination.quiesce().unwrap();
+        destination.collect_major(token).unwrap();
+        let PreparedOuter::Constructor { identity, fields } =
+            destination.inspect_outer(arrived, RealmId::ROOT).unwrap();
+        assert_eq!(identity, DataConId(935));
+        let [PreparedResult::Managed(left), PreparedResult::Managed(right)] = fields.as_slice()
+        else {
+            panic!("recursive fields")
+        };
+        let pointer = destination.handle_current_pointer(arrived);
+        assert_eq!(destination.handle_current_pointer(*left), pointer);
+        assert_eq!(destination.handle_current_pointer(*right), pointer);
+        assert!(destination.release(*left));
+        assert!(destination.release(*right));
+        assert!(destination.release(arrived));
+        assert_eq!(destination.handle_count(), 0);
+    }
+
+    #[test]
+    fn a_late_copy_refusal_restores_source_headers_and_keeps_the_machine_reusable() {
+        let (mut source, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 128 },
+        )
+        .unwrap();
+        let mut builder = source.managed_builder().unwrap();
+        let child = builder.constructor(DataConId(930), &[]).unwrap();
+        let pair = builder
+            .constructor(
+                DataConId(932),
+                &[ManagedField::Node(child), ManagedField::Node(child)],
+            )
+            .unwrap();
+        let value = builder.finish(RealmId::ROOT, pair).unwrap();
+        let pointer = source.handle_current_pointer(value).unwrap();
+        let address = tidepool_heap::managed_reference::untag(pointer);
+        // Fault injection in an exclusively borrowed quiescent, exact Pair
+        // allocation. Both edges name the same Unit: discovery sees the
+        // valid second edge first, while the physical copier must refuse the
+        // contradictory first tag after forwarding the Pair.
+        let first = (address + 8) as *mut usize;
+        let child = unsafe { first.read() };
+        unsafe { first.write(tidepool_heap::managed_reference::untag(child) | 6) };
+        let before = unsafe { std::slice::from_raw_parts(address as *const u64, 3) }.to_vec();
+        let roots = source.total_persistent_roots();
+        assert!(matches!(
+            source.export_parcel(value),
+            Err(ExecutionError::Evacuation(
+                DescriptorTraceError::InvalidManagedTag { .. }
+            ))
+        ));
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(address as *const u64, 3) },
+            before.as_slice()
+        );
+        assert_eq!(source.total_persistent_roots(), roots);
+        assert_eq!(source.disposition(), MachineDisposition::Reusable);
+        unsafe { first.write(child) };
+        let parcel = source.export_parcel(value).unwrap();
+        assert_eq!(parcel.bytes(), 40);
+        let PreparedOuter::Constructor { identity, fields } =
+            source.inspect_outer(value, RealmId::ROOT).unwrap();
+        assert_eq!(identity, DataConId(932));
+        for field in fields {
+            if let PreparedResult::Managed(handle) = field {
+                assert!(source.release(handle));
+            }
+        }
+        assert!(source.release(value));
+        assert_eq!(source.handle_count(), 0);
+    }
+
+    #[test]
+    fn updated_borrowed_thunk_exports_only_its_settled_constructor() {
+        let code = field_constructor_program(972);
+        let (mut source, program) =
+            PreparedMachine::from_borrowed(&code, PreparedMachineOptions { nursery_bytes: 128 })
+                .unwrap();
+        let thunk = source.retain_top(program, ValueId(0)).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        source
+            .run_entry(program, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let pointer = source.handle_current_pointer(thunk).unwrap();
+        let address = tidepool_heap::managed_reference::untag(pointer);
+        let header = unsafe { (address as *const usize).read() };
+        let descriptor = &source.descriptor_registry[&(header & !7)].descriptor;
+        assert_eq!(
+            unsafe {
+                descriptor.state(
+                    address as *const u8,
+                    descriptor.allocation_extent() as usize,
+                )
+            }
+            .unwrap(),
+            tidepool_heap::execution_descriptor::DescriptorState::Updated
+        );
+        let parcel = source.export_parcel(thunk).unwrap();
+        assert!(
+            parcel.images().is_empty(),
+            "obsolete thunk code is not needed"
+        );
+        assert_eq!(parcel.constructors().len(), 1);
+        let (mut destination, base) = machine();
+        let value = destination
+            .import_parcel(parcel, RealmId::ROOT)
+            .unwrap()
+            .value;
+        drop(source);
+        assert!(
+            matches!(destination.observe_handle(base, value, 100).unwrap(), HaskellValue::Con(DataConId(972), ref fields) if fields.len() == 1)
+        );
+        assert!(destination.release(value));
     }
 
     /// Native byte-array production, an exact UnliftedRef consumer, and a
