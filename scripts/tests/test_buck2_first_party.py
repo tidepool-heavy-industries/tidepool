@@ -4,6 +4,7 @@
 import ast
 import json
 import os
+import pathlib
 from pathlib import Path
 import re
 import shutil
@@ -259,6 +260,48 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
                          "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
             self.assertIn(variable, group["env"])
+
+    def test_generated_haskell_source_exports_preserve_compiler_filenames(self):
+        self.write("exomonad/actor/Cargo.toml", "[package]\nname = 'exomonad-actor'\n")
+        self.write("exomonad/actor/src/lib.rs", "pub fn actor() {}\n")
+        self.write("exomonad/actor/src/fixtures/quoted-agent-provider.hs", "module QuotedProvider where\n")
+        package = self.package("exomonad-actor", "exomonad/actor", [
+            ("exomonad_actor", "lib", "src/lib.rs"),
+        ])
+        metadata = json.loads(self.metadata.read_text())
+        metadata["packages"].append(package)
+        metadata["workspace_members"].append(package["id"])
+        self.metadata.write_text(json.dumps(metadata))
+        result = self.generate("--package", "tidepool", "--package", "exomonad-actor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exports = [self.rule("bridge/facade", "workspace_pinned_check_source", "export_file"),
+                   self.rule("exomonad/actor", "quoted_agent_provider_fixture", "export_file")]
+        exports.extend(self.rule("tidepool/runtime", f"activation_input_{name}_fixture", "export_file")
+                       for name in ("function", "receiver", "resident_original", "resident_request", "resident_shadow"))
+        for export in exports:
+            with self.subTest(source=export["src"]):
+                self.assertTrue(export["out"].endswith(".hs"))
+                self.assertEqual(Path(export["out"]).name, Path(export["src"]).name)
+
+    def test_generated_include_inventory_preserves_source_and_data_names(self):
+        tree = ast.parse(GENERATOR.read_text())
+        owners = [node for node in tree.body if isinstance(node, ast.If) and any(
+            isinstance(value, ast.Constant) and value.value == "def declare_rust_test_inputs():"
+            for value in ast.walk(node))]
+        self.assertEqual(len(owners), 1)
+        inputs = {"lib/Original.lhs", "test/Cycle.hs-boot", "test/LiterateCycle.lhs-boot", "test/Data.json"}
+        environment = dict(selected={"fixture"}, SUPPORTED_PACKAGES={"fixture"},
+                           HASKELL_RUST_INPUTS=inputs, outputs={}, ROOT=self.root,
+                           json=json, pathlib=pathlib)
+        exec(compile(ast.Module(body=owners, type_ignores=[]), str(GENERATOR), "exec"), environment)
+        exports = []
+        emitted = environment["outputs"][self.root / "bridge/haskell/rust_inputs.bzl"]
+        rules = {"load": lambda *args: None, "export_file": lambda **rule: exports.append(rule)}
+        exec(compile(emitted, "rust_inputs.bzl", "exec"), rules)
+        rules["declare_rust_test_inputs"]()
+        self.assertEqual({rule["src"] for rule in exports}, inputs)
+        for rule in exports:
+            self.assertEqual(rule["out"], Path(rule["src"]).name)
 
     def test_codegen_emits_native_units_and_all_registered_integration_tests(self):
         result = self.generate()

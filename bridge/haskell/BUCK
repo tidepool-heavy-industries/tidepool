@@ -34,36 +34,42 @@ export_file(
 export_file(
     name = "extract_request_source",
     src = "src/Tidepool/ExtractRequest.hs",
+    out = "ExtractRequest.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "session_source",
     src = "src/Tidepool/Session.hs",
+    out = "Session.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "context_workflow_example",
     src = "examples/model-turns/ContextWorkflow.hs",
+    out = "ContextWorkflow.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "timing_source",
     src = "src/Tidepool/Timing.hs",
+    out = "Timing.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "worker_server_source",
     src = "src/Tidepool/WorkerServer.hs",
+    out = "WorkerServer.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "ghc_pipeline_source",
     src = "src/Tidepool/GhcPipeline.hs",
+    out = "GhcPipeline.hs",
     visibility = ["PUBLIC"],
 )
 

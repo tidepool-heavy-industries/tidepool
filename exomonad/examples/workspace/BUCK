@@ -4,6 +4,7 @@ load("@prelude//:rules.bzl", "export_file", "filegroup")
 export_file(
     name = "facade_agent_spec",
     src = ".exomonad/AgentSpec.hs",
+    out = "AgentSpec.hs",
     visibility = ["PUBLIC"],
 )
 

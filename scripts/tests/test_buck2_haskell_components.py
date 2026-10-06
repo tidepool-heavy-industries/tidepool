@@ -1,4 +1,5 @@
 """Validate native component projection without compiling or parsing Cabal."""
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -27,6 +28,43 @@ def component(name, kind="library", phase="production", roots=("src",), modules=
 
 def dependency(package, library=None):
     return dict(package=package, version_range="-any", libraries=[library])
+
+
+class SourceExportFilenameTests(unittest.TestCase):
+    def assert_compiler_sources(self, exports):
+        self.assertTrue(exports)
+        for export in exports:
+            with self.subTest(source=export["src"]):
+                output = export["src"] if export.get("mode") == "reference" else export.get("out", export["name"])
+                self.assertTrue(output.endswith((".hs", ".lhs", ".hs-boot", ".lhs-boot")), output)
+                self.assertEqual(Path(output).name, Path(export["src"]).name)
+
+    def test_authored_projection_preserves_haskell_and_boot_source_filenames(self):
+        exports = []
+        environment = {"load": lambda *args: None, "export_file": lambda **rule: exports.append(rule)}
+        path = SCRIPT.parents[1] / "exomonad/examples/workspace/authored_sources.bzl"
+        exec(compile(path.read_text(), str(path), "exec"), environment)
+        environment["declare_authored_haskell_sources"]([
+            ".exomonad/Exomonad/Contrib/Types.hs", ".exomonad/Jev/Operators.hs",
+            ".exomonad/Project/Literate.lhs", ".exomonad/Project/Cycle.hs-boot",
+            ".exomonad/Project/LiterateCycle.lhs-boot",
+        ])
+        self.assert_compiler_sources(exports)
+
+    def test_static_source_exports_preserve_compiler_filenames(self):
+        exports = []
+        for relative in ("bridge/haskell/BUCK", "exomonad/examples/workspace/BUCK"):
+            tree = ast.parse((SCRIPT.parents[1] / relative).read_text())
+            for statement in tree.body:
+                if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+                    continue
+                call = statement.value
+                if not isinstance(call.func, ast.Name) or call.func.id != "export_file":
+                    continue
+                export = {argument.arg: ast.literal_eval(argument.value) for argument in call.keywords}
+                if export["src"].endswith((".hs", ".lhs", ".hs-boot", ".lhs-boot")):
+                    exports.append(export)
+        self.assert_compiler_sources(exports)
 
 
 class ComponentProjectionTests(unittest.TestCase):

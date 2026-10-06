@@ -7,5 +7,6 @@ def declare_authored_haskell_sources(sources):
         export_file(
             name = "authored_haskell_" + relative.replace("/", "_").replace(".", "_").replace("-", "_"),
             src = source,
+            out = relative.split("/")[-1],
             visibility = ["PUBLIC"],
         )

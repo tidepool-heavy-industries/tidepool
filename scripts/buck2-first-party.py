@@ -1248,6 +1248,7 @@ tidepool_buildscript_run(
         rules.append('''export_file(
     name = "quoted_agent_provider_fixture",
     src = "src/fixtures/quoted-agent-provider.hs",
+    out = "quoted-agent-provider.hs",
     visibility = ["PUBLIC"],
 )
 ''')
@@ -1262,6 +1263,7 @@ tidepool_buildscript_run(
         rules.append('''export_file(
     name = "workspace_pinned_check_source",
     src = "src/exomonad/workspace_pinned_check.hs",
+    out = "workspace_pinned_check.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -1281,6 +1283,7 @@ filegroup(
             rules.append(f'''export_file(
     name = "activation_input_{fixture.replace("-", "_")}_fixture",
     src = "src/session/fixtures/activation-input-{fixture}.hs",
+    out = "activation-input-{fixture}.hs",
     visibility = ["PUBLIC"],
 )
 ''')
@@ -1378,7 +1381,7 @@ if selected == set(SUPPORTED_PACKAGES):
              'load("@prelude//:rules.bzl", "export_file")', '', 'def declare_rust_test_inputs():']
     for relative in sorted(HASKELL_RUST_INPUTS):
         name = "rust_input_" + relative.replace("/", "_").replace(".", "_").replace("-", "_")
-        lines.append(f"    export_file(name = {json.dumps(name)}, src = {json.dumps(relative)}, visibility = [\"PUBLIC\"])")
+        lines.append(f"    export_file(name = {json.dumps(name)}, src = {json.dumps(relative)}, out = {json.dumps(pathlib.PurePosixPath(relative).name)}, visibility = [\"PUBLIC\"])")
     if not HASKELL_RUST_INPUTS:
         lines.append("    pass")
     outputs[ROOT / "bridge/haskell/rust_inputs.bzl"] = "\n".join(lines) + "\n"
