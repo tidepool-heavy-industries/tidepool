@@ -132,39 +132,7 @@ impl SourceLayer {
                 return Ok(revision.clone());
             }
         }
-        let paths = revision_include_paths(&path, record.roots)
-            .into_iter()
-            .map(std::fs::canonicalize)
-            .collect::<std::io::Result<Vec<_>>>()?;
-        let manifests = paths
-            .iter()
-            .map(|root| {
-                let files = tidepool_toolchain::cache::source_root_manifest(root)?;
-                Ok(tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)?)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // The generated resource carries the identity and is not part of its
-        // own input. Every ordered authored root must match the publication.
-        if source_revision(domain, &manifests[..record.roots]).identity != record.identity {
-            return Err("immutable source revision differs from its publication".into());
-        }
-        let resources = manifests[record.roots]
-            .files()
-            .map(|(path, digest)| (path.to_owned(), *digest))
-            .collect::<Vec<_>>();
-        if resources
-            != vec![(
-                PathBuf::from(REVISION_MODULE),
-                blake3::hash(revision_module(&record.identity).as_bytes()),
-            )]
-        {
-            return Err("immutable source revision resource differs from its publication".into());
-        }
-        let revision = RetainedRevision {
-            identity: record.identity,
-            paths,
-            manifests: manifests.into(),
-        };
+        let revision = inspect_retained_revision(domain, &record.identity, &path, record.roots)?;
         *retained = Some(revision.clone());
         Ok(revision)
     }
@@ -236,7 +204,50 @@ impl SourceLayer {
     /// revision is already active. Idempotent, and the only way `active` comes
     /// into existence: every compile in the run needs it to resolve.
     pub(crate) fn ensure_active(&self, frozen: &FrozenWorkspace) -> Result<SourceRevision> {
+        if let Some(revision) = frozen.prepared_source_revision()? {
+            return self.ensure_active_from_prepared(frozen.identity(), &revision);
+        }
         self.ensure_active_from(frozen.identity(), frozen.captured_source_roots())
+    }
+
+    /// Publish a validated prepared source tree as this run's initial source
+    /// revision. The run owns its active link and publication record; the
+    /// revision directory itself remains owned by the prepared deployment.
+    fn ensure_active_from_prepared(
+        &self,
+        domain: &str,
+        prepared_revision: &Path,
+    ) -> Result<SourceRevision> {
+        if let Some(active) = self.read_active()? {
+            return Ok(active);
+        }
+        let prepared_revision = std::fs::canonicalize(prepared_revision)?;
+        let roots = revision_root_count(&prepared_revision)?;
+        // A prepared directory is named by its preparation revision, whereas
+        // the live source identity is derived from the run's frozen domain.
+        // Validate its contents under that identity before retaining it.
+        let manifests = source_manifests(&prepared_revision, roots)?;
+        let revision = source_revision(domain, &manifests[..roots]);
+        validate_revision_resource(&prepared_revision, roots, &revision.identity, &manifests)?;
+        let target = self.revisions().join(&revision.identity);
+        std::fs::create_dir_all(self.revisions())?;
+        match std::os::unix::fs::symlink(&prepared_revision, &target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::canonicalize(&target)? != prepared_revision {
+                    return Err(
+                        "prepared source revision identity is already owned by another path".into(),
+                    );
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let pending = PendingRevision {
+            directory: target,
+            source_roots: Vec::new(),
+            revision,
+        };
+        self.publish(pending)
     }
 
     /// As [`Self::ensure_active`], for a layer with no frozen capture of its
@@ -675,6 +686,66 @@ fn revision_root_count(directory: &Path) -> Result<usize> {
         return Err("source revision root indexes are not contiguous".into());
     }
     Ok(indices.len())
+}
+
+fn source_manifests(
+    directory: &Path,
+    roots: usize,
+) -> Result<Vec<tidepool_toolchain::cache::SourceRootManifest>> {
+    revision_include_paths(directory, roots)
+        .into_iter()
+        .map(|root| {
+            let files = tidepool_toolchain::cache::source_root_manifest(&root)?;
+            Ok(tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)?)
+        })
+        .collect()
+}
+
+fn validate_revision_resource(
+    directory: &Path,
+    roots: usize,
+    identity: &str,
+    manifests: &[tidepool_toolchain::cache::SourceRootManifest],
+) -> Result<()> {
+    let resources = manifests[roots]
+        .files()
+        .map(|(path, digest)| (path.to_owned(), *digest))
+        .collect::<Vec<_>>();
+    if resources
+        != vec![(
+            PathBuf::from(REVISION_MODULE),
+            blake3::hash(revision_module(identity).as_bytes()),
+        )]
+    {
+        return Err(format!(
+            "immutable source revision resource differs from its publication at {}",
+            directory.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn inspect_retained_revision(
+    domain: &str,
+    identity: &str,
+    directory: &Path,
+    roots: usize,
+) -> Result<RetainedRevision> {
+    let paths = revision_include_paths(directory, roots)
+        .into_iter()
+        .map(std::fs::canonicalize)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let manifests = source_manifests(directory, roots)?;
+    if source_revision(domain, &manifests[..roots]).identity != identity {
+        return Err("immutable source revision differs from its publication".into());
+    }
+    validate_revision_resource(directory, roots, identity, &manifests)?;
+    Ok(RetainedRevision {
+        identity: identity.to_owned(),
+        paths,
+        manifests: manifests.into(),
+    })
 }
 
 /// Which layer one actor's own source calls act on.
@@ -2468,6 +2539,106 @@ mod tests {
             SourceRootOwner::Temporary(foreign_run),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn completed_prepared_source_is_referenced_then_live_reload_is_run_owned() {
+        use exomonad_actor::ActorSourceLayers;
+
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let original_run = tempfile::tempdir().unwrap();
+        let mut frozen = FrozenWorkspace::load(project.path(), original_run.path()).unwrap();
+        let original_layer = SourceLayer::new(original_run.path());
+        let original = original_layer.ensure_active(&frozen).unwrap();
+
+        let deployment = tempfile::tempdir().unwrap();
+        let prepared_revision = deployment
+            .path()
+            .join("workspace/revisions")
+            .join(&original.identity);
+        std::fs::create_dir_all(prepared_revision.parent().unwrap()).unwrap();
+        copy_revision_tree(
+            &original_layer.revisions().join(&original.identity),
+            &prepared_revision,
+        )
+        .unwrap();
+        std::fs::create_dir_all(deployment.path().join("workspace/entries")).unwrap();
+        frozen.preparation = Some(super::super::workspace::WorkspacePreparation::Completed {
+            original: uuid::Uuid::new_v4(),
+            revision: original.identity.clone(),
+            entries: BTreeMap::new(),
+        });
+        frozen.prepared_deployment = Some(Arc::new(
+            tidepool_atomic_write::DirectoryAnchor::open_existing(deployment.path()).unwrap(),
+        ));
+
+        let run = Arc::new(run);
+        let reload = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let selected = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(
+            selected.identities(),
+            &[format!("run:{}", original.identity)]
+        );
+        assert_eq!(
+            selected.include_paths(),
+            revision_include_paths(
+                &prepared_revision,
+                revision_root_count(&prepared_revision).unwrap()
+            )
+            .iter()
+            .map(|path| std::fs::canonicalize(path).unwrap())
+            .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            selected.prepared_entries(),
+            Some(exomonad_actor::SourceEntryStorage::CompletedOriginal { directory, .. })
+                if directory == &deployment.path().join("workspace/entries")
+        ));
+        let run_revision = run
+            .path()
+            .join("workspace/revisions")
+            .join(&original.identity);
+        assert!(std::fs::symlink_metadata(&run_revision)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::canonicalize(&run_revision).unwrap(),
+            prepared_revision
+        );
+
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork = 2\n",
+        )
+        .unwrap();
+        let active = reload.layer.ensure_active(&reload.frozen).unwrap();
+        let pending = reload
+            .layer
+            .capture_from_workspace(&reload.frozen, &reload.workspace)
+            .unwrap();
+        let updated = reload.layer.publish(pending).unwrap();
+        assert_ne!(updated.identity, active.identity);
+        let owned = reload
+            .layer
+            .checkpoint_revision(reload.frozen.identity())
+            .unwrap();
+        assert!(owned.paths[0].starts_with(run.path().join("workspace/revisions")));
+        assert!(!std::fs::symlink_metadata(
+            run.path()
+                .join("workspace/revisions")
+                .join(&updated.identity)
+        )
+        .unwrap()
+        .file_type()
+        .is_symlink());
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
