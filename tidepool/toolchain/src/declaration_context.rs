@@ -3671,6 +3671,49 @@ impl ExactDeclarationContext {
         self.prepare_compilation_with_authorization(root, producer, None)
     }
 
+    /// The fixture adapter exits before its Haskell consumer runs. Its packet
+    /// directory therefore owns the complete issued resource until consumption
+    /// and cleanup, rather than borrowing the adapter process's temporary files.
+    #[cfg(test)]
+    pub(crate) fn prepare_fixture_compilation(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        if !root.is_absolute()
+            || self.inventory.retained_materialization().is_some()
+            || self.producer
+                != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    producer,
+                )
+                .sha256()
+        {
+            return Err(failure(
+                "fixture delivery requires a fresh matched artifact owner",
+            ));
+        }
+        std::fs::create_dir_all(root)?;
+        let metadata = self.inventory.metadata_snapshot();
+        metadata.validate_native_selection()?;
+        self.inventory.retain_materialization(|parents| {
+            if !parents.is_empty() {
+                return Err(failure(
+                    "fixture delivery cannot borrow process-local artifact owners",
+                ));
+            }
+            let directory = tempfile::Builder::new()
+                .prefix("tidepool-exact-artifacts-")
+                .tempdir_in(root)?;
+            let mut retained =
+                self.materialize_retained_artifacts(&metadata, parents, directory)?;
+            // These paths already belong to the packet's scoped directory. Its
+            // owner releases them after the downstream process consumes them.
+            retained._directory.disable_cleanup(true);
+            Ok(retained)
+        })?;
+        self.prepare_compilation(root, producer)
+    }
+
     pub(crate) fn prepare_compilation_with_authorization(
         self: &Arc<Self>,
         root: &Path,
@@ -3714,10 +3757,8 @@ impl ExactDeclarationContext {
         &self,
         metadata: &ArtifactMetadataSnapshot,
         parents: Vec<Arc<RetainedArtifactMaterialization>>,
+        directory: tempfile::TempDir,
     ) -> Result<RetainedArtifactMaterialization, CompileError> {
-        let directory = tempfile::Builder::new()
-            .prefix("tidepool-exact-artifacts-")
-            .tempdir()?;
         let root = directory.path();
         let mut inherited_rows = BTreeMap::new();
         for parent in &parents {
@@ -3863,7 +3904,10 @@ impl ExactDeclarationContext {
         std::fs::create_dir_all(root)?;
         let reused = self.inventory.retained_materialization().is_some();
         let retained = self.inventory.retain_materialization(|parents| {
-            self.materialize_retained_artifacts(metadata, parents)
+            let directory = tempfile::Builder::new()
+                .prefix("tidepool-exact-artifacts-")
+                .tempdir()?;
+            self.materialize_retained_artifacts(metadata, parents, directory)
         })?;
         let selected_rows = retained.selected_rows(metadata);
         let artifacts = metadata
@@ -4945,6 +4989,42 @@ mod tests {
         let mut foreign = request.artifacts.clone();
         foreign[0].interface.sha256 = sha256(b"different claimed owner");
         assert!(request.context.validate_artifacts(&foreign).is_err());
+    }
+
+    #[test]
+    fn fixture_delivery_transfers_materialization_cleanup_to_packet_owner() {
+        let (context, producer) = metadata_fixture();
+        let packet = tempfile::tempdir().unwrap();
+        let request = context
+            .prepare_fixture_compilation(packet.path(), &producer)
+            .unwrap();
+        let paths = request
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.interface.path.clone())
+            .collect::<Vec<_>>();
+        let owned_root = request
+            .materialization
+            .as_ref()
+            .unwrap()
+            ._directory
+            .path()
+            .to_path_buf();
+        assert!(owned_root.starts_with(packet.path()));
+        assert!(!paths.is_empty());
+        assert!(paths.iter().all(|path| path.starts_with(&owned_root)));
+        assert!(context
+            .prepare_fixture_compilation(&packet.path().join("second"), &producer)
+            .is_err());
+        assert!(!packet.path().join("second").exists());
+        let weak = Arc::downgrade(request.materialization.as_ref().unwrap());
+        drop(request);
+        drop(context);
+        assert!(weak.upgrade().is_none());
+        assert!(paths.iter().all(|path| path.is_file()));
+        drop(packet);
+        assert!(!owned_root.exists());
+        assert!(paths.iter().all(|path| !path.exists()));
     }
 
     #[test]

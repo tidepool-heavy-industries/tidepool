@@ -377,11 +377,11 @@ fn source_boot_candidate_packet_producer() {
         empty_fixture_scope(producer_sha)
     };
     if fields[6].as_bool().expect("fixture scope selection") {
-        // The request owns every exclusively created graph and its manifest.
-        // Keep both together until Haskell consumption releases the packet.
+        // The packet receives custody of the complete issued resource before
+        // this adapter exits, and releases it after Haskell consumption.
         let request_root = fresh_fixture_request_root(&packet);
         let scope = Arc::new(context)
-            .prepare_compilation(&request_root, producer)
+            .prepare_fixture_compilation(&request_root, producer)
             .unwrap();
         write_fixture_scope_output(&packet, &scope.manifest);
     }
@@ -458,7 +458,7 @@ fn source_boot_authored_declaration_packet_producer() {
                 }));
     let request_root = fresh_fixture_request_root(&packet);
     let scope = Arc::new(context)
-        .prepare_compilation(&request_root, endpoint.identity().producer_bytes())
+        .prepare_fixture_compilation(&request_root, endpoint.identity().producer_bytes())
         .expect("production authored scope delivery with original carrier association");
     write_fixture_scope_output(&packet, &scope.manifest);
     println!("genuine authored fixture: reserved declaration certification, origin-preserving type-only projection and production scope delivery passed");
