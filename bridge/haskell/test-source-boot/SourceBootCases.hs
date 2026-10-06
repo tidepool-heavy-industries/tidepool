@@ -2747,7 +2747,7 @@ candidateSitedSiblingsAt work = do
   copyFile "test-source-boot/fixtures/HydratedReplyOwner.hs" (replyDir </> "Internal.hs")
   copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing owner [work] Nothing
+    Nothing target [work] Nothing
   originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult original))
     (pprFinalizedModules original) [] work
   originalFixture <- capturePreparedFixture work original
@@ -2777,16 +2777,16 @@ candidateSitedSiblingsAt work = do
   case filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused) of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
-  -- Full original recovery consumes the genuine canonical Core certificate,
-  -- independently of the source memo and exact-subset preparation caches.
-  fullFixture <- capturePreparedFixture work reused
+  -- Both deliveries select from the same cold, fully certified original.
+  -- The mixed candidate/source result above has inherited custody and cannot
+  -- be recertified as an ordinary fresh compiler result.
   fullScopePath <- writeGenuineCandidateLexicalScope []
-    (owners ++ ["HydratedChildTarget"]) work fullFixture
+    (owners ++ ["HydratedChildTarget"]) work originalFixture
   fullScope <- readExactScope fullScopePath >>= either fail pure
   fullBodies <- newPreparedBodyCache
   let fullOwner = mkModule (stringToUnit "main") (mkModuleName "HydratedChildTarget")
-      fullEnv = prHscEnv (pprPipelineResult reused)
-      siblingsA = Map.unions (map pmSitedSiblings (pprModules reused))
+      fullEnv = prHscEnv (pprPipelineResult original)
+      siblingsA = Map.unions (map pmSitedSiblings (pprModules original))
       acquireFull cache siblings = do
         prepare <- newPreparedOriginalModuleTaskPreparer fullEnv cache fullScope
         prepare siblings fullOwner >>= \case
@@ -2797,7 +2797,7 @@ candidateSitedSiblingsAt work = do
               fail "full original cache control lost its genuine typed suspension site"
             stable <- makeStableName prepared
             pure (observation == PreparedBodyReused,stable,prepared)
-  alternative <- case [binder | prepared <- pprModules reused
+  alternative <- case [binder | prepared <- pprModules original
       , moduleNameString (moduleName (pmModule prepared)) == "Tidepool.Actors.Unfold"
       , (binding,_) <- pmBindings prepared, binder <- topBinders binding
       , getOccString binder == "childAlternativeSited"] of
@@ -2837,9 +2837,9 @@ candidateSitedSiblingsAt work = do
   unless (reenabledHit && reenabledIdentity == coldIdentity) $
     fail "body-disable calibration displaced the normal completed original"
   fullRaw <- newOriginalProjectionCollector
-  fullContext <- prepareCompilerProjectionContext reused Map.empty fullOwner "result" [] Nothing
+  fullContext <- prepareCompilerProjectionContext original Map.empty fullOwner "result" [] Nothing
   let rawFor prepared = projectCachedOriginalHomeModuleProducts fullRaw fullEnv
-        (pprProductInterfaces reused) fullContext prepared
+        (pprProductInterfaces original) fullContext prepared
   (coldRawHit,_) <- rawFor cold
   (changedRawHit,_) <- rawFor changed
   (restoredRawHit,_) <- rawFor cold
