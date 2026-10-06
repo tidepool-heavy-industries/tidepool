@@ -81,16 +81,22 @@ pub(crate) fn read_exact_until(
         if ready == 0 {
             continue;
         }
-        if descriptor.revents & libc::POLLNVAL != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "compiler handshake pipe closed",
-            ));
-        }
         if cancelled() {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "compiler handshake cancelled",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "compiler handshake deadline exceeded",
+            ));
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "compiler handshake pipe closed",
             ));
         }
         match reader.read(bytes) {
@@ -104,6 +110,18 @@ pub(crate) fn read_exact_until(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
+    }
+    if cancelled() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "compiler handshake cancelled",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "compiler handshake deadline exceeded",
+        ));
     }
     Ok(())
 }
@@ -255,6 +273,84 @@ mod tests {
     const TRANSITION_ENV: &str = "TIDEPOOL_PARENT_TRANSITION_DIRECTORY";
     const EXPECTED_PARENT_ENV: &str = "TIDEPOOL_EXPECTED_PARENT";
     const NAMESPACE_ENV: &str = "TIDEPOOL_PARENT_NAMESPACE_HELPER";
+
+    #[test]
+    fn handshake_cancellation_interrupts_a_retained_open_writer() {
+        let (mut reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            });
+            let started = Instant::now();
+            let error = read_exact_until(
+                &mut reader,
+                &mut [0],
+                started + Duration::from_secs(1),
+                || cancelled.load(std::sync::atomic::Ordering::Acquire),
+            ).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert!(started.elapsed() < Duration::from_millis(500));
+            // EOF cannot explain the interruption: the peer remains owned.
+            drop(writer);
+        });
+    }
+
+    #[test]
+    fn handshake_partial_reply_then_eof_is_not_success() {
+        use std::io::Write;
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(&[1, 2]).unwrap();
+        drop(writer);
+        let mut bytes = [0; 4];
+        let error = read_exact_until(
+            &mut reader,
+            &mut bytes,
+            Instant::now() + Duration::from_secs(1),
+            || false,
+        ).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(&bytes[..2], &[1, 2]);
+    }
+
+    #[test]
+    fn handshake_ready_or_final_byte_after_deadline_is_refused() {
+        use std::io::Write;
+        struct DelayedReadyPipe {
+            stream: std::os::unix::net::UnixStream,
+            delay_before_poll: bool,
+        }
+        impl AsRawFd for DelayedReadyPipe {
+            fn as_raw_fd(&self) -> std::os::fd::RawFd {
+                if self.delay_before_poll {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                self.stream.as_raw_fd()
+            }
+        }
+        impl Read for DelayedReadyPipe {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if self.delay_before_poll {
+                    panic!("expired readiness must refuse before reading");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                self.stream.read(bytes)
+            }
+        }
+        for delay_before_poll in [true, false] {
+            let (stream, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            writer.write_all(&[1]).unwrap();
+            let mut reader = DelayedReadyPipe { stream, delay_before_poll };
+            let error = read_exact_until(
+                &mut reader,
+                &mut [0],
+                Instant::now() + Duration::from_millis(50),
+                || false,
+            ).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+    }
 
     #[test]
     fn handshake_deadline_is_not_renewed_by_partial_bytes() {
