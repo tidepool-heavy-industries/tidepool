@@ -24,6 +24,13 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Observe the actual interpreter instances before admitting an actor.
+    /// This is the same support used by hosted installation and cell dispatch.
+    #[must_use]
+    pub fn installed_intrinsic_effect_support(&self) -> Vec<ToolEffectKey> {
+        self.environment.intrinsic_effect_support()
+    }
+
     /// Observe the interpreters installed on each exact machine checkout.
     /// Dedicated children may have different support from their parent.
     #[must_use]
