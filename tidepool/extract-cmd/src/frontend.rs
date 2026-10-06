@@ -137,6 +137,21 @@ impl Drop for OwnedDaemonChild {
     }
 }
 
+fn owned_timing_command(program: impl AsRef<OsStr>, timing: Option<&OsStr>) -> Command {
+    let mut command = crate::process::command(program);
+    // Owned qualification keeps detailed timing by default. Explicit zero
+    // selects ordinary worker execution for a matched measurement control.
+    command.env(
+        "TIDEPOOL_TIMING",
+        if timing == Some(OsStr::new("0")) {
+            "0"
+        } else {
+            "1"
+        },
+    );
+    command
+}
+
 /// Qualify one isolated process against its own exact persistent compiler.
 /// The frontend owns all process edges; test helpers do not launch compilers.
 #[allow(
@@ -154,6 +169,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
             "owned daemon requires an explicit command separator".into(),
         ));
     }
+    let timing = std::env::var_os("TIDEPOOL_TIMING");
     for key in [
         crate::DAEMON_SOCKET_ENV,
         crate::REQUIRED_DAEMON_ENDPOINT_ENV,
@@ -212,10 +228,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         1,
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
     );
-    let mut command = crate::process::command(&frontend);
+    let mut command = owned_timing_command(&frontend, timing.as_deref());
     command
         .args(&arguments)
-        .env("TIDEPOOL_TIMING", "1")
         .env("XDG_CACHE_HOME", &cache)
         .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
         .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
@@ -263,11 +278,10 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
     write_report(false, None)?;
     let mut descendants =
         crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?;
-    let child = crate::process::command(program)
+    let child = owned_timing_command(program, timing.as_deref())
         .args(child_args)
         .env(crate::DAEMON_SOCKET_ENV, &socket)
         .env(crate::REQUIRED_DAEMON_ENDPOINT_ENV, identity.to_hex())
-        .env("TIDEPOOL_TIMING", "1")
         .env("XDG_CACHE_HOME", &cache)
         .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
         .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
@@ -1104,6 +1118,54 @@ mod tests {
             owned_daemon_run(&["/tmp/fresh".into(), "--other".into(), "test".into()]),
             Err(FrontendError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn owned_compiler_timing_controls_daemon_and_child_commands() {
+        let daemon_arguments = crate::persistent_daemon_arguments(
+            Path::new("/tmp/owned.sock"),
+            Path::new("/tmp/compiler.jsonl"),
+            "isolated-qualification",
+            1,
+            Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+        );
+        for (timing, expected) in [
+            (None, "1"),
+            (Some(OsStr::new("0")), "0"),
+            (Some(OsStr::new("1")), "1"),
+        ] {
+            let mut daemon = owned_timing_command("/selected/frontend", timing);
+            daemon.args(&daemon_arguments);
+            let mut child = owned_timing_command("/selected/libtest", timing);
+            child.args(["--exact", "selected_case"]);
+            for command in [&daemon, &child] {
+                assert_eq!(
+                    command
+                        .get_envs()
+                        .find(|(key, _)| *key == OsStr::new("TIDEPOOL_TIMING"))
+                        .and_then(|(_, value)| value),
+                    Some(OsStr::new(expected))
+                );
+            }
+            assert_eq!(
+                daemon.get_args().collect::<Vec<_>>(),
+                daemon_arguments
+                    .iter()
+                    .map(OsString::as_os_str)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                child.get_args().collect::<Vec<_>>(),
+                [OsStr::new("--exact"), OsStr::new("selected_case")]
+            );
+            let configuration = parse_daemon(&daemon_arguments[1..]).unwrap();
+            assert!(configuration.persistent);
+            assert_eq!(configuration.workers, Some(1));
+            assert_eq!(
+                configuration.rss_ceiling_mb,
+                Some(crate::SESSION_WORKER_RSS_CEILING_MB)
+            );
+        }
     }
 
     #[test]
