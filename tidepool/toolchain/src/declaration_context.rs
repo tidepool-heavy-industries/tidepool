@@ -306,7 +306,7 @@ fn execution_scope_value(
 fn execution_scope_value_with_graph_paths(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
-    graph_paths: &mut BTreeMap<[u8; 32], PathBuf>,
+    graph_paths: &mut BTreeMap<[u8; 32], OwnedExecutionGraphFile>,
     written_bytes: &mut u64,
 ) -> Result<Option<Value>, CompileError> {
     let originals = entries
@@ -393,8 +393,8 @@ fn execution_scope_value_with_graph_paths(
                 .into_iter()
                 .filter(|(digest, _)| admitted_graphs.contains(digest))
                 .map(|(digest, graph)| {
-                    let path = if let Some(path) = graph_paths.get(&digest) {
-                        path.clone()
+                    let path = if let Some(file) = graph_paths.get(&digest) {
+                        file.path.clone()
                     } else {
                         let path = root.join(format!("execution-{}.cbor", hex(&digest)));
                         let mut file = std::fs::OpenOptions::new()
@@ -403,7 +403,7 @@ fn execution_scope_value_with_graph_paths(
                             .open(&path)?;
                         file.write_all(graph.bytes())?;
                         *written_bytes += graph.bytes().len() as u64;
-                        graph_paths.insert(digest, path.clone());
+                        graph_paths.insert(digest, OwnedExecutionGraphFile { path: path.clone() });
                         path
                     };
                     Ok(Value::Array(vec![text(hex(&digest)), path_value(&path)?]))
@@ -762,9 +762,17 @@ pub(crate) struct RetainedArtifactMaterialization {
     rows: BTreeMap<ArtifactId, RetainedArtifactRow>,
     groups: Arc<[PendingCertifiedGroup]>,
     execution_scope: Option<Value>,
-    graph_paths: BTreeMap<[u8; 32], PathBuf>,
+    graph_paths: BTreeMap<[u8; 32], OwnedExecutionGraphFile>,
     #[cfg(test)]
     payload_work: recovery_artifacts::RecoveryArtifactWork,
+}
+
+/// Issued only when the owning materialization writes an admitted immutable
+/// graph. Its path is transported by the sealed exact scope, while the request
+/// retains this materialization and its parent directories through worker use.
+#[derive(Clone)]
+struct OwnedExecutionGraphFile {
+    path: PathBuf,
 }
 
 impl RetainedArtifactMaterialization {
@@ -849,7 +857,7 @@ impl RetainedArtifactMaterialization {
         groups
     }
 
-    fn graph_path_refs<'a>(&'a self) -> BTreeMap<[u8; 32], &'a PathBuf> {
+    fn graph_path_refs<'a>(&'a self) -> BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile> {
         let mut paths = BTreeMap::new();
         self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
             paths.extend(
@@ -7915,6 +7923,49 @@ mod tests {
     ) -> Result<Option<Value>, CompileError> {
         let root = tempfile::tempdir_in(parent)?.keep();
         execution_scope_value(entries, &root)
+    }
+
+    #[test]
+    fn execution_scope_borrows_parent_owned_graph_files_without_payload_writes() {
+        let source = tempfile::tempdir().unwrap();
+        let (graph, owners) = crate::execution_source::test_graph(source.path());
+        let entries = [
+            execution_entry(owners[0].clone(), Arc::clone(&graph)),
+            execution_entry(owners[1].clone(), Arc::clone(&graph)),
+        ];
+        let parent = tempfile::tempdir().unwrap();
+        let child = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let mut parent_written_bytes = 0;
+        let first = execution_scope_value_with_graph_paths(
+            &entries,
+            parent.path(),
+            &mut files,
+            &mut parent_written_bytes,
+        )
+        .unwrap();
+        assert_eq!(parent_written_bytes, graph.bytes().len() as u64);
+        assert_eq!(files.len(), 1);
+        let mut child_written_bytes = 0;
+        let second = execution_scope_value_with_graph_paths(
+            &entries,
+            child.path(),
+            &mut files,
+            &mut child_written_bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            first, second,
+            "the child selects its parent's exact descriptor"
+        );
+        assert_eq!(child_written_bytes, 0);
+        assert_eq!(std::fs::read_dir(child.path()).unwrap().count(), 0);
+        assert!(files[&graph.digest()].path.starts_with(parent.path()));
+        assert_eq!(
+            std::fs::read(&files[&graph.digest()].path).unwrap(),
+            graph.bytes()
+        );
+        println!("retained-graph parent_written_bytes={parent_written_bytes} descendant_written_bytes={child_written_bytes} graph_files=1");
     }
 
     #[test]

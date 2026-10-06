@@ -11,7 +11,7 @@ module Tidepool.ExecutionSource
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
-  , decodeExecutionSourceDescriptors, readExecutionSourceGraphs, executionSourceGraphsFit
+  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, readExecutionSourceGraphs, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
   , WorkerExecutionSource(..), SourceRecipeUnavailable(..), encodeWorkerExecutionSource
   ) where
@@ -537,18 +537,31 @@ decodeExecutionSourceDescriptors = do
   unique "original execution graphs" (map fst descriptors)
   pure descriptors
 
+-- Exact scopes carry file paths issued by the Rust immutable artifact owner;
+-- the request retains its complete parent custody. Candidate offers still own
+-- request-local graph copies. File placement never establishes graph authority.
+data ExecutionSourceFiles
+  = RetainedScopeGraphFiles FilePath
+  | CandidateGraphFiles FilePath
+
 -- Capture one graph at a time after checking the complete retained byte budget.
 -- The file paths transport bytes; only their authenticated graph digests and
 -- original references can establish product compatibility.
-readExecutionSourceGraphs :: FilePath -> [ExecutionSourceGraph]
+readExecutionSourceGraphs :: ExecutionSourceFiles -> [ExecutionSourceGraph]
   -> [(String, FilePath)] -> IO [ExecutionSourceGraph]
-readExecutionSourceGraphs manifest known descriptors = do
+readExecutionSourceGraphs files known descriptors = do
+  let manifest = case files of
+        RetainedScopeGraphFiles path -> path
+        CandidateGraphFiles path -> path
+      selectedPath path = isAbsolute path && case files of
+        RetainedScopeGraphFiles _ -> True
+        CandidateGraphFiles _ -> takeDirectory path == takeDirectory manifest
   unless (isAbsolute manifest && length descriptors <= executionSourceGraphsLimit
       && Set.size (Set.fromList (map fst descriptors)) == length descriptors)
     (fail "invalid original execution graph descriptor inventory")
   let captured = Map.fromList [(executionGraphSha256 graph,graph) | graph <- known]
   sizes <- forM descriptors $ \(sha, path) -> do
-    unless (isAbsolute path && takeDirectory path == takeDirectory manifest)
+    unless (selectedPath path)
       (fail "original execution graph is outside its request directory")
     size <- getFileSize path
     when (size > toInteger executionSourceGraphBytesLimit)

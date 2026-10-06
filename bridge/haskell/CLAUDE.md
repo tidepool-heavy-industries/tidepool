@@ -69,8 +69,11 @@ native execution or lexical imports. Its demanding recovery owner verifies and
 decodes the compiler-native payload without replaying source or Template Haskell.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
-original references. The request owner captures graph files beside the manifest;
-unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
+original references. Exact-scope graph paths come from the retained immutable
+artifact owner; the request keeps its complete parent custody alive while the
+worker consumes them. Their sealed paths and digests transport selected bytes;
+graph producer and complete original identity checks establish compatibility.
+Unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
 Metadata is limited to four MiB. Execution graphs retain their 64 MiB aggregate
 and 4096-graph bounds. Authored source is bounded separately at 32 MiB of UTF-8;
 other text and metadata keep their existing bounds. Advertised invalid or

@@ -65,7 +65,7 @@ import Tidepool.ModuleCandidates
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceDescriptors, decodeExecutionSourceReferences
-  , readExecutionSourceGraphs, executionSourceGraphsFit
+  , ExecutionSourceFiles(..), readExecutionSourceGraphs, executionSourceGraphsFit
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
   , executionSourceOriginalClosure )
 import Tidepool.LocalNativeDeclaration
@@ -552,7 +552,7 @@ readExactScope path = do
         Right (remaining, result)
           | BL.null remaining -> pure result
           | otherwise -> fail "exact scope has trailing bytes"
-      graphs <- readExecutionSourceGraphs path [] descriptors
+      graphs <- readExecutionSourceGraphs (RetainedScopeGraphFiles path) [] descriptors
       evidence <- validateInterfaceEvidence scope interfaceEvidence
       validatePreviewOriginalTarget scope evidence
       validateExecutionSources scope graphs

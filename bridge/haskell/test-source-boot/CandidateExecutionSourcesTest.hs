@@ -331,8 +331,8 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         , Just (graphs,_) <- [candidateExecutionSources candidate]]
   unless (map withoutParcel sharedOffer == map withoutParcel offered) $
     fail "shared exact graph inventory changed a candidate identity, artifact, import or group"
-  candidateCustody <- readDescriptorCustody candidatePath parcel
-  scopeCustody <- readDescriptorCustody sourceScopePath allOriginals
+  candidateCustody <- readDescriptorCustody (CandidateGraphFiles candidatePath) parcel
+  scopeCustody <- readDescriptorCustody (RetainedScopeGraphFiles sourceScopePath) allOriginals
   unless (graphCustody candidateCustody == graphCustody offeredGraphs
       && graphCustody scopeCustody == graphCustody (scopeExecutionGraphs originalScope)) $
     fail "candidate or scope graph files differ from their authenticated inventory"
@@ -357,15 +357,15 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
       bytes <- BS.readFile path
       either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
     writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
-    readDescriptorCustody manifestPath = \case
+    readDescriptorCustody files = \case
       TList [descriptors,_] -> do
         decoded <- case deserialiseFromBytes decodeExecutionSourceDescriptors
             (BSL.fromStrict (toStrictByteString (encodeTerm descriptors))) of
           Right (remaining,values) | BSL.null remaining -> pure values
           _ -> fail "issued graph fixture has invalid production descriptors"
-        -- The production reader checks co-location, bounded file bytes and
+        -- The production reader checks transport policy, bounded file bytes and
         -- the complete canonical graph against each advertised digest.
-        readExecutionSourceGraphs manifestPath [] decoded
+        readExecutionSourceGraphs files [] decoded
       _ -> fail "issued graph fixture has another parcel shape"
     originalClosureFacts graphs reference = do
       nodes <- either (fail . show) pure (executionSourceOriginalClosure graphs [reference])

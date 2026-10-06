@@ -32,7 +32,7 @@ import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
-  , decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs
+  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs
   , executionSourceGraphsFit, executionIdentityKey, executionSourceOriginalClosure )
 
 data ModuleCandidate = ModuleCandidate
@@ -151,7 +151,7 @@ readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest pa
       Left failure -> pure (Left (show failure))
       Right (remaining, (candidates, descriptors, references, producer))
         | BL.null remaining -> do
-            graphs <- readExecutionSourceGraphs path exactGraphs descriptors
+            graphs <- readExecutionSourceGraphs (CandidateGraphFiles path) exactGraphs descriptors
             pure (attachExecutionSources exactGraphs graphs references producer candidates)
         | otherwise -> pure (Left "candidate manifest has trailing bytes"))
     :: IO (Either IOException (Either String [ModuleCandidate]))

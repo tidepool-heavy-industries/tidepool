@@ -4,7 +4,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (Decoder)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (evaluate)
+import Control.Exception (IOException, bracket, evaluate, try)
 import Control.Monad (forM_, unless, when)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
@@ -17,8 +17,9 @@ import Data.Text.Encoding qualified as TE
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.FilePath ((</>))
+import System.IO (hClose, openBinaryTempFile)
 import System.Mem (performGC)
 import Text.Read (readMaybe)
 import Tidepool.DependencyEvidence
@@ -74,6 +75,7 @@ executionSourceDecodeChecks = do
     _ -> fail "issued decoder fixture has malformed CBOR"
   graph <- either fail pure (decode bytes)
   unless (executionGraphBytes graph == bytes) (fail "decoder changed graph bytes")
+  executionSourceFileCustodyChecks graph
   inheritedIdentityChecks graph
   contextualDependencyChecks
   let refuse label reason value = case decode (encode value) of
@@ -120,6 +122,48 @@ executionSourceDecodeChecks = do
   expectParcelRejection "duplicate original execution graphs" decodeExecutionSourceDescriptors parcel
   expectParcelRejection "duplicate original execution references" decodeExecutionSourceReferences (encode (TList [reference, reference]))
   putStrLn "execution source decoder: 21 admission cases passed"
+
+executionSourceFileCustodyChecks :: ExecutionSourceGraph -> IO ()
+executionSourceFileCustodyChecks graph = bracket newRoot removePathForcibly $ \root -> do
+  let owner = root </> "owned-parent"
+      request = root </> "current-request"
+      manifest = request </> "scope.cbor"
+      graphPath = owner </> "execution.cbor"
+      sha = executionGraphSha256 graph
+      descriptors = [(sha, graphPath)]
+      readScope known = readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) known descriptors
+      reject label action = do
+        result <- try action :: IO (Either IOException [ExecutionSourceGraph])
+        case result of
+          Left _ -> pure ()
+          Right _ -> fail ("graph transport admitted " ++ label)
+  createDirectoryIfMissing True owner
+  createDirectoryIfMissing True request
+  BS.writeFile graphPath (executionGraphBytes graph)
+  forM_ [[], [graph]] $ \known -> do
+    actual <- readScope known
+    unless (actual == [graph]) (fail "retained parent graph transport changed the original payload")
+  reject "candidate graph outside its request directory"
+    (readExecutionSourceGraphs (CandidateGraphFiles manifest) [] descriptors)
+  reject "another advertised digest"
+    (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] [(replicate 64 '0', graphPath)])
+  reject "duplicate graph descriptors"
+    (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] (descriptors ++ descriptors))
+  reject "relative retained graph path"
+    (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] [(sha, "execution.cbor")])
+  BS.writeFile graphPath (BS.reverse (executionGraphBytes graph))
+  reject "corrupted new graph" (readScope [])
+  reject "corrupted previously captured graph" (readScope [graph])
+  removePathForcibly owner
+  reject "expired parent graph custody" (readScope [])
+  where
+    newRoot = do
+      temporary <- getTemporaryDirectory
+      (path, handle) <- openBinaryTempFile temporary "tidepool-graph-custody"
+      hClose handle
+      removeFile path
+      createDirectoryIfMissing True path
+      pure path
 
 -- The graph and original identity come from the owning recipe issuer above.
 -- Mutations are refusals: unchanged interface bytes cannot authorize another
