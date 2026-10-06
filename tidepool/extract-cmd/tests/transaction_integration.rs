@@ -209,3 +209,188 @@ fn memo_trace_flag_adds_diagnostics_without_changing_compiled_output() {
         without_trace.stderr_lossy()
     );
 }
+
+/// Exercise the declared production frontend and Haskell worker through the
+/// same lazy transaction scope and affine close sink as native callers.
+fn genuine_frontend_close_fixture(obstruct: bool) {
+    use std::cell::RefCell;
+    use tidepool_extract_cmd::{
+        CompilerScratchRetirement, CompilerTermination, CompilerTransactionClose,
+        CompilerTransactionCloseReason, CompilerTransactionRetirement, CompilerWorkerRetirement,
+    };
+
+    compiler_inputs::require_compiler_executables();
+    assert!(
+        std::env::var_os(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV).is_none()
+            && std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_none(),
+        "this producer join requires the runner's explicit --compiler-mode direct"
+    );
+    let scratch = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+        Some(root) => {
+            let root = std::path::PathBuf::from(root).join("genuine-frontend-close");
+            std::fs::create_dir(&root).unwrap();
+            root
+        }
+        None => {
+            let scratch = tempfile::tempdir().unwrap();
+            // Keep actual compiler inputs and products if an assertion fails.
+            scratch.keep()
+        }
+    };
+    let source = scratch.join("CloseEvidence.hs");
+    std::fs::write(
+        &source,
+        "module CloseEvidence where\nresult :: Int\nresult = 42\n",
+    )
+    .unwrap();
+    let logical = scratch.join("logical-products");
+    std::fs::create_dir(&logical).unwrap();
+    let unrelated = logical.join("caller-owned");
+    std::fs::write(&unrelated, b"retain caller ownership").unwrap();
+
+    let retained_close = RefCell::new(None);
+    let completed_body = RefCell::new(None);
+    let physical = RefCell::new(None);
+    let expected_os_cause = RefCell::new(None);
+    let outcome = with_compiler_transaction(
+        |close| *retained_close.borrow_mut() = Some(close),
+        || {
+            let mut command = ExtractCmd::new().unwrap();
+            command
+                .input(&source)
+                .output_dir(scratch.join("artifacts"))
+                .target("result")
+                .include(&scratch)
+                .build_products_dir(&logical);
+            let run = command.bind().unwrap().execute(&command).unwrap();
+            assert!(
+                run.success(),
+                "actual compiler request: {}",
+                run.stderr_lossy()
+            );
+            assert!(
+                !run.output.stdout.is_empty(),
+                "actual producer must complete its body"
+            );
+            *completed_body.borrow_mut() = Some(run.output.stdout.clone());
+
+            // Discover the actual interface in this exclusive logical root.
+            // No private namespace grammar or rendered stderr drives ownership.
+            let mut pending = vec![logical.clone()];
+            let mut interface_directories = Vec::new();
+            let mut visited = 0;
+            while let Some(directory) = pending.pop() {
+                visited += 1;
+                assert!(visited <= 32, "one-module products exceeded fixture bound");
+                for entry in std::fs::read_dir(directory).unwrap() {
+                    let entry = entry.unwrap();
+                    let kind = entry.file_type().unwrap();
+                    assert!(
+                        !kind.is_symlink(),
+                        "fixture products must remain under their owner"
+                    );
+                    if kind.is_dir() {
+                        pending.push(entry.path());
+                    } else if entry.file_name() == "CloseEvidence.hi" {
+                        interface_directories.push(entry.path().parent().unwrap().to_owned());
+                    }
+                }
+            }
+            assert_eq!(
+                interface_directories.len(),
+                1,
+                "actual GHC interface must identify one placed owner"
+            );
+            let owned = interface_directories.pop().unwrap();
+            assert!(owned.starts_with(&logical));
+            if obstruct {
+                // The request is complete. Replace its actual placed directory
+                // with a file so retirement fails independently of privileges.
+                std::fs::remove_dir_all(&owned).unwrap();
+                std::fs::write(&owned, b"owned scratch obstruction").unwrap();
+                let independent = std::fs::read_dir(&owned).unwrap_err();
+                assert_eq!(independent.kind(), std::io::ErrorKind::NotADirectory);
+                *expected_os_cause.borrow_mut() =
+                    Some((independent.raw_os_error(), independent.to_string()));
+            }
+            *physical.borrow_mut() = Some(owned);
+            run.output.stdout
+        },
+    );
+    std::fs::write(
+        scratch.join("compiler-close-evidence.txt"),
+        format!("{:#?}\n", retained_close.borrow()),
+    )
+    .unwrap();
+    assert_eq!(
+        Some(outcome.action),
+        completed_body.into_inner(),
+        "close must not replace completed compiler work"
+    );
+    assert_eq!(
+        retained_close.into_inner(),
+        Some(outcome.close.clone()),
+        "the actual close sink must retain the same lifecycle evidence"
+    );
+    let owned = physical.into_inner().unwrap();
+    if obstruct {
+        let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+            panic!("actual filesystem close failure cannot confirm cleanup");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::FrontendReportedFailure
+        );
+        let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+            panic!("actual frontend retirement must remain separate");
+        };
+        assert_eq!(retirement.exit.unwrap().code(), Some(2));
+        assert_eq!(retirement.termination, CompilerTermination::NotRequested);
+        let report = retirement.worker_report.unwrap();
+        let CompilerWorkerRetirement::Reaped(status) = report.worker else {
+            panic!("filesystem obstruction must follow successful actual worker reap");
+        };
+        assert!(status.success());
+        let CompilerScratchRetirement::Unconfirmed(failures) = report.scratch else {
+            panic!("exact filesystem cause must cross the frontend frame");
+        };
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].path, owned);
+        assert_eq!(
+            failures[0].phase,
+            tidepool_extract_cmd::frontend::ScratchCleanupPhase::Products
+        );
+        assert_eq!(failures[0].cause.kind, std::io::ErrorKind::NotADirectory);
+        let (expected_os_error, expected_message) = expected_os_cause.into_inner().unwrap();
+        assert_eq!(failures[0].cause.raw_os_error, expected_os_error);
+        assert_eq!(failures[0].cause.message, expected_message);
+        assert!(
+            owned.is_file(),
+            "unconfirmed scratch remains retained for diagnostics"
+        );
+        // The worker and frontend are actually reaped; only this test's exact
+        // filesystem obstruction remains, and the test owner can now remove it.
+        std::fs::remove_file(&owned).unwrap();
+    } else {
+        assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+        assert!(
+            !owned.exists(),
+            "successful normal END must retire its actual products"
+        );
+    }
+    assert!(logical.is_dir());
+    assert_eq!(
+        std::fs::read(unrelated).unwrap(),
+        b"retain caller ownership"
+    );
+}
+
+#[test]
+fn genuine_frontend_scratch_failure_preserves_completed_body_and_retained_close_receipt() {
+    genuine_frontend_close_fixture(true);
+}
+
+#[test]
+fn genuine_frontend_clean_end_retires_products_and_preserves_completed_body() {
+    genuine_frontend_close_fixture(false);
+}
