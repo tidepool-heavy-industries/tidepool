@@ -5786,6 +5786,14 @@ mod module_product_tests {
         obsolete["schema"] = 1.into();
         std::fs::write(&manifest_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
         assert!(load_selected_production_entry(&moved, &authority, &selected).is_err());
+        for field in ["producer", "worker"] {
+            let mut mismatched: serde_json::Value =
+                serde_json::from_slice(&original_manifest).unwrap();
+            let original_byte = mismatched[field][0].as_u64().unwrap();
+            mismatched[field][0] = ((original_byte + 1) % 256).into();
+            std::fs::write(&manifest_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+            assert!(load_selected_production_entry(&moved, &authority, &selected).is_err());
+        }
         std::fs::write(manifest_path, original_manifest).unwrap();
         let metadata = moved.join("raw/meta.cbor");
         let original = std::fs::read(&metadata).unwrap();
