@@ -155,14 +155,14 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":exomonad_worktree",
     ],
-    env = {
-        "EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY": "$(location :binding_directory_fault_shared)",
-        "EXOMONAD_JOURNAL_FAULT_LIBRARY": "$(location :journal_fault_shared)",
-    },
     resources = [
         ":binding_directory_fault_shared",
         ":journal_fault_shared",
     ],
+    resource_env = {
+        "EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY": "$(location :binding_directory_fault_shared)",
+        "EXOMONAD_JOURNAL_FAULT_LIBRARY": "$(location :journal_fault_shared)",
+    },
     visibility = ["PUBLIC"],
 )
 

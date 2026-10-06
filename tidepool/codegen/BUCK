@@ -267,14 +267,14 @@ tidepool_rust_isolated_test(
     named_deps = {
         "prepared_md5_native": ":prepared_md5_native",
     },
-    env = {
-        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
-        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
-    },
     resources = [
         "//bridge/haskell:freer_resume_prepared",
         "//bridge/haskell:freer_retention_prepared",
     ],
+    resource_env = {
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+    },
     visibility = ["PUBLIC"],
 )
 

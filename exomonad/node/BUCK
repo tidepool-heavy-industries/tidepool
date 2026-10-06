@@ -128,12 +128,12 @@ tidepool_rust_isolated_test(
         "//third-party/rust:uuid",
         "//tidepool/repr:tidepool_repr",
     ],
-    env = {
-        "EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY": "$(location :inbox_directory_fault_shared)",
-    },
     resources = [
         ":inbox_directory_fault_shared",
     ],
+    resource_env = {
+        "EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY": "$(location :inbox_directory_fault_shared)",
+    },
     visibility = ["PUBLIC"],
 )
 

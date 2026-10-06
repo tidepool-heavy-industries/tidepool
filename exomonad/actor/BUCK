@@ -413,14 +413,7 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 14400000,
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
-        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
-        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_SHIPPED_SKILLS": "$(location //exomonad/examples/workspace:shipped_skills)/.exomonad/skills",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
@@ -428,6 +421,15 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
         "//exomonad/examples/workspace:shipped_skills",
     ],
+    resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_SHIPPED_SKILLS": "$(location //exomonad/examples/workspace:shipped_skills)/.exomonad/skills",
+    },
     haskell_worker = True,
     visibility = ["PUBLIC"],
 )
@@ -563,19 +565,21 @@ tidepool_rust_isolated_test(
         ":exomonad_actor",
     ],
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
-        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
-        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
     ],
+    resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
     haskell_worker = True,
     visibility = ["PUBLIC"],
 )

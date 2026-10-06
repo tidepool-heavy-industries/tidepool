@@ -199,12 +199,12 @@ tidepool_rust_isolated_test(
         "//third-party/rust:insta",
         ":tidepool_protocol",
     ],
-    env = {
-        "RUSTFMT": "$(exe toolchains//:rustfmt)",
-    },
     resources = [
         "toolchains//:rustfmt",
     ],
+    resource_env = {
+        "RUSTFMT": "$(exe toolchains//:rustfmt)",
+    },
     visibility = ["PUBLIC"],
 )
 
@@ -357,12 +357,12 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:insta",
     ],
-    env = {
-        "RUSTFMT": "$(exe toolchains//:rustfmt)",
-    },
     resources = [
         "toolchains//:rustfmt",
     ],
+    resource_env = {
+        "RUSTFMT": "$(exe toolchains//:rustfmt)",
+    },
     visibility = ["PUBLIC"],
 )
 
@@ -397,12 +397,12 @@ tidepool_rust_isolated_test(
         "//third-party/rust:insta",
         ":tidepool_protocol",
     ],
-    env = {
-        "RUSTFMT": "$(exe toolchains//:rustfmt)",
-    },
     resources = [
         "toolchains//:rustfmt",
     ],
+    resource_env = {
+        "RUSTFMT": "$(exe toolchains//:rustfmt)",
+    },
     visibility = ["PUBLIC"],
 )
 

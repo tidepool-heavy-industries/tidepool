@@ -351,7 +351,6 @@ tidepool_rust_isolated_test(
         ":tidepool_runtime",
     ],
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -360,6 +359,7 @@ tidepool_rust_isolated_test(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -530,7 +530,6 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 14400000,
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -542,6 +541,7 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
@@ -581,7 +581,6 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -590,6 +589,7 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -609,7 +609,6 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -618,6 +617,7 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -646,7 +646,6 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -655,6 +654,7 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
@@ -730,7 +730,6 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -739,6 +738,7 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -884,7 +884,6 @@ tidepool_rust_isolated_test(
         ":tidepool_runtime",
     ],
     env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -898,6 +897,7 @@ tidepool_rust_isolated_test(
         "//build/package:tidepool_extract_runtime_libraries",
     ],
     resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
