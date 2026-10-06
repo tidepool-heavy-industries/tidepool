@@ -20,16 +20,21 @@ import QuotedProvider (capture)
 newtype Probe = Probe { topic :: Text }
   deriving (Generic, FromJSON, JsonSchema)
 
-newtype Tools mode = Tools { probe :: mode :- Call Probe Text }
-  deriving Generic
+data Tools effects mode = Tools
+  { notebook :: HaskellTools effects mode
+  , probe :: mode :- Call Probe Text
+  } deriving Generic
 
 original :: Int
 original = [capture|{quotation-input}|]
 
-agentSpec :: Member Replies effects => AgentSpec Tools effects
+agentSpec
+  :: (KnownToolEffects effects, AsyncEffects effects, Member Replies effects)
+  => AgentSpec (Tools effects) effects
 agentSpec = defaultSpec
   { specTools = Tools
-      { probe = presentWith id $ tool (Text.pack (show original)) $ \_ -> do
+      { notebook = haskellTools
+      , probe = presentWith id $ tool (Text.pack (show original)) $ \_ -> do
           scope <- currentRequest @Text @Int
           case requestReplyOf scope of
             Nothing -> pure "no active request"

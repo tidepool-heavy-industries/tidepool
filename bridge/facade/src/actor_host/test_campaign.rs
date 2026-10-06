@@ -744,6 +744,27 @@ impl HostedScriptRound {
     }
 
     pub fn call(self, call_id: &str, source: &str) {
+        let advertised = self
+            .request
+            .tools
+            .iter()
+            .map(|tool| {
+                format!(
+                    "{} ({})",
+                    tool["name"].as_str().unwrap_or("unnamed"),
+                    tool["type"].as_str().unwrap_or("unknown kind")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            self.request
+                .tools
+                .iter()
+                .any(|tool| tool["name"] == "haskell_sync" && tool["type"] == "custom"),
+            "scripted cell label {call_id:?} sends a custom_tool_call named `haskell_sync`; \
+             the issuing request advertised [{}]",
+            advertised.join(", ")
+        );
         self.reply
             .send(harness::transport::ResponsesTurn {
                 response_id: format!("script-{call_id}"),
@@ -1017,5 +1038,35 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].0["type"], "message");
         assert_eq!(result.items[0].0["phase"], "final_answer");
+    }
+
+    #[tokio::test]
+    async fn scripted_cell_label_does_not_replace_the_declared_tool_name() {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let mut request = request();
+        request.tools = vec![serde_json::json!({
+            "type": "custom",
+            "name": "haskell_sync",
+            "description": "Run a cell"
+        })]
+        .into();
+        HostedScriptRound { request, reply }.call("prepared-children", "display True");
+        let response = response.await.expect("script replies on its declared tool");
+        assert_eq!(response.items[0].0["call_id"], "prepared-children");
+        assert_eq!(response.items[0].0["name"], "haskell_sync");
+    }
+
+    #[tokio::test]
+    async fn scripted_cell_refuses_an_unregistered_tool_before_provider_admission() {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            HostedScriptRound {
+                request: request(),
+                reply,
+            }
+            .call("prepared-children", "display True");
+        }));
+        assert!(result.is_err(), "the fixture must reject its mismatched tool locally");
+        assert!(response.await.is_err(), "no invalid tool call was sent");
     }
 }
