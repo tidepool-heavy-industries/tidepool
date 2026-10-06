@@ -716,10 +716,17 @@ verifyRepeatedConstructorEvidence result = do
           , preparedPreparedSites = rooted
           , preparedSiteRejections = []
           }
-      -- This structural control emits independently rooted graphs directly.
-      -- Keep their typed siblings but omit unused unsited surface definitions.
+      graphRoots = [varUnique (psOwner site) | site <- pmPreparedSites target
+        , any (`siteOwnedBy` site) ["noUnpack", "automatic"]]
+      sharedReach = Projection.admitReachFacts graphRoots
+        (map (Projection.preparedModuleReachFacts context) (pprModules result))
+        Projection.emptyPreparedReachability
+      -- Select the actual cross-module body closure, preserving the compiler's
+      -- intrinsic helper omission independently of each graph's type evidence.
       otherModules = [filterPreparedBindings (\(binding, _) ->
-          not (any (preparedRejectsIntrinsic prepared) (Projection.topBinders binding))) prepared
+          any ((`elementOfUniqSet` Projection.reachedUniques sharedReach) . varUnique)
+            (Projection.topBinders binding)
+          && not (any (preparedRejectsIntrinsic prepared) (Projection.topBinders binding))) prepared
         | prepared <- pprModules result
         , moduleNameString (moduleName (pmModule prepared)) /= "StrictPlainMetadata"]
       bindingKey (binding, _) = sort (map (getKey . varUnique) (Projection.topBinders binding))
@@ -1127,7 +1134,7 @@ fullMain = do
         , "marker = generationMarker"
         ])
       verifyPreparedPrivateImports
-      verifyConstructorRepresentations dir
+      withCaseScratch "constructor-representations" verifyConstructorRepresentations
       verifyJsonDependencyAuthority dir
       writeFile target validTarget
       writeFile siteTarget (unlines
