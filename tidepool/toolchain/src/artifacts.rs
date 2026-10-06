@@ -2965,7 +2965,6 @@ fn prepare_deployment_module_action(
 #[derive(Clone)]
 enum CompilationPolicy<'a> {
     Runtime,
-    FreshRuntime,
     Exact {
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
     },
@@ -3155,7 +3154,6 @@ fn compile_invocation_inner(
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
         CompilationPolicy::Runtime
-        | CompilationPolicy::FreshRuntime
         | CompilationPolicy::BuildAction {
             export:
                 BuildActionExport::PreparedFixture { .. } | BuildActionExport::CatalogInventory { .. },
@@ -3449,24 +3447,12 @@ fn compile_invocation_inner(
             }
         },
     );
-    let (meta_bytes, raw, product_bytes) = match extracted {
-        Ok(output) => output,
-        Err(error)
-            if allow_candidates
-                && candidate_set
-                    .as_ref()
-                    .is_some_and(|set| !set.by_owner.is_empty()) =>
-        {
-            tracing::warn!(%error, "candidate compile failed; retrying without candidates");
-            return compile_invocation_inner(inv, on_stage, CompilationPolicy::FreshRuntime);
-        }
-        Err(error) => {
-            return Err(match &policy {
-                CompilationPolicy::BuildAction { .. } => error,
-                _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
-            });
-        }
-    };
+    // Candidate admission misses are handled before source execution by the
+    // worker. A completed request is never replayed because of its response.
+    let (meta_bytes, raw, product_bytes) = extracted.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction { .. } => error,
+        _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
+    })?;
 
     // Store only what DESERIALIZED, so a malformed artifact set is never
     // memoized into a permanently-failing entry. Best-effort: an unwritable
@@ -3750,44 +3736,31 @@ fn compile_invocation_inner(
         }
         Ok(artifacts)
     })();
-    match assembled {
-        Err(error)
-            if allow_candidates
-                && candidate_set
-                    .as_ref()
-                    .is_some_and(|set| !set.by_owner.is_empty()) =>
-        {
-            tracing::warn!(%error, "candidate certification failed; retrying without candidates");
-            compile_invocation_inner(inv, on_stage, CompilationPolicy::FreshRuntime)
-        }
-        result => {
-            let artifacts = result.map_err(|error| match &policy {
-                CompilationPolicy::BuildAction { .. } => error,
-                _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
-            })?;
-            if let CompilationPolicy::BuildAction {
-                export: BuildActionExport::PreparedFixture { output },
-                ..
-            } = &policy
-            {
-                std::fs::create_dir(output)?;
-                // Portable code has no authority to hydrate the source-bound
-                // native products or certificates from this transaction.
-                std::fs::write(output.join("meta.cbor"), &meta_bytes)?;
-                for target in &raw {
-                    std::fs::write(
-                        output.join(prepared_artifact_name(&target.target)),
-                        target.prepared_bytes.as_slice(),
-                    )?;
-                    std::fs::write(
-                        output.join(format!("{}.asks.json", target.target)),
-                        &target.asks_bytes,
-                    )?;
-                }
-            }
-            Ok(artifacts)
+    let artifacts = assembled.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction { .. } => error,
+        _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
+    })?;
+    if let CompilationPolicy::BuildAction {
+        export: BuildActionExport::PreparedFixture { output },
+        ..
+    } = &policy
+    {
+        std::fs::create_dir(output)?;
+        // Portable code has no authority to hydrate the source-bound
+        // native products or certificates from this transaction.
+        std::fs::write(output.join("meta.cbor"), &meta_bytes)?;
+        for target in &raw {
+            std::fs::write(
+                output.join(prepared_artifact_name(&target.target)),
+                target.prepared_bytes.as_slice(),
+            )?;
+            std::fs::write(
+                output.join(format!("{}.asks.json", target.target)),
+                &target.asks_bytes,
+            )?;
         }
     }
+    Ok(artifacts)
 }
 
 /// Retain worker outputs and stderr after compilation or final sealing fails.
@@ -5575,15 +5548,14 @@ mod module_product_tests {
             std::fs::write(&owner_source, owner_bytes).unwrap();
             std::fs::write(&support_source, support_bytes).unwrap();
             std::fs::write(&unrelated_source, unrelated_bytes).unwrap();
-            let original = compile_invocation_inner(
+            let original = compile_invocation(
                 &CompileInvocation {
                     source: probe_bytes,
                     targets: &["result"],
                     include: &include,
                     fallback_module_name: "RetainedPromotionProbe",
                 },
-                &mut |_, _, _| {},
-                CompilationPolicy::FreshRuntime,
+                |_, _, _| {},
             )
             .expect("genuine source-only original issuance");
             let modules = original
@@ -6052,6 +6024,120 @@ mod constructor_identity_tests {
             err,
             CompileError::ConstructorIdentity(ConstructorIdentityMismatch::ArityMismatch { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod completed_response_tests {
+    use super::*;
+
+    const DEPENDENCY: &str =
+        include_str!("../tests/fixtures/completed-response/ResponseDependency.hs");
+    const CONSUMER: &str =
+        include_str!("../tests/fixtures/completed-response/ResponseConsumer.hs");
+    const REJECTED: &str =
+        include_str!("../tests/fixtures/completed-response/RejectedConsumer.hs");
+
+    struct CandidateFixture {
+        _directory: TempDir,
+        include: [PathBuf; 1],
+        dependency: PathBuf,
+    }
+
+    impl CandidateFixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let include = [directory.path().to_owned()];
+            let dependency = directory.path().join("ResponseDependency.hs");
+            std::fs::write(&dependency, DEPENDENCY).unwrap();
+            let compiled = compile_invocation(
+                &CompileInvocation {
+                    source: CONSUMER,
+                    targets: &["result"],
+                    include: &include,
+                    fallback_module_name: "ResponseConsumer",
+                },
+                |_, _, _| {},
+            )
+            .expect("production compiler issues the candidate control");
+            let selected = module_candidates::select_configured(
+                compiled.producer_identity.as_ref().unwrap(),
+                &include,
+                &directory.path().join("offer"),
+            )
+            .expect("candidate selection")
+            .expect("genuine candidate was published");
+            assert!(selected
+                .by_owner
+                .contains_key(&("main".into(), "ResponseDependency".into())));
+            Self {
+                _directory: directory,
+                include,
+                dependency,
+            }
+        }
+
+        fn invocation<'a>(&'a self, source: &'a str) -> CompileInvocation<'a> {
+            CompileInvocation {
+                source,
+                targets: &["result"],
+                include: &self.include,
+                fallback_module_name: "ResponseConsumer",
+            }
+        }
+    }
+
+    #[test]
+    fn offered_candidates_do_not_replay_source_failure() {
+        let fixture = CandidateFixture::new();
+        let mut completed_requests = 0;
+        let result = compile_invocation(&fixture.invocation(REJECTED), |stage, _, _| {
+            if stage == timing::STAGE_EXTRACT_SPAWN {
+                completed_requests += 1;
+            }
+        });
+        assert_eq!(completed_requests, 1, "completed source failures are final");
+        let Err(CompileError::Diagnostics(diagnostics)) = result else {
+            panic!("expected the original source failure");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == diag::DiagnosticSeverity::Error
+                && diagnostic
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.file.ends_with("ResponseConsumer.hs"))
+        }));
+        compile_invocation(&fixture.invocation(CONSUMER), |_, _, _| {})
+            .expect("an explicit repaired request can still compile");
+    }
+
+    #[test]
+    fn offered_candidates_do_not_replay_product_admission_failure() {
+        let fixture = CandidateFixture::new();
+        let mut completed_requests = 0;
+        let mut output_read = false;
+        let result = compile_invocation(&fixture.invocation(CONSUMER), |stage, _, _| {
+            if stage == timing::STAGE_EXTRACT_SPAWN {
+                completed_requests += 1;
+            }
+            if stage == timing::STAGE_CBOR_READ && !output_read {
+                output_read = true;
+                // The worker has completed, but Rust has not admitted its
+                // dependency witnesses or product receipt yet.
+                std::fs::write(&fixture.dependency, DEPENDENCY.replace("41", "42")).unwrap();
+            }
+        });
+        assert!(
+            output_read,
+            "the failure must follow completed output reading"
+        );
+        assert_eq!(completed_requests, 1, "product refusal cannot replay source");
+        let Err(CompileError::ExtractFailed(message)) = result else {
+            panic!("expected the original product admission failure");
+        };
+        assert!(message.starts_with("module or target owner lacks valid final dependency evidence"));
+        compile_invocation(&fixture.invocation(CONSUMER), |_, _, _| {})
+            .expect("an explicit request can compile the changed dependency");
     }
 }
 
