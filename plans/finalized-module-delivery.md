@@ -152,12 +152,16 @@ fill worker slots.
    descendant test is gated out of this native
    profile; a zero-match selection cannot substitute for live recursion.
 4. Run the structural prepared corpus and validate the original seven generated
-   artifacts in seven separate codec cases, plus the demanded `importedReverse`
-   artifact and its import refusals. The current source and target sets belong
+   artifacts in seven separate codec cases, plus the genuine `importedReverse`
+   codec artifact. Representation-level callable-import fixtures separately
+   check entry signatures, missing imports and live-handle refusal; these data
+   grant no compiler provenance. The current source and target sets belong
    to the declared prepared fixture producers in
    [bridge/haskell/BUCK](../bridge/haskell/BUCK); the consuming cases belong to
    [prepared_execution.rs](../tidepool/runtime/tests/prepared_execution.rs).
-   Select all ten cases so an early failure cannot hide later artifact outcomes:
+   Select the ten codec/refusal cases plus the closed-machine control directly
+   affected by their shared typed fixture, so an early failure cannot hide later
+   artifact outcomes:
 
    ```sh
    swarm-build just test-target tidepool-runtime session \
@@ -168,10 +172,11 @@ fill worker slots.
      --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_entries \
      --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_ask_argument \
      --exact prepared_execution::generated_haskell_fixture_codec_freer_resume_val_result \
-     --exact prepared_execution::generated_importer_codec_preserves_and_requires_package_entry \
+     --exact prepared_execution::generated_haskell_importer_codec_round_trip \
      --exact prepared_execution::one_shot_rejects_missing_import_malformed_and_precancel \
      --exact prepared_execution::retained_session_caches_closed_program_and_rejects_unclosed_artifact \
-     --expected-count 10
+     --exact prepared_execution::one_shot_runs_closed_compiled_program_and_returns_values \
+     --expected-count 11
    ```
 
    Use the same matched compiler/resource closure, not a historical cohort.

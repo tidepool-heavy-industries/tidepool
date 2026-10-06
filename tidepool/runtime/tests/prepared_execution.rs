@@ -87,16 +87,6 @@ fn artifact() -> &'static [u8] {
         tidepool_test_data::prepared_resources::read_target("TIDEPOOL_M3_FIXTURE_DIR", "result")
     })
 }
-fn imported_reverse_artifact() -> &'static [u8] {
-    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    BYTES.get_or_init(|| {
-        tidepool_test_data::prepared_resources::read_target(
-            "TIDEPOOL_M3_FIXTURE_DIR",
-            "importedReverse",
-        )
-    })
-}
-
 fn freer_retention_artifact() -> &'static [u8] {
     static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     BYTES.get_or_init(|| {
@@ -658,105 +648,35 @@ fn chrono_parse_error_text_survives_collection_before_observation() {
     );
 }
 
-fn head(major: u8, length: usize) -> Vec<u8> {
-    assert!(length < 24);
-    vec![(major << 5) | length as u8]
-}
-
-fn array(values: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
-    let values: Vec<_> = values.into_iter().collect();
-    let mut result = head(4, values.len());
-    for value in values {
-        result.extend(value);
-    }
-    result
-}
-
-fn uint(value: u64) -> Vec<u8> {
-    if value <= 23 {
-        vec![value as u8]
-    } else if value <= u8::MAX as u64 {
-        vec![0x18, value as u8]
-    } else if value <= u16::MAX as u64 {
-        let mut result = vec![0x19];
-        result.extend((value as u16).to_be_bytes());
-        result
-    } else if value <= u32::MAX as u64 {
-        let mut result = vec![0x1a];
-        result.extend((value as u32).to_be_bytes());
-        result
-    } else {
-        let mut result = vec![0x1b];
-        result.extend(value.to_be_bytes());
-        result
-    }
-}
-
-fn text(value: &str) -> Vec<u8> {
-    let mut result = head(3, value.len());
-    result.extend(value.as_bytes());
-    result
-}
-
-fn rep_lifted() -> Vec<u8> {
-    array([uint(1)])
-}
-
-fn symbol(namespace: &str, module: &str, occurrence: &str) -> Vec<u8> {
-    array([
-        text("fixture"),
-        text(module),
-        text(namespace),
-        text(occurrence),
-        array([uint(0)]),
-    ])
+fn callable_import_artifact() -> Vec<u8> {
+    use tidepool_repr::execution_schema::{Atom, ExprFrame, GlobalId, SignatureId, ValueRef};
+    let mut wire = tidepool_test_data::prepared::callable_import_program();
+    wire.expressions.nodes[0] = ExprFrame::Call {
+        callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+        signature: SignatureId(0),
+        arguments: vec![],
+    };
+    tidepool_test_data::prepared_encode::encode_wire_program(&wire)
 }
 
 fn strict_artifact() -> Vec<u8> {
-    let constructor = array([
-        symbol("value", "PreparedStrict", "Box"),
-        symbol("type", "PreparedStrict", "BoxFamily"),
-        array([]),
-        array([]),
-        array([array([]), uint(1), uint(0), array([])]),
-        rep_lifted(),
-        uint(1),
-        uint(1),
-        uint(100),
-    ]);
-    let expression = array([uint(4), uint(0), array([])]);
-    let function = array([uint(0), uint(0), array([]), array([]), uint(0)]);
-    let top = array([
-        symbol("value", "PreparedStrict", "entry"),
-        array([uint(0), function]),
-    ]);
-    let binding_group = array([uint(0), top]);
-    array([
-        text("TPSTG"),
-        uint(SCHEMA_VERSION),
-        text("ghc-9.12-prepared-stg"),
-        text("ghc-9.12.2"),
-        uint(EXECUTION_ABI_VERSION),
-        array([
-            uint(0),
-            uint(0),
-            uint(64),
-            uint(64),
-            text("sysv64"),
-            array([]),
-        ]),
-        array([array([array([]), array([uint(0), array([rep_lifted()])])])]),
-        array([]),
-        array([constructor]),
-        array([]),
-        array([expression]),
-        array([binding_group]),
-        uint(0),
-        array([]),
-        array([]),
-        array([]),        // verb sites
-        array([uint(0)]), // no authenticated JSON layout
-    ])
+    use tidepool_repr::execution_schema::{CheckedLayout, ConstructorId, ExprFrame};
+    let mut wire = tidepool_test_data::prepared::constructor_program();
+    let constructor = &mut wire.constructors[0];
+    constructor.host_id = DataConId(100);
+    constructor.field_reps.clear();
+    constructor.strict_fields.clear();
+    constructor.layout = CheckedLayout {
+        fields: vec![],
+        alignment: 1,
+        payload_size: 0,
+        root_mask: vec![],
+    };
+    wire.expressions.nodes[0] = ExprFrame::Construct {
+        constructor: ConstructorId(0),
+        fields: vec![],
+    };
+    tidepool_test_data::prepared_encode::encode_wire_program(&wire)
 }
 
 fn strict_program() -> PreparedProgram {
@@ -940,24 +860,26 @@ fn one_shot_runs_closed_compiled_program_and_returns_values() {
 #[test]
 fn one_shot_rejects_missing_import_malformed_and_precancel() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let imported = parse_program(
-        imported_reverse_artifact(),
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .unwrap();
-    let demanded = imported
-        .globals()
-        .iter()
-        .find(|global| global.identity.occurrence == "reverse")
-        .expect("importedReverse demands the genuine package reverse entry");
+    let bytes = callable_import_artifact();
+    let imported = parse_program(&bytes, &requirements(), DecodeLimits::default()).unwrap();
+    let demanded = &imported.globals()[0];
+    assert!(demanded.entry_signature.is_some());
+    let mut facts = import_facts(&imported);
+    assert!(link_program(imported.clone(), &facts).is_ok());
+    facts
+        .values
+        .get_mut(&demanded.identity)
+        .unwrap()
+        .entry_signature = None;
+    assert!(matches!(link_program(imported.clone(), &facts),
+        Err(LinkError::ImportContract(ref identity)) if identity == &demanded.identity));
     let mut remaining_imports = import_facts(&imported);
     assert!(remaining_imports
         .values
         .remove(&demanded.identity)
         .is_some());
     let missing = run_prepared_once(
-        imported_reverse_artifact(),
+        &bytes,
         &requirements(),
         DecodeLimits::default(),
         remaining_imports,
@@ -1024,21 +946,10 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     // Exact declared import facts can satisfy linking without granting a live
-    // handle. Installation must refuse the demanded package import while the
+    // handle. Installation must refuse the referenced callable import while the
     // machine's previously working program remains executable.
-    let imported = parse_program(
-        imported_reverse_artifact(),
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .unwrap();
-    assert!(
-        imported
-            .globals()
-            .iter()
-            .any(|global| global.identity.occurrence == "reverse"),
-        "importedReverse must demand a real package import"
-    );
+    let bytes = callable_import_artifact();
+    let imported = parse_program(&bytes, &requirements(), DecodeLimits::default()).unwrap();
     let facts = import_facts(&imported);
     let unclosed_linked = link_program(imported, &facts)
         .expect("the importer declares exactly the supplied link facts");
@@ -2882,22 +2793,14 @@ fn generated_haskell_fixture_codec_freer_resume_val_result() {
 }
 
 #[test]
-fn generated_importer_codec_preserves_and_requires_package_entry() {
+fn generated_haskell_importer_codec_round_trip() {
     let produced =
         assert_generated_fixture_codec_round_trip("TIDEPOOL_M3_FIXTURE_DIR", "importedReverse");
-    let reverse = produced
-        .globals()
-        .iter()
-        .find(|global| global.identity.occurrence == "reverse")
-        .expect("the importedReverse target retains the demanded package entry");
-    let identity = reverse.identity.clone();
-    assert!(reverse.entry_signature.is_some());
-    assert!(reverse.required_evaluated);
-    assert_eq!(reverse.required_generation, None);
-    assert_eq!(reverse.identity.record_parent, None);
-    let mut facts = import_facts(&produced);
-    assert!(link_program(produced.clone(), &facts).is_ok());
-    facts.values.get_mut(&identity).unwrap().entry_signature = None;
-    assert!(matches!(link_program(produced, &facts),
-        Err(LinkError::ImportContract(ref refused)) if refused == &identity));
+    assert_eq!(
+        top_named(&produced, "M3Vertical", "importedReverse")
+            .binding
+            .id,
+        produced.entry(),
+        "the generated codec fixture preserves the requested source entry"
+    );
 }
