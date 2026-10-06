@@ -12468,6 +12468,7 @@ pub(crate) mod request_tests {
             .publish(crate::ActorTerminal {
                 kind: crate::ActorExitKind::Cancelled,
                 summary: "stopped while compiler pending".into(),
+                diagnostic: None,
             })
             .unwrap();
         assert!(!retained.cleanup().unwrap().is_confirmed());
