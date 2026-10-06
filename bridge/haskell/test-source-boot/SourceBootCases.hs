@@ -103,7 +103,7 @@ import Tidepool.CompilerProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
   , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
-  , preparedProductInventory, preparedProductModules
+  , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
@@ -2267,8 +2267,7 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
       entryOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextConsumer")
       requestOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextRequest")
   context <- prepareCompilerProjectionContext produced Map.empty entryOwner "result" [] Nothing
-  (_, completed) <- prepareOriginalProducts env Nothing interfaces context Set.empty (pprModules produced)
-  let modules = preparedProductModules completed
+  (modules, _) <- prepareOriginalProducts env Nothing interfaces context Set.empty (pprModules produced)
   cache <- newOriginalProjectionCollector
   cold <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
   warm <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
