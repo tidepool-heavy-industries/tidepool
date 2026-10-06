@@ -447,6 +447,61 @@ impl<'a> ObservationHeap<'a> {
         }
         let (descriptor, object, _) = self.object(encoded)?;
         let header = descriptor.initial_header_word();
+        let children = self.managed_edges(descriptor, object)?;
+        Ok(Traced::Object { header, children })
+    }
+
+    /// A parcel discovers only objects the copier will retain. Updated
+    /// thunks contribute their target, never their obsolete code/captures.
+    pub(super) fn trace_parcel_step(
+        &self,
+        encoded: usize,
+    ) -> Result<ParcelTraceStep, ObservationFailure> {
+        if let Some(region) = self.statics.admit(encoded, &self.static_metrics)? {
+            return Ok(ParcelTraceStep::Static {
+                region_start: region.address_range().start,
+            });
+        }
+        let (descriptor, object, state) = self.object(encoded)?;
+        match state {
+            DescriptorState::Updated => {
+                // SAFETY: object admission proved an exact readable start;
+                // Updated state proves a thunk with its word-8 target.
+                let target = unsafe {
+                    object
+                        .add(tidepool_heap::execution_descriptor::FORWARDING_POINTER_OFFSET)
+                        .cast::<usize>()
+                        .read()
+                };
+                return Ok(ParcelTraceStep::Updated { target });
+            }
+            DescriptorState::Evaluating => {
+                return Err(DescriptorTraceError::EvaluatingInParcel {
+                    address: object as usize,
+                }
+                .into())
+            }
+            DescriptorState::Forwarded => return Err(DescriptorTraceError::ForwardedObject.into()),
+            DescriptorState::Live => {}
+        }
+        if descriptor.kind() == ObjectKind::Continuation {
+            return Err(DescriptorTraceError::ContinuationInParcel {
+                address: object as usize,
+            }
+            .into());
+        }
+        Ok(ParcelTraceStep::Object {
+            header: descriptor.initial_header_word(),
+            bytes: descriptor.allocation_extent() as usize,
+            children: self.managed_edges(descriptor, object)?,
+        })
+    }
+
+    fn managed_edges(
+        &self,
+        descriptor: &ObjectDescriptor,
+        object: *const u8,
+    ) -> Result<Vec<usize>, ObservationFailure> {
         let mut children = Vec::new();
         match descriptor.external_kind() {
             Some(ExternalStorageKind::BoxedArray) => {
@@ -479,7 +534,7 @@ impl<'a> ObservationHeap<'a> {
             },
         }
         children.retain(|word| *word != 0);
-        Ok(Traced::Object { header, children })
+        Ok(children)
     }
 }
 
@@ -488,6 +543,20 @@ impl<'a> ObservationHeap<'a> {
 pub(super) enum Traced {
     Static { region_start: usize },
     Object { header: usize, children: Vec<usize> },
+}
+
+pub(super) enum ParcelTraceStep {
+    Static {
+        region_start: usize,
+    },
+    Updated {
+        target: usize,
+    },
+    Object {
+        header: usize,
+        bytes: usize,
+        children: Vec<usize>,
+    },
 }
 
 impl ObservationHeap<'_> {

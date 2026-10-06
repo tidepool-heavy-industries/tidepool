@@ -124,7 +124,13 @@ def main(argv=None):
         return buck("build", sorted(build_labels))
     if options.command == "verify":
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
-        test_labels.update(("//tidepool/runtime:compile_fail_machine_lease_double_borrow", "//tidepool/runtime:compile_fail_machine_lease_consumes_pending", "//tidepool/runtime:compile_fail_machine_lease_crossed_image"))
+        test_labels.update((
+            "//tidepool/runtime:compile_fail_machine_lease_double_borrow",
+            "//tidepool/runtime:compile_fail_prepared_install_consumes_pending",
+            "//tidepool/runtime:compile_fail_prepared_install_crossed_image",
+            "//tidepool/runtime:compile_fail_root_borrow_release",
+            "//tidepool/runtime:compile_fail_root_borrow_collection",
+        ))
         # Suite ownership is declared by generated native rules; query the graph
         # rather than maintaining or parsing a second component inventory.
         discovery = subprocess.run(

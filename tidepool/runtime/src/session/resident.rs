@@ -3425,7 +3425,7 @@ where
             .into());
         }
         let mut value = source_entry.value.clone();
-        // A prepared alias shares the source's root and handle, but a later
+        // A prepared alias shares the source's handle, but a later
         // turn imports it by ITS OWN thin value module and name, so the
         // recorded identity is re-minted for the alias.
         let BoundValue { identity, .. } = &mut value;
@@ -4078,29 +4078,24 @@ where
         // The native preflight and report enumerate the same missing instance
         // imports, deduplicated by full identity. Consume those original plans;
         // package imports stay rooted by their native installation.
-        let resolved: Vec<(
-            SymbolIdentity,
-            ParcelLibraryBinding,
-            PreparedHandle,
-            tidepool_codegen::old_space::RootSlot,
-        )> = imports
+        let resolved: Vec<(SymbolIdentity, ParcelLibraryBinding, PreparedHandle)> = imports
             .into_iter()
             .filter_map(|(identity, imported)| {
                 let (identity, binding) = bindings.remove_entry(&identity)?;
-                let root = engine
-                    .adopt(imported)
-                    .expect("a just-imported binding handle is live");
-                Some((identity, binding, imported, root))
+                assert!(
+                    engine.adopt(imported),
+                    "a just-imported binding handle is live"
+                );
+                Some((identity, binding, imported))
             })
             .collect();
-        for (identity, binding, imported, root) in resolved {
+        for (identity, binding, imported) in resolved {
             let ParcelLibraryBinding { id, module } = binding;
             self.state.bind(BindingEntry {
                 name: BindingName(identity.occurrence.clone()),
                 id,
                 module,
                 value: BoundValue {
-                    root,
                     handle: imported,
                     identity,
                 },
@@ -6423,21 +6418,17 @@ where
             ValueInterfaceSource::Checked | ValueInterfaceSource::Staged(_) => "main".to_owned(),
             ValueInterfaceSource::LegacyDisk => engine.entry_unit(program).unwrap_or_default(),
         };
-        let mut roots = Vec::with_capacity(bound.len());
         for (_, handle) in bound {
-            match engine.adopt(*handle) {
-                Some(root) => roots.push(root),
-                None => {
-                    engine.release_all(bound.iter().map(|(_, handle)| *handle));
-                    return Err(PreparedRuntimeError::Run(
-                        tidepool_codegen::prepared_program::ExecutionError::UnknownPreparedHandle,
-                    )
-                    .into());
-                }
+            if !engine.adopt(*handle) {
+                engine.release_all(bound.iter().map(|(_, handle)| *handle));
+                return Err(PreparedRuntimeError::Run(
+                    tidepool_codegen::prepared_program::ExecutionError::UnknownPreparedHandle,
+                )
+                .into());
             }
         }
         let mut entries = Vec::with_capacity(bound.len());
-        for ((binder, handle), root) in bound.iter().zip(roots) {
+        for (binder, handle) in bound {
             // The identity a later turn's `GlobalDecl` names when it imports
             // this binder: its thin value module and name.
             let identity = SymbolIdentity {
@@ -6452,7 +6443,6 @@ where
                 id: SessionVarId::from_extract(binder.var_id),
                 module: SessionModule::val(generation),
                 value: BoundValue {
-                    root,
                     handle: *handle,
                     identity,
                 },
@@ -10192,10 +10182,9 @@ where
     }
 }
 
-/// The `Send` result that crosses the eval-thread boundary: a bind's tenured
-/// `!Send` `RootSlot` is minted into a
-/// [`ValueHandle`] IN-THREAD (`realm`-owned) and the id crosses instead —
-/// resolved back to its slot by `materialize_binder` on the session thread.
+/// The result crossing the eval-thread boundary carries typed [`ValueHandle`]
+/// identities. The owning machine retains their values under the turn's
+/// resource scope until publication adopts them into ROOT.
 /// `CompletedProject` is the multi-binder lane; `CompletedRender` remains
 /// unreachable because resident turns do not use render parking. Live-payload
 /// presence is dropped because the payload itself is acquired explicitly from

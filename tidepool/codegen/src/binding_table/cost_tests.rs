@@ -217,25 +217,17 @@ struct Scenario {
     shadow: SessionVarId,
     local_ids: Vec<SessionVarId>,
     next_id: u64,
-    // Individual boxes keep RootSlot cell addresses stable across vector growth.
-    slots: Vec<Box<*mut u8>>,
 }
 
 impl Scenario {
     fn entry(&mut self, name: String) -> BindingEntry {
         let generation = self.next_id;
         self.next_id += 1;
-        let mut slot = Box::new(std::ptr::null_mut::<u8>());
-        // These value slots measure binding-table bookkeeping only; the table
-        // never dereferences them. Native source roots below are machine-owned.
-        let root = unsafe { RootSlot::new(slot.as_mut() as *mut *mut u8) };
-        self.slots.push(slot);
         BindingEntry {
             name: BindingName(name.clone()),
             id: SessionVarId::from_extract(generation),
             module: SessionModule::val(Generation(generation)),
             value: BoundValue {
-                root,
                 handle: crate::prepared_program::PreparedHandle::new(
                     ValueHandle(generation),
                     RuntimeRep::LiftedRef,
@@ -282,7 +274,6 @@ impl Scenario {
             shadow: SessionVarId::from_extract(0),
             local_ids: Vec::new(),
             next_id: 1,
-            slots: Vec::new(),
         };
         for index in 0..n {
             let id = scenario.bind(parent, format!("value_{index:03}"));

@@ -5001,9 +5001,9 @@ impl PreparedEngine {
         // A live-payload policy names one field of THIS request Con (the
         // convention's field 1) as the value crossing the runtime boundary
         // by reference. Classify first so a rejected request cannot strand a
-        // newly tenured root without a frame to own it; then mirror the field
+        // newly tenured handle without a frame to own it; then mirror the field
         // before releasing `payload`. `PreparedMachine::park` consumes the
-        // root on both success and refusal.
+        // handle on both success and refusal.
         let live_payload_root =
             match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
                 Ok(root) => root,
@@ -5043,9 +5043,8 @@ impl PreparedEngine {
     /// primitives this layer actually has above the JIT boundary:
     /// `payload`'s OWN fields are read through `PreparedMachine::inspect_outer`
     /// (which mints a fresh handle per managed field), the policy's chosen
-    /// field's handle is adopted into a bare root via
-    /// [`PreparedMachine::take_handle_root`], and every other minted field
-    /// handle is released immediately (`inspect_outer` is non-consuming and
+    /// field's handle stays ledger-owned until atomic parking, and every other
+    /// minted field handle is released immediately (`inspect_outer` is non-consuming and
     /// re-mints on every call, so nothing here is `payload`'s own retained
     /// registration).
     ///
@@ -5063,7 +5062,7 @@ impl PreparedEngine {
         realm: RealmId,
         policy: LivePayloadPolicy,
         request: &HaskellValue,
-    ) -> Result<Option<tidepool_codegen::old_space::RootSlot>, ExecutionError> {
+    ) -> Result<Option<PreparedHandle>, ExecutionError> {
         let field = match policy {
             LivePayloadPolicy::None => None,
             LivePayloadPolicy::ClosureField(field) => {
@@ -5084,7 +5083,7 @@ impl PreparedEngine {
         for (index, value) in fields.into_iter().enumerate() {
             match value {
                 PreparedResult::Managed(handle) if index == field => {
-                    root = self.machine.take_handle_root(handle)?;
+                    root = Some(handle);
                 }
                 PreparedResult::Managed(handle) => {
                     self.machine.release(handle);
@@ -5153,27 +5152,15 @@ impl PreparedEngine {
         id: ContinuationId,
         answer: PreparedHandle,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
-        let taken = self.take_for_resume(id, answer);
-        let (continuation, evidence, realm) = match taken {
-            Ok(taken) => taken,
-            Err(error) => {
-                self.machine.release(answer);
-                return Err(error);
-            }
-        };
-        let batch = self.machine.run_entry_retained(
-            evidence.runner,
-            evidence.resume_entry,
-            &[
-                PreparedInput::Managed(continuation),
-                PreparedInput::Managed(answer),
-            ],
-            SETTLE_CALL,
-            realm,
-        );
-        self.machine.release(continuation);
+        if let Err(error) = self.validate_owned_resume(id, answer) {
+            self.machine.release(answer);
+            return Err(error);
+        }
+        let resumed = self
+            .machine
+            .run_parked_entry_retained(id, answer, SETTLE_CALL);
         self.machine.release(answer);
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
+        let (realm, evidence, batch) = resumed.map_err(PreparedRuntimeError::Run)?;
         let settlement = self.settle_batch(evidence.runner, realm, batch)?;
         Ok(PreparedResumed {
             settlement,
@@ -5206,23 +5193,10 @@ impl PreparedEngine {
         if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let (continuation, evidence) = self
+        let (realm, evidence, batch) = self
             .machine
-            .take_parked(id)
+            .run_parked_entry_retained(id, answer, SETTLE_CALL)
             .map_err(PreparedRuntimeError::Run)?;
-        let batch = self.machine.run_entry_retained(
-            evidence.runner,
-            evidence.resume_entry,
-            &[
-                PreparedInput::Managed(continuation),
-                PreparedInput::Managed(answer),
-            ],
-            SETTLE_CALL,
-            realm,
-        );
-        self.machine.release(continuation);
-        // `answer` stays live: the caller owns it before and after.
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
         let settlement = self.settle_batch(evidence.runner, realm, batch)?;
         Ok(PreparedResumed {
             settlement,
@@ -5337,13 +5311,14 @@ impl PreparedEngine {
         self.resume_parked(id, built)
     }
 
-    /// The pre-take checks of a resume, then the take: the frame exists,
+    /// Validate the owned answer before current-thread admission and frame transfer.
+    /// The frame exists,
     /// `answer` is live under its resource scope, the scope is not cancelled.
-    fn take_for_resume(
+    fn validate_owned_resume(
         &mut self,
         id: ContinuationId,
         answer: PreparedHandle,
-    ) -> Result<(PreparedHandle, PreparedFrameEvidence, RealmId), PreparedRuntimeError> {
+    ) -> Result<(), PreparedRuntimeError> {
         let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
@@ -5358,11 +5333,7 @@ impl PreparedEngine {
         if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let (continuation, evidence) = self
-            .machine
-            .take_parked(id)
-            .map_err(PreparedRuntimeError::Run)?;
-        Ok((continuation, evidence, realm))
+        Ok(())
     }
 
     /// Validate and construct an owned response directly from structural
@@ -5470,17 +5441,10 @@ impl PreparedEngine {
         Ok(managed)
     }
 
-    /// Hand a run result to the session binding store: the handle moves into
-    /// the machine's ROOT scope (no resource-scope close releases it) and its
-    /// persistent root slot is returned for the binding to load through.
-    pub fn adopt(
-        &mut self,
-        handle: PreparedHandle,
-    ) -> Option<tidepool_codegen::old_space::RootSlot> {
-        self.machine
-            .adopt_handle(handle)
-            .then(|| self.machine.handle_root(handle))
-            .flatten()
+    /// Move a live handle into ROOT so resource-scope closure cannot release
+    /// a value published in the session binding store.
+    pub fn adopt(&mut self, handle: PreparedHandle) -> bool {
+        self.machine.adopt_handle(handle)
     }
 
     /// Duplicate a live root into independent custody of the same heap object.
@@ -5603,7 +5567,7 @@ impl PreparedEngine {
     pub fn handle_slot(
         &self,
         handle: ValueHandle,
-    ) -> Option<tidepool_codegen::old_space::RootSlot> {
+    ) -> Option<tidepool_codegen::old_space::RootRef<'_>> {
         self.machine.handle_slot(handle)
     }
 
@@ -8664,8 +8628,8 @@ pub(super) mod tests {
         };
         let handle = *handle;
         assert!(engine.release(binding.value.handle));
+        assert!(engine.adopt(handle));
         binding.value = BoundValue {
-            root: engine.adopt(handle).unwrap(),
             handle,
             identity: binding.value.identity,
         };
@@ -8687,19 +8651,307 @@ pub(super) mod tests {
             .machine
             .retain_top(program, top)
             .expect("retain fixture top");
-        let root = engine.adopt(handle).expect("adopt real fixture root");
+        assert!(engine.adopt(handle));
         BindingEntry {
             name: tidepool_repr::BindingName(name.into()),
             id: SessionVarId::from_extract(generation),
             module: SessionModule::val(tidepool_repr::Generation(generation)),
             value: BoundValue {
-                root,
                 handle,
                 identity: producer_identity(),
             },
             type_display: None,
             defining_expr: None,
             scope: tidepool_codegen::scope::ScopeId::ROOT,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn small_stack_resume_preserves_frame_and_answer_custody_for_normal_thread_retry() {
+        for borrowed in [false, true] {
+            let (mut engine, program, parked) = park_json_fixture_request(
+                Some(ConstructorReply::Static(TypeNodeId(0))),
+                8,
+                serde_json::Value::Null,
+            );
+            let id = parked.unwrap().id;
+            let answer = engine
+                .build_host_value(
+                    RealmId::ROOT,
+                    &HaskellValue::Con(DataConId(105), vec![]),
+                    &json_mount_table(),
+                )
+                .unwrap();
+            let before_roots = engine.persistent_roots_count();
+            engine.machine.quiesce().unwrap();
+            let mut engine = std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    let refused = if borrowed {
+                        engine.resume_with_handle(id, answer.raw())
+                    } else {
+                        engine.resume_parked(id, answer)
+                    };
+                    assert!(matches!(
+                        refused,
+                        Err(PreparedRuntimeError::Run(ExecutionError::Runtime(
+                            tidepool_codegen::machine_state::MachineFailure {
+                                cause: tidepool_codegen::host_fns::RuntimeError::StackOverflow,
+                                disposition:
+                                    tidepool_codegen::machine_state::MachineDisposition::Reusable,
+                            }
+                        )))
+                    ));
+                    assert_eq!(engine.parked_count(), 1);
+                    assert_eq!(engine.prepared_handle_of(answer.raw()).is_some(), borrowed);
+                    assert_eq!(
+                        engine.persistent_roots_count(),
+                        before_roots - usize::from(!borrowed)
+                    );
+                    engine.machine.quiesce().unwrap();
+                    engine
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            let retry = if borrowed {
+                answer
+            } else {
+                engine
+                    .build_host_value(
+                        RealmId::ROOT,
+                        &HaskellValue::Con(DataConId(105), vec![]),
+                        &json_mount_table(),
+                    )
+                    .unwrap()
+            };
+            let resumed = if borrowed {
+                engine.resume_with_handle(id, retry.raw())
+            } else {
+                engine.resume_parked(id, retry)
+            }
+            .unwrap();
+            let PreparedSettlement::Done { value } = resumed.settlement else {
+                panic!("resume returns Done answer")
+            };
+            assert_eq!(
+                engine.machine.observe_handle(program, value, 100).unwrap(),
+                HaskellValue::Con(DataConId(105), vec![])
+            );
+            assert_eq!(engine.parked_count(), 0);
+            if borrowed {
+                assert!(engine.release(answer));
+            }
+            assert!(engine.release(value));
+            engine.quiesce_and_collect_now().unwrap();
+            assert_eq!(engine.residency().root_cells, 0);
+        }
+    }
+
+    #[test]
+    fn root_views_are_reborrowed_after_quiescent_engine_thread_transfer() {
+        let prepared = producer_program();
+        let top = prepared.entry();
+        let (mut engine, program) = PreparedEngine::bootstrap(prepared).unwrap();
+        let handle = engine.machine.retain_top(program, top).unwrap();
+        let address = engine.handle_slot(handle.raw()).unwrap().addr() as usize;
+        engine.machine.quiesce().unwrap();
+        // PreparedEngine owns the production quiescent transfer boundary;
+        // no readable RootRef or separate MachineState owner crosses it.
+        let mut engine = std::thread::spawn(move || {
+            assert_eq!(
+                engine.handle_slot(handle.raw()).unwrap().addr() as usize,
+                address
+            );
+            engine.quiesce_and_collect_now().unwrap();
+            assert_eq!(
+                engine.handle_slot(handle.raw()).unwrap().addr() as usize,
+                address
+            );
+            let result = engine
+                .machine
+                .run_entry_retained(
+                    program,
+                    top,
+                    &[],
+                    PreparedCallOptions {
+                        observation_budget: 100,
+                        collect_before_observation: true,
+                    },
+                    RealmId::ROOT,
+                )
+                .unwrap();
+            let [PreparedResult::Managed(returned)] = result.values.as_slice() else {
+                panic!("native producer returns one managed Field value")
+            };
+            assert_eq!(
+                engine.handle_slot(handle.raw()).unwrap().addr() as usize,
+                address
+            );
+            let CodegenPreparedOuter::Constructor { identity, fields } = engine
+                .machine
+                .inspect_outer(*returned, RealmId::ROOT)
+                .unwrap()
+            else {
+                panic!("native Field constructor")
+            };
+            assert_eq!(identity, tidepool_repr::DataConId(980));
+            assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
+            assert!(engine.release(*returned));
+            assert!(engine.release(handle));
+            assert!(engine.handle_slot(handle.raw()).is_none());
+            engine.machine.quiesce().unwrap();
+            engine
+        })
+        .join()
+        .unwrap();
+        assert_eq!(engine.residency().root_cells, 0);
+        assert!(engine.handle_slot(handle.raw()).is_none());
+        assert!(!engine.release(handle));
+        engine.quiesce_and_collect_now().unwrap();
+    }
+
+    #[test]
+    fn exact_handle_alias_custody_survives_capture_and_distinct_handle_retirement() {
+        use tidepool_repr::{BindingName, Generation, SessionModule};
+
+        for capture_first in [false, true] {
+            let mut state = super::super::PersistentSession::new(None, 64 * 1024);
+            let original_scope = state.mint_isolated_scope();
+            let alias_scope = state.mint_isolated_scope();
+            let distinct_scope = state.mint_isolated_scope();
+            let original = evaluated_publication_fixture(&mut state, "original", 901);
+            let original_id = original.id;
+            let handle = original.value.handle;
+            let shared_value = original.value.clone();
+            let distinct = state
+                .prepared_mut()
+                .unwrap()
+                .retain_handle_value(handle, RealmId::ROOT)
+                .unwrap();
+            assert_ne!(handle.raw(), distinct.raw());
+            {
+                let engine = state.prepared_mut().unwrap();
+                // Independent handles keep independent cells for one object.
+                let first = engine.handle_slot(handle.raw()).unwrap();
+                let second = engine.handle_slot(distinct.raw()).unwrap();
+                assert_ne!(first.addr(), second.addr());
+                assert_eq!(first.current(), second.current());
+            }
+            state.bind_in(original_scope, original).unwrap();
+            state
+                .bind_in(
+                    distinct_scope,
+                    BindingEntry {
+                        name: BindingName("distinct".into()),
+                        id: SessionVarId::from_extract(902),
+                        module: SessionModule::val(Generation(902)),
+                        value: BoundValue {
+                            handle: distinct,
+                            identity: shared_value.identity.clone(),
+                        },
+                        type_display: None,
+                        defining_expr: None,
+                        scope: distinct_scope,
+                    },
+                )
+                .unwrap();
+            let mut alias_value = shared_value;
+            alias_value.identity.occurrence = "alias".into();
+            state
+                .publish_alias_in(
+                    original_scope,
+                    BindingEntry {
+                        name: BindingName("alias".into()),
+                        id: SessionVarId::from_extract(903),
+                        module: SessionModule::val(Generation(903)),
+                        value: alias_value,
+                        type_display: None,
+                        defining_expr: None,
+                        scope: original_scope,
+                    },
+                    original_id,
+                )
+                .unwrap();
+            let sibling_value = state
+                .resolve_in(original_scope, "alias")
+                .unwrap()
+                .value
+                .clone();
+            state
+                .bind_in(
+                    alias_scope,
+                    BindingEntry {
+                        name: BindingName("sibling".into()),
+                        id: SessionVarId::from_extract(905),
+                        module: SessionModule::val(Generation(905)),
+                        value: sibling_value,
+                        type_display: None,
+                        defining_expr: None,
+                        scope: alias_scope,
+                    },
+                )
+                .unwrap();
+            let capture = state.mint_detached_scope(original_scope).unwrap();
+            let roots = state.persistent_roots_count();
+            assert_eq!(state.value_handle_count(), 2);
+            assert_eq!(state.retire_scope(original_scope).roots_released, 0);
+            assert_eq!(
+                state.resolve_in(capture, "original").unwrap().id,
+                original_id
+            );
+            assert_eq!(state.retire_scope(distinct_scope).roots_released, 1);
+            assert!(state
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(distinct.raw())
+                .is_none());
+            assert_eq!(state.persistent_roots_count(), roots - 1);
+            let order = if capture_first {
+                [capture, alias_scope]
+            } else {
+                [alias_scope, capture]
+            };
+            assert_eq!(state.retire_scope(order[0]).roots_released, 0);
+            {
+                let engine = state.prepared_mut().unwrap();
+                engine.quiesce_and_collect_now().unwrap();
+                let CodegenPreparedOuter::Constructor { identity, fields } = engine
+                    .machine
+                    .inspect_outer(handle, RealmId::ROOT)
+                    .expect("surviving alias or frozen capture retains the original value");
+                assert_eq!(identity, tidepool_repr::DataConId(980));
+                assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
+            }
+            assert_eq!(state.value_handle_count(), 1);
+            // Major collection may independently retire the producer's root
+            // block once only its shared constructor remains reachable.
+            let roots_after_collection = state.persistent_roots_count();
+            assert_eq!(state.retire_scope(order[1]).roots_released, 1);
+            assert_eq!(state.value_handle_count(), 0);
+            assert_eq!(state.persistent_roots_count(), roots_after_collection - 1);
+            let engine = state.prepared_mut().unwrap();
+            assert!(engine.prepared_handle_of(handle.raw()).is_none());
+            assert!(matches!(
+                engine.retain_handle_value(handle, RealmId::ROOT),
+                Err(PreparedRuntimeError::Run(
+                    ExecutionError::UnknownPreparedHandle
+                ))
+            ));
+            // A later admission cannot revive the stale handle identity.
+            let fresh = evaluated_publication_fixture(&mut state, "fresh", 904);
+            let fresh_handle = fresh.value.handle;
+            assert_ne!(fresh_handle.raw(), handle.raw());
+            let fresh_scope = state.mint_isolated_scope();
+            state.bind_in(fresh_scope, fresh).unwrap();
+            assert!(state
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(handle.raw())
+                .is_none());
+            assert_eq!(state.retire_scope(fresh_scope).roots_released, 1);
+            assert_eq!(state.value_handle_count(), 0);
         }
     }
 
@@ -8878,13 +9130,12 @@ pub(super) mod tests {
             .machine
             .retain_top(first, top)
             .expect("producer top binds");
-        let root = engine.adopt(handle).expect("retained handle adopts a root");
+        assert!(engine.adopt(handle));
         let entry = BindingEntry {
             name: tidepool_repr::BindingName("producer".into()),
             id: SessionVarId::from_extract(1),
             module: SessionModule::val(tidepool_repr::Generation(1)),
             value: BoundValue {
-                root,
                 handle,
                 identity: producer_identity(),
             },
@@ -11589,7 +11840,7 @@ pub(super) mod tests {
         for (name, id, scope) in [("a", 11, private_a), ("b", 12, private_b)] {
             let engine = state.prepared_mut().unwrap();
             let handle = engine.machine.retain_top(program, top).unwrap();
-            let root = engine.adopt(handle).unwrap();
+            assert!(engine.adopt(handle));
             state
                 .bind_in(
                     scope,
@@ -11598,7 +11849,6 @@ pub(super) mod tests {
                         id: SessionVarId::from_extract(id),
                         module: SessionModule::val(Generation(id)),
                         value: BoundValue {
-                            root,
                             handle,
                             identity: producer_identity(),
                         },

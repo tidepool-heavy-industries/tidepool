@@ -411,97 +411,84 @@ unsafe impl ExternalPayloadOwner for ExportPayloads<'_> {
     }
 }
 
-/// The smallest destination an export tries before growing.
-const INITIAL_PARCEL_BYTES: usize = 64 * 1024;
-
-/// Export the graph reachable from `roots` (each a tagged managed reference
-/// into `source`, a static address, or 0) into a fresh parcel; the first
-/// root is the value, the rest are the import slots its images depend on.
-///
-/// `descriptors` is the source machine's descriptor space (its static
-/// catalog resolves static references; its scratch drives the copy);
-/// `arena_descriptors` pins every layout the parcel may contain; `exporter`
-/// describes source payloads. The destination starts small and doubles on
-/// `InsufficientSpace`; every attempt restores the source's headers before
-/// the next, so a failed export leaves the source exactly as it was.
+/// Export one graph into a fresh parcel with one physical copy. `capacity`
+/// is the caller's checked bound on the reachable objects' total extents.
+/// A successful export requires capacity for each unique copied object;
+/// an undersized capacity returns `InsufficientSpace`. Metadata and external
+/// payloads remain owned by this layout boundary.
+/// Every forwarding write is restored before any Result returns; an
+/// insufficient bound is a typed refusal, never a retry or partial export.
 ///
 /// # Safety
-/// The source machine is quiescent and exclusively borrowed for the whole
-/// call: no generated frame is live and no mutator runs.
+/// The source machine is quiescent and exclusively borrowed throughout
+/// discovery and copying: no generated frame or mutator runs.
 pub unsafe fn export_reachable(
     roots: &[usize],
+    capacity: usize,
     source: &dyn DescriptorSourceSpace,
     external_handles: usize,
     descriptors: &mut DescriptorSpace,
     arena_descriptors: &[Arc<ObjectDescriptor>],
     exporter: &dyn PayloadExporter,
 ) -> Result<Parcel, DescriptorTraceError> {
-    let mut capacity = INITIAL_PARCEL_BYTES.min(source.source_bytes().max(16));
-    loop {
-        let payloads = ExportPayloads {
-            exporter,
-            copies: RefCell::new(Vec::new()),
-            index: RefCell::new(HashMap::new()),
-            failure: RefCell::new(None),
-        };
-        let mut arena = DescriptorArena::reserve(capacity, arena_descriptors.iter().cloned())?;
-        let mut slots: Vec<*mut u8> = roots.iter().map(|&root| root as *mut u8).collect();
-        let root_ptrs: Vec<*mut *mut u8> =
-            slots.iter_mut().map(|slot| slot as *mut *mut u8).collect();
-        prepare_reachable_copy_from_space(
-            &root_ptrs,
-            source,
-            external_handles,
-            arena.destination(),
-            descriptors,
-        )?;
-        // Each forwarded object occupies at least 16 destination bytes, plus
-        // the thunks an updated chain forwards without copying.
-        let objects = capacity / 16 + source.source_bytes() / 16 + 1;
-        descriptors.begin_forwarding_log(objects)?;
-        let outcome = copy_reachable_from_space(
-            &root_ptrs,
-            source,
-            arena.destination(),
-            descriptors,
-            None,
-            Some(&payloads),
-        );
-        descriptors.restore_forwarding_log();
-        match outcome {
-            Ok(copied) => {
-                arena.seal(copied.bytes_copied)?;
-                let map = payloads.map();
-                rewrite_payload_slots(&arena, &map)?;
-                let mut externals = 0;
-                arena.walk_sealed(|_, descriptor| {
-                    externals += usize::from(descriptor.external_kind().is_some());
-                    Ok(())
-                })?;
-                let parcel = Parcel {
-                    arena,
-                    roots: slots.iter().map(|&slot| slot as usize).collect(),
-                    payloads: payloads.copies.into_inner(),
-                    externals,
-                };
-                parcel.check_transferable()?;
-                return Ok(parcel);
-            }
-            Err(DescriptorTraceError::InsufficientSpace { .. }) => {
-                capacity = capacity
-                    .checked_mul(2)
-                    .ok_or(DescriptorTraceError::InvalidRange)?;
-            }
-            Err(DescriptorTraceError::ExternalPayload(
-                ExternalStorageValidationError::BookkeepingAllocation,
-            )) if payloads.failure.borrow().is_some() => {
-                return Err(payloads
-                    .failure
-                    .into_inner()
-                    .unwrap_or(DescriptorTraceError::MetadataAllocation));
-            }
-            Err(error) => return Err(error),
+    let payloads = ExportPayloads {
+        exporter,
+        copies: RefCell::new(Vec::new()),
+        index: RefCell::new(HashMap::new()),
+        failure: RefCell::new(None),
+    };
+    let mut arena = DescriptorArena::reserve(capacity, arena_descriptors.iter().cloned())?;
+    let mut slots: Vec<*mut u8> = roots.iter().map(|&root| root as *mut u8).collect();
+    let root_ptrs: Vec<*mut *mut u8> = slots.iter_mut().map(|slot| slot as *mut *mut u8).collect();
+    prepare_reachable_copy_from_space(
+        &root_ptrs,
+        source,
+        external_handles,
+        arena.destination(),
+        descriptors,
+    )?;
+    // Each forwarded object occupies at least 16 destination bytes, plus
+    // the thunks an updated chain forwards without copying.
+    let objects = (capacity / 16)
+        .checked_add(source.source_bytes() / 16)
+        .and_then(|objects| objects.checked_add(1))
+        .ok_or(DescriptorTraceError::InvalidRange)?;
+    descriptors.begin_forwarding_log(objects)?;
+    let outcome = copy_reachable_from_space(
+        &root_ptrs,
+        source,
+        arena.destination(),
+        descriptors,
+        None,
+        Some(&payloads),
+    );
+    descriptors.restore_forwarding_log();
+    match outcome {
+        Ok(copied) => {
+            arena.seal(copied.bytes_copied)?;
+            let map = payloads.map();
+            rewrite_payload_slots(&arena, &map)?;
+            let mut externals = 0;
+            arena.walk_sealed(|_, descriptor| {
+                externals += usize::from(descriptor.external_kind().is_some());
+                Ok(())
+            })?;
+            let parcel = Parcel {
+                arena,
+                roots: slots.iter().map(|&slot| slot as usize).collect(),
+                payloads: payloads.copies.into_inner(),
+                externals,
+            };
+            parcel.check_transferable()?;
+            Ok(parcel)
         }
+        Err(DescriptorTraceError::ExternalPayload(
+            ExternalStorageValidationError::BookkeepingAllocation,
+        )) if payloads.failure.borrow().is_some() => Err(payloads
+            .failure
+            .into_inner()
+            .unwrap_or(DescriptorTraceError::MetadataAllocation)),
+        Err(error) => Err(error),
     }
 }
 
@@ -624,4 +611,152 @@ unsafe impl DescriptorSourceSpace for MachineSpaces<'_> {
 pub fn names_machine_storage(spaces: &MachineSpaces<'_>, encoded: usize) -> bool {
     let address = untag(encoded);
     spaces.covers_slot(address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use tidepool_repr::execution_schema::testing;
+
+    struct CountingPayloads {
+        payloads: Vec<(PayloadShape, Box<[u64]>)>,
+        calls: Cell<usize>,
+    }
+
+    impl PayloadExporter for CountingPayloads {
+        fn shape(
+            &self,
+            published: *mut u8,
+            expected: ExternalStorageKind,
+        ) -> Result<PayloadShape, ExternalStorageValidationError> {
+            self.calls.set(self.calls.get() + 1);
+            let (shape, words) = self
+                .payloads
+                .iter()
+                .find(|(_, words)| words.as_ptr().cast::<u8>() == published.cast_const())
+                .ok_or(ExternalStorageValidationError::Untracked(
+                    published as usize,
+                ))?;
+            if shape.kind != expected {
+                return Err(ExternalStorageValidationError::KindMismatch {
+                    expected,
+                    actual: shape.kind,
+                });
+            }
+            assert_eq!(words[0], shape.logical_len as u64);
+            Ok(*shape)
+        }
+    }
+
+    #[test]
+    fn bounded_export_copies_shared_external_payloads_once_and_restores_on_refusal() {
+        let array = Arc::new(
+            ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &testing::target())
+                .unwrap(),
+        );
+        let bytes = Arc::new(
+            ObjectDescriptor::external(ExternalStorageKind::Bytes, &testing::target()).unwrap(),
+        );
+        let descriptors = vec![Arc::clone(&array), Arc::clone(&bytes)];
+        let children = 4200;
+        let capacity = (children + 1) * 16;
+        let mut source = DescriptorArena::reserve(capacity, descriptors.iter().cloned()).unwrap();
+        let base = source.destination().as_mut_ptr();
+        let mut slots = vec![2 * children as u64];
+        for child in 0..children {
+            let word = (base as usize + (child + 1) * 16) | usize::from(bytes.tag());
+            slots.extend([word as u64, word as u64]);
+        }
+        let mut exporter = CountingPayloads {
+            payloads: vec![(
+                PayloadShape {
+                    kind: ExternalStorageKind::BoxedArray,
+                    logical_len: 2 * children,
+                    align: 8,
+                },
+                slots.into_boxed_slice(),
+            )],
+            calls: Cell::new(0),
+        };
+        for child in 0..children {
+            exporter.payloads.push((
+                PayloadShape {
+                    kind: ExternalStorageKind::Bytes,
+                    logical_len: 1,
+                    align: 8,
+                },
+                vec![1, child as u64 % 256].into_boxed_slice(),
+            ));
+        }
+        // All fixture storage is exclusively owned, initialized and pinned
+        // before export; sealing proves each external wrapper's exact start.
+        unsafe {
+            array.initialize_header(base);
+            array
+                .external_payload_slot(base, 16)
+                .unwrap()
+                .write(exporter.payloads[0].1.as_ptr().cast_mut().cast());
+            for child in 0..children {
+                let object = base.add((child + 1) * 16);
+                bytes.initialize_header(object);
+                bytes
+                    .external_payload_slot(object, 16)
+                    .unwrap()
+                    .write(exporter.payloads[child + 1].1.as_ptr().cast_mut().cast());
+            }
+        }
+        source.seal(capacity).unwrap();
+        let source_before =
+            unsafe { std::slice::from_raw_parts(base.cast::<u64>(), capacity / 8) }.to_vec();
+        let payload_before = exporter.payloads[0].1.to_vec();
+        let roots = [base as usize | usize::from(array.tag()); 2];
+        let mut space = DescriptorSpace::new(descriptors.iter().cloned()).unwrap();
+        assert!(matches!(
+            unsafe {
+                export_reachable(
+                    &roots,
+                    16,
+                    &source,
+                    children + 1,
+                    &mut space,
+                    &descriptors,
+                    &exporter,
+                )
+            },
+            Err(DescriptorTraceError::InsufficientSpace { .. })
+        ));
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(base.cast::<u64>(), capacity / 8) },
+            source_before.as_slice()
+        );
+        assert_eq!(exporter.payloads[0].1.as_ref(), payload_before.as_slice());
+        exporter.calls.set(0);
+        let parcel = unsafe {
+            export_reachable(
+                &roots,
+                capacity,
+                &source,
+                children + 1,
+                &mut space,
+                &descriptors,
+                &exporter,
+            )
+        }
+        .unwrap();
+        assert!(capacity > 64 * 1024);
+        assert_eq!(parcel.bytes(), capacity);
+        assert_eq!(parcel.roots()[0], parcel.roots()[1]);
+        assert_eq!(parcel.payloads().len(), children + 1);
+        assert_eq!(
+            exporter.calls.get(),
+            children + 1,
+            "one copy phase, one copy per published identity"
+        );
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(base.cast::<u64>(), capacity / 8) },
+            source_before.as_slice()
+        );
+        assert_eq!(exporter.payloads[0].1.as_ref(), payload_before.as_slice());
+    }
 }

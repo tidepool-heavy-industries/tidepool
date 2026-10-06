@@ -19,9 +19,9 @@ use super::run::{
     runtime_error_from_machine, runtime_error_from_machine_or_observation,
     runtime_error_without_machine, try_words,
 };
-use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ExecutionError};
 use crate::host_fns::{prepared_gc_trigger, RuntimeError};
+use crate::native_stack::NativeStackScope;
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
 use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace};
 use std::rc::Rc;
@@ -50,6 +50,7 @@ pub(super) struct PreparedInvocation<'code> {
     /// Boxed so the machine's borrowed admission pointer remains stable even
     /// while this invocation value is moved out of `enter`.
     old_space: Box<OldSpace>,
+    _native_stack: NativeStackScope<'static>,
 }
 
 fn static_catalog(
@@ -117,17 +118,13 @@ impl<'code> PreparedInvocation<'code> {
             });
         }
 
-        let max_native_frame = program.pipeline.native_frame_maximum();
-        let native_frame_reserve = max_native_frame
-            .checked_mul(2)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
-        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
-        bounds
-            .ensure_current_frame_reserve(native_frame_reserve)
-            .map_err(runtime_error_without_machine)?;
-        let prepared_stack_limit = bounds
-            .limit_with_frame_reserve(max_native_frame)
-            .map_err(runtime_error_without_machine)?;
+        let machine = Rc::new(MachineState::new());
+        let native_stack =
+            NativeStackScope::owned(Rc::clone(&machine)).map_err(runtime_error_without_machine)?;
+        let prepared_stack_limit = native_stack
+            .admit_entry(program.pipeline.native_frame_maximum())
+            .map_err(runtime_error_without_machine)?
+            .limit();
 
         let instance = InstanceImage::new(program)?;
         let statics = Arc::clone(&instance.statics);
@@ -161,7 +158,6 @@ impl<'code> PreparedInvocation<'code> {
             .div_ceil(std::mem::size_of::<u64>());
         let results = super::run::try_root_words(result_words.max(1))?;
 
-        let machine = Rc::new(MachineState::new());
         let environment = Box::new(InstallationEnvironment {
             roots: roots.as_mut_ptr(),
             descriptors: instance.descriptor_words.as_ptr(),
@@ -241,6 +237,7 @@ impl<'code> PreparedInvocation<'code> {
             result_layout: compiled.abi.result_layout().clone(),
             collections_before: 0,
             old_space: Box::new(OldSpace::new()),
+            _native_stack: native_stack,
         };
         for spec in &invocation.instance.heap_top_specs {
             if let Some(root) = invocation

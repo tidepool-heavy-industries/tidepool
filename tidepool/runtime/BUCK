@@ -510,6 +510,30 @@ rust_compile_fail(
     visibility = ["PUBLIC"],
 )
 
+rust_compile_fail(
+    name = "compile_fail_root_borrow_collection",
+    source = "tests/compile_fail/root_borrow_collection.rs",
+    control = "tests/compile_pass/root_borrow_collection.rs",
+    expected = "tests/compile_fail/root_borrow_collection.stderr",
+    dependencies = {
+        "tidepool_codegen": "//tidepool/codegen:tidepool_codegen",
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_root_borrow_release",
+    source = "tests/compile_fail/root_borrow_release.rs",
+    control = "tests/compile_pass/root_borrow_release.rs",
+    expected = "tests/compile_fail/root_borrow_release.stderr",
+    dependencies = {
+        "tidepool_codegen": "//tidepool/codegen:tidepool_codegen",
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
 rust_filegroup(
     name = "session_sources",
     mapped_srcs = {

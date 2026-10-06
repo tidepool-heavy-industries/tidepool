@@ -242,7 +242,7 @@ pub struct PersistentSession {
     /// `None` for a session with no persistent declaration environment; `Some` for the repl and the
     /// accumulating harness.
     lib: Option<SessionLib>,
-    /// The persistent binding store: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
+    /// The persistent binding store: `name → (SessionVarId, PreparedHandle, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
     bindings: BindingTable,
     /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
@@ -1002,7 +1002,7 @@ impl PersistentSession {
         for entry in entries {
             let module = entry.module;
             // `on_evict` is the single point of truth for whether any OTHER
-            // live entry still shares this root slot (an alias published by
+            // live entry still shares this handle (an alias published by
             // `bind_alias_in`, or a same-batch sibling evicted alongside
             // this entry) -- replacing the old whole-table scan. It must run
             // exactly once per entry that leaves `live`, which this is.
@@ -1296,23 +1296,13 @@ impl PersistentSession {
 
     // -- machine lifecycle -------------------------------------------------
     //
-    // Threading note: [`BindingTable`] holds `RootSlot(*mut *mut u8)` and
-    // [`ExternalEnv`] holds raw slot addresses. Both the table and the
-    // [`PreparedEngine`] carry an `unsafe impl Send` justified by the
-    // stowed-XOR-running discipline, so a whole `PersistentSession` can be moved
-    // to another thread as long as exactly one thread owns it at a time — which
-    // is what the repl does (the session is moved into a `spawn_blocking` turn
-    // and returned out of it). The harness instead runs the deep-recursion turn
-    // on a fresh big-stack thread while keeping the rest of the session on the
-    // caller's frame: it [`Self::lease_machine`]s the machine over with the
-    // accumulated table and lets the [`MachineLease`] restore it on `Drop`.
-    // `add_function` (which needs the raw-pointer env) therefore always happens
-    // on the thread that owns the session.
+    // The complete PreparedEngine moves under the stowed-XOR-running
+    // discipline. Binding metadata carries identities and stays auto-Send;
+    // only the machine resolves them under exclusive invocation ownership.
+    // MachineLease restores the engine after a turn on another thread.
 
-    /// Install a prepared turn's program, bootstrapping
-    /// the machine from it when this is the session's first turn. Every
-    /// global the program declares resolves to a live prepared binding by
-    /// the identity recorded when that binding was made.
+    /// Install a prepared turn's program. Every declared global resolves
+    /// to a live binding by its recorded import identity.
     pub fn install_prepared(
         &mut self,
         prepared: PreparedProgram,
@@ -1432,8 +1422,8 @@ impl PersistentSession {
     // There is deliberately no `drop_machine`: tearing a session down means
     // dropping the whole `PersistentSession` (which frees the heap through the
     // machine's own `Drop`). A method that emptied the machine slot in place
-    // would leave a live session whose binding-store `RootSlot`s all dangle — a
-    // state with no legitimate use and no way to detect from the outside.
+    // would invalidate every retained binding handle while leaving its lexical
+    // metadata live. Session teardown settles both owners together.
 
     // -- persistent binding bookkeeping ----------------------------------
 
@@ -3164,7 +3154,7 @@ impl PersistentSession {
     }
 
     /// Publish a compiler-typed alias of an already registered binding root.
-    /// The slot belongs to the source binding, so a failed declaration retract
+    /// The handle belongs to the source binding, so a failed declaration retract
     /// must never pass it through the new-root cleanup path used by a bind.
     pub(crate) fn publish_alias_in(
         &mut self,
@@ -3348,9 +3338,8 @@ impl PersistentSession {
     }
 
     /// Dispose roots that were produced by a completed materialization but
-    /// could not enter the persistent binding store. They are registered persistent roots,
-    /// not ordinary Rust-owned allocations, so dropping `RootSlot` alone would
-    /// leak them until session teardown.
+    /// could not enter the persistent binding store. Dropping their copied
+    /// handle identities does not release the machine's retained values.
     fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
         let mut owned = self
             .bindings
@@ -3697,7 +3686,7 @@ impl Drop for MachineLease<'_> {
 /// `roots_released` is the number of persistent GC roots deregistered, and it
 /// is exactly the drop a caller must observe in
 /// [`PersistentSession::persistent_roots_count`] across the call. It is `<=`
-/// `bindings_retired`: a binding whose slot is still owned by a survivor (the
+/// `bindings_retired`: a binding whose handle is still owned by a survivor (the
 /// sole-ownership rule) retires its NAME without releasing its ROOT.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScopeRetirement {

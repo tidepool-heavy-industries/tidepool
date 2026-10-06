@@ -1,5 +1,5 @@
 //! Explicit fallback costs include real observation mutations and complete
-//! exact inventory requests. Stable bookkeeping slots are not native values.
+//! exact inventory requests. Bookkeeping handle identities are not native values.
 
 use super::*;
 use crate::prepared_program::PreparedHandle;
@@ -15,8 +15,6 @@ struct Scenario {
     owner: ScopeId,
     unrelated: ScopeId,
     next_id: u64,
-    // The table only stores these bookkeeping cells; each address is stable.
-    slots: Vec<Box<*mut u8>>,
 }
 
 impl Scenario {
@@ -32,16 +30,12 @@ impl Scenario {
             owner,
             unrelated,
             next_id: 1,
-            slots: Vec::new(),
         }
     }
 
     fn bind(&mut self, scope: ScopeId, name: String) -> SessionVarId {
         let generation = self.next_id;
         self.next_id += 1;
-        let mut slot = Box::new(std::ptr::null_mut::<u8>());
-        let root = unsafe { RootSlot::new(slot.as_mut() as *mut *mut u8) };
-        self.slots.push(slot);
         let id = SessionVarId::from_extract(generation);
         self.table
             .bind_in(
@@ -51,7 +45,6 @@ impl Scenario {
                     id,
                     module: SessionModule::val(Generation(generation)),
                     value: BoundValue {
-                        root,
                         handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
                         identity: SymbolIdentity {
                             unit: "fixture".into(),

@@ -593,7 +593,22 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     // LOW bound: every JIT frame `walk_frames` is about to walk sits at
     // a strictly higher address than this one.
     let stack_low: u8 = 0;
-    let bounds = frame_walker::StackBounds::capture(&stack_low as *const u8 as usize);
+    let bounds = match ms
+        .native_stack
+        .borrow()
+        .as_ref()
+        .and_then(std::rc::Weak::upgrade)
+        .ok_or(frame_walker::FrameWalkError::StackMappingUnavailable)
+        .and_then(|mapping| mapping.walk_bounds(&stack_low as *const u8 as usize))
+    {
+        Ok(bounds) => bounds,
+        Err(error) => {
+            ms.set_first_cause(crate::host_fns::RuntimeError::IncompleteRootSnapshot(error));
+            return;
+        }
+    };
+    #[cfg(test)]
+    ms.native_frame_walks.set(ms.native_frame_walks.get() + 1);
     // SAFETY: fp is a valid frame pointer read from gc_trigger's caller.
     // The chain covers stack maps for every JIT pipeline installed on this
     // machine, resolved per frame through the machine's code-range index --
@@ -703,6 +718,79 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
 mod tests {
     use super::*;
 
+    fn admitted_gc_request(
+        ms: &crate::machine_state::MachineState,
+        fp: usize,
+        vmctx: *mut VMContext,
+        reserve: usize,
+    ) {
+        let _scope = crate::native_stack::NativeStackScope::borrowed(ms).unwrap();
+        perform_gc_request(fp, vmctx, reserve);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn absent_or_invalid_stack_admission_aborts_before_any_frame_read_or_copy() {
+        for invalid in [0, 1, 2] {
+            let ms = crate::machine_state::MachineState::new();
+            ms.install_prepared_buffer(vec![0_u64; 8], Vec::new())
+                .unwrap();
+            let (start, size) = ms.gc_active_range().unwrap();
+            let maps = crate::stack_map::StackMapRegistry::new();
+            ms.set_stack_map_registry(&maps);
+            let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
+            vmctx.machine_state = &ms as *const _ as *mut _;
+            vmctx.alloc_ptr = unsafe { start.add(16) };
+            let scope = if invalid == 0 {
+                None
+            } else {
+                Some(crate::native_stack::NativeStackScope::borrowed(&ms).unwrap())
+            };
+            if invalid != 0 {
+                crate::native_stack::tests::invalidate_mapping(&ms, invalid == 1);
+            }
+            let before = ms.gc_active_range();
+            // This deliberately unreadable FP must never reach the walker.
+            perform_gc_request(usize::MAX, &mut vmctx, 0);
+            assert_eq!(ms.native_frame_walks.get(), 0);
+            assert_eq!(ms.gc_generation(), 0);
+            assert_eq!(ms.gc_active_range(), before);
+            assert_eq!(vmctx.alloc_ptr, unsafe { start.add(16) });
+            let error = ms.take_runtime_error();
+            assert!(
+                matches!(&error, Some(RuntimeError::IncompleteRootSnapshot(_))),
+                "{error:?}"
+            );
+            let expected = match invalid {
+                0 => matches!(
+                    error,
+                    Some(RuntimeError::IncompleteRootSnapshot(
+                        frame_walker::FrameWalkError::StackMappingUnavailable
+                    ))
+                ),
+                1 => matches!(
+                    error,
+                    Some(RuntimeError::IncompleteRootSnapshot(
+                        frame_walker::FrameWalkError::StackThreadMismatch
+                    ))
+                ),
+                _ => matches!(
+                    error,
+                    Some(RuntimeError::IncompleteRootSnapshot(
+                        frame_walker::FrameWalkError::InvalidStackMapping { .. }
+                    ))
+                ),
+            };
+            assert!(expected);
+            assert_eq!(
+                ms.disposition(),
+                crate::machine_state::MachineDisposition::Unavailable
+            );
+            drop(scope);
+            assert!(ms.native_stack.borrow().is_none());
+        }
+    }
+
     #[test]
     fn prepared_collection_reserves_capacity_and_rewrites_only_managed_fields() {
         use std::sync::Arc;
@@ -747,7 +835,7 @@ mod tests {
         ms.register_rust_root(&mut root);
         let maps = crate::stack_map::StackMapRegistry::new();
         ms.set_stack_map_registry(&maps);
-        perform_gc_request(0, &mut vmctx, extent * 4);
+        admitted_gc_request(&ms, 0, &mut vmctx, extent * 4);
         assert_eq!(
             ms.prepared_call_status(),
             crate::prepared_control::CallStatus::Success
@@ -761,12 +849,12 @@ mod tests {
         assert_eq!(ms.gc_generation(), 1);
         // Once both spaces have reached the active size, ordinary collections
         // reuse them. Only object addresses change; raw Address bits do not.
-        perform_gc_request(0, &mut vmctx, 0);
+        admitted_gc_request(&ms, 0, &mut vmctx, 0);
         let first_space = root;
-        perform_gc_request(0, &mut vmctx, 0);
+        admitted_gc_request(&ms, 0, &mut vmctx, 0);
         let second_space = root;
         assert_ne!(first_space, second_space);
-        perform_gc_request(0, &mut vmctx, 0);
+        admitted_gc_request(&ms, 0, &mut vmctx, 0);
         assert_eq!(root, first_space);
 
         // A valid request whose live-plus-reserve exceeds the ceiling is
@@ -778,7 +866,7 @@ mod tests {
                 0,
             )
             .unwrap();
-        perform_gc_request(0, &mut vmctx, max_heap_bytes() & !7);
+        admitted_gc_request(&ms, 0, &mut vmctx, max_heap_bytes() & !7);
         assert_eq!(
             ms.prepared_call_status(),
             crate::prepared_control::CallStatus::LanguageFailure
@@ -872,7 +960,7 @@ mod tests {
         let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &ms as *const _ as *mut _;
         vmctx.alloc_ptr = unsafe { start.add(used) };
-        perform_gc_request(0, &mut vmctx, used * 4);
+        admitted_gc_request(&ms, 0, &mut vmctx, used * 4);
 
         assert_eq!(
             ms.prepared_call_status(),
@@ -925,7 +1013,7 @@ mod tests {
         ms.allocate_external_storage(ExternalStorageKind::Bytes, 0)
             .unwrap();
         root = std::ptr::null_mut();
-        perform_gc_request(0, &mut vmctx, 0);
+        admitted_gc_request(&ms, 0, &mut vmctx, 0);
         assert_eq!(
             ms.prepared_call_status(),
             crate::prepared_control::CallStatus::Success
@@ -949,7 +1037,7 @@ mod tests {
         vmctx.machine_state = &ms as *const _ as *mut _;
         let maps = crate::stack_map::StackMapRegistry::new();
         ms.set_stack_map_registry(&maps);
-        perform_gc_request(0, &mut vmctx, usize::MAX);
+        admitted_gc_request(&ms, 0, &mut vmctx, usize::MAX);
         assert_eq!(ms.gc_active_range(), Some((start, size)));
         assert_eq!(vmctx.alloc_ptr, start);
         assert_eq!(ms.gc_generation(), 0);
@@ -990,7 +1078,7 @@ mod tests {
         vmctx.machine_state = &ms as *const _ as *mut _;
         let before_range = ms.gc_active_range();
 
-        perform_gc_request(0, &mut vmctx, 0);
+        admitted_gc_request(&ms, 0, &mut vmctx, 0);
 
         assert_eq!(ms.gc_generation(), 0, "collection must not begin");
         assert_eq!(

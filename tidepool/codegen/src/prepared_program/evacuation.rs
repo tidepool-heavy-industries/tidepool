@@ -23,7 +23,7 @@ use super::run::runtime_error;
 use super::{CompiledProgram, ExecutionError, ImportBindings};
 use crate::suspension::RealmId;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use tidepool_heap::descriptor_region::DescriptorArena;
@@ -82,12 +82,58 @@ impl Drop for PendingStaticRegions {
 /// (into the parcel's roots) of the copied value the importer binds it to.
 pub type ParcelImports = Vec<(SymbolIdentity, usize)>;
 
+/// Logical evidence for a managed parcel root. Descriptor shape cannot tell
+/// lifted and unlifted references apart; addresses travel with literal owners.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ParcelRootRep {
+    Lifted,
+    Unlifted,
+}
+
+impl ParcelRootRep {
+    fn runtime_rep(self) -> RuntimeRep {
+        match self {
+            Self::Lifted => RuntimeRep::LiftedRef,
+            Self::Unlifted => RuntimeRep::UnliftedRef,
+        }
+    }
+}
+
+/// One exact machine root and its retained semantic representation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct ParcelRoot {
+    word: usize,
+    rep: ParcelRootRep,
+}
+
+impl ParcelRoot {
+    pub(super) fn new(word: usize, rep: RuntimeRep) -> Result<Self, ExecutionError> {
+        let rep = match rep {
+            RuntimeRep::LiftedRef => ParcelRootRep::Lifted,
+            RuntimeRep::UnliftedRef => ParcelRootRep::Unlifted,
+            _ => {
+                return Err(ExecutionError::Invariant(
+                    "export_parcel: a root has a non-managed representation",
+                ))
+            }
+        };
+        Ok(Self { word, rep })
+    }
+}
+
 /// One installation instance a parcel depends on, its shared code, and its
 /// import slots as [`ParcelImports`].
 pub struct ParcelImage {
     pub image: Arc<CompiledProgram>,
     instance: Arc<InstanceImage>,
     pub imports: ParcelImports,
+}
+
+#[cfg(test)]
+impl ParcelImage {
+    pub(super) fn names_instance(&self, instance: &Arc<InstanceImage>) -> bool {
+        Arc::ptr_eq(&self.instance, instance)
+    }
 }
 
 /// A constructor descriptor the copied objects use. Interned constructors
@@ -105,6 +151,8 @@ pub struct ParcelConstructor {
 /// remaining roots are the import-slot values of the images in `images`.
 pub struct Parcel {
     heap: tidepool_heap::gc::evacuate::Parcel,
+    /// In heap-root order; the heap owner alone retains relocated words.
+    root_reps: Vec<ParcelRootRep>,
     images: Vec<ParcelImage>,
     constructors: Vec<ParcelConstructor>,
 }
@@ -141,10 +189,6 @@ impl Parcel {
     }
 }
 
-/// The largest number of export rounds a manifest fixpoint may take: every
-/// round adds at least one image, and an image's imports are bounded.
-const MANIFEST_ROUNDS: usize = 64;
-
 impl PreparedMachine<'_> {
     /// Export the graph `handle` roots into a parcel. The machine is
     /// unchanged afterwards: every forwarding word the copy wrote is
@@ -152,7 +196,8 @@ impl PreparedMachine<'_> {
     ///
     /// The parcel names every image its objects or static references belong
     /// to, and carries the current value of each such image's import slots
-    /// as extra roots; the export repeats until that set is stable.
+    /// as extra roots. A finite read-only worklist discovers that closure;
+    /// the physical heap copier runs once after discovery finishes.
     pub fn export_parcel(&mut self, handle: PreparedHandle) -> Result<Parcel, ExecutionError> {
         self.ensure_handle_access()?;
         let _quiescent = self.quiesce()?;
@@ -160,128 +205,121 @@ impl PreparedMachine<'_> {
             let entry = self
                 .handles
                 .handle(handle.raw())
+                .filter(|entry| entry.rep == handle.rep())
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
             // SAFETY: the ledger keeps the slot registered while the handle
             // is live, and the machine is quiescent.
-            unsafe { entry.slot.current() }
-        } as usize;
-        let static_metrics =
-            tidepool_heap::static_region::StaticLookupMetrics::new("parcel-export");
+            ParcelRoot::new(unsafe { entry.slot.current() } as usize, entry.rep)?
+        };
         let mut roots = vec![value];
-        let mut images: Vec<(
-            ProgramId,
-            Arc<CompiledProgram>,
-            Arc<InstanceImage>,
-            ParcelImports,
-        )> = Vec::new();
-        for _ in 0..MANIFEST_ROUNDS {
-            let heap = self.export_roots(&roots)?;
-            // Owners of every copied object and every static reference.
-            // An interned constructor or an external wrapper has no owner
-            // (see `install_shared`): externals are process-wide and every
-            // machine knows them; constructors travel in the parcel. Any
-            // other unowned header is a defect on this side, refused here
-            // where the object can still be named.
-            let mut owners: Vec<ProgramId> = Vec::new();
-            let mut constructors: Vec<ParcelConstructor> = Vec::new();
-            for header in heap.headers().map_err(ExecutionError::Evacuation)? {
-                if let Some(id) = self.owner_of_header(header) {
-                    if !owners.contains(&id) {
-                        owners.push(id);
-                    }
+        let mut root_indices = HashMap::from([(value, 0)]);
+        let mut images = Vec::new();
+        let mut constructors = Vec::new();
+        let mut image_ids = HashSet::new();
+        let mut constructor_headers = HashSet::new();
+        let mut capacity = 0usize;
+        {
+            let heap = self.observation_heap()?;
+            let mut work = vec![value.word];
+            let mut visited = HashSet::new();
+            while let Some(word) = work.pop() {
+                if word == 0 {
                     continue;
                 }
-                let Some(entry) = self.descriptor_registry.get(&header) else {
-                    return Err(ExecutionError::Evacuation(
-                        DescriptorTraceError::UnknownDescriptor { address: header },
-                    ));
-                };
-                match &entry.meaning {
-                    super::DescriptorMeaning::External => {}
-                    super::DescriptorMeaning::Constructor(observation) => {
-                        if !constructors
-                            .iter()
-                            .any(|known| known.descriptor.initial_header_word() == header)
-                        {
-                            constructors.push(ParcelConstructor {
-                                descriptor: Arc::clone(&entry.descriptor),
-                                identity: observation.identity,
-                                fields: observation.fields.clone(),
-                            });
+                if !visited.insert(tidepool_heap::managed_reference::untag(word)) {
+                    continue;
+                }
+                let step = heap.trace_parcel_step(word)?;
+                let owner = match step {
+                    super::observe::ParcelTraceStep::Updated { target } => {
+                        work.push(target);
+                        continue;
+                    }
+                    super::observe::ParcelTraceStep::Static { region_start } => {
+                        Some(self.owner_of_static_region(region_start).ok_or(
+                            ExecutionError::Invariant(
+                                "export_parcel: a static reference names no installed program",
+                            ),
+                        )?)
+                    }
+                    super::observe::ParcelTraceStep::Object {
+                        header,
+                        bytes,
+                        children,
+                    } => {
+                        capacity =
+                            capacity
+                                .checked_add(bytes)
+                                .ok_or(ExecutionError::Evacuation(
+                                    DescriptorTraceError::InvalidRange,
+                                ))?;
+                        work.extend(children);
+                        if let Some(id) = self.owner_of_header(header) {
+                            Some(id)
+                        } else {
+                            let entry = self.descriptor_registry.get(&header).ok_or(
+                                ExecutionError::Evacuation(
+                                    DescriptorTraceError::UnknownDescriptor { address: header },
+                                ),
+                            )?;
+                            match &entry.meaning {
+                                super::DescriptorMeaning::External => {}
+                                super::DescriptorMeaning::Constructor(observation) => {
+                                    if constructor_headers.insert(header) {
+                                        constructors.push(ParcelConstructor {
+                                            descriptor: Arc::clone(&entry.descriptor),
+                                            identity: observation.identity,
+                                            fields: observation.fields.clone(),
+                                        });
+                                    }
+                                }
+                                super::DescriptorMeaning::Callable { .. }
+                                | super::DescriptorMeaning::Pap => {
+                                    return Err(ExecutionError::Invariant(
+                                        "export_parcel: a callable's header belongs to no installed image",
+                                    ));
+                                }
+                            }
+                            None
                         }
                     }
-                    super::DescriptorMeaning::Callable { .. } | super::DescriptorMeaning::Pap => {
-                        tracing::error!(
-                            header = format_args!("{header:#x}"),
-                            kind = ?entry.descriptor.kind(),
-                            "export_parcel: a callable's header belongs to no installed image"
-                        );
-                        return Err(ExecutionError::Invariant(
-                            "export_parcel: a callable's header belongs to no installed image",
-                        ));
-                    }
-                }
-            }
-            for address in heap
-                .static_references()
-                .map_err(ExecutionError::Evacuation)?
-            {
-                if let Some(id) = self.owner_of_static(address, &static_metrics)? {
-                    if !owners.contains(&id) {
-                        owners.push(id);
-                    }
-                } else {
-                    return Err(ExecutionError::Invariant(
-                        "export_parcel: a static reference names no installed program",
-                    ));
-                }
-            }
-            let mut grew = false;
-            for id in owners {
-                if images.iter().any(|(known, _, _, _)| *known == id) {
-                    continue;
-                }
-                let Some((image, instance, slots)) = self.image_with_imports(id) else {
-                    return Err(ExecutionError::BorrowedParcelCode);
                 };
+                let Some(id) = owner.filter(|id| image_ids.insert(*id)) else {
+                    continue;
+                };
+                let (image, instance, slots) = self.image_with_imports(id)?;
                 let mut imports = Vec::with_capacity(slots.len());
-                for (identity, word) in slots {
-                    let index = match roots.iter().position(|&root| root == word) {
-                        Some(index) => index,
-                        None => {
-                            roots.push(word);
-                            grew = true;
-                            roots.len() - 1
-                        }
-                    };
+                for (identity, root) in slots {
+                    let index = *root_indices.entry(root).or_insert_with(|| {
+                        let index = roots.len();
+                        roots.push(root);
+                        work.push(root.word);
+                        index
+                    });
                     imports.push((identity, index));
                 }
-                images.push((id, image, instance, imports));
-            }
-            if !grew {
-                return Ok(Parcel {
-                    heap,
-                    images: images
-                        .into_iter()
-                        .map(|(_, image, instance, imports)| ParcelImage {
-                            image,
-                            instance,
-                            imports,
-                        })
-                        .collect(),
-                    constructors,
+                images.push(ParcelImage {
+                    image,
+                    instance,
+                    imports,
                 });
             }
         }
-        Err(ExecutionError::Invariant(
-            "export_parcel: the image manifest did not converge",
-        ))
+        let words: Vec<_> = roots.iter().map(|root| root.word).collect();
+        let heap = self.export_roots(&words, capacity)?;
+        Ok(Parcel {
+            heap,
+            root_reps: roots.into_iter().map(|root| root.rep).collect(),
+            images,
+            constructors,
+        })
     }
 
-    /// One export round over `roots`; the source is restored afterwards.
+    /// One physical copy over the discovered roots; the source is restored.
     fn export_roots(
         &mut self,
         roots: &[usize],
+        capacity: usize,
     ) -> Result<tidepool_heap::gc::evacuate::Parcel, ExecutionError> {
         let mut state = self
             .machine
@@ -319,6 +357,7 @@ impl PreparedMachine<'_> {
             unsafe {
                 export_reachable(
                     roots,
+                    capacity,
                     &spaces,
                     nursery_externals + arena_externals,
                     &mut prepared.space,
@@ -377,6 +416,7 @@ impl PreparedMachine<'_> {
         let _quiescent = self.quiesce()?;
         let Parcel {
             heap: mut parcel,
+            root_reps,
             images,
             constructors,
         } = parcel;
@@ -622,15 +662,12 @@ impl PreparedMachine<'_> {
             // bound to. An index not named by any kept identity (a duplicate
             // root two images both import) is released with the rest below.
             // Every root is retained before installation can allocate or collect.
-            for &pointer in &relocated {
-                let slot = self
-                    .old_space
-                    .adopt_root(&self.machine, pointer as *mut u8)
+            for (&pointer, rep) in relocated.iter().zip(&root_reps) {
+                let rep = rep.runtime_rep();
+                let slot = crate::old_space::OwnedRootCell::new(&self.machine, pointer as *mut u8)
                     .map_err(|cause| runtime_error(&self.machine, cause))?;
-                let raw = self
-                    .handles
-                    .insert_handle(slot, realm, RuntimeRep::LiftedRef);
-                handles.push(PreparedHandle::new(raw, RuntimeRep::LiftedRef));
+                let raw = self.handles.insert_handle(slot, realm, rep);
+                handles.push(PreparedHandle::new(raw, rep));
             }
             let mut imported: Vec<(SymbolIdentity, PreparedHandle)> = Vec::new();
             let mut kept_indices: std::collections::HashSet<usize> =

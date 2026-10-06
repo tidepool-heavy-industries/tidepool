@@ -743,6 +743,8 @@ def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
         "machine_lease_double_borrow": (),
+        "root_borrow_release": ("tidepool-codegen",),
+        "root_borrow_collection": ("tidepool-codegen",),
         "prepared_install_consumes_pending": (),
         "prepared_install_crossed_image": ("frunk", "tidepool-mcp"),
     }

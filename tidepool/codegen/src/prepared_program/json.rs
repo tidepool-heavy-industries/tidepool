@@ -1693,16 +1693,12 @@ impl<'a> IntrinsicBuilder<'a> {
             .native_frame_maximum()
             .checked_mul(2)
             .ok_or(CallStatus::IntegrityFailure)?;
-        let bounds = super::safepoint::NativeStackBounds::current().map_err(|cause| {
-            self.machine.set_first_cause(cause);
-            self.machine.prepared_call_status()
-        })?;
-        bounds
-            .ensure_current_frame_reserve(reserve)
-            .map_err(|cause| {
+        crate::native_stack::ensure_active_frame_reserve(self.machine, reserve).map_err(
+            |cause| {
                 self.machine.set_first_cause(cause);
                 self.machine.prepared_call_status()
-            })?;
+            },
+        )?;
         let input = self.word(node).map_err(|cause| {
             self.machine.set_first_cause(cause);
             self.machine.prepared_call_status()
@@ -1867,7 +1863,7 @@ impl<'a> IntrinsicBuilder<'a> {
 mod tests {
     use super::*;
     use crate::machine_state::MachineDisposition;
-    use crate::prepared_program::safepoint::NativeStackBounds;
+    use crate::native_stack::NativeStackScope;
     use crate::prepared_program::ActiveIntrinsicScope;
     use tidepool_repr::execution_schema::{
         link_program, testing, CheckedLayout, ConstructorDecl, FieldLayout, MachineImports,
@@ -1992,8 +1988,8 @@ mod tests {
         let (start, size) = machine.gc_active_range().unwrap();
         let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
-        vmctx.prepared_stack_limit = NativeStackBounds::current()
-            .unwrap()
+        let native_stack = NativeStackScope::borrowed(&machine).unwrap();
+        vmctx.prepared_stack_limit = native_stack
             .limit_with_frame_reserve(program.pipeline.native_frame_maximum())
             .unwrap();
         let old_space = crate::old_space::OldSpace::new();
@@ -2072,6 +2068,11 @@ mod tests {
         };
         let result = encoder.write_value(value, RuntimeRep::LiftedRef, 0, &mut output);
         let comparisons = encoder.identity_comparisons;
+        assert_eq!(
+            machine.native_stack_queries.get(),
+            1,
+            "reentrant forcing shares its admitted mapping"
+        );
         let metrics = encoder.builder.core.root_operation_metrics();
         drop(encoder);
         builder.release_node(value).unwrap();

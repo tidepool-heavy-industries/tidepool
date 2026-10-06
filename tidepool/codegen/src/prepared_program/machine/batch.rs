@@ -488,7 +488,6 @@ impl PreparedMachine<'_> {
             owners,
             stack_maps,
             candidate_alloc_start: None,
-            adopted_slots_start: None,
             provisional_handles: Vec::with_capacity(requests.len()),
             committed: false,
         };
@@ -499,7 +498,6 @@ impl PreparedMachine<'_> {
             &mut transaction.candidate_alloc_start,
         );
         let leased = if staged.is_ok() {
-            transaction.adopted_slots_start = Some(transaction.machine.old_space.slots.len());
             transaction.machine.stage_batch_leases(
                 &candidates,
                 &requests,
@@ -622,9 +620,7 @@ impl PreparedMachine<'_> {
             }
             // Candidate objects are fully initialized. No collection runs
             // before commit or rollback, and rollback releases this root.
-            let root = self
-                .old_space
-                .adopt_root(&self.machine, word as *mut u8)
+            let root = crate::old_space::OwnedRootCell::new(&self.machine, word as *mut u8)
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
             let raw = self.handles.insert_handle(root, RealmId::ROOT, export.rep);
             provisional.push(PreparedHandle {
@@ -1588,7 +1584,7 @@ mod tests {
             .is_err());
         assert_eq!(machine.residency(), ResidencyCounts::default());
         assert_eq!(machine.handle_count(), 0);
-        assert_eq!(machine.old_space.slots.len(), 0);
+        assert_eq!(machine.machine.root_cell_allocation_counts(), (0, 1));
         assert!(machine.descriptor_registry.is_empty());
 
         machine.fail_catalog_after_stage = false;
@@ -1609,10 +1605,11 @@ mod tests {
             .install_shared_batch_with_leases(batch(), vec![request()])
             .is_err());
         assert_eq!(machine.handle_count(), 1);
-        assert_eq!(machine.old_space.slots.len(), 1);
+        assert_eq!(machine.machine.root_cell_allocation_counts(), (1, 3));
         assert_eq!(machine.residency().programs, 1);
         machine.fail_catalog_after_stage = false;
         assert!(machine.release(installed.leases[0].handle()));
+        assert_eq!(machine.machine.root_cell_allocation_counts(), (0, 3));
         let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(retired.programs, installed.programs);
     }

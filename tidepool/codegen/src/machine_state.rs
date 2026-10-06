@@ -356,6 +356,18 @@ pub struct MachineState {
     #[cfg(test)]
     prepared_test_failure: RefCell<Option<PreparedTestFailure>>,
     stack_map_registry: RefCell<Vec<*const StackMapRegistry>>,
+    /// Weak association only: a thread-bound native scope owns the mapping.
+    /// The final scope clears it before this machine can become quiescent.
+    pub(crate) native_stack:
+        RefCell<Option<std::rc::Weak<crate::native_stack::NativeStackMapping>>>,
+    #[cfg(test)]
+    pub(crate) native_stack_queries: Cell<u64>,
+    #[cfg(test)]
+    pub(crate) fail_next_native_stack_query: Cell<bool>,
+    #[cfg(test)]
+    pub(crate) native_frame_walks: Cell<u64>,
+    #[cfg(test)]
+    pub(crate) native_entries: Cell<u64>,
     /// Code-range index over `stack_map_registry`, populated exactly while
     /// two or more registries are linked (a single registry is searched
     /// directly). Every link/unlink path below keeps it in step with the
@@ -386,23 +398,23 @@ pub struct MachineState {
     /// `clear_run_scratch`/`clear_gc_state`.
     rust_roots: RefCell<TemporaryRoots>,
     next_rust_root: Cell<usize>,
-    /// Session-scoped GC roots (`PERSISTENT_ROOTS`): tenured bindings'
-    /// stable slots. Survive across runs; cleared only at machine teardown
-    /// (`free_session_heap`).
+    /// Registered stable cells owned by live handles, payloads and program
+    /// root blocks. Individual owners deregister before freeing their cells;
+    /// exclusive terminal teardown clears the registry before owner drain.
     persistent_roots: RefCell<Vec<*mut *mut u8>>,
-    /// STOWED GC roots (segment 40): the suspended continuation slot(s) of a
-    /// parent turn parked at a typed yield (`runLLMTurn`/`Ask`), registered
-    /// for the duration of a NESTED CHILD run so a child's collection evacuates
-    /// the parent's stowed continuation tree instead of freeing it. Kept as a
-    /// SEPARATE set from `persistent_roots` DELIBERATELY: intent must be
-    /// auditable — a persistent root is a tenured persistent-binding-store binding that lives
-    /// for the machine's whole life; a stowed root is a *transient* parent
-    /// continuation rooted only while at least one child is running against the
-    /// suspended machine. `perform_gc` folds this set in alongside the other
-    /// three sources. Registered on entering nested-child mode, deregistered on
-    /// parent resume or child teardown; cleared defensively at machine teardown
-    /// (`free_session_heap`). NOT touched by `clear_run_scratch` — a child
-    /// turn's per-run teardown must not strand the parent's continuation.
+    /// Actual owned-cell allocations, distinct from root-block registrations.
+    root_cells_live: Cell<usize>,
+    #[cfg(test)]
+    root_cells_issued: Cell<u64>,
+    #[cfg(test)]
+    root_removal_probes: Cell<u64>,
+    #[cfg(test)]
+    pub(crate) fail_next_persistent_root_reservation: Cell<bool>,
+    #[cfg(test)]
+    pub(crate) fail_next_stowed_root_reservation: Cell<bool>,
+    /// Stable continuation cells owned by parked frames. Collection rewrites
+    /// these alongside persistent roots; class transfer reserves its destination
+    /// before removing the previous registration.
     stowed_roots: RefCell<Vec<*mut *mut u8>>,
     /// Stable slots embedded as loads in finalized session fragments. A
     /// binding may leave the session table while older callable code still
@@ -524,6 +536,15 @@ impl MachineState {
             #[cfg(test)]
             prepared_test_failure: RefCell::new(None),
             stack_map_registry: RefCell::new(Vec::new()),
+            native_stack: RefCell::new(None),
+            #[cfg(test)]
+            native_stack_queries: Cell::new(0),
+            #[cfg(test)]
+            fail_next_native_stack_query: Cell::new(false),
+            #[cfg(test)]
+            native_frame_walks: Cell::new(0),
+            #[cfg(test)]
+            native_entries: Cell::new(0),
             stack_map_index: RefCell::new(Arc::default()),
             runtime_error: RefCell::new(None),
             disposition: Cell::new(MachineDisposition::Reusable),
@@ -536,6 +557,15 @@ impl MachineState {
             prepared_exception: Cell::new(std::ptr::null_mut()),
             describing_exception: Cell::new(false),
             persistent_roots: RefCell::new(Vec::new()),
+            root_cells_live: Cell::new(0),
+            #[cfg(test)]
+            root_cells_issued: Cell::new(0),
+            #[cfg(test)]
+            root_removal_probes: Cell::new(0),
+            #[cfg(test)]
+            fail_next_persistent_root_reservation: Cell::new(false),
+            #[cfg(test)]
+            fail_next_stowed_root_reservation: Cell::new(false),
             stowed_roots: RefCell::new(Vec::new()),
             code_roots: RefCell::new(HashSet::new()),
             write_barrier_armed: Cell::new(false),
@@ -1352,6 +1382,53 @@ impl MachineState {
 
     // --- persistent roots (session-scoped GC roots, leaf 3) ---------------
 
+    pub(crate) fn try_reserve_persistent_roots(&self, count: usize) -> Result<(), RuntimeError> {
+        #[cfg(test)]
+        if self.fail_next_persistent_root_reservation.replace(false) {
+            return Err(RuntimeError::HeapOverflow);
+        }
+        self.persistent_roots
+            .borrow_mut()
+            .try_reserve(count)
+            .map_err(|_| RuntimeError::HeapOverflow)
+    }
+
+    pub(crate) fn try_reserve_stowed_roots(&self, count: usize) -> Result<(), RuntimeError> {
+        #[cfg(test)]
+        if self.fail_next_stowed_root_reservation.replace(false) {
+            return Err(RuntimeError::HeapOverflow);
+        }
+        self.stowed_roots
+            .borrow_mut()
+            .try_reserve(count)
+            .map_err(|_| RuntimeError::HeapOverflow)
+    }
+
+    pub(crate) fn root_cell_created(&self) {
+        self.root_cells_live.set(self.root_cells_live.get() + 1);
+        #[cfg(test)]
+        self.root_cells_issued
+            .set(self.root_cells_issued.get().saturating_add(1));
+    }
+
+    pub(crate) fn root_cell_destroyed(&self) {
+        self.root_cells_live.set(self.root_cells_live.get() - 1);
+    }
+
+    pub(crate) fn root_cells_live(&self) -> usize {
+        self.root_cells_live.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn root_cell_allocation_counts(&self) -> (usize, u64) {
+        (self.root_cells_live.get(), self.root_cells_issued.get())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn root_removal_probes(&self) -> u64 {
+        self.root_removal_probes.get()
+    }
+
     pub(crate) fn register_persistent_root(&self, slot: *mut *mut u8) {
         self.persistent_roots.borrow_mut().push(slot);
     }
@@ -1366,13 +1443,16 @@ impl MachineState {
     /// remove-by-position semantics (a slot registered once is removed once;
     /// an already-removed slot is a no-op, so release paths that can race a
     /// wholesale teardown stay idempotent). Added for per-runtime-resource-scope release
-    /// (`PreparedMachine::close_realm`): a released value's slot cell stays
-    /// allocated (owned by `OldSpace::slots` for the machine's life — 8 bytes),
-    /// but the GC stops tracing and rewriting it, so the value it pinned can
-    /// be collected once nothing else reaches it.
+    /// (`PreparedMachine::close_realm`). An owned cell deregisters here before
+    /// its backing storage drops; its heap value can then become collectable.
     pub(crate) fn deregister_persistent_root(&self, slot: *mut *mut u8) {
         let mut roots = self.persistent_roots.borrow_mut();
-        if let Some(pos) = roots.iter().position(|&s| s == slot) {
+        if let Some(pos) = roots.iter().position(|&s| {
+            #[cfg(test)]
+            self.root_removal_probes
+                .set(self.root_removal_probes.get().saturating_add(1));
+            s == slot
+        }) {
             roots.remove(pos);
         }
     }
@@ -1437,7 +1517,12 @@ impl MachineState {
     /// child depth pairs each register with exactly one deregister.
     pub(crate) fn deregister_stowed_root(&self, slot: *mut *mut u8) {
         let mut roots = self.stowed_roots.borrow_mut();
-        if let Some(pos) = roots.iter().position(|&s| s == slot) {
+        if let Some(pos) = roots.iter().position(|&s| {
+            #[cfg(test)]
+            self.root_removal_probes
+                .set(self.root_removal_probes.get().saturating_add(1));
+            s == slot
+        }) {
             roots.remove(pos);
         }
     }
