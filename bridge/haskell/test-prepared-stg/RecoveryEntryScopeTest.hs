@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module RecoveryEntryScopeTest (entryScopeTests) where
 
 import Control.Exception (SomeException, finally, try)
