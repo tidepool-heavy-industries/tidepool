@@ -1472,7 +1472,7 @@ fn resident_capture_cells(count: usize, durable: bool) {
     );
     for index in 0..count {
         let source = guarded_integer_capture_source(
-            &format!("{index} + {}", 42_i64 - i64::try_from(index).unwrap()),
+            &format!("{index} + ({})", 42_i64 - i64::try_from(index).unwrap()),
             42,
         );
         assert_eq!(
