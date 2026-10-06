@@ -120,7 +120,7 @@ impl WorkbenchCompilationAuthority {
 pub(crate) struct WorkbenchPublicOwner {
     actor: ActorRef,
     placement: crate::ActorPlacement,
-    durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
+    readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
 }
 
 /// Plain resource owners retained by the existing native continuation entry.
@@ -199,7 +199,7 @@ impl WorkbenchPublicOwner {
     pub(crate) fn issue(
         context: &ActorSessionContext,
         descriptor: &ActorDescriptor,
-        durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
+        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
     ) -> Result<Arc<Self>, KernelInvocationFailure> {
         let refuse = |detail: &str| KernelInvocationFailure::Rejected {
             receipts: Vec::new(),
@@ -211,9 +211,10 @@ impl WorkbenchPublicOwner {
                 "publication owner differs from the admitted actor placement",
             ));
         }
-        match (descriptor.persistence_policy(), &durable) {
+        match (descriptor.persistence_policy(), readiness.as_ref()) {
             (crate::ActorPersistencePolicy::Ephemeral, None) => {}
-            (crate::ActorPersistencePolicy::Durable, Some(owner)) => {
+            (crate::ActorPersistencePolicy::Durable, Some(native)) => {
+                let owner = native.durable_owner();
                 let expected = descriptor.actor_path().and_then(|path| {
                     tidepool_runtime::session::RecoveryPublicOwner::new(
                         path,
@@ -223,6 +224,14 @@ impl WorkbenchPublicOwner {
                 if expected.as_ref() != Some(owner) {
                     return Err(refuse(
                         "durable publication owner differs from canonical actor identity",
+                    ));
+                }
+                if native.session() != context.placement.session
+                    || native.scope() != context.placement.lexical_scope
+                    || !native.is_ready()
+                {
+                    return Err(refuse(
+                        "durable publication owner has no exact native readiness",
                     ));
                 }
             }
@@ -235,12 +244,17 @@ impl WorkbenchPublicOwner {
         Ok(Arc::new(Self {
             actor: context.actor,
             placement: context.placement,
-            durable,
+            readiness,
         }))
     }
 
     pub(crate) fn durable(&self) -> Option<&tidepool_runtime::session::RecoveryPublicOwner> {
-        self.durable.as_ref()
+        self.readiness.as_ref().map(|native| native.durable_owner())
+    }
+    pub(crate) fn is_ready(&self) -> bool {
+        self.readiness
+            .as_ref()
+            .is_none_or(|native| native.is_ready())
     }
 
     pub(crate) fn matches_context(&self, context: &ActorSessionContext) -> bool {

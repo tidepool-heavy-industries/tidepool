@@ -282,7 +282,7 @@ impl SessionLib {
             owner,
             path,
             graph,
-            unconfirmed: None,
+            unconfirmed: Default::default(),
         });
         Ok(())
     }

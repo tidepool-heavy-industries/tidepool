@@ -11,6 +11,37 @@ use tidepool_repr::Generation;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
+/// Read-only native readiness for one originally admitted durable public owner.
+/// The graph owns the confirmation state; losing that graph revokes readiness.
+pub struct RuntimeDurablePublicReadiness {
+    owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    session: super::SessionId,
+    durable: super::RecoveryPublicOwner,
+    scope: ScopeId,
+    confirmation:
+        std::sync::Weak<parking_lot::Mutex<Option<tidepool_atomic_write::PublishedWrite>>>,
+}
+
+impl RuntimeDurablePublicReadiness {
+    pub fn is_ready(&self) -> bool {
+        self.owner.epoch() == self.owner_epoch
+            && self
+                .confirmation
+                .upgrade()
+                .is_some_and(|state| state.lock().is_none())
+    }
+    pub fn session(&self) -> super::SessionId {
+        self.session
+    }
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+    pub fn durable_owner(&self) -> &super::RecoveryPublicOwner {
+        &self.durable
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NativeSetupAdmissionFailure {
     #[error("expected one binderless Bind, items={items}, first={first:?}, binders={binders}")]
@@ -2046,6 +2077,27 @@ impl PersistentSession {
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         self.validate_durable_public_admission(owner, public_scope)?;
         self.begin_private_execution(public_scope)
+    }
+
+    pub fn durable_public_readiness(
+        &self,
+        owner: &super::RecoveryPublicOwner,
+        public_scope: ScopeId,
+    ) -> Result<Arc<RuntimeDurablePublicReadiness>, SessionError> {
+        self.validate_durable_public_admission(owner, public_scope)?;
+        let state = self
+            .lib()
+            .durable_graph
+            .as_ref()
+            .expect("validated durable graph");
+        Ok(Arc::new(RuntimeDurablePublicReadiness {
+            owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
+            session: self.lib().session_id(),
+            durable: owner.clone(),
+            scope: public_scope,
+            confirmation: Arc::downgrade(&state.unconfirmed.0),
+        }))
     }
 
     pub(super) fn validate_durable_public_admission(

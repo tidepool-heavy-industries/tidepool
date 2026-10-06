@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod sequence_tests;
 
+mod activation;
+pub(crate) use activation::RequestActivationCompletion;
+
 mod invocation;
 pub(crate) mod routes;
 pub(crate) mod sources;
@@ -344,6 +347,7 @@ impl From<Option<std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInput
 struct RequestRecord {
     sources: Vec<sources::RequestSourceConnection>,
     updates: Vec<updates::UpdateRecord>,
+    activation: Option<activation::ActivationRecord>,
     owner: ActorRef,
     reservation_owner: Option<RequestReservationOwner>,
     /// Detachment changes lifetime, never the original reservation rollback fence.
@@ -601,6 +605,7 @@ impl RequestStateTable {
             RequestRecord {
                 sources: Vec::new(),
                 updates: Vec::new(),
+                activation: None,
                 owner,
                 reservation_owner,
                 invocation_detached: false,
@@ -1645,6 +1650,8 @@ impl RequestRegistry {
         }
     }
 
+    #[cfg(test)]
+    /// Check the immediate presentation gate without admitting native work.
     /// Publish staged activation work under the same arbitration as requester
     /// cancellation and deadline expiry. The callback must not block or await.
     pub(crate) fn publish_presented_request<R>(
@@ -1678,9 +1685,13 @@ impl RequestRegistry {
         match record.target_state {
             TargetState::Presented => {
                 if record
-                    .updates
-                    .iter()
-                    .any(updates::UpdateRecord::fences_settlement)
+                    .activation
+                    .as_mut()
+                    .is_some_and(activation::ActivationRecord::fences_settlement)
+                    || record
+                        .updates
+                        .iter()
+                        .any(updates::UpdateRecord::fences_settlement)
                 {
                     return Err(ReplyError::UpdatePending);
                 }
@@ -1967,9 +1978,13 @@ impl RequestRegistry {
         // next assignment while old input can still arrive. Cancellation may be
         // requested immediately; acknowledgement waits for presentation ownership.
         if record
-            .updates
-            .iter()
-            .any(updates::UpdateRecord::fences_settlement)
+            .activation
+            .as_mut()
+            .is_some_and(activation::ActivationRecord::fences_settlement)
+            || record
+                .updates
+                .iter()
+                .any(updates::UpdateRecord::fences_settlement)
         {
             return Err(ReplyError::UpdatePending);
         }

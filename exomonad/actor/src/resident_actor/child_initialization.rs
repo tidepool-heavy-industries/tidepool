@@ -11,6 +11,7 @@ pub(super) struct ChildInitializationFrame {
     pub boot: super::ResidentBoot,
     pub lexical: Arc<RuntimeLexicalScopeLease>,
     pub durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
+    pub readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
     pub checkpoint: Option<(
         crate::CheckpointLease,
         Option<crate::HostedCheckpointAttachment>,
@@ -350,6 +351,7 @@ mod tests {
                 boot: super::super::ResidentBoot::Workbench,
                 lexical: release.into_lexical(),
                 durable: None,
+                readiness: None,
                 checkpoint: None,
             },
             session,

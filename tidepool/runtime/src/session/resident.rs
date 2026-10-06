@@ -2768,6 +2768,14 @@ where
         self.state.lib_mut().confirm_recovery_durability()
     }
 
+    pub fn durable_public_readiness(
+        &self,
+        owner: &super::RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<Arc<super::RuntimeDurablePublicReadiness>, SessionError> {
+        self.state.durable_public_readiness(owner, scope)
+    }
+
     pub fn confirm_durable_public_scope(
         &mut self,
         owner: &super::RecoveryPublicOwner,
@@ -3046,25 +3054,36 @@ where
         self.state.revalidate_declaration_rejection(rejected)
     }
 
-    /// Snapshot a host-owned binding write for the existing public-manifest
-    /// publisher. `None` selects an ephemeral surface; it never bypasses an
-    /// initialized durable owner. Staging and publication retain their usual
-    /// exact public/private visibility checks.
+    /// Stage only the original input mounted under this exact private admission.
+    /// Binding promotion retains the producer's native reachability; pure preview
+    /// programs remain private to their detached scope leases.
     pub fn snapshot_host_binding_publication(
         &mut self,
-        owner: Option<super::RecoveryPublicOwner>,
-        public_scope: ScopeId,
-        private_scope: ScopeId,
-        writes: Vec<SessionVarId>,
-    ) -> Result<super::PublicManifestBase, SessionError> {
+        execution: &super::PrivateExecutionAdmission,
+        input: &RuntimeActivationPreviewAdmission,
+    ) -> Result<super::PublicManifestBase, ResidentError> {
         self.settle_dropped_custody();
-        self.state.snapshot_publication_target(
-            owner,
-            public_scope,
-            private_scope,
-            writes,
+        self.state.compile_view_for_execution(execution)?;
+        self.validate_mounted_activation_input(&input.mounted)?;
+        if input.mounted.scope != execution.private_scope()
+            || !Arc::ptr_eq(&input.owner, self.state.admission_owner())
+            || input.owner_epoch != self.state.admission_owner().epoch()
+            || self
+                .current_decl_heads_in(execution.admitted_public().scope)
+                .iter()
+                .any(|(name, _)| name == "sessionInput")
+        {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: input.mounted.binding,
+            });
+        }
+        Ok(self.state.snapshot_publication_target(
+            execution.durable_owner.clone(),
+            execution.admitted_public().scope,
+            execution.private_scope(),
+            vec![input.mounted.binding],
             Vec::new(),
-        )
+        )?)
     }
 
     pub fn publish_staged_public_manifest(
@@ -3073,6 +3092,15 @@ where
         decision: &Arc<super::PublicationDecision>,
     ) -> Result<super::PublicManifestCommit, SessionError> {
         self.state.publish_staged_public_manifest(ticket, decision)
+    }
+
+    pub fn publish_staged_public_manifest_admitted(
+        &mut self,
+        ticket: super::StagedPublicManifest,
+        claim: impl FnOnce() -> Option<super::PublicationClaim>,
+    ) -> Result<super::PublicManifestCommit, SessionError> {
+        self.state
+            .publish_staged_public_manifest_admitted(ticket, claim)
     }
 
     /// Admit one compiler-certified target and its demanded source closure
@@ -9774,6 +9802,102 @@ mod authored_publication_tests {
             )
             .unwrap_err();
         assert_published_and_confirm_only(&mut session, root.path(), &error);
+    }
+
+    #[test]
+    fn authored_native_readiness_shares_confirmation_and_rejects_transferred_epoch() {
+        use std::os::unix::fs::PermissionsExt;
+        struct RunOwner {
+            root: PathBuf,
+            _lock: std::fs::File,
+        }
+        impl crate::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_owned_recovery_graph_v3(
+            root.path().join("declarations.json"),
+            Arc::new(RunOwner {
+                root: root.path().canonicalize().unwrap(),
+                _lock: lock,
+            }),
+        )
+        .unwrap();
+        let mut session =
+            ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = crate::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/authored").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .initialize_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let readiness = session.durable_public_readiness(&owner, public).unwrap();
+        let sibling_scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let sibling_owner = crate::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/sibling").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .initialize_durable_public_scope(sibling_owner.clone(), sibling_scope)
+            .unwrap();
+        let sibling = session
+            .durable_public_readiness(&sibling_owner, sibling_scope)
+            .unwrap();
+        session.state.lib_mut().fail_recovery_durability_once = true;
+        let error = session
+            .define_scoped_with_imports_in(
+                public,
+                &["answer :: Int\nanswer = 42"],
+                &SourceImports::new(),
+            )
+            .unwrap_err();
+        assert!(error.published_declaration_commit().is_some());
+        assert!(!readiness.is_ready());
+        assert!(!sibling.is_ready());
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        assert!(session
+            .confirm_durable_public_scope(&owner, public)
+            .is_err());
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!readiness.is_ready());
+        assert!(!sibling.is_ready());
+        session
+            .confirm_durable_public_scope(&owner, public)
+            .unwrap();
+        assert!(readiness.is_ready());
+        assert!(sibling.is_ready());
+        let next = session
+            .state
+            .prepare_execution_admission_epoch_advance()
+            .unwrap();
+        session
+            .state
+            .invalidate_execution_admissions_after_owner_transfer(next);
+        assert!(!readiness.is_ready());
+        assert!(!sibling.is_ready());
+        let current = session.durable_public_readiness(&owner, public).unwrap();
+        assert!(current.is_ready());
+        drop(session);
+        assert!(!current.is_ready());
     }
 }
 

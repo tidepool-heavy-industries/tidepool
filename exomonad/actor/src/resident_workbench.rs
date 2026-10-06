@@ -1420,6 +1420,9 @@ where
 #[cfg(test)]
 pub(crate) enum ActivationPublicationObservation<'a> {
     InputMounted(&'a tidepool_runtime::session::MountedActivationInput),
+    NativeClaimed,
+    BeforeConfirmation,
+    NativeSettled(&'a tidepool_runtime::session::PublicManifestCommit),
     ToolsPrepared {
         tools: std::sync::Weak<ResidentWorkbenchTools>,
         dispatch: std::sync::Weak<RootCustody>,
@@ -1825,6 +1828,50 @@ impl Drop for ChildSessionStartupLease {
             discard();
         }
     }
+}
+
+pub(crate) struct PreparedActivationInput {
+    pub(crate) input_preview: String,
+    pub(crate) reply_preview: String,
+    pub(crate) binding: tidepool_repr::SessionVarId,
+    admission: Arc<tidepool_runtime::session::RuntimeActivationPreviewAdmission>,
+    execution: Arc<ExecutionPrivateScope>,
+}
+
+impl PreparedActivationInput {
+    fn publication_resources(&self) -> Arc<ActivationPublicationResources> {
+        Arc::new(ActivationPublicationResources {
+            execution: self.execution.clone(),
+            input: self.admission.clone(),
+        })
+    }
+}
+
+impl std::fmt::Debug for PreparedActivationInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedActivationInput")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct ActivationPublicationResources {
+    execution: Arc<ExecutionPrivateScope>,
+    input: Arc<tidepool_runtime::session::RuntimeActivationPreviewAdmission>,
+}
+
+impl ActivationPublicationResources {
+    pub(crate) fn confirmed(&self) -> bool {
+        self.execution.owner.is_ready()
+    }
+}
+
+pub(crate) enum ActivationInputPublication {
+    Published(crate::request::RequestActivationCompletion),
+    Cancelled,
+    BeforeRename { detail: String },
+    PublishedUnconfirmed { detail: String },
 }
 
 pub(crate) struct ExecutionPrivateScope {
@@ -2765,6 +2812,11 @@ fn write_seed_source(path: &std::path::Path, source: &str) -> Result<(), String>
 }
 
 impl<H, O> ResidentActorRunner<H, O> {
+    #[cfg(test)]
+    pub(crate) fn machines_for_test(&self) -> &Arc<ActorMachineRegistry<H, O>> {
+        &self.access.machines
+    }
+
     #[must_use]
     pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
         Self {
@@ -3453,12 +3505,6 @@ pub enum ResidentActorWorkbenchError {
         #[source]
         source: Box<ResidentActorWorkbenchError>,
     },
-    #[error("activation binding {binding:?} publication was refused ({primary:?}); binding cleanup failed: {cleanup}")]
-    ActivationPublicationCleanup {
-        binding: tidepool_repr::SessionVarId,
-        primary: Option<Box<ResidentActorWorkbenchError>>,
-        cleanup: Box<ResidentActorWorkbenchError>,
-    },
     #[error("pure activation preview suspended; parked continuation cleanup failure: {cleanup:?}")]
     ActivationPreviewSuspended { cleanup: Option<ResidentError> },
     #[error("could not inspect the saved value: {0}")]
@@ -3509,12 +3555,6 @@ impl ResidentActorWorkbenchError {
         match self {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),
-            Self::ActivationPublicationCleanup {
-                primary, cleanup, ..
-            } => primary
-                .as_ref()
-                .and_then(|error| error.failure_diagnostic())
-                .or_else(|| cleanup.failure_diagnostic()),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
@@ -4449,19 +4489,6 @@ where
         })
     }
 
-    pub(crate) async fn retire_activation_input(
-        &self,
-        context: crate::ActorSessionContext,
-        binding: tidepool_repr::SessionVarId,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session.retire_binding_owner(binding);
-                Ok(())
-            })
-            .await
-    }
-
     /// Commit the original input through a fresh thin interface, then prepare
     /// its pure display against the original executable owners.
     #[tracing::instrument(target = "exomonad_actor::workbench_phase", name = "activation_input_prepare", skip_all, fields(actor = %context.actor))]
@@ -4472,7 +4499,22 @@ where
         reply_type: String,
         reply_declaration: Option<String>,
         reply_declaration_modules: Vec<String>,
-    ) -> Result<(String, String, tidepool_repr::SessionVarId), ResidentActorWorkbenchError> {
+    ) -> Result<PreparedActivationInput, ResidentActorWorkbenchError> {
+        let private_owner = self.private_execution.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "activation input requires its original private execution".into(),
+            )
+        })?;
+        let mut public_context = context.clone();
+        public_context.placement.lexical_scope = private_owner.public_scope;
+        if context.placement.lexical_scope != private_owner.private_scope
+            || !private_owner.owner.matches_context(&public_context)
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "activation input differs from its exact private owner".into(),
+            ));
+        }
+        let execution = private_owner.clone();
         let reply_declaration = reply_declaration.filter(|_| {
             reply_declaration_modules.iter().any(|module| {
                 declaration_worth_showing(module, &self.access.source.workspace_modules)
@@ -4491,6 +4533,10 @@ where
                     ActivationPreviewCompilation,
                 };
                 use tidepool_toolchain::activation_preview::ActivationPreviewDisposition;
+                let _private_owner = private_owner;
+                session
+                    .compile_view_for_execution(&_private_owner.admission)
+                    .map_err(ResidentError::Session)?;
                 reject_activation_declaration(session, context.placement.lexical_scope)?;
                 let owner = session
                     .admit_activation_input_in(context.placement.lexical_scope, input)
@@ -4530,7 +4576,7 @@ where
                 let budget = ACTIVATION_INPUT_LIMIT as u64;
                 let template = assemble_activation_preview_module(budget);
                 let compiled = match compile_activation_preview(
-                    admission,
+                    admission.clone(),
                     &template,
                     budget,
                     &prepared.include,
@@ -4540,7 +4586,7 @@ where
                         let unavailable = ActivationPreviewOutcome::Unavailable(
                             ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable,
                         );
-                        return Ok((unavailable, binding));
+                        return Ok((unavailable, binding, admission));
                     }
                     Err(failure) if matches!(failure.error, CompileError::Diagnostics(_)) => {
                         return Ok((
@@ -4548,6 +4594,7 @@ where
                                 ActivationPreviewUnavailable::Language,
                             ),
                             binding,
+                            admission,
                         ));
                     }
                     Err(failure) => {
@@ -4558,7 +4605,7 @@ where
                     }
                 };
                 if compiled.proof().disposition() == ActivationPreviewDisposition::Opaque {
-                    return Ok((ActivationPreviewOutcome::Opaque, binding));
+                    return Ok((ActivationPreviewOutcome::Opaque, binding, admission));
                 }
                 let preview = match session.run_activation_preview(compiled) {
                     Ok(
@@ -4593,10 +4640,10 @@ where
                         return Err(committed(ResidentActorWorkbenchError::Resident(error)))
                     }
                 };
-                Ok((preview, binding))
+                Ok((preview, binding, admission))
             })
             .await?;
-        let (preview, input_binding) = preview;
+        let (preview, input_binding, admission) = preview;
         let input = match preview {
             ActivationPreviewOutcome::Rendered { text, omitted } => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "display sessionInput",
@@ -4616,11 +4663,18 @@ where
             // model construct one.
             None => String::new(),
         };
-        Ok((
-            input,
-            bounded_activation_text(reply, 4 * 1024, false, &format!("lookup {reply_type}")),
-            input_binding,
-        ))
+        Ok(PreparedActivationInput {
+            input_preview: input,
+            reply_preview: bounded_activation_text(
+                reply,
+                4 * 1024,
+                false,
+                &format!("lookup {reply_type}"),
+            ),
+            binding: input_binding,
+            admission,
+            execution,
+        })
     }
 
     /// Prepare a private cell through its original source and execution admission.
@@ -6893,6 +6947,25 @@ where
             .await
     }
 
+    pub(crate) async fn durable_public_readiness(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> Result<
+        Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+        ResidentActorWorkbenchError,
+    > {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .durable_public_readiness(&owner, context.placement.lexical_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
     pub(crate) async fn begin_public_bootstrap(
         &self,
         context: crate::ActorSessionContext,
@@ -7042,6 +7115,144 @@ where
                 })
             })
             .await
+    }
+
+    /// Native ownership includes both private input and request fence. Every
+    /// blocking operation settles before returning to a possibly absent waiter.
+    pub(crate) async fn publish_activation_input(
+        &self,
+        context: crate::ActorSessionContext,
+        input: &PreparedActivationInput,
+        requests: Arc<crate::RequestRegistry>,
+        request: crate::RequestId,
+        retirement: crate::RetainedActorExit,
+        #[cfg(test)] observer: Option<ActivationPublicationObserver>,
+    ) -> Result<ActivationInputPublication, ResidentActorWorkbenchError> {
+        let execution = input.execution.clone();
+        let mut public_context = context.clone();
+        public_context.placement.lexical_scope = execution.public_scope;
+        if context.placement.lexical_scope != execution.private_scope
+            || !execution.owner.matches_context(&public_context)
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "activation publication differs from its original private and public owner".into(),
+            ));
+        }
+        let resources = input.publication_resources();
+        loop {
+            let snapshot_resources = resources.clone();
+            let baseline = self
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    session
+                        .snapshot_host_binding_publication(
+                            &snapshot_resources.execution.admission,
+                            &snapshot_resources.input,
+                        )
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                })
+                .await?;
+            let stage_resources = resources.clone();
+            let ticket = spawn_blocking_in_span(move || {
+                let _native_owner = stage_resources;
+                baseline.stage()
+            })
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)?
+            .map_err(ResidentError::Session)?;
+            let native_resources = resources.clone();
+            let native_requests = requests.clone();
+            let native_retirement = retirement.clone();
+            let actor = context.actor;
+            #[cfg(test)]
+            let native_observer = observer.clone();
+            let publication = self.access.with_machine(context.clone(), move |session, _, _| {
+                let mut activation = None;
+                let mut refusal = None;
+                let mut retired = None;
+                let outcome = session.publish_staged_public_manifest_admitted(ticket, || {
+                    let admitted = native_requests.begin_activation_publication(
+                        actor, request, native_resources.clone(), || {
+                            let mut claim = None;
+                            match native_retirement.claim_before_shutdown(|| {
+                                claim = native_resources.execution.decision.claim_commit();
+                                claim.is_some()
+                            }) {
+                                Ok(_) => claim,
+                                Err(terminal) => { retired = Some(terminal); None }
+                            }
+                        },
+                    );
+                    match admitted {
+                        Ok(Some((claim, lease))) => {
+                            activation = Some(lease);
+                            #[cfg(test)]
+                            if let Some(observer) = &native_observer {
+                                observer(ActivationPublicationObservation::NativeClaimed)
+                                    .expect("native publication observer must release its phase");
+                            }
+                            Some(claim)
+                        }
+                        Ok(None) => None,
+                        Err(error) => { refusal = Some(error); None }
+                    }
+                }).map_err(ResidentError::Session)?;
+                let completion = activation.map(|lease| lease.finish_native(&outcome));
+                // Confirm the same visible native owner while this operation still
+                // owns its checkout/fence. No JoinHandle delivery is required.
+                let outcome = if matches!(outcome,
+                    tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+                ) {
+                    #[cfg(test)]
+                    if let Some(observer) = &native_observer {
+                        observer(ActivationPublicationObservation::BeforeConfirmation)
+                            .expect("confirmation observer must release its phase");
+                    }
+                    let owner = native_resources.execution.owner.durable()
+                        .expect("only a durable owner needs confirmation");
+                    match session.confirm_durable_public_scope(owner, native_resources.execution.public_scope) {
+                        Ok(()) => {
+                            completion.as_ref().expect("visible commit retains exact request lease").confirm_native();
+                            tidepool_runtime::session::PublicManifestCommit::Durable
+                        }
+                        Err(error) => {
+                            let tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } = outcome
+                                else { unreachable!() };
+                            tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+                                detail: format!("{detail}; confirmation failed: {error}"),
+                            }
+                        }
+                    }
+                } else { outcome };
+                #[cfg(test)]
+                if let Some(observer) = &native_observer {
+                    observer(ActivationPublicationObservation::NativeSettled(&outcome))
+                        .expect("native settlement observer must release its phase");
+                }
+                if let Some(terminal) = retired {
+                    return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal));
+                }
+                if let Some(error) = refusal {
+                    if error != crate::ReplyError::CancellationRequested {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "activation native claim refused: {error:?}"
+                        )));
+                    }
+                }
+                Ok((outcome, completion))
+            }).await?;
+            return Ok(match publication {
+                (tidepool_runtime::session::PublicManifestCommit::Stale, _) => continue,
+                (tidepool_runtime::session::PublicManifestCommit::Durable
+                    | tidepool_runtime::session::PublicManifestCommit::Ephemeral, completion) =>
+                    ActivationInputPublication::Published(completion.expect("native visible claim issued its request completion")),
+                (tidepool_runtime::session::PublicManifestCommit::Cancelled, _) => ActivationInputPublication::Cancelled,
+                (tidepool_runtime::session::PublicManifestCommit::BeforeRename { detail }, _) =>
+                    ActivationInputPublication::BeforeRename { detail },
+                (tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }, _) =>
+                    ActivationInputPublication::PublishedUnconfirmed { detail },
+            });
+        }
     }
 
     /// Complete only the directory durability confirmation for an already
@@ -17649,7 +17860,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             root: durable.path().canonicalize().unwrap(),
             _lock: lock,
         });
-        let (mut session, context, source, inputs, _root) = activation_input_fixture(|lib| {
+        let (mut session, mut context, source, inputs, _root) = activation_input_fixture(|lib| {
             lib.attach_owned_recovery_graph_v3(&manifest, authority)
                 .unwrap();
         });
@@ -17657,6 +17868,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let durable_owner =
             tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
                 .unwrap();
+        context.placement.lexical_scope = session.mint_scope(ScopeId::ROOT).unwrap();
         let public_scope = context.placement.lexical_scope;
         session
             .initialize_durable_public_scope(durable_owner.clone(), public_scope)
@@ -17667,7 +17879,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
             &context,
             &descriptor,
-            Some(durable_owner.clone()),
+            Some(
+                session
+                    .durable_public_readiness(&durable_owner, public_scope)
+                    .unwrap(),
+            ),
         )
         .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
@@ -17684,17 +17900,68 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .begin_public_bootstrap(context.clone(), owner.clone())
                 .await
                 .unwrap();
-            let (_, _, binding) = workbench
-                .mount_activation_input(context.clone(), input, "()".into(), None, vec![])
-                .await
-                .unwrap();
+            let runner = workbench_runner_for_test(&workbench);
             assert_eq!(
-                workbench_runner_for_test(&workbench)
+                runner
                     .publish_public_bootstrap(context.clone(), owner.clone(), bootstrap)
                     .await
                     .unwrap(),
                 tidepool_runtime::session::PublicManifestCommit::Durable
             );
+            let execution = Arc::new(
+                runner
+                    .begin_private_execution(
+                        context.clone(),
+                        owner.clone(),
+                        tidepool_runtime::session::PublicationDecision::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            let mut private_context = context.clone();
+            private_context.placement.lexical_scope = execution.private_scope;
+            let private_workbench = ResidentActorWorkbench::new(
+                workbench.access.machines.clone(),
+                workbench.access.source.clone(),
+                None,
+            )
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(
+                    private_context.clone(),
+                ),
+            )
+            .with_private_execution(execution);
+            let prepared = private_workbench
+                .mount_activation_input(private_context.clone(), input, "()".into(), None, vec![])
+                .await
+                .unwrap();
+            let binding = prepared.binding;
+            let requests = Arc::new(crate::RequestRegistry::default());
+            let requester = crate::ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
+            let request = requests.reserve(requester, context.actor);
+            requests
+                .mark_queued(requester, context.actor, request)
+                .unwrap();
+            requests
+                .present_with_progress_type(context.actor, request, None)
+                .unwrap();
+            let retirement = crate::RetainedActorExit::default();
+            assert!(matches!(
+                runner
+                    .publish_activation_input(
+                        private_context,
+                        &prepared,
+                        requests,
+                        request,
+                        retirement,
+                        None
+                    )
+                    .await
+                    .unwrap(),
+                ActivationInputPublication::Published(_)
+            ));
+            drop(prepared);
+            drop(private_workbench);
             assert_ne!(std::fs::read(&manifest).unwrap(), before_manifest);
             assert_ne!(previous, Some(binding));
             let expected = durable_owner.clone();
@@ -17766,8 +18033,24 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
+        let descriptor = crate::ActorDescriptor::new("reserved input fixture", context.placement);
+        let owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+            .unwrap();
+        let execution = Arc::new(
+            workbench_runner_for_test(&workbench)
+                .begin_private_execution(
+                    context.clone(),
+                    owner,
+                    tidepool_runtime::session::PublicationDecision::new(),
+                )
+                .await
+                .unwrap(),
+        );
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = execution.private_scope;
+        let workbench = workbench.with_private_execution(execution);
         let error = workbench
-            .mount_activation_input(context.clone(), inputs.remove(0), "()".into(), None, vec![])
+            .mount_activation_input(private_context, inputs.remove(0), "()".into(), None, vec![])
             .await
             .unwrap_err();
         assert!(

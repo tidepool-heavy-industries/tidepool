@@ -64,7 +64,7 @@ pub use admission::{
     NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
     PrivateExecutionAdmission, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
-    RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
+    RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -79,7 +79,9 @@ pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedFailureStage, PreparedRuntimeError,
     PreparedSettlement, RealmId, RequestCompileAnnotations, RuntimeCompileInputs, SiteTypeEvidence,
 };
-pub use publication::{PublicationCancellation, PublicationDecision, PublicationPhase};
+pub use publication::{
+    PublicationCancellation, PublicationClaim, PublicationDecision, PublicationPhase,
+};
 // Composition roots wire the sessions' shared immutable native image cache
 // through [`resident::ResidentSession::set_image_registry`].
 pub use tidepool_codegen::prepared_program::ImageRegistry;
@@ -797,13 +799,42 @@ pub struct SessionLib {
     fail_recovery_durability_once: bool,
 }
 
+/// The actual native manifest confirmation state, shared by read-only owner
+/// readiness capabilities. A pending receipt remains here throughout fsync.
+#[derive(Default)]
+struct RecoveryDurability(
+    std::sync::Arc<parking_lot::Mutex<Option<tidepool_atomic_write::PublishedWrite>>>,
+);
+
+impl RecoveryDurability {
+    fn is_some(&self) -> bool {
+        self.0.lock().is_some()
+    }
+    #[cfg(test)]
+    fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+    fn set(&self, publication: tidepool_atomic_write::PublishedWrite) {
+        *self.0.lock() = Some(publication);
+    }
+    fn confirm(&self) -> Result<(), tidepool_atomic_write::WriteError> {
+        let publication = self.0.lock().clone();
+        if let Some(publication) = publication {
+            publication.confirm_durability()?;
+            // Native checkout serializes all writes and confirmations.
+            *self.0.lock() = None;
+        }
+        Ok(())
+    }
+}
+
 struct DurableDeclarationGraph {
     owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
     path: PathBuf,
     graph: recovery::RecoveryGraph,
     /// A visible rename whose directory sync still needs confirmation. The
     /// high-water identity is already burned, even while success is withheld.
-    unconfirmed: Option<tidepool_atomic_write::PublishedWrite>,
+    unconfirmed: RecoveryDurability,
 }
 
 /// Exact declaration module prepared for cell compilation without advancing
@@ -1219,7 +1250,7 @@ impl SessionLib {
                 detail,
             } => {
                 state.graph = graph;
-                state.unconfirmed = Some(publication);
+                state.unconfirmed.set(publication);
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
         };
@@ -1307,7 +1338,7 @@ impl SessionLib {
             } => {
                 state.graph = graph;
                 self.log.commit_reservations(prepared);
-                state.unconfirmed = Some(publication);
+                state.unconfirmed.set(publication);
                 Err(SessionError::RecoveryManifest {
                     path: state.path.clone(),
                     detail,
@@ -1379,7 +1410,7 @@ impl SessionLib {
             } => {
                 state.graph = graph;
                 self.log = initialized_log;
-                state.unconfirmed = Some(publication);
+                state.unconfirmed.set(publication);
                 Err(SessionError::RecoveryManifest {
                     path: state.path.clone(),
                     detail,
@@ -1404,15 +1435,13 @@ impl SessionLib {
                 path: self.root.clone(),
                 detail: "v2 recovery graph is not attached".into(),
             })?;
-        if let Some(publication) = &state.unconfirmed {
-            publication
-                .confirm_durability()
-                .map_err(|error| SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: error.to_string(),
-                })?;
-            state.unconfirmed = None;
-        }
+        state
+            .unconfirmed
+            .confirm()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: error.to_string(),
+            })?;
         Ok(())
     }
 
@@ -2180,7 +2209,7 @@ impl SessionLib {
                     detail,
                 } => {
                     state.graph = graph;
-                    state.unconfirmed = Some(publication);
+                    state.unconfirmed.set(publication);
                     Some(detail)
                 }
             }

@@ -1631,13 +1631,16 @@ fn settle_root_public_owner_record(
     context: &ActorSessionContext,
     expected_owner: &tidepool_runtime::session::RecoveryPublicOwner,
     outcome: &tidepool_runtime::session::PublicManifestCommit,
+    readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
 ) -> Result<(), ResidentActorWorkbenchError> {
     if record.terminal.is_some()
         || record.descriptor.placement() != context.placement
-        || !matches!(&record.public_owner,
+        || !(matches!(&record.public_owner,
                 ActorPublicOwnerPlane::DurablePending(owner)
                 | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner, .. }
                 if owner == expected_owner)
+            || matches!(&record.public_owner, ActorPublicOwnerPlane::DurableReady(owner)
+                if owner.durable() == Some(expected_owner)))
     {
         return Err(ResidentActorWorkbenchError::ActorProtocol(
             "root public settlement requires its original pending owner".into(),
@@ -1645,13 +1648,19 @@ fn settle_root_public_owner_record(
     }
     match outcome {
         tidepool_runtime::session::PublicManifestCommit::Durable => {
+            if let ActorPublicOwnerPlane::DurableReady(owner) = &record.public_owner {
+                return if owner.is_ready() {
+                    Ok(())
+                } else {
+                    Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "original native readiness remains unavailable after confirmation".into(),
+                    ))
+                };
+            }
             record.public_owner = ActorPublicOwnerPlane::DurableReady(
-                WorkbenchPublicOwner::issue(
-                    context,
-                    &record.descriptor,
-                    Some(expected_owner.clone()),
-                )
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?,
+                WorkbenchPublicOwner::issue(context, &record.descriptor, readiness).map_err(
+                    |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                )?,
             );
         }
         tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
@@ -1688,7 +1697,8 @@ enum ActorPublicOwnerPlane {
 impl ActorPublicOwnerPlane {
     fn ready(&self) -> Option<&Arc<WorkbenchPublicOwner>> {
         match self {
-            Self::Ephemeral(owner) | Self::DurableReady(owner) => Some(owner),
+            Self::Ephemeral(owner) | Self::DurableReady(owner) if owner.is_ready() => Some(owner),
+            Self::Ephemeral(_) | Self::DurableReady(_) => None,
             Self::DurablePending(_) | Self::DurablePublishedUnconfirmed { .. } => None,
         }
     }
@@ -1758,7 +1768,9 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
              admitted"
         }
         ReplyError::AlreadySettled => "a request this watch names has already settled",
-        ReplyError::UpdatePending => "a request this watch names has an update in flight",
+        ReplyError::UpdatePending => {
+            "a request this watch names has request input publication in flight"
+        }
         ReplyError::ProgressTypeMismatch => {
             "a request this watch names has an incompatible progress type"
         }
@@ -1769,7 +1781,7 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
 /// What an actor sees when its own reply or cancellation acknowledgement for
 /// `request` cannot settle.
 ///
-/// An update in flight is refused, not held. The requester's update reaches
+/// Input publication in flight is refused, not held. The requester's update reaches
 /// the target's model only as provider input between model rounds, so a hold
 /// inside the cell would hold the very tool call that has to end before the
 /// update can be delivered. Settling once presentation is confirmed would
@@ -1789,10 +1801,8 @@ fn settlement_refusal(
     let request = request.0;
     let detail = match error {
         ReplyError::UpdatePending => format!(
-            "your parent sent an update to request {request} that has not been shown to you \
-             yet. Queued messages are shown only when your turn ends, one per turn end: end \
-             your turn now, read the update, then send this again (changed if the update \
-             asks for it). Sending it again before then is refused the same way"
+            "request {request} has input publication in flight or awaiting confirmation. \
+             End your turn so queued input can be shown, then retry once publication is confirmed"
         ),
         ReplyError::CancellationRequested => {
             format!("request {request} is being cancelled; acknowledge the cancellation instead")
@@ -7722,11 +7732,6 @@ where
                     "request presentation was rejected: {error:?}"
                 ))
             })?;
-        if cancellation.is_some() {
-            drop(hole);
-            drop(input);
-            return Ok(InteractivePark::Cancelled(request.request));
-        }
         let already_installed = self.policy_installed;
         let (owner, bootstrap, prepared_installation) = match prepared {
             Some(prepared) => (
@@ -7744,6 +7749,27 @@ where
                 (owner, bootstrap, None)
             }
         };
+        // Application-native bootstrap has its own completed surface. Request
+        // preparation begins only after that exact durable owner is admissible.
+        self.publish_application_surface(kernel, context, owner.clone(), bootstrap)
+            .await?;
+        if cancellation.is_some() {
+            drop(hole);
+            drop(input);
+            return Ok(InteractivePark::Cancelled(request.request));
+        }
+        let private = Arc::new(
+            self.environment
+                .runner
+                .begin_private_execution(
+                    context.clone(),
+                    owner.clone(),
+                    tidepool_runtime::session::PublicationDecision::new(),
+                )
+                .await?,
+        );
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = private.private_scope;
         let installed_tools = prepared_installation
             .as_ref()
             .and_then(|installation| installation.prepared_tools.clone())
@@ -7753,7 +7779,7 @@ where
             None => self.freeze_installed_source(context.actor)?,
         };
         let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
-            context.clone(),
+            private_context.clone(),
             activation_source.clone(),
             installed_tools,
             self.environment.source_layers.as_ref(),
@@ -7767,7 +7793,8 @@ where
                 request.request,
                 request.type_evidence.clone(),
             )
-            .with_compilation_authority(authority);
+            .with_compilation_authority(authority)
+            .with_private_execution(private.clone());
         #[cfg(test)]
         let workbench = {
             let mut workbench = workbench;
@@ -7783,26 +7810,10 @@ where
                 request.response.declaration_modules.clone(),
             )
             .await;
-        let (input_preview, reply_preview, input_binding) = match mounted {
-            Ok(mounted) => mounted,
-            Err(error) => {
-                let binding = match &error {
-                    ResidentActorWorkbenchError::ActivationBindingCommitted { binding, .. } => {
-                        Some(*binding)
-                    }
-                    _ => None,
-                };
-                drop(workbench);
-                drop(prepared_installation);
-                return match binding {
-                    Some(binding) => {
-                        self.retire_unpublished_activation_input(context, binding, Err(error))
-                            .await
-                    }
-                    None => Err(error),
-                };
-            }
-        };
+        let mut input = mounted?;
+        let input_binding = input.binding;
+        let input_preview = std::mem::take(&mut input.input_preview);
+        let reply_preview = std::mem::take(&mut input.reply_preview);
         let result = async {
             let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
             let contract = crate::interactive_session::ActivationContract {
@@ -7826,7 +7837,7 @@ where
                 None if !self.policy_installed => Some(
                     self.prepare_interactive_policy_from_source(
                         kernel,
-                        context,
+                        &private_context,
                         Some(request_message.clone()),
                         activation_source,
                     )
@@ -7834,12 +7845,42 @@ where
                 ),
                 None => None,
             };
-            self.publish_application_surface(kernel, context, owner, bootstrap)
-                .await?;
-            self.check_application_readiness(kernel, context)?;
             let request_id = request.request;
-            let requests = Arc::clone(&self.environment.requests);
-            let publication = requests.publish_presented_request(context.actor, request_id, || {
+            let native = self
+                .environment
+                .runner
+                .publish_activation_input(
+                    private_context.clone(),
+                    &input,
+                    self.environment.requests.clone(),
+                    request_id,
+                    kernel.retained_exit(),
+                    #[cfg(test)]
+                    self.activation_preview_observer.clone(),
+                )
+                .await?;
+            let completion = match native {
+                crate::resident_workbench::ActivationInputPublication::Published(completion) => {
+                    completion
+                }
+                crate::resident_workbench::ActivationInputPublication::Cancelled => {
+                    return Ok(InteractivePark::Cancelled(request_id));
+                }
+                crate::resident_workbench::ActivationInputPublication::PublishedUnconfirmed {
+                    detail,
+                } => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "activation native publication durability remains unconfirmed: {detail}"
+                    )));
+                }
+                crate::resident_workbench::ActivationInputPublication::BeforeRename { detail } => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "activation native publication did not commit: {detail}"
+                    )))
+                }
+            };
+            self.check_application_readiness(kernel, context)?;
+            let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
                     if let Some(installation) = installation {
                         self.publish_interactive_installation(installation);
@@ -7908,36 +7949,8 @@ where
             }
         }
         .await;
-        if !matches!(&result, Ok(InteractivePark::Parked)) {
-            // Preview authority may borrow a newly staged installation. Release
-            // it before retiring the input and its queued implementation leases.
-            drop(workbench);
-            return self
-                .retire_unpublished_activation_input(context, input_binding, result)
-                .await;
-        }
-        result
-    }
-
-    async fn retire_unpublished_activation_input(
-        &self,
-        context: &ActorSessionContext,
-        binding: tidepool_repr::SessionVarId,
-        result: Result<InteractivePark, ResidentActorWorkbenchError>,
-    ) -> Result<InteractivePark, ResidentActorWorkbenchError> {
-        if let Err(cleanup) = self
-            .environment
-            .runner
-            .application_workbench()
-            .retire_activation_input(context.clone(), binding)
-            .await
-        {
-            return Err(ResidentActorWorkbenchError::ActivationPublicationCleanup {
-                binding,
-                primary: result.err().map(Box::new),
-                cleanup: Box::new(cleanup),
-            });
-        }
+        // Native claim wins. A late cancellation/retirement suppresses provider
+        // activation but cannot withdraw its already promoted exact input.
         result
     }
 
@@ -8069,23 +8082,6 @@ where
             detail,
         } = commit
         {
-            let durable = owner
-                .durable()
-                .expect("unconfirmed durable publication")
-                .clone();
-            if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
-                if record.descriptor.placement() == context.placement
-                    && record
-                        .public_owner
-                        .ready()
-                        .is_some_and(|current| Arc::ptr_eq(current, &owner))
-                {
-                    record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
-                        owner: durable,
-                        detail: detail.clone(),
-                    };
-                }
-            }
             return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                 "native bootstrap public surface remains durably unconfirmed: {detail}",
             )));
@@ -8315,6 +8311,7 @@ where
             boot,
             lexical,
             durable,
+            readiness: None,
             checkpoint: self.admitted_checkpoint.clone(),
         };
         Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
@@ -8361,16 +8358,34 @@ where
             let retirement = kernel.retained_exit();
             return Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
                 Box::pin(async move {
+                    let mut frame = frame;
                     let started = std::time::Instant::now();
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, phase = "child_durable_initialization_started", "actor phase");
                     let result = runner
                         .initialize_fork_child_public_owner(
                             frame.context.clone(),
-                            owner,
+                            owner.clone(),
                             Arc::clone(&frame.lexical),
                             retirement,
                         )
                         .await;
+                    let result = if matches!(
+                        result,
+                        Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+                    ) {
+                        match runner
+                            .durable_public_readiness(frame.context.clone(), owner)
+                            .await
+                        {
+                            Ok(readiness) => {
+                                frame.readiness = Some(readiness);
+                                result
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        result
+                    };
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durable_initialization_returned", "actor phase");
                     crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
                         behavior.advance_child_public_initialization(kernel, frame, result)
@@ -8478,8 +8493,12 @@ where
             ));
         }
         record.public_owner = ActorPublicOwnerPlane::DurableReady(
-            WorkbenchPublicOwner::issue(&frame.context, &record.descriptor, Some(owner))
-                .map_err(|error| Self::invocation_failure(kernel.identity(), error))?,
+            WorkbenchPublicOwner::issue(
+                &frame.context,
+                &record.descriptor,
+                frame.readiness.clone(),
+            )
+            .map_err(|error| Self::invocation_failure(kernel.identity(), error))?,
         );
         Ok(())
     }
@@ -8560,6 +8579,7 @@ where
         let runner = self.environment.runner.clone();
         let retirement = kernel.retained_exit();
         crate::OwnedActorTask::new(Box::pin(async move {
+            let mut pending = pending;
             let owner = pending
                 .frame
                 .durable
@@ -8591,6 +8611,20 @@ where
                     terminal = retirement.wait_requested_shutdown() => break Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
                     _ = tokio::time::sleep(std::time::Duration::from_millis(25 * attempts)) => {},
                 }
+            };
+            let result = if result.is_ok() {
+                match runner
+                    .durable_public_readiness(pending.frame.context.clone(), owner)
+                    .await
+                {
+                    Ok(readiness) => {
+                        pending.frame.readiness = Some(readiness);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                result
             };
             tracing::info!(target: "exomonad_actor::workbench_phase", actor = %pending.frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durability_confirmation_returned", "actor phase");
             crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
@@ -8653,6 +8687,7 @@ where
                         boot,
                         lexical,
                         durable: _,
+                        readiness: _,
                         checkpoint,
                     } = frame;
                     let result =
@@ -12108,12 +12143,24 @@ where
                     .bind_durable_root_public_owner(context.clone(), owner.clone())
                     .await
                     .map_err(Self::failure)?;
+                let readiness =
+                    if outcome == tidepool_runtime::session::PublicManifestCommit::Durable {
+                        Some(
+                            self.environment
+                                .runner
+                                .durable_public_readiness(context.clone(), owner.clone())
+                                .await
+                                .map_err(Self::failure)?,
+                        )
+                    } else {
+                        None
+                    };
                 {
                     let mut records = self.environment.actors.lock();
                     let record = records.get_mut(&context.actor).ok_or_else(|| {
                         Self::failure("prepared root allocation retired before publication")
                     })?;
-                    settle_root_public_owner_record(record, &context, &owner, &outcome)
+                    settle_root_public_owner_record(record, &context, &owner, &outcome, readiness)
                         .map_err(Self::failure)?;
                 }
                 match outcome {
@@ -12122,12 +12169,14 @@ where
                         self.environment.runner.confirm_durable_public_owner(
                             context.clone(), owner.clone(),
                         ).await.map_err(Self::failure)?;
+                        let readiness = self.environment.runner.durable_public_readiness(context.clone(), owner.clone()).await.map_err(Self::failure)?;
                         let mut records = self.environment.actors.lock();
                         let record = records.get_mut(&context.actor).ok_or_else(|| Self::failure(
                             "prepared root allocation retired before confirmation",
                         ))?;
                         settle_root_public_owner_record(record, &context, &owner,
                             &tidepool_runtime::session::PublicManifestCommit::Durable,
+                            Some(readiness),
                         ).map_err(Self::failure)?;
                     }
                     other => return Err(Self::failure(format!(
@@ -13270,8 +13319,32 @@ where
         }
         if kind == crate::kernel::KernelResume::ConfirmChildDurability {
             let Some(pending) = self.pending_child_initialization.take() else {
-                // Repeated confirmation requests cannot become program resumes.
-                return Ok(crate::OwnedActorTask::new(Box::pin(async {
+                let context = self.context(kernel.identity());
+                let owner = self
+                    .environment
+                    .actors
+                    .lock()
+                    .get(&context.actor)
+                    .and_then(|record| match &record.public_owner {
+                        ActorPublicOwnerPlane::DurableReady(owner)
+                            if owner.matches_context(&context) =>
+                        {
+                            owner.durable().cloned()
+                        }
+                        _ => None,
+                    });
+                let runner = self.environment.runner.clone();
+                // Confirmation of a post-initialization write cannot resume
+                // the program or mint a different owner. Its shared native fact
+                // becomes ready even if delivery of this completion is lost.
+                return Ok(crate::OwnedActorTask::new(Box::pin(async move {
+                    if let Some(owner) = owner {
+                        if let Err(error) =
+                            runner.confirm_durable_public_owner(context, owner).await
+                        {
+                            tracing::warn!(%error, "child native publication remains unconfirmed");
+                        }
+                    }
                     crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
                 })));
             };
@@ -13970,7 +14043,8 @@ where
             ));
         }
         match &record.public_owner {
-            ActorPublicOwnerPlane::DurableReady(_) => return Ok(()),
+            ActorPublicOwnerPlane::DurableReady(owner) if owner.is_ready() => return Ok(()),
+            ActorPublicOwnerPlane::DurableReady(_) => {}
             ActorPublicOwnerPlane::DurablePublishedUnconfirmed { detail, .. } => {
                 tracing::debug!(actor = %actor, %detail, "child durability confirmation requested");
             }
@@ -14095,7 +14169,11 @@ where
             ActorPublicOwnerPlane::DurableReady(owner)
                 if owner.durable() == Some(placement.owner()) =>
             {
-                Ok(RootPublicOwnerPosture::Ready)
+                Ok(if owner.is_ready() {
+                    RootPublicOwnerPosture::Ready
+                } else {
+                    RootPublicOwnerPosture::PublishedUnconfirmed
+                })
             }
             _ => Err(ResidentActorWorkbenchError::ActorProtocol(
                 "root public plane differs from its original requested owner".into(),
@@ -14103,19 +14181,34 @@ where
         }
     }
 
-    fn settle_root_public_owner(
+    async fn settle_root_public_owner(
         &self,
         placement: &crate::RootRecoveryPlacement,
         outcome: &tidepool_runtime::session::PublicManifestCommit,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let context = self.root_recovery_context(placement)?;
+        let established = self.environment.actors.lock().get(&placement.actor())
+            .is_some_and(|record| matches!(&record.public_owner,
+                ActorPublicOwnerPlane::DurableReady(owner) if owner.durable() == Some(placement.owner())));
+        let readiness = if !established
+            && *outcome == tidepool_runtime::session::PublicManifestCommit::Durable
+        {
+            Some(
+                self.environment
+                    .runner
+                    .durable_public_readiness(context.clone(), placement.owner().clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
         let mut records = self.environment.actors.lock();
         let record = records.get_mut(&placement.actor()).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "root public allocation retired before confirmation".into(),
             )
         })?;
-        settle_root_public_owner_record(record, &context, placement.owner(), outcome)
+        settle_root_public_owner_record(record, &context, placement.owner(), outcome, readiness)
     }
 
     /// Confirm only directory durability of the original visible root owner.
@@ -14142,7 +14235,7 @@ where
             .confirm_durable_public_owner(context, placement.owner().clone())
             .await?;
         let outcome = tidepool_runtime::session::PublicManifestCommit::Durable;
-        self.settle_root_public_owner(&placement, &outcome)?;
+        self.settle_root_public_owner(&placement, &outcome).await?;
         Ok(outcome)
     }
 
@@ -14169,7 +14262,7 @@ where
             .runner
             .bind_durable_root_public_owner(context, placement.owner().clone())
             .await?;
-        self.settle_root_public_owner(&placement, &outcome)?;
+        self.settle_root_public_owner(&placement, &outcome).await?;
         Ok(outcome)
     }
 
@@ -14203,7 +14296,7 @@ where
                 authority,
             )
             .await?;
-        self.settle_root_public_owner(&placement, &outcome)?;
+        self.settle_root_public_owner(&placement, &outcome).await?;
         Ok(outcome)
     }
 

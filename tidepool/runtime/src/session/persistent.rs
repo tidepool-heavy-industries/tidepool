@@ -2497,7 +2497,7 @@ impl PersistentSession {
                 detail,
             } => {
                 state.graph = graph;
-                state.unconfirmed = Some(publication);
+                state.unconfirmed.set(publication);
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
         };
@@ -2653,7 +2653,7 @@ impl PersistentSession {
                 detail,
             } => {
                 state.graph = graph;
-                state.unconfirmed = Some(publication);
+                state.unconfirmed.set(publication);
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
         };
@@ -2841,7 +2841,7 @@ impl PersistentSession {
                 detail,
             } => {
                 state.graph = graph;
-                state.unconfirmed = Some(publication);
+                state.unconfirmed.set(publication);
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
         };
@@ -3023,6 +3023,16 @@ impl PersistentSession {
         ticket: StagedPublicManifest,
         decision: &Arc<PublicationDecision>,
     ) -> Result<PublicManifestCommit, SessionError> {
+        self.publish_staged_public_manifest_admitted(ticket, || decision.claim_commit())
+    }
+
+    /// Admit the frontend's short control claim only after exact native preflight.
+    /// The claim callback must not await or perform native publication itself.
+    pub fn publish_staged_public_manifest_admitted(
+        &mut self,
+        ticket: StagedPublicManifest,
+        claim: impl FnOnce() -> Option<super::PublicationClaim>,
+    ) -> Result<PublicManifestCommit, SessionError> {
         if ticket
             .admission_owner
             .as_ref()
@@ -3068,7 +3078,7 @@ impl PersistentSession {
             .as_ref()
             .map(|declaration| declaration.declared_names.clone())
             .unwrap_or_default();
-        let Some(claim) = decision.claim_commit() else {
+        let Some(claim) = claim() else {
             return Ok(PublicManifestCommit::Cancelled);
         };
         let public_scope = ticket.public_scope;

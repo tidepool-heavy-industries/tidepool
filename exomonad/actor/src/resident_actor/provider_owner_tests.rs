@@ -246,3 +246,165 @@ async fn requested_retirement_refuses_provider_before_terminal_publication() {
     assert_eq!(actor.terminal().requested_shutdown(), Some(requested));
     forest.shutdown().await;
 }
+
+#[tokio::test]
+async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_confirmation() {
+    use std::os::unix::fs::PermissionsExt;
+    use tidepool_runtime::session::{
+        PublicManifestCommit, PublicationDecision, RecoveryPublicOwner,
+    };
+    struct RunOwner {
+        root: PathBuf,
+        _lock: std::fs::File,
+    }
+    impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+        fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+            Ok(root.canonicalize()? == self.root)
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let session = tidepool_runtime::session::fresh_session_id();
+    let manifest = root.path().join("declarations.json");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.path().join("run-owner.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let mut library =
+        SessionLib::open(session, root.path(), ModuleEnv::standalone_default()).unwrap();
+    library
+        .attach_owned_recovery_graph_v3(
+            &manifest,
+            Arc::new(RunOwner {
+                root: root.path().canonicalize().unwrap(),
+                _lock: lock,
+            }),
+        )
+        .unwrap();
+    let machine = ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    let (forest, _deployments) = ResidentForest::new(
+        ActorWorkbenchSource::new("", Vec::new()),
+        session,
+        machine,
+        None,
+        crate::Incarnation::FIRST,
+    );
+    let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
+    assert_eq!(
+        forest
+            .bind_durable_root_public_owner(actor.identity())
+            .await
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let provider = forest
+        .authorize_provider_attachment(actor.identity())
+        .unwrap();
+    let context = forest.directory.session_context(actor.identity()).unwrap();
+    let owner = provider.owner.durable().unwrap().clone();
+    let machines = forest.environment.runner.machines_for_test().clone();
+    let (mut resident, receipt) = machines.checkout_run(session).unwrap().into_parts();
+    let sibling_scope = resident
+        .mint_scope(context.placement.lexical_scope)
+        .unwrap();
+    let sibling_owner =
+        RecoveryPublicOwner::new(&crate::ActorPath::parse("root/sibling").unwrap(), 1).unwrap();
+    resident
+        .initialize_durable_public_scope(sibling_owner.clone(), sibling_scope)
+        .unwrap();
+    let sibling = resident
+        .durable_public_readiness(&sibling_owner, sibling_scope)
+        .unwrap();
+    assert!(sibling.is_ready());
+    assert!(resident
+        .durable_public_readiness(&owner, sibling_scope)
+        .is_err());
+    assert!(resident
+        .confirm_durable_public_scope(&owner, sibling_scope)
+        .is_err());
+    let private = resident
+        .begin_durable_private_execution(&owner, context.placement.lexical_scope)
+        .unwrap();
+    let intent = resident.freeze_private_execution(&private).unwrap();
+    let tidepool_runtime::session::ExecutionPublication::Bindings(base) = resident
+        .restage_execution_publication(owner.clone(), intent)
+        .unwrap()
+    else {
+        panic!("empty private execution has a binding-only native publication");
+    };
+    let ticket = base.stage().unwrap();
+    // Real native rename remains permitted; only parent-directory fsync fails.
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+    let commit = resident
+        .publish_staged_public_manifest(ticket, &PublicationDecision::new())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(
+        commit,
+        PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+    ));
+    assert!(!provider.owner.is_ready());
+    assert!(!sibling.is_ready());
+    assert!(matches!(
+        resident.begin_durable_private_execution(&sibling_owner, sibling_scope),
+        Err(
+            tidepool_runtime::session::SessionError::InvalidDurablePublicAdmission {
+                reason: tidepool_runtime::session::DurablePublicAdmissionFailure::Unconfirmed,
+                ..
+            }
+        )
+    ));
+    drop(private);
+    let holes = resident
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    machines.settle_suspended(receipt, resident, holes);
+    assert!(forest
+        .authorize_provider_attachment(actor.identity())
+        .is_err());
+    assert!(forest.validate_provider_attachment(&provider).is_err());
+    let visible_bytes = std::fs::read(&manifest).unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+    assert!(forest
+        .confirm_durable_root_public_owner(actor.identity())
+        .await
+        .is_err());
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!provider.owner.is_ready());
+    assert!(!sibling.is_ready());
+    assert!(forest.validate_provider_attachment(&provider).is_err());
+    assert_eq!(
+        forest
+            .confirm_durable_root_public_owner(actor.identity())
+            .await
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    assert!(sibling.is_ready());
+    forest
+        .validate_provider_attachment(&provider)
+        .expect("confirmation preserves exact provider owner Arc");
+    assert_eq!(
+        std::fs::read(&manifest).unwrap(),
+        visible_bytes,
+        "confirmation never republishes"
+    );
+    forest.shutdown().await;
+    drop(actor);
+    drop(forest);
+    drop(machines);
+    assert!(
+        !sibling.is_ready(),
+        "native graph destruction revokes retained readiness"
+    );
+}
