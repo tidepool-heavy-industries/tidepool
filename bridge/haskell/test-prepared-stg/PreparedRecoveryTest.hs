@@ -32,7 +32,7 @@ import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, varUnique)
 import GHC.Unit.Types (unitString, toUnitId, GenWithIsBoot(..))
-import GHC.Unit.Module (mkModule)
+import GHC.Unit.Types qualified as Unit (mkModule)
 import GHC.Unit.Module.Location (ml_hi_file, ml_dyn_hi_file)
 import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
@@ -641,7 +641,7 @@ verifyRecoveryPublication env context modules original = do
       hFlush handle
       hClose handle
       finder <- initFinderCache
-      addModuleToFinder finder (GWIB (mkModule (toUnitId (moduleUnit owner)) (moduleName owner)) NotBoot)
+      addModuleToFinder finder (GWIB (Unit.mkModule (toUnitId (moduleUnit owner)) (moduleName owner)) NotBoot)
         location {ml_hi_file=path,ml_dyn_hi_file=path}
       let broken = env {hsc_FC=finder}
       forM_ [False,True] $ \preparedInterface -> do
