@@ -119,7 +119,7 @@ import GHC.Unit.Module.Location
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable )
 import GHC.Unit.Types (mkModule, GenWithIsBoot(..), ModuleNameWithIsBoot, unitString)
-import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)

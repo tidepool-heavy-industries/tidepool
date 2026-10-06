@@ -561,6 +561,7 @@ pub fn load_selected_production_entry(
         checked_values: None,
         checked_projections: Vec::new(),
         checked: None,
+        selected_session_values: Default::default(),
     };
     let products = seal_turn_outputs_inner(
         &offer,
