@@ -30,7 +30,10 @@ mod process;
 mod request;
 pub use endpoint::{
     with_compiler_transaction, with_compiler_transaction_cancellable, CompilerEndpoint,
-    CompilerIdentity, CompilerTransaction, CompilerTransactionCancellation,
+    CompilerIdentity, CompilerTermination, CompilerTransaction, CompilerTransactionCancellation,
+    CompilerTransactionClose, CompilerTransactionCloseEvidence, CompilerTransactionCloseFailure,
+    CompilerTransactionClosePhase, CompilerTransactionCloseReason, CompilerTransactionOutcome,
+    CompilerTransactionRetirement, DirectCompilerRetirement,
 };
 use exec_check::is_readable_executable_file;
 pub use request::{

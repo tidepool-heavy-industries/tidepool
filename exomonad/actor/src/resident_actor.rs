@@ -8167,12 +8167,14 @@ where
             .application_workbench()
             .with_intrinsic_effect_support(self.environment.intrinsic_effect_support())
             .with_compilation_authority(authority);
-        let compiled_tools = application_workbench
-            .prepare_tools(
+        let compiler_owner =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit());
+        let compiled_tools = compiler_owner
+            .scope(application_workbench.prepare_tools(
                 compile_context,
                 self.spec_installs,
                 self.descriptor.effective_role().effect_keys().to_vec(),
-            )
+            ))
             .await;
         tracing::info!(
             actor = %context.actor,
@@ -8712,7 +8714,13 @@ where
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
         let workbench = self.environment.runner.application_workbench();
-        let guard = workbench.actor_initialization_cleanup(context.clone());
+        let guard = workbench
+            .actor_initialization_cleanup(context.clone())
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::Initialization(
+                    kernel.retained_exit(),
+                ),
+            );
         let registration = guard.registration();
         // Keep initialization state out of the enclosing task-local scope future.
         let result = registration
@@ -13087,12 +13095,16 @@ where
                     "workbench public view admitted"
                 );
             }
-            let result = call_scope
-                .run(self.execute_workbench(
+            let compiler_owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
+                work: execution_state.effects.invocation_work.clone(),
+                control: execution_state.effects.control.clone(),
+            };
+            let result = compiler_owner
+                .scope(call_scope.run(self.execute_workbench(
                     kernel,
                     &mut execution_state,
                     admitted_workbench.as_ref(),
-                ))
+                )))
                 .await
                 .map(|advance| match advance {
                     WorkbenchRunAdvance::Complete(step) => step,

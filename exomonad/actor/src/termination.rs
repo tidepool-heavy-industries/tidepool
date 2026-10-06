@@ -151,10 +151,87 @@ pub struct ActorExitAlreadyPublished {
     pub existing: ActorTerminal,
 }
 
+/// A pending close is recorded by the lifecycle owner before native work starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompilerWorkClose {
+    Pending,
+    Settled(tidepool_runtime::CompilerTransactionClose),
+    Abandoned,
+}
+
+impl CompilerWorkClose {
+    pub(crate) fn is_confirmed(&self) -> bool {
+        matches!(
+            self,
+            Self::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+                    | tidepool_runtime::CompilerTransactionClose::NotStarted
+            )
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompilerWorkReceipt(Arc<Mutex<CompilerWorkClose>>);
+
+impl CompilerWorkReceipt {
+    pub(crate) fn pending() -> Self {
+        Self(Arc::new(Mutex::new(CompilerWorkClose::Pending)))
+    }
+    pub(crate) fn observation(&self) -> CompilerWorkClose {
+        self.0.lock().clone()
+    }
+}
+
+/// Affine native-work obligation. Its blocking owner settles even without a waiter.
+#[must_use]
+pub(crate) struct CompilerWorkTicket {
+    receipt: CompilerWorkReceipt,
+    settled: bool,
+    owner: crate::resident_workbench::CompilerCloseOwner,
+}
+
+impl CompilerWorkTicket {
+    pub(crate) fn new(
+        receipt: CompilerWorkReceipt,
+        owner: crate::resident_workbench::CompilerCloseOwner,
+    ) -> Self {
+        Self {
+            receipt,
+            settled: false,
+            owner,
+        }
+    }
+    pub(crate) fn consume<T>(
+        mut self,
+        outcome: tidepool_runtime::CompilerTransactionOutcome<T>,
+    ) -> T {
+        *self.receipt.0.lock() = CompilerWorkClose::Settled(outcome.close);
+        self.settled = true;
+        self.owner.close_settled();
+        outcome.action
+    }
+}
+
+impl Drop for CompilerWorkTicket {
+    fn drop(&mut self) {
+        if !self.settled {
+            *self.receipt.0.lock() = CompilerWorkClose::Abandoned;
+            self.owner.close_settled();
+        }
+    }
+}
+
+#[derive(Default)]
+struct RetainedCleanupState {
+    outcome: Option<crate::ResidentCleanupOutcome>,
+    compilers: Vec<CompilerWorkReceipt>,
+}
+
 struct ExitState {
     successor: Mutex<Option<crate::ActorRef>>,
     lifecycle: Mutex<LifecycleState>,
-    cleanup: Mutex<Option<crate::ResidentCleanupOutcome>>,
+    cleanup: Mutex<RetainedCleanupState>,
     requested_shutdown: Mutex<Option<ActorTerminal>>,
     acknowledged_retirement: Mutex<Option<crate::ActorRef>>,
     changed: watch::Sender<u64>,
@@ -162,9 +239,10 @@ struct ExitState {
 
 /// Cloneable observation of one actor's single-assignment terminal record.
 ///
-/// The record retains metadata only. Keeping or cloning it never creates a
-/// second root for the actor's Haskell exit value. Observation is repeatable,
-/// and a waiter cannot miss publication between checking and parking.
+/// The record retains lifecycle and owned cleanup evidence, including any
+/// unconfirmed compiler process custody. Cloning it creates no second root for
+/// the actor's Haskell exit value. Observation is repeatable, and a waiter
+/// cannot miss publication between checking and parking.
 #[derive(Clone)]
 pub struct RetainedActorExit {
     state: Arc<ExitState>,
@@ -222,11 +300,49 @@ impl RetainedActorExit {
     }
     /// Terminal-only legacy/forced exits deliberately have no cleanup proof.
     pub fn cleanup(&self) -> Option<crate::ResidentCleanupOutcome> {
-        self.state.cleanup.lock().clone()
+        let state = self.state.cleanup.lock();
+        let mut outcome = state.outcome.clone()?;
+        let unconfirmed: Vec<_> = state
+            .compilers
+            .iter()
+            .map(CompilerWorkReceipt::observation)
+            .filter(|close| !close.is_confirmed())
+            .collect();
+        if !unconfirmed.is_empty() {
+            outcome.hook = crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "actor hook {:?}; compiler close {unconfirmed:?}",
+                outcome.hook
+            ));
+        }
+        Some(outcome)
     }
 
     pub(crate) fn retain_cleanup(&self, outcome: crate::ResidentCleanupOutcome) {
-        self.state.cleanup.lock().get_or_insert(outcome);
+        self.state.cleanup.lock().outcome.get_or_insert(outcome);
+    }
+
+    pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkReceipt) -> bool {
+        let mut state = self.state.cleanup.lock();
+        if state.outcome.is_some() {
+            return false;
+        }
+        state.compilers.push(receipt);
+        true
+    }
+
+    pub(crate) fn notify_compiler_close(&self) {
+        self.state.changed.send_modify(|revision| *revision += 1);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compiler_close_observations(&self) -> Vec<CompilerWorkClose> {
+        self.state
+            .cleanup
+            .lock()
+            .compilers
+            .iter()
+            .map(CompilerWorkReceipt::observation)
+            .collect()
     }
 
     /// Record intent without publishing an exit. Bootstrap checks this at safe
@@ -299,7 +415,7 @@ impl RetainedActorExit {
                     current: ActorLifecycle::Live,
                     connections: Vec::new(),
                 }),
-                cleanup: Mutex::new(None),
+                cleanup: Mutex::new(RetainedCleanupState::default()),
                 requested_shutdown: Mutex::new(None),
                 acknowledged_retirement: Mutex::new(None),
                 changed,
@@ -361,6 +477,94 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    fn clean_actor_cleanup(actor: crate::ActorRef) -> crate::ResidentCleanupOutcome {
+        crate::ResidentCleanupOutcome {
+            actor,
+            hook: crate::CleanupComponentOutcome::Confirmed,
+            realm: crate::CleanupComponentOutcome::Confirmed,
+            children: crate::CleanupComponentOutcome::Confirmed,
+        }
+    }
+
+    fn admitted_compiler(owner: &RetainedActorExit) -> CompilerWorkTicket {
+        let receipt = CompilerWorkReceipt::pending();
+        assert!(owner.register_compiler_work(receipt.clone()));
+        CompilerWorkTicket::new(
+            receipt,
+            crate::resident_workbench::CompilerCloseOwner::Initialization(owner.clone()),
+        )
+    }
+
+    #[test]
+    fn pending_compiler_prevents_confirmed_actor_stop_until_actual_late_close() {
+        let owner = RetainedActorExit::new();
+        let ticket = admitted_compiler(&owner);
+        let actor = crate::ActorRef::first(crate::ActorId(1));
+        owner.retain_cleanup(clean_actor_cleanup(actor));
+        owner
+            .publish(completed("actor stopped while compiler was pending"))
+            .unwrap();
+        assert!(!owner.cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            owner.compiler_close_observations(),
+            vec![CompilerWorkClose::Pending]
+        );
+        // The blocking owner survives the vanished async waiter and settles its
+        // affine obligation independently of the actor's immutable terminal.
+        assert_eq!(
+            ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+                action: Ok::<_, &'static str>(42),
+                close: tidepool_runtime::CompilerTransactionClose::Clean,
+            }),
+            Ok(42)
+        );
+        assert!(owner.cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            owner.get(),
+            Some(completed("actor stopped while compiler was pending"))
+        );
+        assert!(!owner.register_compiler_work(CompilerWorkReceipt::pending()));
+    }
+
+    #[test]
+    fn completed_compiler_close_is_retained_before_actor_stop() {
+        let owner = RetainedActorExit::new();
+        let ticket = admitted_compiler(&owner);
+        assert_eq!(
+            ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+                action: Err::<(), _>("primary failure"),
+                close: tidepool_runtime::CompilerTransactionClose::Clean,
+            }),
+            Err("primary failure")
+        );
+        owner.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
+            1,
+        ))));
+        owner.publish(completed("stopped after close")).unwrap();
+        assert!(owner.cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            owner.compiler_close_observations(),
+            vec![CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            )]
+        );
+    }
+
+    #[test]
+    fn abandoned_compiler_obligation_cannot_certify_actor_cleanup() {
+        let owner = RetainedActorExit::new();
+        let ticket = admitted_compiler(&owner);
+        owner.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
+            1,
+        ))));
+        drop(ticket);
+        assert!(!owner.cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            owner.compiler_close_observations(),
+            vec![CompilerWorkClose::Abandoned]
+        );
+    }
 
     fn completed(summary: &str) -> ActorTerminal {
         ActorTerminal {

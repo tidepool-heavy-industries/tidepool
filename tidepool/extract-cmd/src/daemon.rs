@@ -1885,6 +1885,7 @@ pub(crate) struct BuildProductsNamespace {
     path: std::path::PathBuf,
     transport: BuildProductsTransport,
     directories: std::collections::BTreeSet<std::path::PathBuf>,
+    empty_namespaces: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 impl BuildProductsNamespace {
@@ -1893,6 +1894,7 @@ impl BuildProductsNamespace {
             path,
             transport,
             directories: Default::default(),
+            empty_namespaces: Default::default(),
         }
     }
 
@@ -1926,32 +1928,63 @@ impl BuildProductsNamespace {
         Ok((request.worker_argv(), diagnostics))
     }
 
-    /// Called only after the last owning child was reaped. Slot replacements
-    /// transfer this ownership instead of cleaning their warm products.
-    pub(crate) fn cleanup(&mut self) {
-        for directory in std::mem::take(&mut self.directories) {
+    /// Called only after the last owning child was reaped. Failed paths stay
+    /// with this owner; retries never remove another slot's live products.
+    pub(crate) fn cleanup_checked(
+        &mut self,
+    ) -> Result<(), Vec<crate::frontend::ScratchCleanupFailure>> {
+        use crate::frontend::{ScratchCleanupFailure, ScratchCleanupPhase};
+        let mut failures = Vec::new();
+        for directory in self.directories.clone() {
             match fs::remove_dir_all(&directory) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    tracing::warn!(path = %directory.display(), %error, "failed to remove compiler scratch products");
+                Err(source) => {
+                    failures.push(ScratchCleanupFailure {
+                        path: directory,
+                        phase: ScratchCleanupPhase::Products,
+                        source,
+                    });
                     continue;
                 }
             }
-            if let Some(epoch_directory) = directory.parent() {
-                // Other live slots may still own siblings. Remove only an
-                // empty epoch directory, never the caller's logical root.
-                match fs::remove_dir(epoch_directory) {
-                    Ok(()) => {}
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-                        ) => {}
-                    Err(error) => {
-                        tracing::warn!(path = %epoch_directory.display(), %error, "failed to remove empty compiler scratch namespace")
-                    }
+            self.directories.remove(&directory);
+            if let Some(parent) = directory.parent() {
+                self.empty_namespaces.insert(parent.to_owned());
+            }
+        }
+        for namespace in self.empty_namespaces.clone() {
+            // A sibling may still own this shared epoch directory. Only remove
+            // it if empty, including on retries after a prior IO failure.
+            match fs::remove_dir(&namespace) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(source) => {
+                    failures.push(ScratchCleanupFailure {
+                        path: namespace,
+                        phase: ScratchCleanupPhase::EmptyNamespace,
+                        source,
+                    });
+                    continue;
                 }
+            }
+            self.empty_namespaces.remove(&namespace);
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
+    }
+
+    pub(crate) fn cleanup(&mut self) {
+        if let Err(failures) = self.cleanup_checked() {
+            for failure in failures {
+                tracing::warn!(path = %failure.path.display(), phase = ?failure.phase, error = %failure.source, "compiler scratch cleanup remains unconfirmed");
             }
         }
     }
@@ -2400,6 +2433,8 @@ impl Worker {
         )?;
         replacement.build_products_namespace.directories =
             std::mem::take(&mut self.build_products_namespace.directories);
+        replacement.build_products_namespace.empty_namespaces =
+            std::mem::take(&mut self.build_products_namespace.empty_namespaces);
         *self = replacement;
         Ok(())
     }
@@ -2601,6 +2636,31 @@ impl Worker {
         }
     }
 
+    /// Direct frontend success must prove both bracket acknowledgement and
+    /// retirement of its exact worker, rather than merely requesting shutdown.
+    pub(crate) fn shutdown_confirmed(&mut self) -> Result<(), FrontendError> {
+        drop(self.stdin.take());
+        match self.child.wait() {
+            Ok(status) => {
+                let scratch = self.build_products_namespace.cleanup_checked();
+                if status.success() {
+                    scratch.map_err(FrontendError::ScratchCleanup)
+                } else {
+                    Err(FrontendError::WorkerClose {
+                        status,
+                        scratch: scratch.err().unwrap_or_default(),
+                    })
+                }
+            }
+            Err(source) => {
+                // Products may still be in use. Preserve the primary wait
+                // failure and keep their existing owner attached to the child.
+                self.abort();
+                Err(FrontendError::Io(source))
+            }
+        }
+    }
+
     pub(crate) fn shutdown(&mut self) {
         drop(self.stdin.take());
         if self.child.wait().is_err() {
@@ -2692,6 +2752,76 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    fn scratch_failure_fixture() -> (tempfile::TempDir, Worker, std::path::PathBuf, Vec<String>) {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("Expr.hs");
+        fs::write(&input, "completed body").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let mut worker = Worker::spawn(&prepared).unwrap();
+        let response = products_response(
+            &mut worker,
+            directory.path(),
+            &products_request(&directory.path().join("products"), &input),
+        );
+        let owned = worker
+            .build_products_namespace
+            .directories
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        // A filesystem obstruction at the real placed path makes cleanup fail
+        // deterministically, without permissions depending on the test account.
+        fs::remove_dir_all(&owned).unwrap();
+        fs::write(&owned, b"owned scratch obstruction").unwrap();
+        (directory, worker, owned, response)
+    }
+
+    #[test]
+    fn reaped_worker_scratch_failure_preserves_completed_body_and_owned_retry_path() {
+        let (_directory, mut worker, owned, response) = scratch_failure_fixture();
+        let result = worker.shutdown_confirmed();
+        assert!(
+            worker.child.try_wait().unwrap().unwrap().success(),
+            "scratch failure does not imply a live worker"
+        );
+        assert!(!response.is_empty(), "request completed before close");
+        let Err(FrontendError::ScratchCleanup(failures)) = result else {
+            panic!("scratch health must be separate from successful worker retirement");
+        };
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].path, owned);
+        assert_eq!(
+            failures[0].phase,
+            crate::frontend::ScratchCleanupPhase::Products
+        );
+        assert!(worker.build_products_namespace.directories.contains(&owned));
+        fs::remove_file(&owned).unwrap();
+        worker.build_products_namespace.cleanup_checked().unwrap();
+        assert!(worker.build_products_namespace.directories.is_empty());
+        assert!(!owned.exists());
+    }
+
+    #[test]
+    fn unsuccessful_worker_retirement_keeps_secondary_scratch_failure() {
+        let (_directory, mut worker, owned, response) = scratch_failure_fixture();
+        worker.child.kill().unwrap();
+        let result = worker.shutdown_confirmed();
+        assert!(
+            !response.is_empty(),
+            "completed action is independent of worker retirement"
+        );
+        let Err(FrontendError::WorkerClose { status, scratch }) = result else {
+            panic!("worker and scratch failures must both be retained");
+        };
+        assert!(!status.success());
+        assert_eq!(scratch.len(), 1);
+        assert_eq!(scratch[0].path, owned);
+        assert!(worker.build_products_namespace.directories.contains(&owned));
+        fs::remove_file(&owned).unwrap();
+        worker.build_products_namespace.cleanup_checked().unwrap();
     }
 
     #[test]

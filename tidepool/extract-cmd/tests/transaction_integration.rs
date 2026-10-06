@@ -3,7 +3,16 @@
     clippy::expect_used,
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
-use tidepool_extract_cmd::{with_compiler_transaction, ExtractCmd};
+use tidepool_extract_cmd::{with_compiler_transaction, CompilerTransactionOutcome, ExtractCmd};
+
+fn clean_action<T>(outcome: CompilerTransactionOutcome<T>) -> T {
+    assert!(
+        outcome.close.is_clean(),
+        "compiler close: {:?}",
+        outcome.close
+    );
+    outcome.action
+}
 #[path = "support/compiler_inputs.rs"]
 mod compiler_inputs;
 
@@ -63,7 +72,7 @@ fn direct_transaction_executes_multiple_compiler_requests() {
     };
     std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
     std::env::set_var("TIDEPOOL_TIMING", "1");
-    let diagnostics = with_compiler_transaction(|| {
+    let diagnostics = clean_action(with_compiler_transaction(|| {
         let mut diagnostics = Vec::new();
         for index in 0..3 {
             if index == 2 {
@@ -85,13 +94,13 @@ fn direct_transaction_executes_multiple_compiler_requests() {
             diagnostics.push(run.stderr_lossy().into_owned());
         }
         diagnostics
-    });
+    }));
     assert!(diagnostics[0].contains("tidepool-memo-miss module=Dep"));
     assert!(!diagnostics[1].contains("tidepool-memo-miss module=Dep"));
     assert!(diagnostics[2].contains("tidepool-memo-miss module=Dep"));
 
     std::fs::write(&source, "module Expr where\nresult =\n").unwrap();
-    with_compiler_transaction(|| {
+    clean_action(with_compiler_transaction(|| {
         let mut command = ExtractCmd::new().unwrap();
         command
             .input(&source)
@@ -100,14 +109,14 @@ fn direct_transaction_executes_multiple_compiler_requests() {
             .include(&dir);
         let run = command.bind().unwrap().execute(&command).unwrap();
         assert!(!run.success(), "invalid source must be rejected");
-    });
+    }));
 
     std::fs::write(
         &source,
         "module Expr where\nimport Dep\nresult :: Int\nresult = dep + 2\n",
     )
     .unwrap();
-    with_compiler_transaction(|| {
+    clean_action(with_compiler_transaction(|| {
         let mut command = ExtractCmd::new().unwrap();
         command
             .input(&source)
@@ -120,7 +129,7 @@ fn direct_transaction_executes_multiple_compiler_requests() {
             "a new transaction is admitted after rejection: {}",
             run.stderr_lossy()
         );
-    });
+    }));
 }
 
 /// `TIDEPOOL_MEMO_TRACE=1` is a diagnostic-only stderr emitter: it must
@@ -169,10 +178,10 @@ fn memo_trace_flag_adds_diagnostics_without_changing_compiled_output() {
     };
 
     std::env::remove_var("TIDEPOOL_MEMO_TRACE");
-    let without_trace = with_compiler_transaction(|| run_once("without-trace"));
+    let without_trace = clean_action(with_compiler_transaction(|| run_once("without-trace")));
 
     std::env::set_var("TIDEPOOL_MEMO_TRACE", "1");
-    let with_trace = with_compiler_transaction(|| run_once("with-trace"));
+    let with_trace = clean_action(with_compiler_transaction(|| run_once("with-trace")));
 
     assert_eq!(
         without_trace.output.stdout, with_trace.output.stdout,

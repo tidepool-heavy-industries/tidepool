@@ -71,6 +71,7 @@ pub struct WorkbenchExecutionControl {
     receipt_owner: std::sync::OnceLock<Arc<dyn WorkbenchReceiptOwner>>,
     context_cancel_requested: std::sync::atomic::AtomicBool,
     cell_terminal: parking_lot::Mutex<Option<crate::CellExit>>,
+    compiler_work: parking_lot::Mutex<Vec<crate::termination::CompilerWorkReceipt>>,
     publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
@@ -116,6 +117,7 @@ impl WorkbenchExecutionControl {
             receipt_owner: std::sync::OnceLock::new(),
             context_cancel_requested: std::sync::atomic::AtomicBool::new(false),
             cell_terminal: parking_lot::Mutex::new(None),
+            compiler_work: parking_lot::Mutex::new(Vec::new()),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
             sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
@@ -197,13 +199,42 @@ impl WorkbenchExecutionControl {
         let exit = crate::CellExit::from_reply(
             execution,
             result,
-            cleanup_confirmed,
+            cleanup_confirmed
+                && self
+                    .compiler_close_observations()
+                    .iter()
+                    .all(|close| close.is_confirmed()),
             // This flag proves cancellation won the arbiter and survives acknowledgement.
             self.native_cancel
                 .load(std::sync::atomic::Ordering::Acquire),
         );
         *terminal = Some(exit.clone());
         exit
+    }
+
+    pub(crate) fn register_compiler_work(
+        &self,
+        receipt: crate::termination::CompilerWorkReceipt,
+    ) -> bool {
+        // This order matches finish_cell: completion fences future admissions.
+        let terminal = self.cell_terminal.lock();
+        if terminal.is_some() {
+            return false;
+        }
+        self.compiler_work.lock().push(receipt);
+        true
+    }
+
+    pub(crate) fn notify_compiler_close(&self) {
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) fn compiler_close_observations(&self) -> Vec<crate::termination::CompilerWorkClose> {
+        self.compiler_work
+            .lock()
+            .iter()
+            .map(|receipt| receipt.observation())
+            .collect()
     }
 
     fn cell_finished(&self) -> bool {
@@ -1814,6 +1845,40 @@ mod tests {
             exit,
             "terminal evidence is immutable"
         );
+    }
+
+    #[test]
+    fn pending_compiler_close_blocks_context_commit_without_rewriting_completed_action() {
+        let control = WorkbenchExecutionControl::untracked();
+        let receipt = crate::termination::CompilerWorkReceipt::pending();
+        assert!(control.register_compiler_work(receipt.clone()));
+        let ticket = crate::termination::CompilerWorkTicket::new(
+            receipt,
+            crate::resident_workbench::CompilerCloseOwner::Hosted(control.clone()),
+        );
+        let response = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+            publication: None,
+            status: WorkbenchRunStatus::Completed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        }));
+        let execution = WorkbenchExecutionId::from_digest([31; 16]);
+        let exit = control.finish_cell(execution.clone(), &response, true);
+        assert_eq!(exit.cause, crate::CellExitCause::FullReturn);
+        assert!(!exit.cleanup_confirmed);
+        assert!(!exit.permits_context_commit());
+        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+            action: (),
+            close: tidepool_runtime::CompilerTransactionClose::Clean,
+        });
+        assert_eq!(
+            control.finish_cell(execution, &response, true),
+            exit,
+            "late close cannot mutate an already published cell cutoff"
+        );
+        assert!(!control.register_compiler_work(crate::termination::CompilerWorkReceipt::pending()));
     }
 
     #[test]

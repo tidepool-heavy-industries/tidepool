@@ -22,7 +22,7 @@ pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_effect::EffectError;
 pub use tidepool_extract_cmd::{
     with_compiler_transaction, with_compiler_transaction_cancellable,
-    CompilerTransactionCancellation,
+    CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionOutcome,
 };
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::DataConTable;

@@ -86,6 +86,11 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
     }
     let mut input = std::io::stdin();
     let mut output = std::io::stdout();
+    if phase == 8 {
+        output.write_all(b"INVALID!").unwrap();
+        output.flush().unwrap();
+        return;
+    }
     output.write_all(b"TPCID002").unwrap();
     output.write_all(&[1; 32]).unwrap();
     output.write_all(&[2; 32]).unwrap();
@@ -103,6 +108,9 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
         let mut command = [0];
         input.read_exact(&mut command).unwrap();
         if command == [0] {
+            if phase == 6 {
+                std::process::exit(17);
+            }
             return;
         }
         assert_eq!(command, [1]);
@@ -115,7 +123,9 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
         requests += 1;
         let body = requests.to_string();
         output.write_all(&0i32.to_le_bytes()).unwrap();
-        output.write_all(&(body.len() as u32).to_le_bytes()).unwrap();
+        output
+            .write_all(&(body.len() as u32).to_le_bytes())
+            .unwrap();
         output.write_all(body.as_bytes()).unwrap();
         output.write_all(&0u32.to_le_bytes()).unwrap();
         output.flush().unwrap();

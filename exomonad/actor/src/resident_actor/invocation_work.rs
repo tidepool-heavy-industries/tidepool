@@ -14,6 +14,7 @@ pub(crate) struct InvocationWork {
 #[derive(Default)]
 struct InvocationWorkState {
     closed: bool,
+    compilers: Vec<crate::termination::CompilerWorkReceipt>,
     commands: Vec<String>,
     detached_commands: std::collections::HashSet<String>,
     workers: Vec<LocalActorRef>,
@@ -28,6 +29,7 @@ struct InvocationWorkState {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct InvocationCleanup {
+    compilers: Vec<crate::termination::CompilerWorkReceipt>,
     commands: Vec<InvocationCommandCleanup>,
     workers: Vec<InvocationWorkerCleanup>,
     requests: Vec<InvocationRequestCleanup>,
@@ -59,6 +61,12 @@ struct InvocationRequestCleanup {
 impl InvocationCleanup {
     pub(super) fn uncertainty(&self) -> Option<String> {
         let mut details = self.failures.clone();
+        for receipt in &self.compilers {
+            let close = receipt.observation();
+            if !close.is_confirmed() {
+                details.push(format!("compiler close: {close:?}"));
+            }
+        }
         if self.settlement_notifications_pending {
             details.push("settlement notices remain queued for publication".into());
         }
@@ -127,6 +135,18 @@ impl InvocationWork {
 
     pub(super) fn matches(&self, owner: ActorRef, reservation: &RequestReservationOwner) -> bool {
         self.owner == owner && &self.reservation == reservation
+    }
+
+    pub(crate) fn register_compiler_work(
+        &self,
+        receipt: crate::termination::CompilerWorkReceipt,
+    ) -> bool {
+        let mut state = self.state.lock();
+        if state.closed {
+            return false;
+        }
+        state.compilers.push(receipt);
+        true
     }
 
     pub(crate) fn register_command(&self, id: String) -> Result<(), CommandError> {
@@ -294,7 +314,10 @@ impl InvocationWork {
                 state.watches.clone(),
             )
         };
-        let mut cleanup = InvocationCleanup::default();
+        let mut cleanup = InvocationCleanup {
+            compilers: self.state.lock().compilers.clone(),
+            ..InvocationCleanup::default()
+        };
         // Reserved identities never reached a target. Preserve the original
         // rollback fence, including internally detached branch reservations,
         // before target cancellation changes any request state.

@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
 #[cfg(test)]
 use std::io::Read;
+use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -139,6 +139,128 @@ pub struct CompilerEndpoint {
     transport: Transport,
 }
 
+/// A completed action and its independent compiler lifecycle observation.
+/// Cleanup uncertainty never replaces the action or authorizes its replay.
+#[must_use]
+#[derive(Debug)]
+pub struct CompilerTransactionOutcome<T> {
+    pub action: T,
+    pub close: CompilerTransactionClose,
+}
+
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerTransactionClose {
+    NotStarted,
+    Clean,
+    Unconfirmed(CompilerTransactionCloseEvidence),
+}
+
+impl CompilerTransactionClose {
+    pub fn is_clean(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerTransactionCloseEvidence {
+    pub reason: CompilerTransactionCloseReason,
+    pub retirement: CompilerTransactionRetirement,
+    pub earlier: Vec<CompilerTransactionCloseEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerTransactionCloseReason {
+    AdmissionAborted(CompilerTransactionClosePhase),
+    AdmissionFailed(CompilerTransactionCloseFailure),
+    FailedRequest,
+    Abandoned,
+    Cancelled,
+    EndFailed(CompilerTransactionCloseFailure),
+    FrontendExitUnsuccessful,
+    FrontendRetirementUnconfirmed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilerTransactionClosePhase {
+    IdentityHandshake,
+    BeginHandshake,
+    EndWrite,
+    DaemonEndAcknowledgement,
+    DaemonDisconnect,
+    FrontendWait,
+    FrontendKill,
+}
+
+/// Equality preserves the identity of the retained IO cause across clones.
+#[derive(Clone, Debug)]
+pub struct CompilerTransactionCloseFailure {
+    pub phase: CompilerTransactionClosePhase,
+    pub source: Arc<io::Error>,
+}
+
+impl PartialEq for CompilerTransactionCloseFailure {
+    fn eq(&self, other: &Self) -> bool {
+        self.phase == other.phase && Arc::ptr_eq(&self.source, &other.source)
+    }
+}
+impl Eq for CompilerTransactionCloseFailure {}
+
+impl CompilerTransactionCloseFailure {
+    fn new(phase: CompilerTransactionClosePhase, source: io::Error) -> Self {
+        Self {
+            phase,
+            source: Arc::new(source),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerTransactionRetirement {
+    DaemonUnobserved {
+        disconnect: Option<Result<(), CompilerTransactionCloseFailure>>,
+    },
+    Direct(DirectCompilerRetirement),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectCompilerRetirement {
+    pub exit: Result<std::process::ExitStatus, CompilerTransactionCloseFailure>,
+    pub termination: CompilerTermination,
+    _retained_child: Option<RetainedCompilerChild>,
+}
+
+/// Retains the exact unreaped child when retirement could not be confirmed.
+#[derive(Clone)]
+struct RetainedCompilerChild(Arc<Mutex<Child>>);
+impl std::fmt::Debug for RetainedCompilerChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("RetainedCompilerChild")
+            .field(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .id(),
+            )
+            .finish()
+    }
+}
+impl PartialEq for RetainedCompilerChild {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for RetainedCompilerChild {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerTermination {
+    NotRequested,
+    Requested,
+    Failed(CompilerTransactionCloseFailure),
+}
+
 /// A bounded lease on one compiler worker. Requests execute in order against
 /// one resident GHC transaction and dropping the lease releases admission.
 #[derive(Debug)]
@@ -201,6 +323,8 @@ struct DirectEndpoint {
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     program: OsString,
+    retired: bool,
+    admission_phase: CompilerTransactionClosePhase,
 }
 
 impl DirectEndpoint {
@@ -218,17 +342,11 @@ impl DirectEndpoint {
         })
     }
 
-    fn abort(&mut self) {
+    fn abort(&mut self) -> DirectCompilerRetirement {
         drop(self.stdin.take());
         drop(self.stdout.take());
-        if let Ok(mut child) = self.child.lock() {
-            if let Err(error) = child.kill() {
-                tracing::warn!(%error, "failed to kill aborted direct-mode compiler worker");
-            }
-            if let Err(error) = child.wait() {
-                tracing::warn!(%error, "failed to reap aborted direct-mode compiler worker");
-            }
-        }
+        self.retired = true;
+        retire_owned_child(&self.child, true)
     }
 
     fn stdout_mut(&mut self) -> Result<&mut ChildStdout, SpawnError> {
@@ -332,39 +450,111 @@ fn cancel_target(target: Option<CancellationTarget>) {
 /// window, past which the child is killed outright rather than left to
 /// wedge whoever is dropping this endpoint (this function is reachable from
 /// `Drop`, where blocking forever is not an option).
-fn wait_for_owned_child(child: &Arc<Mutex<Child>>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let finished = child
+fn wait_for_owned_child(child: &Arc<Mutex<Child>>) -> DirectCompilerRetirement {
+    retire_owned_child(child, false)
+}
+
+fn retire_owned_child(child: &Arc<Mutex<Child>>, abort: bool) -> DirectCompilerRetirement {
+    let mut termination = CompilerTermination::NotRequested;
+    let mut deadline = Instant::now() + Duration::from_secs(5);
+    if abort {
+        termination = request_child_termination(child);
+    }
+    loop {
+        let observed = child
             .lock()
-            .ok()
-            .and_then(|mut child| child.try_wait().ok())
-            .flatten()
-            .is_some();
-        if finished {
-            return;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_wait();
+        match observed {
+            Ok(Some(status)) => {
+                return DirectCompilerRetirement {
+                    exit: Ok(status),
+                    termination,
+                    _retained_child: None,
+                }
+            }
+            Err(source) => {
+                if matches!(termination, CompilerTermination::NotRequested) {
+                    termination = request_child_termination(child);
+                }
+                return DirectCompilerRetirement {
+                    exit: Err(CompilerTransactionCloseFailure::new(
+                        CompilerTransactionClosePhase::FrontendWait,
+                        source,
+                    )),
+                    termination,
+                    _retained_child: Some(RetainedCompilerChild(Arc::clone(child))),
+                };
+            }
+            Ok(None) => {}
         }
-        // Sync context: this poll loop bounds a Drop-reachable path, which
-        // cannot be async.
+        if Instant::now() >= deadline {
+            if matches!(termination, CompilerTermination::NotRequested) {
+                termination = request_child_termination(child);
+                deadline = Instant::now() + Duration::from_secs(5);
+            } else {
+                return DirectCompilerRetirement {
+                    exit: Err(CompilerTransactionCloseFailure::new(
+                        CompilerTransactionClosePhase::FrontendWait,
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "direct compiler retirement remains unconfirmed",
+                        ),
+                    )),
+                    termination,
+                    _retained_child: Some(RetainedCompilerChild(Arc::clone(child))),
+                };
+            }
+        }
         #[allow(
             clippy::disallowed_methods,
-            reason = "sync poll loop reachable from Drop, which cannot await"
+            reason = "sync compiler owner polls bounded retirement"
         )]
         std::thread::sleep(Duration::from_millis(10));
     }
-    if let Ok(mut child) = child.lock() {
-        if let Err(error) = child.kill() {
-            tracing::warn!(%error, "failed to kill unresponsive direct-mode compiler worker");
-        }
-        if let Err(error) = child.try_wait() {
-            tracing::warn!(%error, "failed to reap unresponsive direct-mode compiler worker");
-        }
+}
+
+fn request_child_termination(child: &Arc<Mutex<Child>>) -> CompilerTermination {
+    match child
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .kill()
+    {
+        Ok(()) => CompilerTermination::Requested,
+        Err(source) => CompilerTermination::Failed(CompilerTransactionCloseFailure::new(
+            CompilerTransactionClosePhase::FrontendKill,
+            source,
+        )),
     }
 }
 
 impl Drop for DirectEndpoint {
     fn drop(&mut self) {
-        self.abort();
+        if self.retired {
+            return;
+        }
+        let retirement = self.abort();
+        TRANSACTION_SCOPE.with(|scope| {
+            if let Ok(mut scope) = scope.try_borrow_mut() {
+                if let Some(scope) = scope.as_mut() {
+                    scope
+                        .admission_close
+                        .push(CompilerTransactionCloseEvidence {
+                            reason: CompilerTransactionCloseReason::AdmissionAborted(
+                                self.admission_phase,
+                            ),
+                            retirement: CompilerTransactionRetirement::Direct(retirement.clone()),
+                            earlier: Vec::new(),
+                        });
+                }
+            }
+        });
+        if retirement.exit.is_err() {
+            tracing::warn!(
+                ?retirement,
+                "direct compiler abandonment remains unconfirmed"
+            );
+        }
     }
 }
 
@@ -469,6 +659,8 @@ impl CompilerEndpoint {
             stdout: child.stdout.take(),
             child: Arc::new(Mutex::new(child)),
             program: spec.program.clone(),
+            retired: false,
+            admission_phase: CompilerTransactionClosePhase::IdentityHandshake,
         };
         if let Some(cancellation) = cancellation {
             cancellation.arm(CancellationTarget::Direct(Arc::clone(&direct.child)));
@@ -526,6 +718,7 @@ impl CompilerEndpoint {
         let admission_started = Instant::now();
         let transport = match self.transport {
             Transport::Direct(mut endpoint) => {
+                endpoint.admission_phase = CompilerTransactionClosePhase::BeginHandshake;
                 if let Some(cancellation) = &cancellation {
                     cancellation.arm(CancellationTarget::Direct(Arc::clone(&endpoint.child)));
                 }
@@ -568,11 +761,35 @@ impl CompilerEndpoint {
                     if matches!(error, daemon::DaemonError::Busy) {
                         return SpawnError::capacity(socket.as_os_str());
                     }
-                    let source = io::Error::other(error.to_string());
-                    if error.permits_rebind() {
+                    let permits_rebind = error.permits_rebind();
+                    let source = io::Error::other(error);
+                    if permits_rebind {
                         SpawnError::not_submitted(socket.as_os_str(), source)
                     } else {
-                        SpawnError::indeterminate(socket.as_os_str(), source)
+                        let failure = CompilerTransactionCloseFailure::new(
+                            CompilerTransactionClosePhase::BeginHandshake,
+                            source,
+                        );
+                        TRANSACTION_SCOPE.with(|scope| {
+                            if let Some(scope) = scope.borrow_mut().as_mut() {
+                                scope
+                                    .admission_close
+                                    .push(CompilerTransactionCloseEvidence {
+                                        reason: CompilerTransactionCloseReason::AdmissionFailed(
+                                            failure.clone(),
+                                        ),
+                                        retirement:
+                                            CompilerTransactionRetirement::DaemonUnobserved {
+                                                disconnect: None,
+                                            },
+                                        earlier: Vec::new(),
+                                    });
+                            }
+                        });
+                        SpawnError::indeterminate(
+                            socket.as_os_str(),
+                            io::Error::new(failure.source.kind(), Arc::clone(&failure.source)),
+                        )
                     }
                 })?;
                 TransactionTransport::Daemon {
@@ -702,6 +919,7 @@ struct TransactionScope {
     transaction: Option<CompilerTransaction>,
     program: Option<OsString>,
     cancellation: Option<CompilerTransactionCancellation>,
+    admission_close: Vec<CompilerTransactionCloseEvidence>,
 }
 
 thread_local! {
@@ -765,20 +983,55 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
     Ok(identity)
 }
 
+fn retain_earlier_close(
+    close: CompilerTransactionClose,
+    mut earlier: Vec<CompilerTransactionCloseEvidence>,
+) -> CompilerTransactionClose {
+    if earlier.is_empty() {
+        return close;
+    }
+    let mut evidence = match close {
+        CompilerTransactionClose::Unconfirmed(evidence) => evidence,
+        settled @ (CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted) => {
+            let Some(evidence) = earlier.pop() else {
+                return settled;
+            };
+            evidence
+        }
+    };
+    evidence.earlier.extend(earlier);
+    CompilerTransactionClose::Unconfirmed(evidence)
+}
+
 struct TransactionScopeGuard;
+
+impl TransactionScopeGuard {
+    fn take_scope() -> Option<TransactionScope> {
+        TRANSACTION_SCOPE.with(|scope| scope.borrow_mut().take())
+    }
+
+    fn finish(self) -> CompilerTransactionClose {
+        let Some(scope) = Self::take_scope() else {
+            return CompilerTransactionClose::NotStarted;
+        };
+        let close = match scope.transaction {
+            Some(transaction) => transaction.finish(),
+            None => {
+                if let Some(cancellation) = scope.cancellation {
+                    cancellation.disarm();
+                }
+                CompilerTransactionClose::NotStarted
+            }
+        };
+        retain_earlier_close(close, scope.admission_close)
+    }
+}
 
 impl Drop for TransactionScopeGuard {
     fn drop(&mut self) {
-        let transaction = TRANSACTION_SCOPE.with(|scope| {
-            scope
-                .borrow_mut()
-                .take()
-                .and_then(|state| state.transaction)
-        });
-        if let Some(transaction) = transaction {
-            if let Err(error) = transaction.finish() {
-                tracing::warn!(%error, "compiler transaction did not close cleanly on scope exit");
-            }
+        if let Some(mut transaction) = Self::take_scope().and_then(|scope| scope.transaction) {
+            let close = transaction.abandon();
+            tracing::warn!(?close, "compiler transaction abandoned during unwind");
         }
     }
 }
@@ -786,7 +1039,7 @@ impl Drop for TransactionScopeGuard {
 /// Run synchronous compiler preparation calls against one pinned worker.
 /// The transaction is created lazily by the first `ExtractCmd::bind` and is
 /// always closed before this function returns or unwinds.
-pub fn with_compiler_transaction<T>(action: impl FnOnce() -> T) -> T {
+pub fn with_compiler_transaction<T>(action: impl FnOnce() -> T) -> CompilerTransactionOutcome<T> {
     with_compiler_transaction_inner(None, action)
 }
 
@@ -796,14 +1049,14 @@ pub fn with_compiler_transaction<T>(action: impl FnOnce() -> T) -> T {
 pub fn with_compiler_transaction_cancellable<T>(
     cancellation: CompilerTransactionCancellation,
     action: impl FnOnce() -> T,
-) -> T {
+) -> CompilerTransactionOutcome<T> {
     with_compiler_transaction_inner(Some(cancellation), action)
 }
 
 fn with_compiler_transaction_inner<T>(
     cancellation: Option<CompilerTransactionCancellation>,
     action: impl FnOnce() -> T,
-) -> T {
+) -> CompilerTransactionOutcome<T> {
     TRANSACTION_SCOPE.with(|scope| {
         assert!(
             scope.borrow().is_none(),
@@ -813,12 +1066,13 @@ fn with_compiler_transaction_inner<T>(
             transaction: None,
             program: None,
             cancellation,
+            admission_close: Vec::new(),
         });
     });
     let guard = TransactionScopeGuard;
-    let result = action();
-    drop(guard);
-    result
+    let action = action();
+    let close = guard.finish();
+    CompilerTransactionOutcome { action, close }
 }
 
 impl CompilerTransaction {
@@ -910,81 +1164,150 @@ impl CompilerTransaction {
         })
     }
 
-    pub fn finish(mut self) -> Result<(), SpawnError> {
-        self.close()
+    pub fn finish(mut self) -> CompilerTransactionClose {
+        self.close(false)
     }
 
-    fn close(&mut self) -> Result<(), SpawnError> {
-        let close_started = self.transport.as_ref().map(|_| Instant::now());
-        let result = match self.transport.take() {
-            None => Ok(()),
-            Some(mut transport) => match &mut transport {
-                TransactionTransport::Direct(endpoint) => {
-                    if self.failed {
-                        endpoint.abort();
-                        Ok(())
-                    } else {
-                        let result = if let Some(stdin) = endpoint.stdin.as_mut() {
+    fn abandon(&mut self) -> CompilerTransactionClose {
+        self.close(true)
+    }
+
+    fn close(&mut self, abandoned: bool) -> CompilerTransactionClose {
+        let Some(transport) = self.transport.take() else {
+            return CompilerTransactionClose::NotStarted;
+        };
+        let cancelled = self
+            .cancellation
+            .as_ref()
+            .is_some_and(CompilerTransactionCancellation::is_cancelled);
+        let prior = if abandoned {
+            Some(CompilerTransactionCloseReason::Abandoned)
+        } else if self.failed {
+            Some(CompilerTransactionCloseReason::FailedRequest)
+        } else if cancelled {
+            Some(CompilerTransactionCloseReason::Cancelled)
+        } else {
+            None
+        };
+        let close = match transport {
+            TransactionTransport::Direct(mut endpoint) => {
+                if let Some(reason) = prior {
+                    CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
+                        reason,
+                        retirement: CompilerTransactionRetirement::Direct(endpoint.abort()),
+                        earlier: Vec::new(),
+                    })
+                } else {
+                    let end = endpoint
+                        .stdin
+                        .as_mut()
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "direct compiler stdin is closed",
+                            )
+                        })
+                        .and_then(|stdin| {
                             stdin
                                 .write_all(&[daemon::TRANSACTION_END])
                                 .and_then(|()| stdin.flush())
-                                .map_err(|source| {
-                                    SpawnError::indeterminate(endpoint.program.clone(), source)
-                                })
-                        } else {
-                            Ok(())
-                        };
-                        drop(endpoint.stdin.take());
-                        // Nothing more is read from this endpoint once
-                        // `TRANSACTION_END` is sent (the worker owes it no
-                        // reply). Closing the read end too, before waiting,
-                        // lets a worker still blocked writing to a full
-                        // stdout pipe get EPIPE and exit instead of wedging
-                        // this wait.
-                        drop(endpoint.stdout.take());
-                        wait_for_owned_child(&endpoint.child);
-                        result
-                    }
-                }
-                TransactionTransport::Daemon {
-                    transaction,
-                    socket,
-                } => {
-                    if self.failed {
-                        // best-effort: the transaction already failed; the
-                        // peer may already have closed its end.
-                        transaction.stream.shutdown(Shutdown::Both).ok();
-                        Ok(())
+                        });
+                    drop(endpoint.stdin.take());
+                    drop(endpoint.stdout.take());
+                    let retirement = wait_for_owned_child(&endpoint.child);
+                    endpoint.retired = true;
+                    let clean_exit = matches!(&retirement.exit, Ok(status) if status.success())
+                        && matches!(retirement.termination, CompilerTermination::NotRequested);
+                    if end.is_ok() && clean_exit {
+                        CompilerTransactionClose::Clean
                     } else {
-                        daemon::end_transaction(transaction).map_err(|error| {
-                            SpawnError::indeterminate(
-                                socket.as_os_str(),
-                                io::Error::other(error.to_string()),
-                            )
+                        let reason = match end {
+                            Err(source) => CompilerTransactionCloseReason::EndFailed(
+                                CompilerTransactionCloseFailure::new(
+                                    CompilerTransactionClosePhase::EndWrite,
+                                    source,
+                                ),
+                            ),
+                            Ok(()) if retirement.exit.is_err() => {
+                                CompilerTransactionCloseReason::FrontendRetirementUnconfirmed
+                            }
+                            Ok(()) => CompilerTransactionCloseReason::FrontendExitUnsuccessful,
+                        };
+                        CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
+                            reason,
+                            retirement: CompilerTransactionRetirement::Direct(retirement),
+                            earlier: Vec::new(),
                         })
                     }
                 }
-            },
+            }
+            TransactionTransport::Daemon {
+                mut transaction,
+                socket: _,
+            } => {
+                if let Some(reason) = prior {
+                    let disconnect =
+                        transaction
+                            .stream
+                            .shutdown(Shutdown::Both)
+                            .map_err(|source| {
+                                CompilerTransactionCloseFailure::new(
+                                    CompilerTransactionClosePhase::DaemonDisconnect,
+                                    source,
+                                )
+                            });
+                    CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
+                        reason,
+                        retirement: CompilerTransactionRetirement::DaemonUnobserved {
+                            disconnect: Some(disconnect),
+                        },
+                        earlier: Vec::new(),
+                    })
+                } else {
+                    match daemon::end_transaction(&mut transaction) {
+                        Ok(()) => CompilerTransactionClose::Clean,
+                        Err(error) => CompilerTransactionClose::Unconfirmed(
+                            CompilerTransactionCloseEvidence {
+                                reason: CompilerTransactionCloseReason::EndFailed(
+                                    CompilerTransactionCloseFailure::new(
+                                        CompilerTransactionClosePhase::DaemonEndAcknowledgement,
+                                        io::Error::other(error),
+                                    ),
+                                ),
+                                retirement: CompilerTransactionRetirement::DaemonUnobserved {
+                                    disconnect: Some(
+                                        transaction.stream.shutdown(Shutdown::Both).map_err(
+                                            |source| {
+                                                CompilerTransactionCloseFailure::new(
+                                                    CompilerTransactionClosePhase::DaemonDisconnect,
+                                                    source,
+                                                )
+                                            },
+                                        ),
+                                    ),
+                                },
+                                earlier: Vec::new(),
+                            },
+                        ),
+                    }
+                }
+            }
         };
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.disarm();
         }
-        if let Some(started) = close_started {
-            tracing::debug!(
-                phase = "compiler_transaction_close",
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                success = result.is_ok(),
-                "compiler transaction closed"
-            );
-        }
-        result
+        close
     }
 }
 
 impl Drop for CompilerTransaction {
     fn drop(&mut self) {
-        if let Err(error) = self.close() {
-            tracing::warn!(%error, "compiler transaction did not close cleanly on drop");
+        if self.transport.is_some() {
+            let close = self.abandon();
+            tracing::warn!(
+                ?close,
+                "compiler transaction abandoned without explicit finish"
+            );
         }
     }
 }
@@ -1025,7 +1348,9 @@ mod tests {
         LaunchSpec::direct(executable.into_os_string())
     }
 
-    fn owned_direct_child(cancellation: &CompilerTransactionCancellation) -> Option<Arc<Mutex<Child>>> {
+    fn owned_direct_child(
+        cancellation: &CompilerTransactionCancellation,
+    ) -> Option<Arc<Mutex<Child>>> {
         let state = cancellation.state.lock().unwrap();
         match state.target.as_ref() {
             Some(CancellationTarget::Direct(child)) => Some(Arc::clone(child)),
@@ -1061,7 +1386,9 @@ mod tests {
                     Some(&reader_cancellation),
                     Duration::from_secs(5),
                 )
-                .and_then(|endpoint| endpoint.transaction_with_cancellation(Some(reader_cancellation)))
+                .and_then(|endpoint| {
+                    endpoint.transaction_with_cancellation(Some(reader_cancellation))
+                })
             });
             let deadline = Instant::now() + Duration::from_secs(5);
             while !directory.path().join("stalled").exists() && Instant::now() < deadline {
@@ -1076,16 +1403,19 @@ mod tests {
             let started = Instant::now();
             // This is the same token edge invoked by the actor's async-drop guard.
             cancellation.cancel();
-            let error = settle_handshake_fixture(
-                binding,
-                &cancellation,
-                started + Duration::from_secs(2),
-            ).unwrap_err();
+            let error =
+                settle_handshake_fixture(binding, &cancellation, started + Duration::from_secs(2))
+                    .unwrap_err();
             let child = child.expect("direct child must be armed before the barrier");
             assert_eq!(error.source.kind(), io::ErrorKind::Interrupted);
             assert_eq!(error.permits_rebind(), phase == 3);
             assert!(started.elapsed() < Duration::from_secs(2));
-            let status = child.lock().unwrap().try_wait().unwrap().expect("binding owner must reap");
+            let status = child
+                .lock()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .expect("binding owner must reap");
             assert!(!status.success());
         });
     }
@@ -1120,18 +1450,20 @@ mod tests {
                     )
                 })
             });
-            settle_handshake_fixture(
-                binding,
-                &cancellation,
-                started + Duration::from_secs(3),
-            ).unwrap_err()
+            settle_handshake_fixture(binding, &cancellation, started + Duration::from_secs(3))
+                .unwrap_err()
         });
         assert_eq!(error.source.kind(), io::ErrorKind::TimedOut);
         assert_eq!(error.permits_rebind(), phase == 3);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(directory.path().join("stalled").exists());
         let child = owned_direct_child(&cancellation).expect("direct child must be armed");
-        let status = child.lock().unwrap().try_wait().unwrap().expect("timeout owner must reap");
+        let status = child
+            .lock()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .expect("timeout owner must reap");
         assert!(!status.success());
     }
 
@@ -1154,9 +1486,12 @@ mod tests {
             spec,
             Some(&cancellation),
             Duration::from_secs(5),
-        ).unwrap();
+        )
+        .unwrap();
         let child = owned_direct_child(&cancellation).expect("successful bind must arm child");
-        let mut transaction = endpoint.transaction_with_cancellation(Some(cancellation.clone())).unwrap();
+        let mut transaction = endpoint
+            .transaction_with_cancellation(Some(cancellation.clone()))
+            .unwrap();
         let command = ExtractCmd {
             program: "fixture".into(),
             bin_source: BinSource::Explicit,
@@ -1167,9 +1502,189 @@ mod tests {
             assert!(response.success());
             assert_eq!(response.output.stdout.as_slice(), expected.as_slice());
         }
-        transaction.finish().unwrap();
-        assert!(child.lock().unwrap().try_wait().unwrap().expect("close must reap").success());
+        assert!(transaction.finish().is_clean());
+        assert!(child
+            .lock()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .expect("close must reap")
+            .success());
         assert!(cancellation.state.lock().unwrap().target.is_none());
+    }
+
+    fn scoped_transport_fixture(
+        phase: u8,
+        primary_failure: bool,
+    ) -> CompilerTransactionOutcome<Result<Vec<u8>, &'static str>> {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), phase);
+        with_compiler_transaction(|| {
+            let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
+            let identity = endpoint.identity.clone();
+            let transaction = endpoint.transaction().unwrap();
+            // Install the genuinely admitted transport in the same private scope
+            // populated by lazy bind; this fixture never issues compiler authority.
+            TRANSACTION_SCOPE
+                .with(|scope| scope.borrow_mut().as_mut().unwrap().transaction = Some(transaction));
+            let command = ExtractCmd {
+                program: "fixture".into(),
+                bin_source: BinSource::Explicit,
+                request: ExtractRequest::default(),
+            };
+            let response = CompilerEndpoint {
+                identity,
+                transport: Transport::Scoped,
+            }
+            .execute(&command)
+            .unwrap();
+            if primary_failure {
+                Err("primary action refusal")
+            } else {
+                Ok(response.output.stdout)
+            }
+        })
+    }
+
+    #[test]
+    fn completed_success_survives_unsuccessful_frontend_close() {
+        let outcome = scoped_transport_fixture(6, false);
+        assert_eq!(outcome.action, Ok(b"1".to_vec()));
+        let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+            panic!("close failure must remain separate");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::FrontendExitUnsuccessful
+        );
+        let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+            panic!("exact direct retirement required");
+        };
+        assert_eq!(retirement.exit.unwrap().code(), Some(17));
+        assert_eq!(retirement.termination, CompilerTermination::NotRequested);
+    }
+
+    #[test]
+    fn primary_failure_survives_unsuccessful_frontend_close() {
+        let outcome = scoped_transport_fixture(6, true);
+        assert_eq!(outcome.action, Err("primary action refusal"));
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
+                reason: CompilerTransactionCloseReason::FrontendExitUnsuccessful,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn clean_scope_explicitly_closes_before_returning_completed_action() {
+        let outcome = scoped_transport_fixture(5, false);
+        assert_eq!(outcome.action, Ok(b"1".to_vec()));
+        assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+    }
+
+    #[test]
+    fn abandonment_quarantines_and_reaps_exact_direct_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancellation = CompilerTransactionCancellation::new();
+        let endpoint = CompilerEndpoint::bind_launch_with_cancellation(
+            direct_handshake_fixture(directory.path(), 5),
+            Some(&cancellation),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let child = owned_direct_child(&cancellation).unwrap();
+        let mut transaction = endpoint
+            .transaction_with_cancellation(Some(cancellation.clone()))
+            .unwrap();
+        let close = transaction.abandon();
+        assert!(
+            transaction.transport.is_none(),
+            "quarantined transport cannot serve another request"
+        );
+        assert!(matches!(
+            close,
+            CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
+                reason: CompilerTransactionCloseReason::Abandoned,
+                ..
+            })
+        ));
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+        assert!(cancellation.state.lock().unwrap().target.is_none());
+    }
+
+    #[test]
+    fn begin_refusal_retains_actual_retirement_in_scoped_close_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 4);
+        let outcome = with_compiler_transaction(|| {
+            CompilerEndpoint::bind_launch(spec).and_then(|endpoint| {
+                endpoint.transaction_with_cancellation_timeout(None, Duration::from_millis(100))
+            })
+        });
+        let primary = outcome.action.unwrap_err();
+        assert_eq!(primary.source.kind(), io::ErrorKind::TimedOut);
+        assert!(!primary.permits_rebind());
+        let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+            panic!("owned BEGIN cannot become NotStarted");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::AdmissionAborted(
+                CompilerTransactionClosePhase::BeginHandshake
+            )
+        );
+        let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
+            panic!("actual direct retirement required");
+        };
+        assert!(
+            retirement.exit.is_ok(),
+            "refusal must retain actual reap evidence"
+        );
+    }
+
+    #[test]
+    fn clean_final_close_does_not_erase_earlier_admission_retirement_uncertainty() {
+        let refused = tempfile::tempdir().unwrap();
+        let refused_spec = direct_handshake_fixture(refused.path(), 8);
+        let healthy = tempfile::tempdir().unwrap();
+        let healthy_spec = direct_handshake_fixture(healthy.path(), 5);
+        let outcome = with_compiler_transaction(|| {
+            let refusal = CompilerEndpoint::bind_launch(refused_spec).unwrap_err();
+            assert!(
+                refusal.permits_rebind(),
+                "identity refusal submitted no compiler request"
+            );
+            let endpoint = CompilerEndpoint::bind_launch(healthy_spec).unwrap();
+            let identity = endpoint.identity.clone();
+            let transaction = endpoint.transaction().unwrap();
+            TRANSACTION_SCOPE
+                .with(|scope| scope.borrow_mut().as_mut().unwrap().transaction = Some(transaction));
+            let command = ExtractCmd {
+                program: "fixture".into(),
+                bin_source: BinSource::Explicit,
+                request: ExtractRequest::default(),
+            };
+            CompilerEndpoint {
+                identity,
+                transport: Transport::Scoped,
+            }
+            .execute(&command)
+            .unwrap()
+            .output
+            .stdout
+        });
+        assert_eq!(outcome.action, b"1".to_vec());
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence {
+                reason: CompilerTransactionCloseReason::AdmissionAborted(
+                    CompilerTransactionClosePhase::IdentityHandshake
+                ),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1245,7 +1760,9 @@ mod tests {
         )]
         let child = Arc::new(Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()));
         let started = Instant::now();
-        wait_for_owned_child(&child);
+        let retirement = wait_for_owned_child(&child);
+        assert!(matches!(retirement.exit, Ok(status) if !status.success()));
+        assert_eq!(retirement.termination, CompilerTermination::Requested);
         assert!(
             started.elapsed() < Duration::from_secs(8),
             "wait_for_owned_child did not bound its wait: {:?}",

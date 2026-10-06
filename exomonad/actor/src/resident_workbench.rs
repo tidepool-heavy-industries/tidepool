@@ -61,7 +61,80 @@ use crate::{ActorCompileViewError, ResponseExpectation};
 tokio::task_local! {
     static SLOT_CONTINUATION_OWNER: ParkedHoleAbortRegistration;
     static INVOCATION_CANCEL: Arc<std::sync::atomic::AtomicBool>;
+    static COMPILER_CLOSE_OWNER: CompilerCloseOwner;
     static EXECUTION_CONTROL: Arc<crate::WorkbenchExecutionControl>;
+}
+
+#[derive(Clone)]
+pub(crate) enum CompilerCloseOwner {
+    Initialization(crate::RetainedActorExit),
+    Hosted(Arc<crate::WorkbenchExecutionControl>),
+    Invocation {
+        work: Arc<crate::resident_actor::invocation_work::InvocationWork>,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    },
+}
+
+impl CompilerCloseOwner {
+    pub(crate) fn close_settled(&self) {
+        match self {
+            Self::Initialization(owner) => owner.notify_compiler_close(),
+            Self::Hosted(control) => control.notify_compiler_close(),
+            Self::Invocation { control, .. } => {
+                if let Some(control) = control {
+                    control.notify_compiler_close();
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn scope<T>(&self, operation: impl std::future::Future<Output = T>) -> T {
+        COMPILER_CLOSE_OWNER.scope(self.clone(), operation).await
+    }
+}
+
+fn register_compiler_work(
+) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
+    let owner = COMPILER_CLOSE_OWNER
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| execution_control().map(CompilerCloseOwner::Hosted))
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "compiler work requires an invocation or initialization cleanup owner".into(),
+            )
+        })?;
+    let receipt = crate::termination::CompilerWorkReceipt::pending();
+    let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), owner.clone());
+    let admitted = match &owner {
+        CompilerCloseOwner::Initialization(owner) => owner.register_compiler_work(receipt),
+        CompilerCloseOwner::Hosted(owner) => owner.register_compiler_work(receipt),
+        CompilerCloseOwner::Invocation { work, control } => {
+            work.register_compiler_work(receipt.clone())
+                && control
+                    .as_ref()
+                    .is_none_or(|owner| owner.register_compiler_work(receipt))
+        }
+    };
+    if admitted {
+        return Ok(ticket);
+    }
+    // No native work has started. Revoke any partial metadata admission cleanly.
+    ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+        action: (),
+        close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+    });
+    Err(ResidentActorWorkbenchError::ActorProtocol(
+        "compiler cleanup owner has closed native work admission".into(),
+    ))
+}
+
+/// Direct fixtures supply the existing lifecycle owner explicitly.
+#[cfg(test)]
+async fn with_test_compiler_owner<T>(operation: impl std::future::Future<Output = T>) -> T {
+    CompilerCloseOwner::Initialization(crate::RetainedActorExit::new())
+        .scope(operation)
+        .await
 }
 
 pub(crate) async fn with_invocation_cancellation<T>(
@@ -1124,6 +1197,7 @@ struct ParkedHoleAbortState {
     state: Mutex<ParkedHoleState>,
     reason: String,
     retained_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    compiler_owner: std::sync::OnceLock<CompilerCloseOwner>,
 }
 
 enum ParkedHoleState {
@@ -1205,9 +1279,18 @@ impl ParkedHoleAbortGuard {
                 state: Mutex::new(ParkedHoleState::Owned(latest.into_iter().collect())),
                 reason,
                 retained_authority,
+                compiler_owner: std::sync::OnceLock::new(),
             }
         });
         Self { shared }
+    }
+
+    pub(crate) fn with_compiler_owner(self, owner: CompilerCloseOwner) -> Self {
+        assert!(
+            self.shared.compiler_owner.set(owner).is_ok(),
+            "cleanup owner is assigned once before native admission"
+        );
+        self
     }
 
     pub(crate) fn registration(&self) -> ParkedHoleAbortRegistration {
@@ -1316,11 +1399,22 @@ impl ParkedHoleAbortRegistration {
     }
 
     pub(crate) async fn scope<F: std::future::Future>(&self, operation: F) -> F::Output {
-        SLOT_CONTINUATION_OWNER.scope(self.clone(), operation).await
+        let compiler_owner = self.0.compiler_owner.get().cloned();
+        let scoped = SLOT_CONTINUATION_OWNER.scope(self.clone(), operation);
+        match compiler_owner {
+            Some(owner) => owner.scope(scoped).await,
+            None => scoped.await,
+        }
     }
 
     pub(crate) fn sync_scope<T>(&self, operation: impl FnOnce() -> T) -> T {
-        SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation)
+        let compiler_owner = self.0.compiler_owner.get().cloned();
+        match compiler_owner {
+            Some(owner) => COMPILER_CLOSE_OWNER.sync_scope(owner, || {
+                SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation)
+            }),
+            None => SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation),
+        }
     }
 
     fn observe(&self, event: ResidentContinuationEvent) {
@@ -4113,9 +4207,12 @@ where
             reason,
             retained_authority,
         );
-        SLOT_CONTINUATION_OWNER
-            .scope(guard.registration(), operation)
-            .await
+        let compiler_owner = COMPILER_CLOSE_OWNER.try_with(Clone::clone).ok();
+        let guard = match compiler_owner {
+            Some(owner) => guard.with_compiler_owner(owner),
+            None => guard,
+        };
+        guard.registration().scope(operation).await
     }
 
     /// Resolve this actor's spec without compiling anything, for status and
@@ -4934,18 +5031,22 @@ where
             let original_admission = admission.clone();
             let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
             let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+            let compiler_work = register_compiler_work()?;
             let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
-                    let prototype = original_admission.prototype();
-                    tidepool_toolchain::artifacts::issue_host_binding_interface(
-                        prototype.compiler().clone(),
-                        original_admission.digest(),
-                        original_admission.generation().0,
-                        original_admission.binding(),
-                        prototype.include_paths(),
-                    )
-                    .map_err(ResidentActorWorkbenchError::Compile)
-                })
+                compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
+                    cancellation,
+                    || {
+                        let prototype = original_admission.prototype();
+                        tidepool_toolchain::artifacts::issue_host_binding_interface(
+                            prototype.compiler().clone(),
+                            original_admission.digest(),
+                            original_admission.generation().0,
+                            original_admission.binding(),
+                            prototype.include_paths(),
+                        )
+                        .map_err(ResidentActorWorkbenchError::Compile)
+                    },
+                ))
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -5159,14 +5260,18 @@ where
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         let parser_specification = specification.clone();
         let parser_cancellation = cancellation.clone();
+        let compiler_work = register_compiler_work()?;
         let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-            tidepool_runtime::with_compiler_transaction_cancellable(parser_cancellation, || {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(parser_specification.cell.clone()),
-                    &parser_specification.include,
-                )
-                .map_err(ResidentActorWorkbenchError::Compile)
-            })
+            compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
+                parser_cancellation,
+                || {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(parser_specification.cell.clone()),
+                        &parser_specification.include,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Compile)
+                },
+            ))
         }))
         .await
         .map_err(ResidentActorWorkbenchError::Join)??;
@@ -5217,34 +5322,38 @@ where
             .await?;
         let check_specification = specification.clone();
         let check_admission = admission.clone();
+        let compiler_work = register_compiler_work()?;
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
-                    let include = check_specification
-                        .include
-                        .iter()
-                        .map(PathBuf::as_path)
-                        .collect::<Vec<_>>();
-                    let view = check_admission.view();
-                    tidepool_runtime::session::turn::compile_cell_program_admitted(
-                        CellCheckRequest {
-                            exact_context: view.exact_compile_context(),
-                            session_id: Some(view.session()),
-                            cell_text: &check_specification.cell.cell_source,
-                            template: &check_specification.cell.template_source,
-                            include: &include,
-                            session_root: view.session_root(),
-                            inject_modules: &check_specification.cell.injected_modules,
-                            compile_generation: view.next_value_generation().0,
-                            compile_view_evidence: &check_specification.evidence,
-                        },
-                        check_admission.clone(),
-                        &check_specification.templates,
-                    )
-                    .map_err(|failure| {
-                        cell_check_error(failure, &check_specification.cell.cell_source)
-                    })
-                })
+                compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
+                    cancellation,
+                    || {
+                        let include = check_specification
+                            .include
+                            .iter()
+                            .map(PathBuf::as_path)
+                            .collect::<Vec<_>>();
+                        let view = check_admission.view();
+                        tidepool_runtime::session::turn::compile_cell_program_admitted(
+                            CellCheckRequest {
+                                exact_context: view.exact_compile_context(),
+                                session_id: Some(view.session()),
+                                cell_text: &check_specification.cell.cell_source,
+                                template: &check_specification.cell.template_source,
+                                include: &include,
+                                session_root: view.session_root(),
+                                inject_modules: &check_specification.cell.injected_modules,
+                                compile_generation: view.next_value_generation().0,
+                                compile_view_evidence: &check_specification.evidence,
+                            },
+                            check_admission.clone(),
+                            &check_specification.templates,
+                        )
+                        .map_err(|failure| {
+                            cell_check_error(failure, &check_specification.cell.cell_source)
+                        })
+                    },
+                ))
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
@@ -5440,34 +5549,37 @@ where
             let compile_cancellation = cancellation.clone();
             let inspection_view = view.clone();
             let effects = effects_alias.clone();
+            let compiler_work = register_compiler_work()?;
             let spawn = {
                 let _entered = compile_span.enter();
                 spawn_blocking_in_span(move || {
-                    let answer = tidepool_runtime::with_compiler_transaction_cancellable(
-                        compile_cancellation,
-                        || {
-                            crate::lookup::execute(
-                                request,
-                                request_view,
-                                &imports,
-                                &injected,
-                                &workspace_modules,
-                                usage,
-                                |queries| {
-                                    inspect_lookup_queries(
-                                        &inspection_view,
-                                        Some(&inspection_values),
-                                        &preamble,
-                                        &imports,
-                                        &include,
-                                        &injected,
-                                        &effects,
-                                        queries,
-                                        timing.as_ref(),
-                                    )
-                                },
-                            )
-                        },
+                    let answer = compiler_work.consume(
+                        tidepool_runtime::with_compiler_transaction_cancellable(
+                            compile_cancellation,
+                            || {
+                                crate::lookup::execute(
+                                    request,
+                                    request_view,
+                                    &imports,
+                                    &injected,
+                                    &workspace_modules,
+                                    usage,
+                                    |queries| {
+                                        inspect_lookup_queries(
+                                            &inspection_view,
+                                            Some(&inspection_values),
+                                            &preamble,
+                                            &imports,
+                                            &include,
+                                            &injected,
+                                            &effects,
+                                            queries,
+                                            timing.as_ref(),
+                                        )
+                                    },
+                                )
+                            },
+                        ),
                     );
                     #[cfg(test)]
                     lookup_inspection_probe::after_request();
@@ -5695,9 +5807,10 @@ where
             let compile_block_text = block.clone();
             let effects = context.haskell_effects_alias.clone();
             let compile_cancellation = cancellation.clone();
+            let compiler_work = register_compiler_work()?;
             let (snapshot, compiled) =
                 crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                    tidepool_runtime::with_compiler_transaction_cancellable(
+                    compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
                         compile_cancellation,
                         || {
                             let compiled = compile_fragment_off_checkout(
@@ -5708,7 +5821,7 @@ where
                             );
                             compiled.map(|compiled| (snapshot, compiled))
                         },
-                    )
+                    ))
                 }))
                 .await
                 .map_err(ResidentActorWorkbenchError::Join)??;
@@ -7441,8 +7554,11 @@ where
                 .await
                 .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
             let compile_cancellation = cancellation.clone();
+            let compiler_work = register_compiler_work().map_err(|error| {
+                publication_error(PrivatePublicationPhase::CertifyAndStage, error)
+            })?;
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(
+                compiler_work.consume(tidepool_runtime::with_compiler_transaction_cancellable(
                     compile_cancellation,
                     || match baseline {
                         tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
@@ -7459,7 +7575,7 @@ where
                             }
                         }
                     },
-                )
+                ))
             }))
             .await
             .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Join(error)))?
@@ -12330,7 +12446,78 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn compiler_obligation_survives_waiter_loss_and_actor_stop_until_late_close() {
+        let retained = crate::RetainedActorExit::new();
+        let owner = CompilerCloseOwner::Initialization(retained.clone());
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let (settled, settled_observation) = std::sync::mpsc::channel();
+        let waiter = owner
+            .scope(async {
+                // Exercise the same admission boundary as every real compiler spawn.
+                let ticket = register_compiler_work().unwrap();
+                let native = spawn_blocking_in_span(move || {
+                    entered.send(()).unwrap();
+                    proceed
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    let action = ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+                        action: Err::<(), _>("completed primary refusal"),
+                        close: tidepool_runtime::CompilerTransactionClose::Clean,
+                    });
+                    settled.send(action).unwrap();
+                });
+                tokio::spawn(async move { native.await })
+            })
+            .await;
+        observed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        retained.retain_cleanup(crate::ResidentCleanupOutcome {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            hook: crate::CleanupComponentOutcome::Confirmed,
+            realm: crate::CleanupComponentOutcome::Confirmed,
+            children: crate::CleanupComponentOutcome::Confirmed,
+        });
+        retained
+            .publish(crate::ActorTerminal {
+                kind: crate::ActorExitKind::Cancelled,
+                summary: "stopped while compiler pending".into(),
+            })
+            .unwrap();
+        assert!(!retained.cleanup().unwrap().is_confirmed());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(!retained.cleanup().unwrap().is_confirmed());
+        release.send(()).unwrap();
+        assert_eq!(
+            settled_observation
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Err("completed primary refusal")
+        );
+        assert!(retained.cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            retained.get().unwrap().kind,
+            crate::ActorExitKind::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn compiler_spawn_refuses_missing_cleanup_owner() {
+        assert!(matches!(
+            register_compiler_work(),
+            Err(ResidentActorWorkbenchError::ActorProtocol(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job() {
+        with_test_compiler_owner(command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job_with_compiler_owner()).await;
+    }
+
+    async fn command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job_with_compiler_owner(
+    ) {
         use tidepool_runtime::session::turn::HostBindingAuthority;
         let (machines, public, source, _root) = actor_registry_fixture();
         let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
@@ -12485,6 +12672,13 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn tool_result_mounts_retain_original_checked_interfaces() {
+        with_test_compiler_owner(
+            tool_result_mounts_retain_original_checked_interfaces_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn tool_result_mounts_retain_original_checked_interfaces_with_compiler_owner() {
         use tidepool_runtime::session::turn::HostBindingAuthority;
         let (machines, public, source, _root) = actor_registry_fixture();
         let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
@@ -12596,6 +12790,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn successful_private_cell_publishes_declarations_and_accepted_host_writes_only() {
+        with_test_compiler_owner(successful_private_cell_publishes_declarations_and_accepted_host_writes_only_with_compiler_owner()).await;
+    }
+
+    async fn successful_private_cell_publishes_declarations_and_accepted_host_writes_only_with_compiler_owner(
+    ) {
         let (machines, public, source, _root) = actor_registry_fixture();
         let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
@@ -12698,6 +12897,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn deferred_children_use_publication_scope_after_later_independent_publication() {
+        with_test_compiler_owner(deferred_children_use_publication_scope_after_later_independent_publication_with_compiler_owner()).await;
+    }
+
+    async fn deferred_children_use_publication_scope_after_later_independent_publication_with_compiler_owner(
+    ) {
         let (machines, public, source, _root) = actor_registry_fixture();
         let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let original_child = workbench_runner_for_test(&initial)
@@ -12843,6 +13047,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution() {
+        with_test_compiler_owner(cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner()).await;
+    }
+
+    async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner(
+    ) {
         let (machines, public, source, _root) = actor_registry_fixture();
         let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
@@ -13522,6 +13731,15 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items() {
+        with_test_compiler_owner(
+            admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items_with_compiler_owner(
+            ),
+        )
+        .await;
+    }
+
+    async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let (initial, private_context) = initial
@@ -13868,6 +14086,15 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn authored_cell_requires_both_source_and_private_execution_admission() {
+        with_test_compiler_owner(
+            authored_cell_requires_both_source_and_private_execution_admission_with_compiler_owner(
+            ),
+        )
+        .await;
+    }
+
+    async fn authored_cell_requires_both_source_and_private_execution_admission_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_json_input(Some(serde_json::json!(42)));
@@ -13909,6 +14136,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits() {
+        with_test_compiler_owner(planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits_with_compiler_owner()).await;
+    }
+
+    async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits_with_compiler_owner(
+    ) {
         for mutate_own in [false, true] {
             let (machines, context, source, _root) = actor_registry_fixture();
             let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
@@ -14036,6 +14268,13 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn lookup_batches_qualified_export_facts_in_one_compiler_request() {
+        with_test_compiler_owner(
+            lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn lookup_batches_qualified_export_facts_in_one_compiler_request_with_compiler_owner() {
         use crate::lookup::LookupOutcome;
         use std::cell::Cell;
 
@@ -14156,6 +14395,13 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
+        with_test_compiler_owner(
+            lookup_inspects_checked_bound_value_on_repeated_requests_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn lookup_inspects_checked_bound_value_on_repeated_requests_with_compiler_owner() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let mut sibling_context = context.clone();
@@ -14379,6 +14625,15 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc() {
+        with_test_compiler_owner(
+            lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc_with_compiler_owner(
+            ),
+        )
+        .await;
+    }
+
+    async fn lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc_with_compiler_owner(
+    ) {
         for sibling_write in [false, true] {
             let (machines, context, source, _root) = actor_lookup_registry_fixture();
             let workbench = Arc::new(ResidentActorWorkbench::new(
@@ -14430,7 +14685,7 @@ pub(crate) mod request_tests {
             let requests_before = compiler_trace_started_ids(&trace_path);
             let task_workbench = Arc::clone(&workbench);
             let task_context = context.clone();
-            let task = tokio::spawn(async move {
+            let task = tokio::spawn(with_test_compiler_owner(async move {
                 task_workbench
                     .resume_lookup(
                         task_context,
@@ -14440,7 +14695,7 @@ pub(crate) mod request_tests {
                         None,
                     )
                     .await
-            });
+            }));
 
             let trace_for_wait = trace_path.clone();
             let active_request = tokio::task::spawn_blocking(move || {
@@ -14544,6 +14799,13 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn actor_empty_snapshot_answers_uncancelled_type_search() {
+        with_test_compiler_owner(
+            actor_empty_snapshot_answers_uncancelled_type_search_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn actor_empty_snapshot_answers_uncancelled_type_search_with_compiler_owner() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let (view, inputs, prepared) = workbench
@@ -14586,6 +14848,13 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn parked_actor_snapshot_answers_uncancelled_type_search() {
+        with_test_compiler_owner(
+            parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let step = workbench
@@ -14678,6 +14947,14 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn parked_lookup_transaction_answers_uncancelled_varied_type_search() {
+        with_test_compiler_owner(
+            parked_lookup_transaction_answers_uncancelled_varied_type_search_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn parked_lookup_transaction_answers_uncancelled_varied_type_search_with_compiler_owner()
+    {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let step = workbench
@@ -14743,6 +15020,11 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers() {
+        with_test_compiler_owner(cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner()).await;
+    }
+
+    async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = Arc::new(ResidentActorWorkbench::new(
             Arc::clone(&machines),
@@ -14774,7 +15056,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let task_continuation_id = continuation_id.clone();
         let task_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(with_test_compiler_owner(async move {
             let guard = ParkedHoleAbortGuard::new(
                 &task_workbench.access,
                 task_context.clone(),
@@ -14793,7 +15075,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     ),
                 )
                 .await
-        });
+        }));
         let trace_for_wait = trace_path.clone();
         let request = tokio::task::spawn_blocking(move || {
             wait_for_new_compiler_request(&trace_for_wait, &requests_before)
@@ -14856,6 +15138,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn tool_installation_preserves_durable_child_private_admission() {
+        with_test_compiler_owner(
+            tool_installation_preserves_durable_child_private_admission_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn tool_installation_preserves_durable_child_private_admission_with_compiler_owner() {
         struct RunOwner {
             root: PathBuf,
             _lock: std::fs::File,
@@ -15062,6 +15351,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn fork_child_admission_prior_retirement_refuses_ready_checkout() {
+        with_test_compiler_owner(
+            fork_child_admission_prior_retirement_refuses_ready_checkout_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn fork_child_admission_prior_retirement_refuses_ready_checkout_with_compiler_owner() {
         let (machines, runner, context, _root) = child_admission_fixture();
         let retirement = crate::RetainedActorExit::new();
         let terminal = retirement.request_shutdown(child_retirement());
@@ -15086,6 +15382,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn fork_child_admission_retirement_removes_queued_checkout() {
+        with_test_compiler_owner(
+            fork_child_admission_retirement_removes_queued_checkout_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn fork_child_admission_retirement_removes_queued_checkout_with_compiler_owner() {
         let (machines, runner, context, _root) = child_admission_fixture();
         let id = context.placement.session;
         let (session, receipt) = machines.checkout_run(id).unwrap().into_parts();
@@ -15117,6 +15420,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn fork_child_admission_claimed_operation_keeps_result_during_retirement() {
+        with_test_compiler_owner(fork_child_admission_claimed_operation_keeps_result_during_retirement_with_compiler_owner()).await;
+    }
+
+    async fn fork_child_admission_claimed_operation_keeps_result_during_retirement_with_compiler_owner(
+    ) {
         let (machines, runner, context, _root) = child_admission_fixture();
         let id = context.placement.session;
         let retirement = crate::RetainedActorExit::new();
@@ -15276,6 +15584,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn cancelling_child_preparation_cannot_register_a_late_machine() {
+        with_test_compiler_owner(
+            cancelling_child_preparation_cannot_register_a_late_machine_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn cancelling_child_preparation_cannot_register_a_late_machine_with_compiler_owner() {
         let id = tidepool_repr::SessionId(810);
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
@@ -15325,6 +15640,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn prepared_child_registration_remains_owned_by_retirement() {
+        with_test_compiler_owner(
+            prepared_child_registration_remains_owned_by_retirement_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn prepared_child_registration_remains_owned_by_retirement_with_compiler_owner() {
         let id = tidepool_repr::SessionId(811);
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
@@ -15465,6 +15787,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// [`ResidentActorRunner`] rather than raw [`ResidentSession`] calls.
     #[tokio::test]
     async fn transfer_custody_moves_a_value_between_two_resident_sessions() {
+        with_test_compiler_owner(
+            transfer_custody_moves_a_value_between_two_resident_sessions_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn transfer_custody_moves_a_value_between_two_resident_sessions_with_compiler_owner() {
         tidepool_testing::eval_harness::require_extract();
         let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
             .expect("materialize minimal effect surface");
@@ -15632,6 +15961,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn cancelling_child_startup_during_custody_transfer_discards_only_the_child_session() {
+        with_test_compiler_owner(cancelling_child_startup_during_custody_transfer_discards_only_the_child_session_with_compiler_owner()).await;
+    }
+
+    async fn cancelling_child_startup_during_custody_transfer_discards_only_the_child_session_with_compiler_owner(
+    ) {
         use std::future::Future;
         use std::task::Poll;
 
@@ -15758,6 +16092,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots() {
+        with_test_compiler_owner(
+            progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner()
+    {
         use crate::request::sources::{RequestSourceKind, SourceDelivery, SourceEvent};
         use crate::request::{RequestRegistry, WatchRequirement};
         use ractor::{Actor, ActorProcessingErr};
@@ -16347,6 +16689,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// custodies are independently discardable with no double-free.
     #[tokio::test]
     async fn import_shared_custody_lets_two_observers_read_one_published_root() {
+        with_test_compiler_owner(
+            import_shared_custody_lets_two_observers_read_one_published_root_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn import_shared_custody_lets_two_observers_read_one_published_root_with_compiler_owner()
+    {
         tidepool_testing::eval_harness::require_extract();
         let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
             .expect("materialize minimal effect surface");
@@ -16657,6 +17007,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup() {
+        with_test_compiler_owner(
+            reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup_with_compiler_owner() {
         let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
         runner.retire_child_session(id, false).await.unwrap();
         assert!(
@@ -16677,6 +17034,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker() {
+        with_test_compiler_owner(reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker_with_compiler_owner()).await;
+    }
+
+    async fn reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker_with_compiler_owner(
+    ) {
         let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
         runner.retire_child_session(id, false).await.unwrap();
         let owner = runner
@@ -16718,6 +17080,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn reaper_release_panicked_checkout_clears_membership_and_finishes_worker() {
+        with_test_compiler_owner(reaper_release_panicked_checkout_clears_membership_and_finishes_worker_with_compiler_owner()).await;
+    }
+
+    async fn reaper_release_panicked_checkout_clears_membership_and_finishes_worker_with_compiler_owner(
+    ) {
         let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
         runner.retire_child_session(id, false).await.unwrap();
         let owner = runner
@@ -16746,6 +17113,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker() {
+        with_test_compiler_owner(reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker_with_compiler_owner()).await;
+    }
+
+    async fn reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker_with_compiler_owner(
+    ) {
         let (_machines, runner, context, _root) = child_admission_fixture();
         let id = tidepool_repr::SessionId(context.placement.session.0 + 1);
         runner.access.child_sessions.lock().unwrap().insert(id);
@@ -16776,6 +17148,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn reaper_release_terminal_cleanup_preserves_different_worker_owner() {
+        with_test_compiler_owner(
+            reaper_release_terminal_cleanup_preserves_different_worker_owner_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn reaper_release_terminal_cleanup_preserves_different_worker_owner_with_compiler_owner()
+    {
         let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
         let owner = Arc::new(PendingChildTeardown::new());
         runner
@@ -16811,6 +17191,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// down; the test waits for both registry removal and worker completion.
     #[tokio::test]
     async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
+        with_test_compiler_owner(
+            retiring_a_child_session_defers_then_completes_once_custody_clears_with_compiler_owner(
+            ),
+        )
+        .await;
+    }
+
+    async fn retiring_a_child_session_defers_then_completes_once_custody_clears_with_compiler_owner(
+    ) {
         let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
         runner
             .retire_child_session(child_id, false)
@@ -16866,6 +17255,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn concurrent_child_retirements_share_one_cleanup_owner() {
+        with_test_compiler_owner(
+            concurrent_child_retirements_share_one_cleanup_owner_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn concurrent_child_retirements_share_one_cleanup_owner_with_compiler_owner() {
         let (runner, machines, child_id, custody, _root) = child_session_with_binding_lease();
         let (first, second) = tokio::join!(
             runner.retire_child_session(child_id, false),
@@ -16903,6 +17299,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops() {
+        with_test_compiler_owner(canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops_with_compiler_owner()).await;
+    }
+
+    async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops_with_compiler_owner(
+    ) {
         let (runner, machines, child_id, custody, _root) = child_session_with_binding_lease();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
@@ -17012,6 +17413,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn planned_cell_defers_declaration_until_its_admitted_item() {
+        with_test_compiler_owner(
+            planned_cell_defers_declaration_until_its_admitted_item_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn planned_cell_defers_declaration_until_its_admitted_item_with_compiler_owner() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None);
         let public_context = context.clone();
@@ -17106,6 +17514,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// later items and closures retain the exact original input after a new mount.
     #[tokio::test]
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation() {
+        with_test_compiler_owner(planned_cell_keeps_request_json_input_owned_across_native_preparation_with_compiler_owner()).await;
+    }
+
+    async fn planned_cell_keeps_request_json_input_owned_across_native_preparation_with_compiler_owner(
+    ) {
         let (machines, public, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
@@ -17394,6 +17807,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn current_request_cell_compiles_closed_site_evidence() {
+        with_test_compiler_owner(
+            current_request_cell_compiles_closed_site_evidence_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn current_request_cell_compiles_closed_site_evidence_with_compiler_owner() {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -17975,6 +18395,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     pub(crate) async fn activation_publication_phase_fixture() -> ActivationPublicationPhaseFixture
     {
+        with_test_compiler_owner(activation_publication_phase_fixture_with_compiler_owner()).await
+    }
+
+    async fn activation_publication_phase_fixture_with_compiler_owner(
+    ) -> ActivationPublicationPhaseFixture {
         struct RunOwner {
             root: PathBuf,
             _lock: std::fs::File,
@@ -18131,6 +18556,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn activation_inputs_preserve_durable_private_admission_across_replacement() {
+        with_test_compiler_owner(activation_inputs_preserve_durable_private_admission_across_replacement_with_compiler_owner()).await;
+    }
+
+    async fn activation_inputs_preserve_durable_private_admission_across_replacement_with_compiler_owner(
+    ) {
         struct RunOwner {
             root: PathBuf,
             _lock: std::fs::File,
@@ -18304,6 +18734,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn activation_refuses_reserved_declaration_without_public_mutation() {
+        with_test_compiler_owner(
+            activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner() {
         let (mut session, context, source, mut inputs, _root) = activation_input_fixture(|_| {});
         let step = begin_fragment(
             &mut session,
@@ -18380,6 +18817,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount() {
+        with_test_compiler_owner(
+            request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let step = workbench
@@ -18432,6 +18876,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn current_request_private_cell_borrows_scope_alias_without_extra_root() {
+        with_test_compiler_owner(
+            current_request_private_cell_borrows_scope_alias_without_extra_root_with_compiler_owner(
+            ),
+        )
+        .await;
+    }
+
+    async fn current_request_private_cell_borrows_scope_alias_without_extra_root_with_compiler_owner(
+    ) {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -18578,6 +19031,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn current_request_without_an_activation_returns_typed_refusal() {
+        with_test_compiler_owner(
+            current_request_without_an_activation_returns_typed_refusal_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn current_request_without_an_activation_returns_typed_refusal_with_compiler_owner() {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -18668,6 +19128,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// unsplit single checkout held across the whole compile would force.
     #[tokio::test]
     async fn planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile() {
+        with_test_compiler_owner(planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile_with_compiler_owner()).await;
+    }
+
+    async fn planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile_with_compiler_owner(
+    ) {
         let (machines, mut context_a, mut context_b, source, _root) =
             actor_registry_fixture_two_scopes();
         context_a.actor = crate::ActorRef::first(crate::ActorId(101));
@@ -18782,6 +19247,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// `begin_fragment_split` commits.
     #[tokio::test]
     async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
+        with_test_compiler_owner(begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment_with_compiler_owner()).await;
+    }
+
+    async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment_with_compiler_owner(
+    ) {
         let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
         let split_workbench =
             ResidentActorWorkbench::new(split_machines, split_source.clone(), None);
@@ -18890,6 +19360,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities() {
+        with_test_compiler_owner(public_visibility_snapshot_pairs_declaration_and_exact_binding_identities_with_compiler_owner()).await;
+    }
+
+    async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
@@ -18955,6 +19430,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
+        with_test_compiler_owner(answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner()).await;
+    }
+
+    async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
@@ -18989,6 +19469,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children(
+    ) {
+        with_test_compiler_owner(captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children_with_compiler_owner()).await;
+    }
+
+    async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children_with_compiler_owner(
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
@@ -19276,6 +19761,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry() {
+        with_test_compiler_owner(checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry_with_compiler_owner()).await;
+    }
+
+    async fn checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
         let scope = runner
@@ -19462,16 +19952,33 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame() {
+        with_test_compiler_owner(tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame_with_compiler_owner()).await;
+    }
+
+    async fn tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame_with_compiler_owner(
+    ) {
         assert_installer_deferred_rejection(InstallerDeferredStage::BeforePublication).await;
     }
 
     #[tokio::test]
     async fn tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame() {
+        with_test_compiler_owner(tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame_with_compiler_owner()).await;
+    }
+
+    async fn tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame_with_compiler_owner(
+    ) {
         assert_installer_deferred_rejection(InstallerDeferredStage::AfterPublication).await;
     }
 
     #[tokio::test]
     async fn external_work_releases_machine_until_its_failure_settles() {
+        with_test_compiler_owner(
+            external_work_releases_machine_until_its_failure_settles_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn external_work_releases_machine_until_its_failure_settles_with_compiler_owner() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
@@ -19568,6 +20075,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// cannot observe without this guard.
     #[tokio::test]
     async fn dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole() {
+        with_test_compiler_owner(dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole_with_compiler_owner()).await;
+    }
+
+    async fn dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let mut suspend_context = context.clone();
         suspend_context.haskell_effects_alias =
@@ -19661,6 +20173,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes() {
+        with_test_compiler_owner(actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes_with_compiler_owner()).await;
+    }
+
+    async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes_with_compiler_owner(
+    ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
@@ -19756,6 +20273,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners() {
+        with_test_compiler_owner(actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners_with_compiler_owner()).await;
+    }
+
+    async fn actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners_with_compiler_owner(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let runner = ResidentActorRunner::new(machines, source);
         let outcome = ResidentOutcome::Suspended {
@@ -19786,6 +20308,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     state: Mutex::new(state),
                     reason: "test".into(),
                     retained_authority: None,
+                    compiler_owner: std::sync::OnceLock::new(),
                 }),
             };
             let registration = guard.registration();
@@ -19805,6 +20328,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn late_parked_hole_registration_aborts_only_its_own_continuation() {
+        with_test_compiler_owner(
+            late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = Arc::new(ResidentActorWorkbench::new(
@@ -19880,6 +20410,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout() {
+        with_test_compiler_owner(
+            cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout_with_compiler_owner()
+    {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = Arc::new(ResidentActorWorkbench::new(
@@ -19968,6 +20506,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole() {
+        with_test_compiler_owner(
+            cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole_with_compiler_owner()
+    {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = Arc::new(ResidentActorWorkbench::new(
@@ -19989,7 +20535,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let task_workbench = Arc::clone(&workbench);
         let slot_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(with_test_compiler_owner(async move {
             task_workbench
                 .with_exact_continuation_cleanup(
                     task_context.clone(),
@@ -20010,7 +20556,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     },
                 )
                 .await
-        });
+        }));
         let slot_id = parked_rx.await.expect("slot parked");
         task.abort();
         assert!(task.await.expect_err("cancelled task").is_cancelled());
@@ -20042,16 +20588,37 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn failed_abort_retains_frame_authority_until_owning_realm_retirement() {
+        with_test_compiler_owner(
+            failed_abort_retains_frame_authority_until_owning_realm_retirement_with_compiler_owner(
+            ),
+        )
+        .await;
+    }
+
+    async fn failed_abort_retains_frame_authority_until_owning_realm_retirement_with_compiler_owner(
+    ) {
         failed_abort_frame_owner(false).await;
     }
 
     #[tokio::test]
     async fn failed_abort_releases_frame_authority_after_confirmed_native_machine_loss() {
+        with_test_compiler_owner(failed_abort_releases_frame_authority_after_confirmed_native_machine_loss_with_compiler_owner()).await;
+    }
+
+    async fn failed_abort_releases_frame_authority_after_confirmed_native_machine_loss_with_compiler_owner(
+    ) {
         failed_abort_frame_owner(true).await;
     }
 
     #[tokio::test]
     async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment() {
+        with_test_compiler_owner(
+            exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment_with_compiler_owner() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
@@ -20220,6 +20787,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     state: Mutex::new(ParkedHoleState::Owned(Default::default())),
                     reason: "test".into(),
                     retained_authority: None,
+                    compiler_owner: std::sync::OnceLock::new(),
                 }),
             }
         };

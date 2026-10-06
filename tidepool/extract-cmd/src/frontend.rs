@@ -654,11 +654,13 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
             }
             worker.end_transaction()
         })();
-        if result.is_ok() {
-            worker.shutdown();
-        } else {
-            worker.abort();
-        }
+        let result = match result {
+            Ok(()) => worker.shutdown_confirmed(),
+            Err(primary) => {
+                worker.abort();
+                Err(primary)
+            }
+        };
         return result.map(|()| 0);
     }
     let mut request = io::Cursor::new(prefix).chain(stdin);
@@ -787,9 +789,27 @@ fn exit_code(status: ExitStatus) -> u8 {
     status.code().unwrap_or(1).clamp(0, 255) as u8
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScratchCleanupPhase {
+    Products,
+    EmptyNamespace,
+}
+
+#[derive(Debug)]
+pub struct ScratchCleanupFailure {
+    pub path: PathBuf,
+    pub phase: ScratchCleanupPhase,
+    pub source: io::Error,
+}
+
 #[derive(Debug)]
 pub enum FrontendError {
     Usage(String),
+    ScratchCleanup(Vec<ScratchCleanupFailure>),
+    WorkerClose {
+        status: std::process::ExitStatus,
+        scratch: Vec<ScratchCleanupFailure>,
+    },
     WorkerProtocol(crate::request::ProtocolError),
     /// The resolved worker binary's `--print-worker-request-flag` output
     /// (`None` if it doesn't understand the probe or exited nonzero) doesn't
@@ -822,6 +842,8 @@ impl std::fmt::Display for FrontendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Usage(message) | Self::Daemon(message) => f.write_str(message),
+            Self::ScratchCleanup(failures) => write!(f, "compiler worker reaped; scratch cleanup unconfirmed: {failures:?}"),
+            Self::WorkerClose { status, scratch } => write!(f, "compiler worker reaped with status {status}; scratch cleanup failures: {scratch:?}"),
             Self::WorkerClientDisconnected => {
                 f.write_str("compiler worker retired after client disconnected")
             }

@@ -838,11 +838,16 @@ where
                 .expect("original execution control")
                 .bind_receipt_owner(owner.clone());
         }
-        let cleanup = workbench.continuation_cleanup_owner(
-            context.clone(),
-            "hosted execution abandoned before exact continuation settlement".into(),
-            resources.clone(),
-        );
+        let cleanup = workbench
+            .continuation_cleanup_owner(
+                context.clone(),
+                "hosted execution abandoned before exact continuation settlement".into(),
+                resources.clone(),
+            )
+            .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+                work: invocation_work.clone(),
+                control: control.clone(),
+            });
         let owned = OwnedExecution {
             observation: self.runtime_observation.clone(),
             retirement: kernel.retained_exit(),
