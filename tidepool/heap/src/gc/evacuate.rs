@@ -413,14 +413,15 @@ unsafe impl ExternalPayloadOwner for ExportPayloads<'_> {
 
 /// Export one graph into a fresh parcel with one physical copy. `capacity`
 /// is the caller's checked bound on the reachable objects' total extents.
-/// Metadata and external payloads remain owned by this layout boundary.
+/// A successful export requires capacity for each unique copied object;
+/// an undersized capacity returns `InsufficientSpace`. Metadata and external
+/// payloads remain owned by this layout boundary.
 /// Every forwarding write is restored before any Result returns; an
 /// insufficient bound is a typed refusal, never a retry or partial export.
 ///
 /// # Safety
 /// The source machine is quiescent and exclusively borrowed throughout
-/// discovery and copying: no generated frame or mutator runs. The caller's
-/// capacity calculation must cover each unique copied object once.
+/// discovery and copying: no generated frame or mutator runs.
 pub unsafe fn export_reachable(
     roots: &[usize],
     capacity: usize,
