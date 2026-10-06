@@ -1330,9 +1330,51 @@ fn same_cell_authored_import_retains_completed_quasiquote_support() {
         .lexical_graph()
         .iter()
         .any(|node| node.owner.module == "SameCellImportSupport"));
+    let public_bindings = resident.workbench_bindings_in(public);
+    let declared = public_bindings
+        .iter()
+        .filter(|binding| binding.name == "sameCellOriginal")
+        .collect::<Vec<_>>();
+    let [declared] = declared.as_slice() else {
+        panic!("published source must have exactly one declaration winner");
+    };
+    assert_eq!(
+        declared.kind,
+        crate::session::WorkbenchBindingKind::Declaration
+    );
+    assert!(declared.defining_generation().is_some());
+    assert!(!resident.binding_names_in(public).contains(&declared.name));
+    let original_support = resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .unwrap()
+        .recovery_products()
+        .into_iter()
+        .find(|product| product.owner().module == "SameCellImportSupport")
+        .expect("completed source import must retain its original native owner")
+        .owner()
+        .clone();
+    std::fs::remove_file(root.path().join("SameCellImportSupport.hs")).unwrap();
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "published_same_cell_original",
+        "if sameCellOriginal == 42 then pure () else error \"published original returned the wrong value\"",
+        0,
+        &ScalePublication::Ephemeral,
+    );
     assert!(resident
-        .binding_names_in(public)
-        .contains(&"sameCellOriginal".to_owned()));
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .unwrap()
+        .recovery_products()
+        .iter()
+        .any(|product| product.owner() == &original_support));
 }
 
 #[test]
