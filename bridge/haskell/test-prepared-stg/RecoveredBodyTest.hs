@@ -29,7 +29,7 @@ import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Utils qualified as CoreUtils
-import GHC.Driver.Session (updOptLevel)
+import GHC.Driver.Session (updOptLevel, gopt_unset, GeneralFlag(Opt_IgnoreInterfacePragmas))
 import GHC.Driver.Main (hscTidy)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.Types.Id (idName, idArity, realIdUnfolding)
@@ -89,7 +89,7 @@ assertRecoveredDictionaryOrdering = do
   libdir <- trim <$> readProcessGhc ["--print-libdir"]
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
-    _ <- setSessionDynFlags (updOptLevel 0 flags)
+    _ <- setSessionDynFlags (gopt_unset (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas)
       { importPaths = [root </> "test-prepared-stg", root </> "lib"] ++ importPaths flags
       , backend = noBackend, ghcLink = NoLink }
     target <- guessTarget (root </> "test-prepared-stg" </> "RecoveredEntryCaller.hs") Nothing Nothing
@@ -115,6 +115,15 @@ assertRecoveredDictionaryOrdering = do
           , projectionTimeAuthority = Nothing, projectionJsonAuthority = Nothing
           , projectionTextUnit = Nothing }
     cache <- liftIO newFatIfaceCache
+    dictionary <- case [identifier | identifier <- preparedTargetReferences context [prepared]
+          , occurrence identifier == "$fApplicativeEff"] of
+      [identifier] -> pure identifier
+      _ -> fail "authored dictionary did not retain its exact package reference"
+    exact <- liftIO $ recoverExactBody env cache dictionary
+    liftIO $ case exact of
+      ExactBody _ group origin -> putStrLn ("production dictionary input via " ++ show origin
+        ++ ": " ++ showSDocUnsafe (ppr group))
+      _ -> fail "genuine dictionary exact body was unavailable"
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
     closure <- liftIO $ recoverPreparedClosure env cache owners bodies context [prepared]
