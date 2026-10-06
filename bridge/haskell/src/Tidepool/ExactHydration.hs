@@ -7,6 +7,7 @@ module Tidepool.ExactHydration
   , ExactIfaceArtifact(..)
   , freshExactState, freshExactContext, forkExactContext
   , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
+  , ExactContextForkFailure(..)
   , readExactIfaceArtifacts
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
@@ -46,8 +47,8 @@ import GHC.Tc.Types (TcGblEnv(..), ImportAvails(..))
 import GHC.Tc.Utils.Monad (getTopEnv)
 import qualified GHC.Linker.Loader as Linker
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..))
-import GHC.Unit.External (ExternalUnitCache(..), initExternalUnitCache, eucEPS, ExternalPackageState(eps_PIT))
-import GHC.Unit.Module.Env (lookupModuleEnv)
+import GHC.Unit.External (ExternalUnitCache(..), initExternalUnitCache, ExternalPackageState(eps_PIT))
+import GHC.Unit.Module.Env (lookupModuleEnv, moduleEnvToList, filterModuleEnv)
 import GHC.Unit.Finder (initFinderCache)
 import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Finder (addHomeModuleToFinder)
@@ -57,8 +58,8 @@ import GHC.Unit.Home.ModInfo
   , lookupHpt )
 import GHC.Iface.Load (readIface)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Driver.Session (targetProfile)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
+import GHC.Driver.Session (targetProfile, ghcMode, GhcMode(CompManager))
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef', atomicModifyIORef')
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
@@ -89,11 +90,11 @@ import GHC.Parser.Annotation (getLocA)
 import Language.Haskell.Syntax (HsModule(..))
 import GHC.Hs (ImportDecl(..), ImportDeclQualifiedStyle(..))
 import GHC.Unit.Module.Deps (dep_orphs, dep_finsts)
-import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
+import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit, isHomeUnitDefinite)
 import GHC.Unit.Types (GenWithIsBoot(..), InstalledModuleWithIsBoot, UnitId)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprint0, fingerprintByteString, fingerprintString)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts, mi_decls)
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
@@ -539,15 +540,46 @@ forkExactContext env = do
   packages <- newPackageFinderFacts env
   forkExactContextWithPackageFacts packages env
 
--- Completed HPT/EPS values are immutable; the attempt receives new EPS cells,
--- home locations and file hashes. Only fixed-universe package locations share
--- the stable GHC cache, and flushing an attempt cannot alter another attempt.
+data ExactContextForkFailure
+  = ExactContextRequiresCompilationManager
+  | ExactContextRequiresSingleDefiniteHomeUnit
+  | ExactContextContainsHomePackageInterface
+  deriving (Eq, Show)
+
+instance Exception ExactContextForkFailure
+
+-- Lazy HMI details capture their original HscEnv. Copying its EPS cell would
+-- let those details load package declarations/instances into the old cell,
+-- leaving the selected attempt with types but without their instances. Keep
+-- that package owner for the fixed compiler universe; HPT, home locations and
+-- file hashes still belong to the selected attempt.
+--
+-- GHC's CompManager loader rejects successful reads of the active home unit
+-- into EPS. Its failed reads nevertheless cache empty home interfaces in PIT.
+-- Remove only these negative rows before a new attempt. OneShot, multiple home
+-- units and Backpack require different ownership and cannot use this boundary.
 forkExactContextWithPackageFacts :: PackageFinderFacts -> HscEnv -> IO HscEnv
 forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env = do
-  eps <- ExternalUnitCache <$> (eucEPS (ue_eps (hsc_unit_env env)) >>= newIORef)
-  localFinder <- initFinderCache
+  unless (ghcMode (hsc_dflags env) == CompManager) $
+    throwIO ExactContextRequiresCompilationManager
   let homeUnits = Set.union packageHomes (hsc_all_home_unit_ids env)
-      selected :: InstalledModuleWithIsBoot -> FinderCache
+      home = hsc_home_unit env
+      eps = ue_eps (hsc_unit_env env)
+  unless (isHomeUnitDefinite home && homeUnits == Set.singleton (homeUnitId home)) $
+    throwIO ExactContextRequiresSingleDefiniteHomeUnit
+  cleared <- atomicModifyIORef' (euc_eps eps) $ \external ->
+    let homeOwner owner = toUnitId (moduleUnit owner) `Set.member` homeUnits
+        negative iface = mi_iface_hash (mi_final_exts iface) == fingerprint0
+          && null (mi_decls iface) && null (mi_exports iface)
+          && null (mi_insts iface) && null (mi_fam_insts iface)
+        unexpected = any (\(owner,iface) -> homeOwner owner && not (negative iface))
+          (moduleEnvToList (eps_PIT external))
+    in if unexpected then (external,False)
+       else (external {eps_PIT = filterModuleEnv (\owner _ -> not (homeOwner owner))
+                     (eps_PIT external)},True)
+  unless cleared (throwIO ExactContextContainsHomePackageInterface)
+  localFinder <- initFinderCache
+  let selected :: InstalledModuleWithIsBoot -> FinderCache
       selected (GWIB owner _)
         | moduleUnit owner `Set.member` homeUnits = localFinder
         | otherwise = packages

@@ -42,6 +42,10 @@ import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
 import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.Class (className)
+import GHC.Core.InstEnv (instEnvElts, is_cls_nm, is_dfun_name)
+import GHC.Core.Predicate (getClassPredTys_maybe)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Builtin.Types (liftedTypeKind)
 import GHC.Types.Var (mkTyVar, VarBndr(..))
 import GHC.Types.Name.Occurrence (mkTyVarOcc, mkVarOcc)
@@ -53,9 +57,15 @@ import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, nameUnique, mkExt
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Utils.Outputable (ppr, showSDocUnsafe)
-import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
+import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hscEPS)
+import GHC.Unit.Env (UnitEnv(..), unitEnv_insert, ue_currentHomeUnitEnv)
+import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(eps_PIT, eps_inst_env))
+import GHC.Unit.Module.Env (lookupModuleEnv, extendModuleEnv)
+import GHC.Iface.Load (loadInterface, WhereFrom(ImportBySystem))
+import GHC.Tc.Utils.Monad (initIfaceCheck)
+import GHC.Data.Maybe qualified as MaybeErr
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt, emptyHomePackageTable)
 import GHC.Utils.Logger (Logger, initLogger, makeThreadSafe, popLogHook, pushLogHook)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
 import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
@@ -68,7 +78,7 @@ import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (importPaths, ghcMode, GhcMode(CompManager), targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Driver.Session (importPaths, ghcMode, GhcMode(CompManager, OneShot), targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.SourceError (SourceError)
@@ -78,9 +88,10 @@ import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls, mi_deps)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls, mi_deps, mi_iface_hash, mi_final_exts)
+import GHC.Utils.Fingerprint (fingerprint0)
 import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
-import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Module.ModDetails (md_types, md_insts)
 import GHC.Unit.Module.ModGuts (cg_binds)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
@@ -155,7 +166,7 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , generatedActivationPreviewRecipe )
-import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface)
+import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
@@ -5849,3 +5860,136 @@ packageFinderHistoryIsolation = withScratch $ \work -> do
       rollbackHash <- lookupFileCache (hsc_FC rollback) (source firstRoot)
       unless (rollbackHash == changedHash) $
         fail "rollback attempt inherited the completed environment's old file hash"
+
+-- A completed home interface can retain unforced package imports. Its lazy
+-- actions must populate the same package owner used by the later consumer.
+lazyHomePackageInstances :: IO ()
+lazyHomePackageInstances = withScratch $ \work -> do
+  let helperName = mkModuleName "LazyMemberHelper"
+      helperSource = work </> "LazyMemberHelper.hs"
+      consumerSource = work </> "LazyMemberConsumer.hs"
+  writeFile helperSource $ unlines
+    [ "{-# LANGUAGE DataKinds, GADTs, FlexibleContexts, TypeOperators #-}"
+    , "module LazyMemberHelper where"
+    , "import Control.Monad.Freer (Eff, Member, send)"
+    , "data Signal a where Signal :: Signal ()"
+    , "data Hidden = Hidden"
+    , "instance Show Hidden where show _ = \"private home\""
+    , "request :: Member Signal effects => Eff effects ()"
+    , "request = send Signal"
+    ]
+  writeFile consumerSource $ unlines
+    [ "{-# LANGUAGE DataKinds #-}"
+    , "module LazyMemberConsumer where"
+    , "import Control.Monad.Freer (Eff)"
+    , "import LazyMemberHelper"
+    , "__result :: Eff '[Signal] ()"
+    , "__result = request"
+    ]
+  -- This first compile proves the ordinary source/package instance path.
+  original <- runPipelineSelected (PreparedProducts Nothing) consumerSource [work]
+  let producer = prHscEnv (pprPipelineResult original)
+  home <- maybe (fail "Member producer omitted helper HMI") pure
+    (lookupHpt (hsc_HPT producer) helperName)
+  requestId <- case [identifier | identifier <- typeEnvIds (md_types (hm_details home))
+    , getOccString identifier == "request"] of
+      [identifier] -> pure identifier
+      _ -> fail "Member producer omitted its actual constrained helper"
+  let (_,constraints,_) = tcSplitSigmaTy (idType requestId)
+  memberName <- case [className cls | predicate <- constraints
+    , Just (cls,_) <- [getClassPredTys_maybe predicate]] of
+      [name] -> pure name
+      _ -> fail "Member helper has another class constraint"
+  let owner = mi_module (hm_iface home)
+      ifacePath = work </> "LazyMemberHelper.hi"
+      packageInstances env = do
+        external <- hscEPS env
+        pure (Set.fromList [is_dfun_name instance_ | instance_ <- instEnvElts (eps_inst_env external)
+          , nameModule_maybe (is_cls_nm instance_) == nameModule_maybe memberName])
+      requireModeFailure expected action = try (void action) >>= \case
+        Left actual | actual == expected -> pure ()
+        Left actual -> throwIO actual
+        Right () -> fail "unsupported exact context acquired shared package state"
+  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression
+    ifacePath (hm_iface home)
+  bytes <- BS.readFile ifacePath
+  let artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
+        (moduleNameString (moduleName owner)) ifacePath (digest bytes) []
+      consumerNodes = [ModuleNode [] summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph producer)
+        , ms_mod_name summary == mkModuleName "LazyMemberConsumer"]
+      consumerGraph = mkModuleGraph consumerNodes
+  fresh <- freshExactState producer
+  packages <- newPackageFinderFacts fresh
+  -- Use GHC's real failed loader, not a constructed negative-cache entry.
+  missing <- initIfaceCheck (text "missing original home") fresh
+    (loadInterface (text "negative home control") owner ImportBySystem)
+  unless (case missing of MaybeErr.Failed _ -> True; _ -> False) $
+    fail "absent original home unexpectedly loaded"
+  negative <- hscEPS fresh
+  unless (maybe False ((== fingerprint0) . mi_iface_hash . mi_final_exts)
+      (lookupModuleEnv (eps_PIT negative) owner)) $
+    fail "GHC did not retain the genuine failed home lookup"
+  repaired <- forkExactContextWithPackageFacts packages fresh
+  afterRepair <- hscEPS repaired
+  unless (isNothing (lookupModuleEnv (eps_PIT afterRepair) owner)) $
+    fail "new attempt retained a failed home interface"
+  loaded <- readExactIfaceArtifacts repaired [artifact] >>= either fail pure
+  hydrated <- hydrateExactScope repaired loaded
+  before <- packageInstances hydrated
+  unless (Set.null before) $
+    fail "Member interface fixture forced its package instances before the fork"
+  selected <- forkExactContextWithPackageFacts packages hydrated
+  unless (euc_eps (ue_eps (hsc_unit_env selected)) == euc_eps (ue_eps (hsc_unit_env hydrated))) $
+    fail "lazy original and selected consumer have different package owners"
+  -- Selecting the genuine helper type forces its captured interface actions.
+  selectedHome <- maybe (fail "fork lost the original helper") pure
+    (lookupHpt (hsc_HPT selected) helperName)
+  selectedRequest <- case [identifier | identifier <- typeEnvIds (md_types (hm_details selectedHome))
+    , getOccString identifier == "request"] of
+      [identifier] -> pure identifier
+      _ -> fail "fork lost the original request type"
+  void (evaluate (length (showSDocUnsafe (ppr (idType selectedRequest)))))
+  originalInstances <- packageInstances hydrated
+  selectedInstances <- packageInstances selected
+  unless (not (Set.null selectedInstances) && selectedInstances == originalInstances) $
+    fail "lazy HMI imports populated a different package instance environment"
+  -- Home instances and visibility remain in private HPTs, never package pools.
+  let private = hscUpdateHPT (const emptyHomePackageTable) selected
+      homeDfuns = Set.fromList (map is_dfun_name (instEnvElts (md_insts (hm_details selectedHome))))
+  selectedExternal <- hscEPS selected
+  let externalDfuns = Set.fromList (map is_dfun_name (instEnvElts (eps_inst_env selectedExternal)))
+  unless (isNothing (lookupHpt (hsc_HPT private) helperName)
+      && isJust (lookupHpt (hsc_HPT hydrated) helperName)
+      && not (Set.null homeDfuns) && Set.null (Set.intersection homeDfuns externalDfuns)) $
+    fail "home table replacement changed the retained original's visibility"
+  restored <- initIfaceCheck (text "restored original home") selected
+    (loadInterface (text "valid home after negative") owner ImportBySystem)
+  unless (case restored of
+      MaybeErr.Succeeded iface -> mi_module iface == owner
+        && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts (hm_iface home))
+      _ -> False) $ fail "valid HPT interface remained poisoned by its failed lookup"
+  lexical <- installExactLexicalGraph consumerGraph [(artifact,[])] noCheckedValueImports selected
+    >>= either fail pure
+  removeFile helperSource
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    setSession lexical
+    case consumerNodes of
+      [ModuleNode _ summary] -> void (parseModule summary >>= typecheckModule)
+      _ -> liftIO (fail "Member fixture omitted its later consumer")
+  requireModeFailure ExactContextRequiresCompilationManager $
+    forkExactContextWithPackageFacts packages
+      (selected {hsc_dflags = (hsc_dflags selected) {ghcMode = OneShot}})
+  let units = hsc_unit_env selected
+      extraHome = toUnitId (stringToUnit "unsupported-second-home")
+      multiHome = selected {hsc_unit_env = units {ue_home_unit_graph =
+        unitEnv_insert extraHome (ue_currentHomeUnitEnv units) (ue_home_unit_graph units)}}
+  requireModeFailure ExactContextRequiresSingleDefiniteHomeUnit $
+    forkExactContextWithPackageFacts packages multiHome
+  -- A genuine positive interface in EPS is an unsupported owner state, not
+  -- a row the repair may silently delete. Inject only this refusal fault.
+  external <- hscEPS selected
+  faultyEPS <- ExternalUnitCache <$> newIORef
+    (external {eps_PIT = extendModuleEnv (eps_PIT external) owner (hm_iface home)})
+  requireModeFailure ExactContextContainsHomePackageInterface $
+    forkExactContextWithPackageFacts packages (selected {hsc_unit_env = units {ue_eps = faultyEPS}})

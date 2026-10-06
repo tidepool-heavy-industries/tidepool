@@ -63,6 +63,7 @@ tests = testGroup "source-boot"
   , testCase "exact transaction reuse" $ exactTransactionReuse
   , testCase "exact transaction cancellation" $ exactTransactionCancellation
   , testCase "package finder history isolation" packageFinderHistoryIsolation
+  , testCase "lazy original home package instances survive context forks" lazyHomePackageInstances
   , testCase "exact transaction candidate reuse" $ exactTransactionCandidateReuse
   , testCase "exact legacy value isolation" $ exactLegacyValueIsolation
   , testCase "quasiquote codegen transition" $ quasiQuoteCodegenTransition

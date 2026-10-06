@@ -1097,7 +1097,8 @@ evictCompilerRecovery caches stale = do
 -- The universe is fixed by the booted package closure, compiler producer and
 -- base compilation policy. Changing a request's lexical view cannot discard
 -- its loaded package facts or completed module versions. Attempts fork its
--- mutable cells; each retained node keeps the environment that owns its thunks.
+-- home resolution cells; lazy retained interfaces share their fixed package
+-- state owner with the selected attempt.
 data CompilerUniverse = CompilerUniverse
   { universeEnvironment :: HscEnv
   , universeSourceVersions :: Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion))
