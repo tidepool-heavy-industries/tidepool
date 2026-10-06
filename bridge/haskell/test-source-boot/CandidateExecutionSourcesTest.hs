@@ -9,9 +9,9 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import System.Directory (copyFile, removeFile)
-import System.FilePath ((</>), takeDirectory)
-import System.IO (IOMode(WriteMode), hSetFileSize, withBinaryFile, openTempFile, hClose)
+import System.Directory (copyFile, createDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.FilePath ((</>), takeDirectory, takeFileName)
+import System.IO (IOMode(WriteMode), hSetFileSize, withBinaryFile)
 import System.Timeout (timeout)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactScope
@@ -24,7 +24,7 @@ import Tidepool.Session (emptySessionScope, SessionScope(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineExecutionScope)
 import SourceBootFixtureSupport
   ( withTiming, withScratch, writeExecutionScope, writeManifestFor
-  , manifest, preparedNames, hasIntResultLiteral, capturePreparedFixture, captureDiagnostics )
+  , manifest, preparedNames, hasIntResultLiteral, capturePreparedFixture, captureDiagnostics, digest )
 
 candidateExecutionSourcesTest :: IO ()
 candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
@@ -367,19 +367,24 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         -- the complete canonical graph against each advertised digest.
         readExecutionSourceGraphs files [] decoded
       _ -> fail "issued graph fixture has another parcel shape"
-    originalClosureFacts graphs reference = do
-      nodes <- either (fail . show) pure (executionSourceOriginalClosure graphs [reference])
-      mapM (\node -> do
-        resolutions <- either (fail . show) pure (executionNodeOriginalResolutions graphs node)
-        pure (executionNodeIdentity node,executionNodeModule node,executionNodeSourceSha256 node
-          ,executionNodeRequirements node,executionNodeOriginalGraphs node,resolutions
-          ,executionGraphSha256 (executionNodeGraph node),executionGraphBytes (executionNodeGraph node))) nodes
+
+originalClosureFacts :: [ExecutionSourceGraph] -> ExecutionSourceRef
+  -> IO [(ExecutionSourceIdentity, DependencyModule, String, [(String,String)], Set.Set String
+        , [DependencyResolution], String, BS.ByteString)]
+originalClosureFacts graphs reference = do
+  nodes <- either (fail . show) pure (executionSourceOriginalClosure graphs [reference])
+  mapM (\node -> do
+    resolutions <- either (fail . show) pure (executionNodeOriginalResolutions graphs node)
+    pure (executionNodeIdentity node,executionNodeModule node,executionNodeSourceSha256 node
+      ,executionNodeRequirements node,executionNodeOriginalGraphs node,resolutions
+      ,executionGraphSha256 (executionNodeGraph node),executionGraphBytes (executionNodeGraph node))) nodes
 
 -- These are decoder refusals around an unchanged producer-issued scope, not
 -- new executable authority. Candidate and exact scopes own separate readers.
 executionScopeDescriptorChecks :: FilePath -> IO ()
 executionScopeDescriptorChecks path = do
   bytes <- BS.readFile path
+  original <- readExactScope path >>= either fail pure
   fields <- decode bytes >>= \case
     TList values | length values == 9 -> pure values
     _ -> fail "genuine exact scope has another current envelope"
@@ -390,14 +395,19 @@ executionScopeDescriptorChecks path = do
     TList [TString sha,TString file]:_ -> pure (sha,T.unpack file)
     _ -> fail "genuine exact scope has no promised graph"
   graphBytes <- BS.readFile graphPath
-  let refuse label = readExactScope path >>= \case
+  unless (digest graphBytes == T.unpack sha
+      && scopeRequestSha256 original == digest bytes) $
+    fail "genuine exact scope or retained graph differs from its advertised digest"
+  originalFacts <- mapM (originalClosureFacts (scopeExecutionGraphs original)) (scopeExecutionOwners original)
+  let refuse selectedPath label = readExactScope selectedPath >>= \case
         Left _ -> pure ()
         Right _ -> fail ("exact execution descriptor accepted " ++ label)
-      withGraph label change = (change >> refuse label)
+      withGraph label change = (change >> refuse path label)
         `finally` BS.writeFile graphPath graphBytes
-      withParcel label value = (BS.writeFile path
+      withParcelAt selectedPath label value = (BS.writeFile selectedPath
           (toStrictByteString (encodeTerm (TList (take 7 fields ++ [value] ++ drop 8 fields))))
-          >> refuse label) `finally` BS.writeFile path bytes
+          >> refuse selectedPath label) `finally` BS.writeFile selectedPath bytes
+      withParcel = withParcelAt path
       descriptor value = TList [TString sha,value]
       replaceFirst value = TList [TList (value:drop 1 (fst parcel)),snd parcel]
   withGraph "missing graph" (removeFile graphPath)
@@ -408,13 +418,39 @@ executionScopeDescriptorChecks path = do
   withParcel "inline graph bytes" (replaceFirst (descriptor (TBytes graphBytes)))
   withParcel "missing promised graph" (TList [TList [],snd parcel])
   withParcel "duplicate graph" (TList [TList (fst parcel ++ fst parcel),snd parcel])
-  bracket (do
-      (outside,handle) <- openTempFile (takeDirectory (takeDirectory path)) "outside-exact-graph"
-      hClose handle
-      pure outside)
-    removeFile $ \outside -> do
-      BS.writeFile outside graphBytes
-      withParcel "graph outside request directory" (replaceFirst (descriptor (TString (T.pack outside))))
+  -- The child borrows the issuer's retained files; only the bounded manifest
+  -- moves. Its complete original references and graph bytes remain unchanged.
+  let requestDirectory = path ++ ".request"
+  bracket (createDirectory requestDirectory >> pure requestDirectory)
+    removeDirectoryRecursive $ \request -> do
+      let requestPath = request </> takeFileName path
+          readRetained = readExactScope requestPath >>= either fail pure
+          requireRetained label = do
+            selected <- readRetained
+            selectedFacts <- mapM (originalClosureFacts (scopeExecutionGraphs selected)) (scopeExecutionOwners selected)
+            entries <- listDirectory request
+            selectedBytes <- BS.readFile requestPath
+            retainedBytes <- BS.readFile graphPath
+            unless (selected {scopeManifestPath=scopeManifestPath original} == original
+                && selectedFacts == originalFacts
+                && selectedBytes == bytes && retainedBytes == graphBytes
+                && entries == [takeFileName path]
+                && takeDirectory graphPath /= request) $
+              fail (label ++ " changed retained path, digest, native owner or original closure")
+      BS.writeFile requestPath bytes
+      requireRetained "child request"
+      -- The exact same external file must still satisfy its original seal.
+      (BS.writeFile graphPath (BS.singleton 0 <> BS.drop 1 graphBytes)
+          >> refuse requestPath "corrupt retained owner graph")
+        `finally` BS.writeFile graphPath graphBytes
+      (removeFile graphPath >> refuse requestPath "missing retained owner graph")
+        `finally` BS.writeFile graphPath graphBytes
+      let wrongSha = if sha == T.replicate 64 "f" then T.replicate 64 "e" else T.replicate 64 "f"
+      withParcelAt requestPath "retained graph digest substitution"
+        (replaceFirst (TList [TString wrongSha,TString (T.pack graphPath)]))
+      withParcelAt requestPath "relative retained graph path"
+        (replaceFirst (descriptor (TString (T.pack (takeFileName graphPath)))))
+      requireRetained "recovered child request"
   restored <- readExactScope path >>= either fail pure
   unless (not (null (scopeExecutionGraphs restored)) && not (null (scopeExecutionOwners restored))) $
     fail "restored exact scope lost original execution custody"

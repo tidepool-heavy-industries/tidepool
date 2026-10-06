@@ -4314,12 +4314,38 @@ exactTransactionCandidateReuse = withTiming $ withScratch $ \work -> do
       target = work </> "MemoReuseTarget.hs"
       anchorPath = work </> "OptionalAnchor.hs"
       dependencyPath = work </> "MemoReuseDependency.hs"
+      dependencyOwner = mkModule (stringToUnit "main") (mkModuleName "MemoReuseDependency")
       frontends name diagnostics = length
         [line | line <- lines diagnostics
         , line == "tidepool-canonical-frontend module=" ++ name
           || line == "tidepool-checked module=" ++ name ++ " target=False"
           || ("tidepool-timing-detail parent=typecheck phase=" ++ name ++ " ") `isPrefixOf` line]
       isInt checked = maybe False (`eqType` intTy) (crResultType checked)
+      dependencyObjects prepared = do
+        finalized <- case Map.lookup (moduleName dependencyOwner) (pprFinalizedModules prepared) of
+          Just value | mi_module (hm_iface (finalizedHomeModInfo value)) == dependencyOwner -> pure value
+          _ -> fail "candidate importer lost its exact finalized main owner"
+        body <- case [body | body <- pprModules prepared, pmModule body == dependencyOwner] of
+          [body] | pmCoverage body == CompleteSourceModule -> pure body
+          _ -> fail "candidate importer lost its complete prepared main owner"
+        (,) <$> (evaluate finalized >>= makeStableName) <*> (evaluate body >>= makeStableName)
+      dependencyEvents stage diagnostics =
+        [line | line <- lines diagnostics, "tidepool-reuse {" `isPrefixOf` line
+          , ("\"stage\":\"" ++ stage ++ "\"") `isInfixOf` line
+          , "\"unit\":\"main\"" `isInfixOf` line
+          , "\"module\":\"MemoReuseDependency\"" `isInfixOf` line]
+      requireReuse label originalObjects prepared diagnostics = do
+        objects <- dependencyObjects prepared
+        unless (objects == originalObjects
+            && frontends "MemoReuseDependency" diagnostics == 0
+            && counterValues "transaction_reused_source_products" diagnostics == [1]) $
+          fail (label ++ " lost completed importer A: same_objects="
+            ++ show (objects == originalObjects) ++ "\n" ++ diagnostics)
+        forM_ ["source_frontend", "finalized_core", "prepared_body"] $ \stage -> do
+          let events = dependencyEvents stage diagnostics
+          unless (any (isInfixOf "\"decision\":\"hit\"") events
+              && not (any (isInfixOf "\"decision\":\"work\"") events)) $
+            fail (label ++ " did not reuse its original " ++ stage ++ " owner: " ++ diagnostics)
   forM_ ["OptionalAnchor.hs", "MemoReuseDependency.hs", "MemoReuseTarget.hs"] $ \name ->
     copyFile (fixture name) (work </> name)
   original <- runPipelineSelected (PreparedProducts Nothing) target [work]
@@ -4339,10 +4365,10 @@ exactTransactionCandidateReuse = withTiming $ withScratch $ \work -> do
           native = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
             (Just scope) target [work] Nothing
           requireAccepted prepared diagnostics = unless
-            (map candidateModule (pprAcceptedCandidates prepared) == ["OptionalAnchor"]
+            (map candidateOriginalIdentity (pprAcceptedCandidates prepared) == [candidateOriginalIdentity candidate]
               && frontends "OptionalAnchor" diagnostics == 0
               && fmap renderType (prResultType (pprPipelineResult prepared)) == Just "Int") $
-                fail "candidate memo control lost current admission or native result type"
+                fail ("candidate memo control lost current exact native admission or result type: " ++ diagnostics)
       -- Seed a genuinely finalized importer. Deferred metadata-only checking
       -- does not itself promise a canonical product to promote in this test.
       (cold,coldDiagnostics) <- captureDiagnostics native
@@ -4350,28 +4376,36 @@ exactTransactionCandidateReuse = withTiming $ withScratch $ \work -> do
       unless (frontends "MemoReuseDependency" coldDiagnostics == 1
           && Map.member (mkModuleName "MemoReuseDependency") (pprFinalizedModules cold)) $
         fail "cold candidate native compile did not finalize its fresh importer"
+      originalObjects <- dependencyObjects cold
       (checked,checkedDiagnostics) <- captureDiagnostics check
       unless (isInt checked && frontends "MemoReuseDependency" checkedDiagnostics == 0
           && counterValues "transaction_reused_source_products" checkedDiagnostics == [1]) $
         fail "checking replayed its already finalized candidate importer"
       (warm,warmDiagnostics) <- captureDiagnostics native
       requireAccepted warm warmDiagnostics
-      unless (frontends "MemoReuseDependency" warmDiagnostics == 0
-          && counterValues "transaction_reused_source_products" warmDiagnostics == [1]
-          && Map.member (mkModuleName "MemoReuseDependency") (pprFinalizedModules warm)) $
-        fail "current admitted candidate did not preserve its fresh importer's canonical memo"
-      writeFile anchorPath "module OptionalAnchor where\nanchor :: Bool\nanchor = True\n"
-      changed <- sourceFailureDiagnostics check
-        `finally` copyFile (fixture "OptionalAnchor.hs") anchorPath
-      case changed of
-        Left diagnostics | any (\diagnostic -> sourceDiagnosticAt dependencyPath "Bool" diagnostic
-            && "Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
-        Left diagnostics -> fail ("changed candidate source failed for another reason: " ++ show diagnostics)
-        Right _ -> fail "old candidate HPT rescued an invalid current importer"
+      requireReuse "warm candidate native" originalObjects warm warmDiagnostics
+      (do
+        writeFile anchorPath "module OptionalAnchor where\nanchor :: Bool\nanchor = True\n"
+        forM_ ["changed candidate B", "repeated refused candidate B"] $ \label -> do
+          (changed,diagnostics) <- captureDiagnostics (sourceFailureDiagnostics check)
+          case changed of
+            Left failures | any (\diagnostic -> sourceDiagnosticAt dependencyPath "Bool" diagnostic
+                && "Int" `isInfixOf` dMessage diagnostic) failures -> pure ()
+            Left failures -> fail (label ++ " failed for another reason: " ++ show failures)
+            Right _ -> fail (label ++ " borrowed the old candidate or importer")
+          unless (frontends "OptionalAnchor" diagnostics == 1
+              && any (isInfixOf "\"decision\":\"miss\"")
+                (dependencyEvents "source_frontend" diagnostics)
+              && not (any (isInfixOf "\"decision\":\"hit\"")
+                (dependencyEvents "source_frontend" diagnostics))
+              && not (any (\line -> "tidepool-reuse {" `isPrefixOf` line
+                && "\"stage\":\"interface\"" `isInfixOf` line
+                && "\"decision\":\"complete\"" `isInfixOf` line) (lines diagnostics))) $
+            fail (label ++ " reused partial work or fabricated a completed interface cycle: " ++ diagnostics)
+        ) `finally` copyFile (fixture "OptionalAnchor.hs") anchorPath
       (recovered,recoveryDiagnostics) <- captureDiagnostics native
       requireAccepted recovered recoveryDiagnostics
-      unless (frontends "MemoReuseDependency" recoveryDiagnostics == 1) $
-        fail "failed candidate/source checking retained a partial memo"
+      requireReuse "restored A after refused B" originalObjects recovered recoveryDiagnostics
       let productPath = candidateProductPath candidate
       productBytes <- BS.readFile productPath
       BS.writeFile productPath (BSC.pack "invalid original native product")
@@ -4381,13 +4415,15 @@ exactTransactionCandidateReuse = withTiming $ withScratch $ \work -> do
           && frontends "OptionalAnchor" refusalDiagnostics == 1
           && frontends "MemoReuseDependency" refusalDiagnostics == 1
           && counterValues "transaction_reused_source_products" refusalDiagnostics == [0]) $
-        fail "previous accepted candidate or importer survived current native-product refusal"
+        fail ("previous candidate authority or importer bypassed current native-product refusal: "
+          ++ refusalDiagnostics)
       (restored,restoredDiagnostics) <- captureDiagnostics native
       requireAccepted restored restoredDiagnostics
       unless (frontends "MemoReuseDependency" restoredDiagnostics == 0
           && counterValues "transaction_reused_source_products" restoredDiagnostics == [1]) $
-        fail "restored current candidate did not recover its independently validated importer"
-  putStrLn "exact candidate memo: checked/native importer reuse, current source/native refusal, recovery and candidate authority passed"
+        fail ("restored current candidate did not recover its independently validated importer: "
+          ++ restoredDiagnostics)
+  putStrLn "exact candidate memo: current admission, exact completed importer A identity, repeated B refusal without partial publication, native-product refusal and recovery passed"
 
 exactLegacyValueIsolation :: IO ()
 exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
