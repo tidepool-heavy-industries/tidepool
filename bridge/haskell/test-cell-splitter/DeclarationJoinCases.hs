@@ -45,6 +45,7 @@ import System.IO (hClose, openTempFile)
 import System.Process (callProcess, readProcess)
 import Tidepool.DeclarationJoin
 import Tidepool.ExactHydration
+import Tidepool.TypePolicy (emptyTypeGraph)
 
 declarationJoinScenario :: IO ()
 declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -482,7 +483,18 @@ originalProductRootsProofWith projectedDemand = do
       envelope = Execution.ProgramEnvelope 14 (fromString "ghc-9.12-prepared-stg") (fromString "ghc-9.12.2") 8
         (Execution.TargetDescriptor Execution.X86_64 Execution.LittleEndian 64 64 (fromString "sysv64") [])
       projected ordinal binders globals = Execution.ProjectedGroup ordinal binders
-        (Execution.ProjectedGroupBody envelope [] globals [] [] [] [] [] [] Nothing)
+        (Execution.ProjectedGroupBody
+          { Execution.projectedEnvelope = envelope
+          , Execution.projectedSignatures = []
+          , Execution.projectedGlobals = globals
+          , Execution.projectedConstructors = []
+          , Execution.projectedOperations = []
+          , Execution.projectedBindings = []
+          , Execution.projectedTypes = emptyTypeGraph
+          , Execution.projectedSites = []
+          , Execution.projectedConstructorReplies = []
+          , Execution.projectedJsonLayout = Nothing
+          })
       dictionaryGlobals = [global package, (global unused)
         { Execution.globalRequiredEvaluated = True, Execution.globalRequiredGeneration = Just 4 }]
       freshOutlines =
