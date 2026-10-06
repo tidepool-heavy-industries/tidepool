@@ -66,6 +66,8 @@ import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, modulePr
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
+  , prepareOriginalProductsWithExecutor, prepareOriginalProductsWithCollector
+  , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
@@ -81,7 +83,7 @@ import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( pmModule, pmYieldSites )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor
   , preparedRecoveryClosure, growPreparedRecovery )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources )
@@ -186,10 +188,11 @@ type Compiler =
 data RecoveryCaches = RecoveryCaches
   { acquireRecoveryCaches :: IO CompilerRecoveryCaches
   , recoveryExecutor :: Maybe CompilerExecutor
+  , recoveryOriginalProjection :: Maybe OriginalProjectionCollector
   }
 
 scopeRecoveryCaches :: CompilerScope -> RecoveryCaches
-scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope)
+scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope) Nothing
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
 -- stderr is the human-readable channel.
@@ -235,12 +238,22 @@ runParsedInvocation compilerScope caches parsedWorkerRequest = do
   bracket getNumCapabilities setNumCapabilities $ \_previous -> do
     setNumCapabilities (requestCompilerCapabilities parsedWorkerRequest)
     withCompilerExecutor grant $ \executor -> do
-      let scope = compilerScope
+      originalProjection <- newOriginalProjectionCollector
+      let completion = observeOriginalProjection originalProjection
+            (requestRetainedGenerations parsedWorkerRequest)
+            [preparedResumeTargetName,preparedApplyEntryTargetName,preparedApplyValueTargetName] Nothing
+          observeProducts :: PipelineSelection result -> PipelineSelection result
+          observeProducts selection = case selection of
+            PreparedStg -> WithPreparedModuleCompletion completion selection
+            PreparedProducts _ -> WithPreparedModuleCompletion completion selection
+            _ -> selection
+          scope = compilerScope
             { scopedCompile = \selection -> scopedCompile compilerScope
-                (WithCompilerExecution grant executor selection)
+                (WithCompilerExecution grant executor (observeProducts selection))
             , scopedExecutor = Just executor
             }
-      runGrantedInvocation scope (caches {recoveryExecutor=Just executor}) parsedWorkerRequest
+      runGrantedInvocation scope (caches
+        {recoveryExecutor=Just executor,recoveryOriginalProjection=Just originalProjection}) parsedWorkerRequest
 
 runGrantedInvocation
   :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
@@ -606,8 +619,13 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
+  let prepareOriginal = case recoveryExecutor caches of
+        Nothing -> prepareOriginalProducts
+        Just executor -> case recoveryOriginalProjection caches of
+          Nothing -> prepareOriginalProductsWithExecutor executor
+          Just collector -> prepareOriginalProductsWithCollector collector executor
   (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
-    prepareOriginalProducts hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+    prepareOriginal hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
   productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
   inventory <- maybe (fail "current original admission did not issue its inventory") pure
     (preparedCurrentOriginalInventory productContext)
@@ -623,7 +641,10 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-  recover <- newPreparedRecoveryWithPackageRoots hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
+  let newRecovery = case recoveryExecutor caches of
+        Nothing -> newPreparedRecoveryWithPackageRoots
+        Just executor -> newPreparedRecoveryWithExecutor executor
+  recover <- newRecovery hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
     (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []
   artifacts <- forM targets $ \target -> do
     let context = withOriginals (contextFor target)
