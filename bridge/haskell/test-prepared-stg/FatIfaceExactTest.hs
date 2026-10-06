@@ -5,7 +5,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import Control.Concurrent (ThreadId, forkFinally, killThread, yield)
 import Control.Concurrent.MVar
   ( MVar, newEmptyMVar, putMVar, readMVar, takeMVar )
-import Control.Exception (SomeException, bracket, finally, throwIO, evaluate)
+import Control.Exception (SomeException, ErrorCall, try, bracket, finally, throwIO, evaluate)
 import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Bits (shiftL, testBit)
@@ -19,7 +19,7 @@ import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Driver.Env (HscEnv)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
-import GHC.Types.Id (Id, realIdUnfolding)
+import GHC.Types.Id (Id, realIdUnfolding, isFCallId)
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName, isExternalName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
@@ -47,7 +47,7 @@ import Tidepool.FatIface
   , fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , lookupFatIfaceExact, lookupFatIfaceBodies
-  , lookupFatIfaceComponents
+  , lookupFatIfaceComponents, privateOriginalDependencies
   , newFatIfaceCache
   , OwnerInterfaceContext(..), newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
@@ -159,6 +159,7 @@ scenario = do
           fatIdentityName = findName "FatFixture" "fatIdentity" names
           privateCallerName = findName "FatFixture" "privateCaller" names
           privateDiamondName = findName "FatFixture" "privateDiamond" names
+          foreignAbsName = findName "FatFixture" "foreignAbs" names
           recAName = findName "FatFixture" "recA" names
           recBName = findName "FatFixture" "recB" names
           thinIdentityName = findName "ThinFixture" "thinIdentity" names
@@ -182,9 +183,29 @@ scenario = do
       liftIO $ assertPrivateScope privateCallerName privateResult
       privateOwner <- maybe (fail "private scope fixture has no owner") pure
         (nameModule_maybe privateCallerName)
+      foreignResult <- liftIO (lookupFatIfaceExact hsc cache foreignAbsName)
+      liftIO $ case foreignResult of
+        FatIfaceFound groups -> do
+          let calls = [identifier | group <- groups
+                , rhs <- case group of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+                , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isFCallId rhs)]
+          assert (not (null calls) && all (not . isExternalName . varName) calls)
+            "compiled FFI fixture did not decode a genuine internal-name operation Id"
+          _ <- evaluate (sum (map Set.size (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] groups))))))
+          pure ()
+        other -> fail ("compiled FFI original failed admission: " ++ showLookup other)
       privateGroups <- case privateResult of
         FatIfaceFound groups -> pure groups
         _ -> fail "private defining closure disappeared"
+      liftIO $ do
+        let withoutHelper = [group | group <- privateGroups
+              , all ((/= "privateHelper") . occNameString . nameOccName . varName) (groupBinders group)]
+        assert (length withoutHelper < length privateGroups) "orphan control did not remove the genuine private group"
+        refused <- try (evaluate (sum (map Set.size
+          (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] withoutHelper))))))) :: IO (Either ErrorCall Int)
+        case refused of
+          Left _ -> pure ()
+          Right _ -> fail "private original census accepted a genuinely dangling decoded GlobalId"
       componentResult <- liftIO (lookupFatIfaceComponents hsc cache privateOwner [privateCallerName])
       liftIO $ case componentResult of
         FatIfaceComponents selection -> do
@@ -653,8 +674,8 @@ demandedOriginalGroups requested groups = Set.size (walk Set.empty roots)
       | (ordinal, binding) <- groups
       , rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
       , free <- nonDetEltsUniqSet (exprSomeFreeVars
-          (\identifier -> isLocalId identifier ||
-            (isId identifier && not (isExternalName (varName identifier)))) rhs)
+          (\identifier -> not (isFCallId identifier) && (isLocalId identifier ||
+            (isId identifier && not (isExternalName (varName identifier))))) rhs)
       , Just target <- [lookup (varName free) owners]]
     walk seen [] = seen
     walk seen (ordinal:pending)

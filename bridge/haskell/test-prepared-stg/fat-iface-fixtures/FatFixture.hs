@@ -1,4 +1,4 @@
-module FatFixture (fatIdentity, recA, recB, privateCaller, privateSecond, privateDiamond) where
+module FatFixture (fatIdentity, recA, recB, privateCaller, privateSecond, privateDiamond, foreignAbs) where
 
 fatIdentity :: Int -> Int
 fatIdentity value = value
@@ -27,3 +27,7 @@ privateSecond value = privateHelper (value + 1)
 privateDiamond :: Int -> Int
 privateDiamond value = privateCaller value + privateSecond value
 {-# NOINLINE privateDiamond #-}
+
+-- GHC decodes the call operation as an internal-name FCallId, without an
+-- original top-level binder. Its wrapper still belongs to this real producer.
+foreign import ccall unsafe "abs" foreignAbs :: Int -> IO Int

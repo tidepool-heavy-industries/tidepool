@@ -1,6 +1,6 @@
 module FatIfaceUse where
 
-import FatFixture (fatIdentity, recA, recB, privateCaller, privateDiamond)
+import FatFixture (fatIdentity, recA, recB, privateCaller, privateDiamond, foreignAbs)
 import ThinFixture (thinIdentity)
 import MissingFixture (missingIdentity)
 

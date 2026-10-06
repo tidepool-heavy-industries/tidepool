@@ -14,7 +14,7 @@ module Tidepool.FatIface
   , fatComponentBindings, fatComponentAllBinders, fatComponentOrdinal
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
-  , FatIfaceComponentLookup(..), lookupFatIfaceComponents
+  , FatIfaceComponentLookup(..), lookupFatIfaceComponents, privateOriginalDependencies
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
@@ -329,11 +329,6 @@ indexOriginalBindings version coreBinds =
     groups = IntMap.fromList (zip [0..] coreBinds)
     names = bindingsToMap coreBinds
     allBinders = concatMap groupBinders coreBinds
-    ordinalByIdentifier = foldl' addBinder emptyVarEnv
-      [ (identifier, ordinal)
-      | (ordinal, binding) <- IntMap.toAscList groups
-      , identifier <- groupBinders binding ]
-    addBinder env (identifier, ordinal) = extendVarEnv env identifier ordinal
     legacyDependencySets = IntMap.mapWithKey legacyPrivateDependencies groups
     legacyPrivateDependencies _ binding = Set.fromList
       [ dependency
@@ -342,27 +337,7 @@ indexOriginalBindings version coreBinds =
       , Just dependency <- [Map.lookup (varName identifier) names] ]
     privateId identifier = isId identifier && not (isExternalName (varName identifier))
     dependencies = IntMap.map Set.toAscList legacyDependencySets
-    localDependencySets = IntMap.mapWithKey localDependencies groups
-    -- Fat-interface decoding constructs GlobalIds even for internal Names.
-    -- Those private tops still require their defining original scope: an
-    -- external recovery request cannot name them. Resolve both representations
-    -- through the full actual-Id census rather than discarding a private edge.
-    needsOriginalScope identifier = isLocalId identifier || privateId identifier
-    localDependencies _ binding = Set.fromList
-      [ dependency
-      | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars needsOriginalScope rhs)
-      , Just dependency <- [localBinderOrdinal identifier] ]
-    localBinderOrdinal identifier = case lookupVarEnv ordinalByIdentifier identifier of
-      Just ordinal -> Just ordinal
-      Nothing -> error ("fat interface contains a private free Id outside its original binder census: owner="
-        ++ showSDocUnsafe (ppr (fatOriginalOwner version))
-        ++ "; identifier=" ++ showSDocUnsafe (ppr identifier)
-        ++ "; name=" ++ showSDocUnsafe (ppr (varName identifier))
-        ++ "; local=" ++ show (isLocalId identifier)
-        ++ "; external-name=" ++ show (isExternalName (varName identifier))
-        ++ "; foreign-call=" ++ show (isFCallId identifier)
-        ++ "; primop=" ++ show (isJust (isPrimOpId_maybe identifier)))
+    localDependencySets = privateOriginalDependencies (fatOriginalOwner version) groups
     privateDependencies = IntMap.map Set.toAscList localDependencySets
     rosters = map Set.toAscList $ Shared.privateComponents
       (Map.fromList (IntMap.toAscList localDependencySets))
@@ -375,6 +350,35 @@ indexOriginalBindings version coreBinds =
       [ (componentOrdinal, FatIfaceComponent version roster
           (IntMap.restrictKeys groups (IntSet.fromList roster)) allBinders)
       | roster@(componentOrdinal:_) <- rosters ]
+
+-- | Private scope edges from actual original Ids. The result carries no Core
+-- admission: callers still need the owning decoded original/version. Operation
+-- Ids are reconstructed by IfaceToCore and lower directly to STG operations;
+-- their internal Names do not denote a missing original top-level definition.
+privateOriginalDependencies :: Module -> IntMap.IntMap CoreBind -> IntMap.IntMap (Set.Set Int)
+privateOriginalDependencies owner groups = IntMap.map dependencies groups
+  where
+    census = foldl' (\known (identifier, ordinal) -> extendVarEnv known identifier ordinal) emptyVarEnv
+      [(identifier, ordinal) | (ordinal, binding) <- IntMap.toAscList groups, identifier <- groupBinders binding]
+    -- Fat Core also gives ordinary private tops GlobalIds with internal Names.
+    -- Their edges still resolve through the complete defining binder census.
+    needsOriginalScope identifier = isId identifier
+      && not (isFCallId identifier || isJust (isPrimOpId_maybe identifier))
+      && (isLocalId identifier || not (isExternalName (varName identifier)))
+    dependencies binding = Set.fromList
+      [ ordinal
+      | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars needsOriginalScope rhs)
+      , let ordinal = case lookupVarEnv census identifier of
+              Just found -> found
+              Nothing -> error ("fat interface contains a private free Id outside its original binder census: owner="
+                ++ showSDocUnsafe (ppr owner)
+                ++ "; identifier=" ++ showSDocUnsafe (ppr identifier)
+                ++ "; name=" ++ showSDocUnsafe (ppr (varName identifier))
+                ++ "; local=" ++ show (isLocalId identifier)
+                ++ "; external-name=" ++ show (isExternalName (varName identifier))
+                ++ "; foreign-call=" ++ show (isFCallId identifier)
+                ++ "; primop=" ++ show (isJust (isPrimOpId_maybe identifier))) ]
 
 validateCrossComponentEdges
   :: IntMap.IntMap (Set.Set Int) -> IntMap.IntMap Int -> ()
