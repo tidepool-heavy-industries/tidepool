@@ -328,7 +328,9 @@ dispatch compilerScope caches timing args = do
 
 dispatchSource :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatchSource compilerScope caches timing args =
-  let compiler = scopedCompile compilerScope in
+  let compiler :: Compiler
+      compiler = scopedCompile compilerScope
+  in
   case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
@@ -486,7 +488,8 @@ runDeclarationOperation compilerScope args manifest = do
 
 runInspectionMode :: CompilerScope -> WorkerRequest -> FilePath -> IO ExitCode
 runInspectionMode compilerScope args _path = do
-  let compiler = scopedCompile compilerScope
+  let compiler :: Compiler
+      compiler = scopedCompile compilerScope
   res <- trySynchronous $ do
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
@@ -809,7 +812,8 @@ reportRecoveryResiduals target failures =
 -- same shape a caller already handles for any other zero-binder bind.
 runTurnMode :: CompilerScope -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
 runTurnMode compilerScope caches args path = do
-  let compiler = scopedCompile compilerScope
+  let compiler :: Compiler
+      compiler = scopedCompile compilerScope
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   lastAttempt <- newIORef Nothing
