@@ -365,6 +365,7 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
   timing <- readTimingEnabled
   workRef <- newIORef (0 :: Integer,0 :: Integer)
   reuseRef <- newIORef (0 :: Integer,0 :: Integer)
+  reportedRef <- newIORef False
   originalPreparerRef <- newIORef Nothing
   modulesRef <- newIORef Map.empty
   admittedRef <- newIORef Map.empty
@@ -477,8 +478,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         emitCount timing "original_prepared_cache_hits" reused
         emitCount timing "original_prepared_new_modules" lowered
         emitCount timing "original_advertised_native_binders" (fromIntegral (Set.size external))
-        forM_ reuse $ \identity -> forM_ [OriginalRecovery,PreparedBody,RawProjection]
-          (emitReuseComplete timing identity)
+        reported <- atomicModifyIORef' reportedRef (\previous -> (True,previous))
+        unless reported $ forM_ reuse $ \identity ->
+          forM_ [OriginalRecovery,PreparedBody,RawProjection] (emitReuseComplete timing identity)
         pure (modules,PreparedProductContext products admitted modules (Just raw) external Nothing)
       samePhysical left right = do
         first <- evaluate left >>= makeStableName
