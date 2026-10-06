@@ -269,14 +269,22 @@ impl CandidateProduct {
         bytes: &[u8],
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
     ) -> Option<RawModuleProduct> {
-        let mut products =
-            tidepool_repr::execution_schema::InventoryOperation::new(product_decode_limits())
-                .parse_module_products(bytes, requirements)
-                .ok()?;
+        let operation = tidepool_repr::execution_schema::InventoryOperation::new(
+            product_decode_limits(),
+        );
+        Self::decode_product_with_operation(bytes, requirements, &operation).ok()?
+    }
+
+    fn decode_product_with_operation(
+        bytes: &[u8],
+        requirements: &tidepool_repr::execution_schema::ProgramRequirements,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Option<RawModuleProduct>, tidepool_repr::execution_schema::ParseError> {
+        let mut products = operation.parse_module_products(bytes, requirements)?;
         if products.len() != 1 {
-            return None;
+            return Ok(None);
         }
-        products.pop()
+        Ok(products.pop())
     }
 
     #[cfg(test)]
@@ -1434,6 +1442,102 @@ fn ordinary_records(
     include: &[PathBuf],
     exact_context: bool,
 ) -> Option<Vec<Record>> {
+    ordinary_records_with_limits(
+        endpoint_identity,
+        include,
+        exact_context,
+        CacheOfferLimits::default(),
+    )
+    .map(|offer| offer.records)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CacheOfferOmission {
+    OwnerLimit,
+    ReadBudget,
+    InvalidRecord,
+    OperationBudget,
+    RequiredInterfaceUnavailable,
+}
+
+#[derive(Clone, Copy)]
+struct CacheOfferLimits {
+    owners: usize,
+    payload_bytes: u64,
+}
+
+impl Default for CacheOfferLimits {
+    fn default() -> Self {
+        Self {
+            owners: CANDIDATE_LIMIT,
+            payload_bytes: PAYLOAD_LIMIT as u64,
+        }
+    }
+}
+
+struct CacheOffer {
+    records: Vec<Record>,
+    diagnostics: CacheOfferDiagnostics,
+}
+
+#[derive(Default)]
+struct CacheOfferDiagnostics {
+    omissions: BTreeMap<CacheOfferOmission, usize>,
+    sampled: usize,
+}
+
+impl CacheOfferDiagnostics {
+    fn omit(&mut self, unit: &str, module: &str, reason: CacheOfferOmission) {
+        *self.omissions.entry(reason).or_default() += 1;
+        if self.sampled < CANDIDATE_LIMIT {
+            self.sampled += 1;
+            tracing::debug!(target: "tidepool_toolchain::module_candidates",
+                phase = "candidate_offer_omission", unit, module, ?reason,
+                "ordinary cache owner omitted from optional candidate offer");
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.omissions.values().sum()
+    }
+
+    fn count(&self, reason: CacheOfferOmission) -> usize {
+        self.omissions.get(&reason).copied().unwrap_or_default()
+    }
+}
+
+impl CacheOffer {
+    fn omit(&mut self, owner: &(String, String), reason: CacheOfferOmission) {
+        self.diagnostics.omit(&owner.0, &owner.1, reason);
+    }
+}
+
+fn operation_budget_error(error: &crate::certified_products::CertificationError) -> bool {
+    matches!(
+        error,
+        crate::certified_products::CertificationError::Product(
+            tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
+                | tidepool_repr::execution_schema::ParseError::InventoryByteLimit { .. }
+        )
+    )
+}
+
+fn operation_parse_budget_error(
+    error: &tidepool_repr::execution_schema::ParseError,
+) -> bool {
+    matches!(
+        error,
+        tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
+            | tidepool_repr::execution_schema::ParseError::InventoryByteLimit { .. }
+    )
+}
+
+fn ordinary_records_with_limits(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    exact_context: bool,
+    limits: CacheOfferLimits,
+) -> Option<CacheOffer> {
     let include = context_paths(include)?;
     let producer_dir = record_dir(endpoint_identity);
     let started = std::time::Instant::now();
@@ -1493,30 +1597,51 @@ fn ordinary_records(
             Err(_) => return None,
         }
     }
-    if selected.len() > CANDIDATE_LIMIT {
-        tracing::info!(target: "tidepool_toolchain::module_candidates",
-            phase = "candidate_owner_bound", limit = CANDIDATE_LIMIT,
-            active_roots = roots.len(), headers_read);
-        return None;
-    }
     let mut record_bytes = 0_u64;
     let mut budget = shared_evidence::ReadBudget::default();
-    let mut records = Vec::new();
-    for (_, (header, mut file, _)) in selected {
-        record_bytes += header.payload_len;
-        if let Some(record) = read_record(&mut file, &header, &producer_dir, &mut budget) {
-            records.push(record);
+    let mut offer = CacheOffer {
+        records: Vec::new(),
+        diagnostics: CacheOfferDiagnostics::default(),
+    };
+    for (owner, (header, mut file, _)) in selected {
+        if offer.records.len() >= limits.owners {
+            offer.omit(&owner, CacheOfferOmission::OwnerLimit);
+            continue;
         }
-        if budget.exhausted {
-            return None;
+        let Some(next_record_bytes) = record_bytes
+            .checked_add(header.payload_len)
+            .filter(|bytes| *bytes <= limits.payload_bytes)
+        else {
+            offer.omit(&owner, CacheOfferOmission::ReadBudget);
+            continue;
+        };
+        // The header was authenticated against the file length by read_header;
+        // recheck before allocating the payload in case the file changed.
+        if file.metadata().ok()?.len() != file.stream_position().ok()? + header.payload_len {
+            offer.omit(&owner, CacheOfferOmission::InvalidRecord);
+            continue;
+        }
+        if let Some(record) = read_record(&mut file, &header, &producer_dir, &mut budget) {
+            record_bytes = next_record_bytes;
+            offer.records.push(record);
+        } else if budget.exhausted {
+            // A failed charge does not consume bytes. Earlier successful
+            // payload/proof charges remain in the shared budget, while a
+            // smaller later record can still fit.
+            budget.exhausted = false;
+            offer.omit(&owner, CacheOfferOmission::ReadBudget);
+        } else {
+            offer.omit(&owner, CacheOfferOmission::InvalidRecord);
         }
     }
     tracing::info!(target: "tidepool_toolchain::module_candidates",
         phase = "candidate_record_read_decode", elapsed_ms = started.elapsed().as_millis() as u64,
         active_roots = roots.len(), headers_read, header_bytes, record_bytes,
         evidence_bytes = budget.evidence_bytes, unique_evidence = budget.evidence_count(),
-        decoded_records = records.len());
-    Some(records)
+        decoded_records = offer.records.len(), owner_limit_omitted = offer.diagnostics.count(CacheOfferOmission::OwnerLimit),
+        read_budget_omitted = offer.diagnostics.count(CacheOfferOmission::ReadBudget),
+        invalid_record_omitted = offer.diagnostics.count(CacheOfferOmission::InvalidRecord));
+    Some(offer)
 }
 
 #[derive(Clone, Debug)]
@@ -1675,6 +1800,7 @@ fn select_records_inner(
     let mut recovered_graphs =
         BTreeMap::<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>::new();
     let mut graph_bytes = 0usize;
+    let mut selection_omissions = CacheOfferDiagnostics::default();
     for (mut record, origin) in records {
         if record.tag != "TPMCAN"
             || record.version != RECORD_VERSION
@@ -1688,8 +1814,24 @@ fn select_records_inner(
             continue;
         }
         let validation_started = std::time::Instant::now();
-        let Ok(source_bytes) = fs::read(&record.source) else {
-            continue;
+        let source_bytes = match crate::certified_products::read_bounded_with_operation(
+            &record.source,
+            RECORD_LIMIT as u64,
+            &package_validation.inventory,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                selection_omissions.omit(
+                    &record.unit,
+                    &record.module,
+                    if operation_budget_error(&error) {
+                        CacheOfferOmission::OperationBudget
+                    } else {
+                        CacheOfferOmission::InvalidRecord
+                    },
+                );
+                continue;
+            }
         };
         let valid = sha(&source_bytes) == record.source_sha256
             && record.evidence.selection_complete
@@ -1698,18 +1840,54 @@ fn select_records_inner(
                 .is_ok();
         validation_elapsed += validation_started.elapsed();
         if !valid {
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                CacheOfferOmission::InvalidRecord,
+            );
             continue;
         }
         let decode_started = std::time::Instant::now();
         decoded_bytes += record.products.len() as u64;
-        let parsed = CandidateProduct::decode_product(&record.products, &requirements);
+        let parsed = CandidateProduct::decode_product_with_operation(
+            &record.products,
+            &requirements,
+            &package_validation.inventory,
+        );
         decode_elapsed += decode_started.elapsed();
-        let Some(product) = parsed else { continue };
+        let product = match parsed {
+            Ok(Some(product)) => product,
+            Ok(None) => {
+                selection_omissions.omit(
+                    &record.unit,
+                    &record.module,
+                    CacheOfferOmission::InvalidRecord,
+                );
+                continue;
+            }
+            Err(error) => {
+                selection_omissions.omit(
+                    &record.unit,
+                    &record.module,
+                    if operation_parse_budget_error(&error) {
+                        CacheOfferOmission::OperationBudget
+                    } else {
+                        CacheOfferOmission::InvalidRecord
+                    },
+                );
+                continue;
+            }
+        };
         if product.unit != record.unit
             || product.module != record.module
             || product.interface != record.interface
             || record.interface.is_empty()
         {
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                CacheOfferOmission::InvalidRecord,
+            );
             continue;
         }
         let evidence_count = record
@@ -1730,11 +1908,16 @@ fn select_records_inner(
                     && s.sha256 == record.source_sha256
             })
         {
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                CacheOfferOmission::InvalidRecord,
+            );
             continue;
         }
         let iface_sha = Sha256::digest(&record.interface);
         let iface_sha_array: [u8; 32] = iface_sha.into();
-        let Ok(package_roots) =
+        let package_roots =
             crate::recovery_artifacts::validate_package_import_evidence_with_validation(
                 &record.package_imports,
                 &record.unit,
@@ -1742,72 +1925,153 @@ fn select_records_inner(
                 &iface_sha_array,
                 Path::new("module-package-imports.cbor"),
                 &mut package_validation,
-            )
-        else {
-            continue;
+            );
+        let package_roots = match package_roots {
+            Ok(roots) => roots,
+            Err(error) => {
+                selection_omissions.omit(
+                    &record.unit,
+                    &record.module,
+                    if operation_budget_error(&error) {
+                        CacheOfferOmission::OperationBudget
+                    } else {
+                        CacheOfferOmission::InvalidRecord
+                    },
+                );
+                continue;
+            }
         };
         if record.original_owner.owner() != computed_owner(&record) {
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                CacheOfferOmission::InvalidRecord,
+            );
             continue;
         }
         if let Some(digest) = record.execution_source_sha256 {
-            let graph = if let Some(graph) = record.execution_source.take() {
-                graph
+            let recovered = if let Some(graph) = record.execution_source.take() {
+                Some(graph)
             } else if let Some(graph) = recovered_graphs.get(&digest) {
-                Arc::clone(graph)
+                Some(Arc::clone(graph))
             } else {
                 let path = graph_path(&record_dir(endpoint_identity), &digest);
-                let mut file = fs::File::open(path).ok()?;
-                if file.metadata().ok()?.len() > crate::execution_source::GRAPH_BYTES_LIMIT as u64 {
-                    return None;
-                }
-                let mut bytes = Vec::new();
-                (&mut file)
-                    .take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1)
-                    .read_to_end(&mut bytes)
+                let recovered = (|| {
+                    let mut file = fs::File::open(path).ok()?;
+                    if file.metadata().ok()?.len()
+                        > crate::execution_source::GRAPH_BYTES_LIMIT as u64
+                    {
+                        return None;
+                    }
+                    let mut bytes = Vec::new();
+                    (&mut file)
+                        .take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .ok()?;
+                    let next_bytes = graph_bytes.checked_add(bytes.len())?;
+                    if next_bytes > crate::execution_source::GRAPH_BYTES_LIMIT
+                        || bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT
+                        || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest
+                    {
+                        return None;
+                    }
+                    let graph = crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
+                        bytes, digest,
+                    )
                     .ok()?;
-                graph_bytes = graph_bytes.checked_add(bytes.len())?;
-                if graph_bytes > crate::execution_source::GRAPH_BYTES_LIMIT
-                    || bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT
-                    || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest
-                {
-                    return None;
-                }
-                crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
-                    bytes, digest,
-                )
-                .ok()?
+                    graph_bytes = next_bytes;
+                    Some(graph)
+                })();
+                recovered
             };
-            validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)?;
+            let Some(graph) = recovered else {
+                selection_omissions.omit(
+                    &record.unit,
+                    &record.module,
+                    CacheOfferOmission::ReadBudget,
+                );
+                continue;
+            };
+            if validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
+                .is_none()
+            {
+                selection_omissions.omit(
+                    &record.unit,
+                    &record.module,
+                    CacheOfferOmission::InvalidRecord,
+                );
+                continue;
+            }
             recovered_graphs.insert(digest, Arc::clone(&graph));
             record.execution_source = Some(graph);
         } else if record.execution_source.is_some() {
-            return None;
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                CacheOfferOmission::InvalidRecord,
+            );
+            continue;
         }
         let canonical = match (&record.module_interface_proof, &record.module_interface) {
             (Some(interface), _) => interface.clone(),
-            (None, Some(reference)) => crate::recovery_artifacts::recover_module_interface(
+            (None, Some(reference)) => match crate::recovery_artifacts::recover_module_interface(
                 &record_dir(endpoint_identity),
                 reference,
                 &mut package_validation,
-            )
-            .ok()?,
+            ) {
+                Ok(interface) => interface,
+                Err(_) => {
+                    selection_omissions.omit(
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::InvalidRecord,
+                    );
+                    continue;
+                }
+            },
             (None, None) => continue,
         };
-        crate::certified_products::validate_canonical_native_bytes_with_operation(
+        let Some(source_sha256) = parse_sha(&record.source_sha256) else {
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                CacheOfferOmission::InvalidRecord,
+            );
+            continue;
+        };
+        if let Err(error) = crate::certified_products::validate_canonical_native_bytes_with_operation(
             &computed_owner(&record),
             &record.original_certification,
             &record.interface,
             &record.package_imports,
-            Some(parse_sha(&record.source_sha256)?),
+            Some(source_sha256),
             &canonical,
             &package_validation.inventory,
-        )
-        .ok()?;
-        let record = ValidatedRecord::admit(record, canonical)?;
+        ) {
+            selection_omissions.omit(
+                &record.unit,
+                &record.module,
+                if operation_budget_error(&error) {
+                    CacheOfferOmission::OperationBudget
+                } else {
+                    CacheOfferOmission::InvalidRecord
+                },
+            );
+            continue;
+        }
+        let owner_key = (record.unit.clone(), record.module.clone());
+        let Some(record) = ValidatedRecord::admit(record, canonical) else {
+            selection_omissions.omit(
+                &owner_key.0,
+                &owner_key.1,
+                CacheOfferOmission::InvalidRecord,
+            );
+            continue;
+        };
         if generation_dependent(&product) {
             continue;
         }
-        let key = (record.unit.clone(), record.module.clone());
+        let key = owner_key;
         if validated
             .insert(key, (record, origin, product, package_roots))
             .is_some()
@@ -1865,11 +2129,27 @@ fn select_records_inner(
             break;
         }
         for (owner, reason) in rejected {
+            selection_omissions.omit(
+                &owner.0,
+                &owner.1,
+                if matches!(reason, CandidateInterfaceUnavailable::RequiredInterface { .. }) {
+                    CacheOfferOmission::RequiredInterfaceUnavailable
+                } else {
+                    CacheOfferOmission::InvalidRecord
+                },
+            );
             tracing::debug!(target: "tidepool_toolchain::module_candidates", unit = owner.0.as_str(), module = owner.1.as_str(), ?reason,
                 "candidate declined because its canonical interface closure is unavailable");
             validated.remove(&owner);
         }
     }
+    tracing::info!(target: "tidepool_toolchain::module_candidates",
+        phase = "candidate_offer_omissions",
+        required_interface_unavailable = selection_omissions.omissions.get(&CacheOfferOmission::RequiredInterfaceUnavailable).copied().unwrap_or_default(),
+        operation_budget = selection_omissions.omissions.get(&CacheOfferOmission::OperationBudget).copied().unwrap_or_default(),
+        invalid_record = selection_omissions.omissions.get(&CacheOfferOmission::InvalidRecord).copied().unwrap_or_default(),
+        total = selection_omissions.total(),
+        "ordinary optional cache offer omissions");
     let mut inventory = inventory::InventoryTables::new(
         validated
             .values()
@@ -3738,13 +4018,227 @@ mod tests {
     fn store_fixture(root: &Path, record: &Record, name: &str) {
         let producer = root.join(RECORD_DIR).join(sha(b"endpoint"));
         let dir = root_shard(&producer, &selected_record_root(record).unwrap());
+        let mut record = record.clone();
+        if let Some(canonical) = &record.module_interface_proof {
+            record.module_interface = Some(
+                crate::recovery_artifacts::materialize_module_interface(
+                    &producer,
+                    canonical,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    crate::recovery_artifacts::MaterializationMode::Durable,
+                )
+                .unwrap(),
+            );
+        }
         shared_evidence::publish(&producer, &record.evidence).unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{name}.cbor")),
-            encode_record(record).unwrap(),
+            encode_record(&record).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ordinary_cache_offer_admits_a_deterministic_owner_subset_with_original_proofs() {
+        let cache = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let records = ["A", "B", "C"]
+            .into_iter()
+            .map(|module| candidate_fixture(sources.path(), module))
+            .collect::<Vec<_>>();
+        for (index, record) in records.iter().enumerate() {
+            store_fixture(cache.path(), record, &format!("candidate-{index}"));
+        }
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let include = records[0].include.clone();
+        let limits = CacheOfferLimits {
+            owners: 2,
+            payload_bytes: PAYLOAD_LIMIT as u64,
+        };
+        let first = ordinary_records_with_limits(b"endpoint", &include, false, limits).unwrap();
+        let second = ordinary_records_with_limits(b"endpoint", &include, false, limits).unwrap();
+        let names = |offer: &CacheOffer| {
+            offer
+                .records
+                .iter()
+                .map(|record| record.module.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&first), ["A", "B"]);
+        assert_eq!(names(&second), ["A", "B"]);
+        assert_eq!(first.diagnostics.count(CacheOfferOmission::OwnerLimit), 1);
+
+        let selected = select_records_inner(
+            b"endpoint",
+            &include,
+            scratch.path(),
+            first
+                .records
+                .into_iter()
+                .map(|record| (record, CandidateOrigin::Ordinary))
+                .collect(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            selected.by_owner.keys().cloned().collect::<Vec<_>>(),
+            vec![("u".into(), "A".into()), ("u".into(), "B".into())]
+        );
+        for record in &records[..2] {
+            let bundle = &selected.by_owner[&(record.unit.clone(), record.module.clone())];
+            assert_eq!(bundle.product.bytes(), record.products);
+            assert_eq!(
+                bundle.original_module_interface,
+                record.module_interface_proof.clone().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ordinary_cache_offer_skips_an_unfittable_owner_and_admits_a_later_small_record() {
+        let cache = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let mut large = candidate_fixture(sources.path(), "A");
+        large.target_source = "x".repeat(4096);
+        large.evidence.make_mut().sources[0].sha256 = sha(large.target_source.as_bytes());
+        large.data.evidence = large.evidence.reference().unwrap().clone();
+        let small = candidate_fixture(sources.path(), "B");
+        store_fixture(cache.path(), &large, "large");
+        store_fixture(cache.path(), &small, "small");
+        let producer = cache.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let shard = root_shard(&producer, &selected_record_root(&small).unwrap());
+        let small_path = shard.join("small.cbor");
+        let small_payload = read_header(&mut fs::File::open(small_path).unwrap())
+            .unwrap()
+            .payload_len;
+        assert!(
+            read_header(&mut fs::File::open(shard.join("large.cbor")).unwrap())
+                .unwrap()
+                .payload_len
+                > small_payload
+        );
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let offer = ordinary_records_with_limits(
+            b"endpoint",
+            &small.include,
+            false,
+            CacheOfferLimits {
+                owners: 2,
+                payload_bytes: small_payload,
+            },
+        )
+        .unwrap();
+        assert_eq!(offer.records.len(), 1);
+        assert_eq!(offer.records[0].module, "B");
+        assert_eq!(offer.diagnostics.count(CacheOfferOmission::ReadBudget), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ordinary_cache_offer_keeps_independent_proof_when_a_selected_owner_lacks_closure() {
+        let cache = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut dependent = candidate_fixture(sources.path(), "A");
+        let independent = candidate_fixture(sources.path(), "B");
+        let beyond_limit = candidate_fixture(sources.path(), "C");
+        let owner = computed_owner(&dependent);
+        let fresh = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            dependent.interface.clone(),
+            dependent.products.clone(),
+            dependent.package_imports.clone(),
+            crate::certified_products::encode_home_certification(
+                &owner,
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+        )
+        .with_source_sha256(parse_sha(&dependent.source_sha256).unwrap());
+        let missing_requirement = BTreeMap::from([(
+            ("u".to_owned(), "Missing".to_owned()),
+            [0x55; 32],
+        )]);
+        let finalized = crate::certified_products::fixture_finalized_product_with_requirements(
+            fresh,
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &dependent.endpoint,
+            )
+            .sha256(),
+            Some(missing_requirement),
+        );
+        let canonical = finalized.module_interface().unwrap().clone();
+        dependent.module_interface = Some(
+            crate::recovery_artifacts::materialize_module_interface(
+                fixture_record_dir(sources.path()).parent().unwrap(),
+                &canonical,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                crate::recovery_artifacts::MaterializationMode::Durable,
+            )
+            .unwrap(),
+        );
+        dependent.module_interface_proof = Some(canonical);
+        dependent.original_certification = finalized.certification_bytes().to_vec();
+        dependent.original_owner = OriginalOwner::from_owner(&owner);
+        for (index, record) in [&dependent, &independent, &beyond_limit]
+            .into_iter()
+            .enumerate()
+        {
+            store_fixture(cache.path(), record, &format!("candidate-{index}"));
+        }
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let include = dependent.include.clone();
+        let offer = ordinary_records_with_limits(
+            b"endpoint",
+            &include,
+            false,
+            CacheOfferLimits {
+                owners: 2,
+                payload_bytes: PAYLOAD_LIMIT as u64,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            offer
+                .records
+                .iter()
+                .map(|record| record.module.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        let selected = select_records_inner(
+            b"endpoint",
+            &include,
+            scratch.path(),
+            offer
+                .records
+                .into_iter()
+                .map(|record| (record, CandidateOrigin::Ordinary))
+                .collect(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            selected.by_owner.keys().cloned().collect::<Vec<_>>(),
+            vec![("u".into(), "B".into())]
+        );
+        assert_eq!(
+            selected.by_owner[&("u".into(), "B".into())]
+                .product
+                .bytes(),
+            independent.products
+        );
     }
 
     #[test]
