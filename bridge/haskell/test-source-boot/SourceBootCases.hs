@@ -2333,8 +2333,10 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
   requestPrepared <- case filter ((== requestOwner) . pmModule) modules of
     [value] -> pure value
     _ -> fail "site closure control lacks its actual compiled original owner"
+  -- Each prepared module retains siblings it defines, rather than imports.
+  -- Resolve the real defining Id from this compilation's prepared owners.
   sibling <- maybe (fail "site closure control lacks the actual typed currentRequest sibling") pure
-    (Map.lookup "currentRequest" (pmSitedSiblings requestPrepared))
+    (Map.lookup "currentRequest" (Map.unions (map pmSitedSiblings modules)))
   let actualFloatedOrdinals = [fromIntegral ordinal
         | (ordinal,(binding,_)) <- zip [0 :: Int ..] (pmBindings requestPrepared)
         , any ((`Set.notMember` pmOriginalTopNames requestPrepared) . varName) (topBinders binding)
