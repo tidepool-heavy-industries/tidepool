@@ -702,6 +702,8 @@ enum ActorSourceScope {
 /// last issued capture releases. Disposable sessions retain their TempDir.
 pub(crate) enum SourceRootOwner {
     Host(Arc<crate::actor_host::HostIncarnationLease>),
+    /// Immutable deployment preparation has no live run or host lease.
+    Prepared(Arc<tidepool_atomic_write::DirectoryAnchor>),
     Temporary(Arc<tempfile::TempDir>),
 }
 
@@ -709,6 +711,7 @@ impl SourceRootOwner {
     fn validate(&self, run_root: &Path) -> Result<()> {
         let owns = match self {
             Self::Host(owner) => owner.owns_run(run_root)?,
+            Self::Prepared(owner) => owner.path() == std::fs::canonicalize(run_root)?.as_path(),
             Self::Temporary(owner) => {
                 std::fs::canonicalize(owner.path())? == std::fs::canonicalize(run_root)?
             }
@@ -722,6 +725,7 @@ impl SourceRootOwner {
 
 struct RetainedSourceGraph {
     _root_owner: Arc<SourceRootOwner>,
+    _prepared_owner: Option<Arc<tidepool_atomic_write::DirectoryAnchor>>,
     identities: Vec<String>,
     include_paths: Vec<PathBuf>,
     manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
@@ -790,16 +794,36 @@ impl ExomonadSourceReload {
         let run_root = std::fs::canonicalize(run_root)?;
         let entries = tidepool_atomic_write::DirectoryAnchor::open_existing(&run_root)?
             .child("workspace/entries")?;
+        let preparation = match (&owner, &frozen.preparation) {
+            (
+                SourceRootOwner::Prepared(_),
+                Some(super::workspace::WorkspacePreparation::Preparing { original }),
+            ) => *original,
+            _ => uuid::Uuid::new_v4(),
+        };
         let fresh_entry_storage = exomonad_actor::SourceEntryStorage::FreshCompilation {
             directory: entries.path().to_owned(),
-            preparation: uuid::Uuid::new_v4(),
+            preparation,
+        };
+        let entry_storage = match &frozen.preparation {
+            Some(super::workspace::WorkspacePreparation::Completed { entries, .. }) => {
+                let deployment = frozen
+                    .prepared_deployment
+                    .as_ref()
+                    .ok_or("completed workspace has no acquired immutable deployment owner")?;
+                exomonad_actor::SourceEntryStorage::CompletedOriginal {
+                    directory: deployment.path().join("workspace/entries"),
+                    selections: entries.clone(),
+                }
+            }
+            _ => fresh_entry_storage.clone(),
         };
         let helper_root = run_root.join("helpers");
         let layer = SourceLayer::new(&run_root);
         Ok(Self {
             source_issuer: exomonad_actor::SourceLayerIssuer::default(),
             source_owner: Arc::new(owner),
-            entry_storage: fresh_entry_storage.clone(),
+            entry_storage,
             fresh_entry_storage,
             frozen,
             workspace,
@@ -901,6 +925,7 @@ impl ExomonadSourceReload {
         add(&self.layer, "run")?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
+            _prepared_owner: self.frozen.prepared_deployment.clone(),
             identities,
             include_paths,
             manifests,
@@ -1760,6 +1785,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         }
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
+            _prepared_owner: self.frozen.prepared_deployment.clone(),
             identities,
             include_paths,
             manifests,
@@ -1777,6 +1803,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         let selected = self.toolset_layer_from(source)?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
+            _prepared_owner: self.frozen.prepared_deployment.clone(),
             identities: selected.identities().to_vec(),
             include_paths: selected.include_paths().to_vec(),
             manifests: selected
@@ -1811,6 +1838,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .map_err(|error| error.to_string())?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
+            _prepared_owner: self.frozen.prepared_deployment.clone(),
             identities: vec![format!("run:{}", revision.identity)],
             include_paths: revision.paths,
             manifests: revision.manifests.iter().cloned().collect(),

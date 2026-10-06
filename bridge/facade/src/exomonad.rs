@@ -74,6 +74,13 @@ pub struct InitOptions {
     pub preflight: PreflightMode,
 }
 
+/// Prepare one immutable source deployment for reuse by fresh runs. Required
+/// root and explicitly configured preparation roles use actual host support.
+pub struct PrepareOptions {
+    pub workspace: Option<PathBuf>,
+    pub directory: PathBuf,
+}
+
 pub struct HostOptions {
     pub workspace: PathBuf,
     pub session: String,

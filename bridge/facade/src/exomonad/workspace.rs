@@ -142,6 +142,28 @@ impl RuntimeLibraries {
 /// Frozen workspace inputs. Actor launch and compilation use this run's captured
 /// authored sources and its pinned library selection.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum WorkspacePreparation {
+    /// Persisted before compilation. Retrying the same deployment keeps the
+    /// exact original namespace even after completed-output publication fails.
+    Preparing { original: uuid::Uuid },
+    Completed {
+        original: uuid::Uuid,
+        revision: String,
+        entries: BTreeMap<String, uuid::Uuid>,
+    },
+}
+
+/// A run-local reference to an independently retained immutable deployment.
+/// Each run still owns its own identity, actor state and incarnation lease.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedWorkspacePointer {
+    pub(crate) version: u32,
+    pub(crate) directory: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrozenWorkspace {
     #[serde(default)]
     version: u32,
@@ -166,6 +188,12 @@ pub struct FrozenWorkspace {
     /// Detect added Haskell modules as well as edits to recorded files.
     #[serde(default)]
     runtime_capture_identity: String,
+    #[serde(default)]
+    pub(crate) preparation: Option<WorkspacePreparation>,
+    /// Acquired only after the existing frozen-input loader validates the
+    /// deployment. Deserializing a path never supplies this physical owner.
+    #[serde(skip)]
+    pub(crate) prepared_deployment: Option<std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>>,
 }
 
 impl FrozenWorkspace {
@@ -406,6 +434,8 @@ impl FrozenWorkspace {
             core_identity,
             runtime_libraries,
             runtime_capture_identity: runtime_identity,
+            preparation: None,
+            prepared_deployment: None,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
         Ok(frozen)
