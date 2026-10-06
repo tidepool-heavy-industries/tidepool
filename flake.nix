@@ -51,8 +51,7 @@
         # Overlay: rebuild GHC 9.12 with fat interface files for boot libraries.
         # -fwrite-if-simplified-core writes ALL Core (including workers, loop-breakers)
         # into mi_extra_decls in .hi files, bypassing unfolding heuristics entirely.
-        # Exposed unfoldings support frontend optimization; native recovery
-        # consumes original fat Core, not reconstructed optimizer recipes.
+        # -fexpose-all-unfoldings + high threshold retained as secondary defense.
         # Targets: ghc-internal (stdlib impl) + ghc-bignum (Integer/Natural).
         # base is just re-exports; ghc-prim has no Haskell Core.
         ghcInternalOverlay =
