@@ -347,7 +347,7 @@ fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: b
     let proof = compiled
         .certification
         .as_ref()
-        .and_then(|certification| certification.compile_input_identity.as_ref());
+        .and_then(|certification| certification.original_compile_input.as_ref());
     let matches = compiled
         .certification
         .as_ref()
@@ -380,7 +380,7 @@ fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: b
         serde_json::json!({
             "stage": label,
             "certification_present": compiled.certification.is_some(),
-            "compile_input_identity_present": proof.is_some(),
+            "original_compile_input_present": proof.is_some(),
             "matches_bundle": matches,
             "sites": sites,
         })
@@ -1139,7 +1139,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     let certification = fixture.producer.certification.as_ref().unwrap();
     let compiler_context = certification
-        .compile_input_identity
+        .original_compile_input
         .as_ref()
         .unwrap()
         .original_interface_context(

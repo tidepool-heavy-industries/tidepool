@@ -14827,6 +14827,116 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     }
 
     #[tokio::test]
+    async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
+    ) {
+        let (session, context, source, _session_root) = host_mount_fixture();
+        let authored = tempfile::tempdir().unwrap();
+        let quotation_input = authored.path().join("external-input");
+        std::fs::write(&quotation_input, "41").unwrap();
+        std::fs::write(
+            authored.path().join("QuotedProvider.hs"),
+            include_str!("fixtures/quoted-agent-provider.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            authored.path().join("QuotedAgentSpec.hs"),
+            include_str!("fixtures/quoted-agent-spec.hs")
+                .replace("{quotation-input}", quotation_input.to_str().unwrap()),
+        )
+        .unwrap();
+        let mut roots = source.toolset_support.to_vec();
+        roots.push(authored.path().canonicalize().unwrap());
+        let source = source
+            .with_toolset_support_roots(roots.clone())
+            .with_spec("QuotedAgentSpec.agentSpec");
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None)
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
+        let first = workbench
+            .prepare_tools(context.clone(), 1, vec![])
+            .await
+            .unwrap();
+        let completed_executions =
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+        assert!(
+            !completed_executions.is_empty(),
+            "the original compiler executes the actual local quoter"
+        );
+        let proof = first
+            ._prepared
+            .entry
+            .compiled()
+            .original_compile_input()
+            .unwrap();
+        assert!(
+            proof.replay_eligible_identity().is_none(),
+            "quotation remains ineligible for ordinary source replay"
+        );
+        assert_ne!(
+            proof.source_replay_eligibility(),
+            tidepool_toolchain::artifacts::SourceReplayEligibility::Eligible
+        );
+        let second = workbench
+            .prepare_tools(context.clone(), 2, vec![])
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first._prepared, &second._prepared));
+        assert_ne!(
+            first._installation_scope.scope(),
+            second._installation_scope.scope()
+        );
+        assert_eq!(
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+            completed_executions
+        );
+        assert_eq!(first.declarations, second.declarations);
+
+        // A new ordinary source request must execute the untracked quoter again.
+        let installation =
+            crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
+        let templates = resident_workbench_templates(
+            &source.preamble,
+            &format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})", installation.effect_row),
+            "import qualified QuotedAgentSpec\nimport qualified Tidepool.Agent.Contract\nimport qualified Tidepool.Effects.Core\n",
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let ordinary =
+            tidepool_runtime::session::run_turn(tidepool_runtime::session::TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: &installation.expression,
+                templates: &templates,
+                include: &include,
+                session_root: scratch.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: Some(tidepool_runtime::session::TurnClassification {
+                    kind: tidepool_runtime::session::TurnKind::Bind,
+                    binders: Vec::new(),
+                    items: Vec::new(),
+                }),
+                target: None,
+                retained_imports: &[],
+            })
+            .unwrap();
+        assert!(matches!(
+            ordinary,
+            tidepool_runtime::session::TurnResult::Bind { .. }
+        ));
+        assert!(
+            std::fs::read_to_string(quotation_input.with_extension("executions"))
+                .unwrap()
+                .lines()
+                .count()
+                > completed_executions.lines().count()
+        );
+    }
+
+    #[tokio::test]
     async fn tool_installation_preserves_durable_child_private_admission() {
         struct RunOwner {
             root: PathBuf,

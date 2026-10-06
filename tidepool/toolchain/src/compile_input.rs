@@ -18,10 +18,10 @@ use crate::certified_products::{
 };
 use crate::CompileError;
 
-/// Compiler-issued continuity of complete, admitted compilation inputs.
+/// Compiler-issued custody of one completed original source compilation.
 /// Cloning this proof does not authorize a different native output bundle.
 #[derive(Debug, Clone)]
-pub struct SealedCompileInputIdentity {
+pub struct SealedOriginalCompileInput {
     identity: String,
     original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
@@ -31,18 +31,50 @@ pub struct SealedCompileInputIdentity {
     package_interfaces: CertifiedTargetPackageInterfaces,
     table: DataConTable,
     sites: Arc<[YieldSite]>,
+    replay: SourceReplayEligibility,
 }
 
-impl SealedCompileInputIdentity {
+/// Eligibility of the original consumed source evidence for a new source recipe.
+/// Completed native output custody is independent of this decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceReplayEligibility {
+    Eligible,
+    UntrackedInputs,
+    IncompleteSelection,
+    UntrackedInputsAndIncompleteSelection,
+}
+
+impl SourceReplayEligibility {
+    fn from_evidence(evidence: &DependencyEvidence) -> Self {
+        match (evidence.cache_safe, evidence.selection_complete) {
+            (true, true) => Self::Eligible,
+            (false, true) => Self::UntrackedInputs,
+            (true, false) => Self::IncompleteSelection,
+            (false, false) => Self::UntrackedInputsAndIncompleteSelection,
+        }
+    }
+}
+
+impl SealedOriginalCompileInput {
+    pub fn source_replay_eligibility(&self) -> SourceReplayEligibility {
+        self.replay
+    }
+
+    /// Source-recipe intent is available only when its original evidence permits
+    /// replay. The returned text remains an observation, never execution authority.
+    pub fn replay_eligible_identity(&self) -> Option<&str> {
+        (self.replay == SourceReplayEligibility::Eligible).then_some(self.identity.as_str())
+    }
+
     pub(crate) fn issued_original_execution(
         &self,
     ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
         self.original_execution.clone()
     }
 
-    /// Versioned serialization for source-continuity intent. This string alone
+    /// Versioned observation of original source continuity. This string alone
     /// is not executable authority and cannot reconstruct the private proof.
-    pub fn compile_input_identity(&self) -> &str {
+    pub fn original_input_identity(&self) -> &str {
         &self.identity
     }
 
@@ -641,9 +673,9 @@ pub(crate) fn seal(
     table: DataConTable,
     sites: Vec<YieldSite>,
     artifacts: &crate::artifact_inventory::ArtifactView,
-) -> Result<Option<SealedCompileInputIdentity>, CompileError> {
-    // The initial contract covers ordinary startup compilation. Mutable
-    // resident Val/Lib interfaces require a distinct context recipe.
+) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
+    // Original completed source output can retain compile-time execution.
+    // Mutable resident Val/Lib interfaces belong to their exact context owner.
     if target_owners
         .iter()
         .chain(groups.iter().flat_map(PendingCertifiedGroup::imports))
@@ -653,7 +685,6 @@ pub(crate) fn seal(
                 PendingImportOwner::Retained { .. } | PendingImportOwner::RetainedPackage { .. }
             )
         })
-        || !evidence.cache_safe
         || evidence.modules.iter().any(|module| {
             module.module.starts_with("Tidepool.Session.")
                 || module
@@ -664,10 +695,9 @@ pub(crate) fn seal(
     {
         return Ok(None);
     }
-    if producer.is_empty()
-        || !evidence.valid(source)
-        || !package_interfaces.matches_target(prepared)
-    {
+    let completed =
+        crate::cache::CompletedSourceEvidence::from_normalized(evidence.clone(), source);
+    if producer.is_empty() || completed.is_err() || !package_interfaces.matches_target(prepared) {
         return Err(CompileError::ExtractFailed(
             "compile input identity lacks validated input or output ownership".into(),
         ));
@@ -702,7 +732,7 @@ pub(crate) fn seal(
             module: module.module.clone(),
         })
         .collect::<Vec<_>>();
-    Ok(Some(SealedCompileInputIdentity {
+    Ok(Some(SealedOriginalCompileInput {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         original_interfaces: Arc::new(
             crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
@@ -727,6 +757,7 @@ pub(crate) fn seal(
         package_interfaces: package_interfaces.clone(),
         table,
         sites: sites.into(),
+        replay: SourceReplayEligibility::from_evidence(evidence),
     }))
 }
 
@@ -756,13 +787,21 @@ mod tests {
         )
     }
 
-    fn package_context_proof(producer: &[u8]) -> SealedCompileInputIdentity {
+    fn package_context_proof(producer: &[u8]) -> SealedOriginalCompileInput {
+        package_context_proof_with_eligibility(producer, true, true)
+    }
+
+    fn package_context_proof_with_eligibility(
+        producer: &[u8],
+        cache_safe: bool,
+        selection_complete: bool,
+    ) -> SealedOriginalCompileInput {
         use tidepool_repr::execution_schema::testing;
         let source = "module Root where root = 42";
         let evidence = DependencyEvidence {
             version: 4,
-            cache_safe: true,
-            selection_complete: true,
+            cache_safe,
+            selection_complete,
             sources: vec![SourceEvidence {
                 path: "@generated-source".into(),
                 sha256: format!("{:x}", Sha256::digest(source)),
@@ -802,7 +841,7 @@ mod tests {
     }
 
     fn original_context(
-        proof: &SealedCompileInputIdentity,
+        proof: &SealedOriginalCompileInput,
     ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
         proof
             .original_interface_context(
@@ -814,6 +853,40 @@ mod tests {
                 &proof.sites,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn completed_original_custody_preserves_each_source_replay_refusal() {
+        for (cache_safe, selection_complete, eligibility) in [
+            (true, true, SourceReplayEligibility::Eligible),
+            (false, true, SourceReplayEligibility::UntrackedInputs),
+            (true, false, SourceReplayEligibility::IncompleteSelection),
+            (
+                false,
+                false,
+                SourceReplayEligibility::UntrackedInputsAndIncompleteSelection,
+            ),
+        ] {
+            let proof = package_context_proof_with_eligibility(
+                b"original compiler producer",
+                cache_safe,
+                selection_complete,
+            );
+            assert_eq!(proof.source_replay_eligibility(), eligibility);
+            assert_eq!(
+                proof.replay_eligible_identity().is_some(),
+                cache_safe && selection_complete
+            );
+            original_context(&proof);
+            assert!(proof.matches_bundle(
+                &proof.target,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
+                &proof.table,
+                &proof.sites,
+            ));
+        }
     }
 
     #[test]

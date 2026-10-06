@@ -698,7 +698,7 @@ impl PreparedSourceEntry {
             .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
         let proof = certification
-            .compile_input_identity
+            .original_compile_input
             .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
         if !matches!(certification.purpose(), super::turn::TurnPurpose::Ordinary)

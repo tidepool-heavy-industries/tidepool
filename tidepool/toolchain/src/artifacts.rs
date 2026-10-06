@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub use crate::compile_input::SealedCompileInputIdentity;
+pub use crate::compile_input::{SealedOriginalCompileInput, SourceReplayEligibility};
 pub use crate::turn_observations::{decode_turn_nominal_heads, decode_turn_yield_sites};
 use serde::Deserialize;
 use tempfile::TempDir;
@@ -2313,7 +2313,7 @@ pub struct SealedTurnProducts {
     // items cannot enlarge an earlier item's original instance environment.
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
-    pub compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
+    pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
@@ -2393,11 +2393,11 @@ impl AdmittedTurnOutput {
     pub fn elapsed(&self) -> Duration {
         self.run.elapsed
     }
-    pub fn compile_input_identity(&self) -> Option<&Arc<SealedCompileInputIdentity>> {
+    pub fn original_compile_input(&self) -> Option<&Arc<SealedOriginalCompileInput>> {
         self.native
             .as_ref()?
             .products()?
-            .compile_input_identity
+            .original_compile_input
             .as_ref()
     }
     pub fn native_output(&self) -> Option<&NativeTurnOutput> {
@@ -2605,7 +2605,7 @@ fn seal_turn_outputs_inner(
             .as_ref()
             .map(|admission| admission.request.context.as_ref()),
     )?;
-    let compile_input_identity =
+    let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
                 &output_dir.join("compiler-inputs.cbor"),
@@ -2638,7 +2638,7 @@ fn seal_turn_outputs_inner(
         };
     let original_execution = match exact.as_ref() {
         Some(admission) => Some(admission.original_execution_context(&artifact_view)?),
-        None => compile_input_identity
+        None => original_compile_input
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
     };
@@ -2710,7 +2710,7 @@ fn seal_turn_outputs_inner(
     Ok(Some(SealedTurnProducts {
         artifact_view,
         original_execution,
-        compile_input_identity,
+        original_compile_input,
         checked,
         certified_groups,
         pending_imports,

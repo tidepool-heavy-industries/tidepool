@@ -1,6 +1,6 @@
 //! Source-owned installer preparation; waiters do not own the shared task.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -72,7 +72,7 @@ fn nominal_artifacts(
                     "installer selects conflicting nominal artifacts for {module}",
                 )));
             }
-            Ok((*first).clone())
+            Ok((**first).clone())
         })
         .collect()
 }
@@ -105,33 +105,49 @@ impl PreparationTask {
 
 #[derive(Default)]
 pub(crate) struct ToolsetPreparation {
-    tasks: Mutex<HashMap<InstallerRecipe, Arc<PreparationTask>>>,
+    state: Mutex<PreparationState>,
 }
+
+#[derive(Default)]
+struct PreparationState {
+    tasks: HashMap<InstallerRecipe, Arc<PreparationTask>>,
+    ready_order: VecDeque<InstallerRecipe>,
+}
+
+const RETAINED_TOOLSETS: usize = 16;
 
 impl ToolsetPreparation {
     pub(crate) async fn prepare(
-        &self,
+        self: &Arc<Self>,
         recipe: InstallerRecipe,
         resolved: ResolvedSpec,
         source: crate::CheckpointSourceLayer,
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
         let (task, launch) = {
-            let mut tasks = self.tasks.lock();
-            match tasks.get(&recipe) {
-                Some(task) => (Arc::clone(task), false),
+            let mut state = self.state.lock();
+            match state.tasks.get(&recipe).cloned() {
+                Some(task) => {
+                    if state.ready_order.contains(&recipe) {
+                        state.ready_order.retain(|key| key != &recipe);
+                        state.ready_order.push_back(recipe.clone());
+                    }
+                    (task, false)
+                }
                 None => {
                     let task = Arc::new(PreparationTask {
                         outcome: Mutex::new(None),
                         completed: tokio::sync::Notify::new(),
                     });
-                    tasks.insert(recipe.clone(), Arc::clone(&task));
+                    state.tasks.insert(recipe.clone(), Arc::clone(&task));
                     (task, true)
                 }
             }
         };
         if launch {
             let task = Arc::clone(&task);
+            let owner = Arc::clone(self);
+            let key = recipe.clone();
             // This task belongs to the preparation owner, independently of any
             // actor waiting for it. Dropping a waiter cannot interrupt its peers.
             tokio::spawn(async move {
@@ -142,15 +158,84 @@ impl ToolsetPreparation {
                 .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
                 *task.outcome.lock() = Some(outcome);
                 task.completed.notify_waiters();
+                owner.completed(key, &task);
             });
         }
         task.wait().await
+    }
+
+    fn completed(&self, key: InstallerRecipe, task: &Arc<PreparationTask>) {
+        let succeeded = task.outcome.lock().as_ref().is_some_and(Result::is_ok);
+        let mut state = self.state.lock();
+        if !state
+            .tasks
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, task))
+        {
+            return;
+        }
+        if !succeeded {
+            state.tasks.remove(&key);
+            return;
+        }
+        state.ready_order.push_back(key);
+        while state.ready_order.len() > RETAINED_TOOLSETS {
+            if let Some(retired) = state.ready_order.pop_front() {
+                state.tasks.remove(&retired);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recipe(entry: &str) -> InstallerRecipe {
+        InstallerRecipe {
+            source_revision: "frozen source".into(),
+            roots: Vec::new(),
+            preamble: String::new(),
+            imports: String::new(),
+            entry: entry.into(),
+            effects: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn failed_preparation_retires_only_its_exact_lookup_task() {
+        let owner = ToolsetPreparation::default();
+        let key = recipe("failed");
+        let failed = Arc::new(PreparationTask {
+            outcome: Mutex::new(Some(Err(PreparationFailure::Source("transient".into())))),
+            completed: tokio::sync::Notify::new(),
+        });
+        owner
+            .state
+            .lock()
+            .tasks
+            .insert(key.clone(), Arc::clone(&failed));
+        owner.completed(key.clone(), &failed);
+        assert!(!owner.state.lock().tasks.contains_key(&key));
+        let retry = Arc::new(PreparationTask {
+            outcome: Mutex::new(None),
+            completed: tokio::sync::Notify::new(),
+        });
+        owner
+            .state
+            .lock()
+            .tasks
+            .insert(key.clone(), Arc::clone(&retry));
+        owner.completed(key.clone(), &failed);
+        assert!(Arc::ptr_eq(
+            owner.state.lock().tasks.get(&key).unwrap(),
+            &retry
+        ));
+        assert!(
+            failed.outcome.lock().is_some(),
+            "admitted waiters retain their settled refusal"
+        );
+    }
 
     #[tokio::test]
     async fn dropping_one_waiter_preserves_the_other_waiter_and_completion() {
