@@ -13,6 +13,7 @@ module Tidepool.ExecutionProjection
   , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
+  , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
@@ -108,6 +109,7 @@ import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Types (Module, Unit, UnitId, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
+import Tidepool.ExecutionEncode (ProjectedGroupEncoding, prepareProjectedGroupEncoding)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -308,6 +310,7 @@ data RawModuleProducts = RawModuleProducts
   { rawOriginalProductOwner :: Module
   , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
   , rawExecutableProduct :: Either ProjectionError [ProjectedGroup]
+  , rawOriginalGroupEncodings :: Map Word32 ProjectedGroupEncoding
   }
 
 -- Raw facts retain exact prepared compiler objects and projection authority.
@@ -364,7 +367,7 @@ projectCachedOriginalHomeModuleProducts (OriginalProjectionCache entries) env in
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts
 projectRawOriginalHomeModuleProducts env interfaces context prepared =
-  RawModuleProducts owner original executable
+  RawModuleProducts owner original executable encodings
   where
     owner = pmModule prepared
     isHome modul = toUnitId (moduleUnit modul) `Set.member` hsc_all_home_unit_ids env
@@ -374,6 +377,8 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
           (projectPreparedModuleGroupOutcomesFor (OriginalHomeProduct isHome) context prepared Nothing)
       _ -> Nothing
     executable = projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing
+    encodings = Map.fromList [(ordinal,prepareProjectedGroupEncoding group)
+      | outcomes <- maybe [] pure original, (ordinal,_,Right group) <- outcomes]
 
 -- Force the local lowering on its executor worker, before incorporation.
 -- Failed groups remain values; only infrastructure exceptions abort the batch.

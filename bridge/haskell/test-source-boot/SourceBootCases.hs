@@ -2574,6 +2574,10 @@ originalProjectionProducts = withScratch $ \work -> do
         , group <- groups, binder <- projectedBinders group]
   unless (emittedBinders == currentOriginalBinders issued) $
     fail "writer changed the compiler-issued original availability boundary"
+  emittedInventory <- BS.readFile (captureDirectory </> "module-products.cbor")
+  unless (emittedInventory == encodeModuleProducts
+      (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
+    fail "retained original group encodings changed the emitted native inventory"
   -- Repeated native/display demand consumes the same completed canonical
   -- bodies, not just a projection of the original frontend result.
   capturedFixture <- capturePreparedFixture work paired

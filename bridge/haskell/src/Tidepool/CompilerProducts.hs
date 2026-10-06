@@ -52,13 +52,14 @@ import Tidepool.ExactScope
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
-  , prepareModuleProductEncoding, encodeModuleProductInventory )
+  , prepareModuleProductEncoding, prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
   , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
   , rawOriginalProductOwner
   , OriginalProjectionCache, newOriginalProjectionCache, projectCachedOriginalHomeModuleProducts
   , rawOriginalProductBinders, rawOriginalProductDemands
+  , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings )
 import Tidepool.ExecutionSchema
@@ -402,7 +403,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
         availability = maybe Map.empty currentOriginalAvailability inventory
         freshProducts = maybe [] currentOriginalProducts inventory
         productPackages = maybe Map.empty currentOriginalPackages inventory
-    timeDetailPhase timing "module_products" "write_products" $
+    productBytes <- timeDetailPhase timing "module_products" "write_products" $
       writeProductInventory outDir freshProducts
         [(unit,name,bytes) | ((unit,name),bytes) <- Map.toAscList productPackages]
     let withCertified = foldr (\candidate -> Map.insert
@@ -426,10 +427,8 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
       verified <- revalidateExactScope hscEnv (compilationScope compilation)
       either (ioError . userError) pure verified
       writeExactCompilation compilation freshDependencies
-    (productBytes, evidenceBytes) <- timeDetailPhase timing "module_products" "certificate_inputs" $ do
-      productBytes <- BS.readFile (outDir </> "module-products.cbor")
-      evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
-      pure (productBytes, evidenceBytes)
+    evidenceBytes <- timeDetailPhase timing "module_products" "certificate_inputs" $
+      BS.readFile (outDir </> "dependencies.json")
     sourceRecipe <- case preparedExactCompilation prepared of
       Nothing -> pure OrdinaryExecutionSource
       Just compilation -> issueFreshExecutionSource includes prepared freshDependencies
@@ -546,16 +545,27 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
           pure (encodePackageImports iface roots)
       when (BS.length sidecar > 4 * 1024 * 1024) $
         ioError (userError "direct package import witness exceeds four MiB")
-      pure (key, ProductReady, Just (prepareModuleProductEncoding (T.pack (fst key),
-        T.pack (snd key), bytes, groups)), Just sidecar)
+      let retainedGroups = do
+            raw <- preparedRawProducts productContext
+            ownerRaw <- case filter ((== owner) . rawOriginalProductOwner) raw of
+              [selected] -> Just selected
+              _ -> Nothing
+            traverse (\group -> Map.lookup (projectedOriginalOrdinal group)
+              (rawOriginalGroupEncodings ownerRaw)) groups
+          encoded = case retainedGroups of
+            Just encodedGroups -> prepareModuleProductEncodingFromGroups
+              (T.pack (fst key)) (T.pack (snd key)) bytes encodedGroups
+            Nothing -> prepareModuleProductEncoding (T.pack (fst key),T.pack (snd key),bytes,groups)
+      pure (key, ProductReady, Just encoded, Just sidecar)
 
 -- Interface-only captures emit the same valid inventory framing with no native
 -- rows. Product absence never prevents retaining the actual finalization.
-writeProductInventory :: FilePath -> [ModuleProductEncoding] -> [(String,String,BS.ByteString)] -> IO ()
+writeProductInventory :: FilePath -> [ModuleProductEncoding] -> [(String,String,BS.ByteString)] -> IO BS.ByteString
 writeProductInventory outDir products packageBundles = do
   timing <- readTimingEnabled
+  let productBytes = encodeModuleProductInventory products
   timeDetailPhase timing "module_products" "encode_products" $
-    BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProductInventory products)
+    BS.writeFile (outDir </> "module-products.cbor") productBytes
   timeDetailPhase timing "module_products" "encode_package_bundles" $
     BS.writeFile (outDir </> "module-package-imports.cbor")
     (toStrictByteString (encodeListLen 3
@@ -564,6 +574,7 @@ writeProductInventory outDir products packageBundles = do
       <> foldMap (\(unit, moduleName', sidecar) -> encodeListLen 3
         <> encodeString (T.pack unit) <> encodeString (T.pack moduleName')
         <> encodeBytes sidecar) packageBundles))
+  pure productBytes
 
 
 -- A later item can execute a quoter defined by an original retained here.
