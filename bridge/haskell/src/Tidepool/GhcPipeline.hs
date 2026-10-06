@@ -4339,9 +4339,12 @@ withResidentCompilerScopes baseIncludes useRequests = do
   unless available (fail "resident compiler GHC closure lacks ghc-iserv")
   runGhc (Just libdir) $ do
     parserFlags <- getSessionDynFlags
-    let baseFlags = gopt_set (extractionDynFlags parserFlags baseIncludes) Opt_ExternalInterpreter
-    _ <- setSessionDynFlags baseFlags
+    let bootstrapFlags = gopt_set (extractionDynFlags parserFlags baseIncludes) Opt_ExternalInterpreter
+    _ <- setSessionDynFlags bootstrapFlags
     baseEnv <- getSession
+    -- GHC initializes the target's platform constants with its package universe.
+    -- Retained views must reset to that initialized profile, not the bootstrap.
+    let baseFlags = hsc_dflags baseEnv
     auxiliaryRecovery <- liftIO freshCompilerRecoveryCaches
     initialRecovery <- liftIO (RecoveryContext <$> RequestUnique.newUnique <*> pure auxiliaryRecovery)
     interpreter <- liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
@@ -4633,8 +4636,9 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
         , mi_module (hm_iface home) == owner]
       -- Store only dependencies in the reusable view. A module target and its
       -- diagnostic/hooks cells belong to this successful attempt's result.
-      retainedView = hscUpdateHPT (filterHpt (\home -> mi_module (hm_iface home) /= targetOwner)) final
-        {hsc_targets=[],hsc_type_env_vars=emptyKnotVars,hsc_dflags=baseFlags}
+      retainedView = hscUpdateFlags (const baseFlags) $
+        hscUpdateHPT (filterHpt (\home -> mi_module (hm_iface home) /= targetOwner)) final
+          {hsc_targets=[],hsc_type_env_vars=emptyKnotVars}
   liftIO $ do
     evictCompilerRecovery recovery (== targetOwner)
     writeIORef active (Just context)
