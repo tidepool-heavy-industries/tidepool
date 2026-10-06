@@ -12,6 +12,7 @@ module Tidepool.ExecutionProjection
   , RawModuleProducts, projectRawOriginalHomeModuleProducts, forceRawModuleProducts
   , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache, mergeOriginalProjectionCaches, selectOriginalProjectionCaches
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
+  , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
@@ -351,39 +352,54 @@ evictOriginalProjectionMatching :: OriginalProjectionCache -> (Module -> Bool) -
 evictOriginalProjectionMatching (OriginalProjectionCache entries) stale =
   modifyMVar_ entries (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
 
-projectCachedOriginalHomeModuleProducts :: OriginalProjectionCache -> HscEnv
-  -> Map ModuleName ModIface -> ProjectionContext -> PreparedModule -> IO (Bool,RawModuleProducts)
-projectCachedOriginalHomeModuleProducts (OriginalProjectionCache entries) env interfaces context prepared = do
+normalizeOriginalProjectionContext :: Set Name -> Set SymbolIdentity -> Set SymbolIdentity
+  -> ProjectionContext -> ProjectionContext
+normalizeOriginalProjectionContext names symbols tops context = context
+  { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
+  , projectionRetainedGenerations = Map.restrictKeys (projectionRetainedGenerations context) symbols
+  , projectionCurrentOriginals = Map.restrictKeys (projectionCurrentOriginals context) names
+  , projectionAuxiliaryRoots = Set.toAscList (Set.fromList (projectionAuxiliaryRoots context)
+      `Set.intersection` tops) }
+
+lookupCachedOriginalHomeModuleProducts :: OriginalProjectionCache -> HscEnv
+  -> Map ModuleName ModIface -> ProjectionContext -> PreparedModule -> IO (Maybe RawModuleProducts)
+lookupCachedOriginalHomeModuleProducts (OriginalProjectionCache entries) env interfaces context prepared = do
   identity <- evaluate prepared >>= makeStableName
   let owner = pmModule prepared
       homes = hsc_all_home_unit_ids env
       hasInterface = maybe False ((== owner) . mi_module) (Map.lookup (moduleName owner) interfaces)
-      identities = preparedTopIdentityBindings [prepared]
-      facts = extractPreparedFacts owner (map fst (pmBindings prepared))
-      identifiers = preparedReferencedIds facts
-        ++ concatMap snd (preparedClosureCaptures facts)
-        ++ [binder | (binding,_) <- pmBindings prepared, binder <- topBinders binding]
-      names = Set.fromList (map varName identifiers)
-      symbols = Set.fromList (Map.elems identities ++ map (idSymbol "value") identifiers)
-      normalize relevantNames relevantSymbols tops = context
-        { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
-        , projectionRetainedGenerations = Map.restrictKeys (projectionRetainedGenerations context) relevantSymbols
-        , projectionCurrentOriginals = Map.restrictKeys (projectionCurrentOriginals context) relevantNames
-        , projectionAuxiliaryRoots = Set.toAscList (Set.fromList (projectionAuxiliaryRoots context)
-            `Set.intersection` tops) }
-      tops = Set.fromList (Map.elems identities)
-      normalized = normalize names symbols tops
-      matches (OriginalProjectionEntry old oldNames oldSymbols oldTops oldContext oldHomes oldInterface _) =
+      matches (OriginalProjectionEntry old names symbols tops oldContext oldHomes oldInterface _) =
         identity == old && homes == oldHomes && hasInterface == oldInterface
-          && normalize oldNames oldSymbols oldTops == oldContext
+          && normalizeOriginalProjectionContext names symbols tops context == oldContext
   known <- Map.findWithDefault [] owner <$> readMVar entries
-  case [raw | entry@(OriginalProjectionEntry _ _ _ _ _ _ _ raw) <- known, matches entry] of
-    raw:_ -> pure (True,raw)
-    [] -> do
-      raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts env interfaces context prepared)
-      modifyMVar_ entries (pure . Map.insertWith (++) owner
-        [OriginalProjectionEntry identity names symbols tops normalized homes hasInterface raw])
-      pure (False,raw)
+  pure (listToMaybe [raw | entry@(OriginalProjectionEntry _ _ _ _ _ _ _ raw) <- known, matches entry])
+
+projectCachedOriginalHomeModuleProducts :: OriginalProjectionCache -> HscEnv
+  -> Map ModuleName ModIface -> ProjectionContext -> PreparedModule -> IO (Bool,RawModuleProducts)
+projectCachedOriginalHomeModuleProducts cache@(OriginalProjectionCache entries) env interfaces context prepared = do
+  hit <- lookupCachedOriginalHomeModuleProducts cache env interfaces context prepared
+  case hit of
+    Just raw -> pure (True,raw)
+    Nothing -> project
+ where
+  project = do
+    identity <- evaluate prepared >>= makeStableName
+    let owner = pmModule prepared
+        homes = hsc_all_home_unit_ids env
+        hasInterface = maybe False ((== owner) . mi_module) (Map.lookup (moduleName owner) interfaces)
+        identities = preparedTopIdentityBindings [prepared]
+        facts = extractPreparedFacts owner (map fst (pmBindings prepared))
+        identifiers = preparedReferencedIds facts
+          ++ concatMap snd (preparedClosureCaptures facts)
+          ++ [binder | (binding,_) <- pmBindings prepared, binder <- topBinders binding]
+        names = Set.fromList (map varName identifiers)
+        symbols = Set.fromList (Map.elems identities ++ map (idSymbol "value") identifiers)
+        tops = Set.fromList (Map.elems identities)
+        normalized = normalizeOriginalProjectionContext names symbols tops context
+    raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts env interfaces context prepared)
+    modifyMVar_ entries (pure . Map.insertWith (++) owner
+      [OriginalProjectionEntry identity names symbols tops normalized homes hasInterface raw])
+    pure (False,raw)
 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts

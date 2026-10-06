@@ -99,7 +99,9 @@ import Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals, certifiedExecutionSource
   , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
+  , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
@@ -111,7 +113,8 @@ import Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
-import Tidepool.PreparedStg (newPreparedBodyCache)
+import Tidepool.PreparedStg (newPreparedBodyCache, pmSitedSiblings)
+import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
 import Tidepool.CompilerExecution (withCompilerExecutor, serialCompilerExecutionGrant)
 import System.Mem.StableName (makeStableName)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -2578,6 +2581,26 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (emittedInventory == encodeModuleProducts
       (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
     fail "retained original group encodings changed the emitted native inventory"
+  pendingBodyCache <- newPreparedBodyCache
+  pendingRawCache <- newOriginalProjectionCollector
+  withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
+    let inputs = PreparedModuleCompletionInputs
+          (Set.fromList (map pmModule (pprModules paired)))
+          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty
+        completionOrder = [consumer,ownerModule,provider,independent]
+    (observer,pendingWorklist) <- observeOriginalProjectionWithRecovery pendingRawCache
+      pendingBodyCache executor Map.empty [] Nothing pairedEnv pairedInterfaces
+      (pmModule consumer) Nothing inputs
+    -- The consumer completes before both owners it references. Their queued
+    -- native tasks provide definitions; no original recovery capability exists.
+    forM_ completionOrder $ \value -> do
+      observePreparedModule observer value
+      completedPreparedModule observer value
+    (_,pendingProducts) <- prepareOriginalProductsWithWorklist pendingWorklist pairedEnv
+      Nothing pairedInterfaces currentContext Set.empty (pprModules paired)
+    unless (preparedModuleProductOutcomes (preparedProductInventory pendingProducts)
+        == preparedModuleProductOutcomes (preparedProductInventory rawContext)) $
+      fail "queued source owners became missing originals during native completion order"
   -- Repeated native/display demand consumes the same completed canonical
   -- bodies, not just a projection of the original frontend result.
   capturedFixture <- capturePreparedFixture work paired
@@ -2621,6 +2644,19 @@ originalProjectionProducts = withScratch $ \work -> do
       {projectionRetainedGenerations=Map.singleton known 1})
     unless (unrelatedHit && not relevantHit) $
       fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
+    let inputs = PreparedModuleCompletionInputs
+          (Set.fromList (map pmModule (pprModules captured)))
+          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty
+    (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
+      Map.empty [] Nothing capturedEnv (pprProductInterfaces captured) (pmModule consumer)
+      (Just capturedScope) inputs
+    forM_ (pprModules captured) (observePreparedModule observer)
+    forM_ (pprModules captured) (completedPreparedModule observer)
+    (earlyDemand,_) <- prepareOriginalProductsWithWorklist earlyWorklist capturedEnv
+      (Just capturedScope) (pprProductInterfaces captured) capturedContext Set.empty (pprModules captured)
+    earlyBodies <- recoveredIdentities earlyDemand
+    unless (earlyBodies == firstBodies) $
+      fail "completion-driven original demand rebuilt or changed its completed native owners"
     -- A completed cached body is not authority to use changed artifacts.
     ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
       (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))

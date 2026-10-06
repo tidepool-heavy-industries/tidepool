@@ -13,6 +13,7 @@ module Tidepool.CompilerProducts
   , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
   , prepareOriginalProductsWithCollector
   , prepareOriginalProductsWithCache
+  , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   ) where
@@ -20,7 +21,7 @@ module Tidepool.CompilerProducts
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Applicative ((<|>))
-import Control.Exception (throwIO)
+import Control.Exception (throwIO, evaluate)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
@@ -33,6 +34,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Word (Word64)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Types.Name (Name)
+import GHC.Types.Var (Id)
 import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
@@ -42,6 +44,7 @@ import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
 import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
+import System.Mem.StableName (makeStableName)
 import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
@@ -58,6 +61,7 @@ import Tidepool.ExecutionProjection
   , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
   , rawOriginalProductOwner
   , OriginalProjectionCache, newOriginalProjectionCache, projectCachedOriginalHomeModuleProducts
+  , lookupCachedOriginalHomeModuleProducts
   , rawOriginalProductBinders, rawOriginalProductDemands
   , rawOriginalGroupEncodings
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
@@ -75,7 +79,7 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore )
 import Tidepool.GhcPipeline
-  ( PreparedPipelineResult(..), PipelineResult(..), PreparedModuleObserver(..)
+  ( PreparedPipelineResult(..), PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
   , preparedFreshDependencies, preparedExactCompilation )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
@@ -151,9 +155,9 @@ newOriginalProjectionCollector = newOriginalProjectionCache
 observeOriginalProjection :: OriginalProjectionCollector
   -> Map.Map SymbolIdentity Word64 -> [String] -> Maybe JsonAuthority
   -> HscEnv -> Map.Map ModuleName ModIface -> Module -> Maybe ExactScope
-  -> IO PreparedModuleObserver
+  -> PreparedModuleCompletionInputs -> IO PreparedModuleObserver
 observeOriginalProjection completed retained auxiliaryRoots json
-    environment interfaces owner exact = do
+    environment interfaces owner exact _inputs = do
   context <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
     "__original_projection" auxiliaryRoots json
   let observe prepared = do
@@ -290,31 +294,82 @@ prepareOriginalProductsWithCache
   -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
 prepareOriginalProductsWithCache cache collector = prepareOriginalProductsUsingCollector collector (Just cache)
 
+-- The coordinator owns incorporation and demand discovery. Workers publish
+-- only immutable raw leaves through the existing projection cache. This driver
+-- lives for one compiler result; completed body/raw nodes live in its universe.
+data OriginalProductWorklist = OriginalProductWorklist
+  { worklistObserve :: PreparedModule -> IO ()
+  , worklistComplete :: PreparedModule -> IO ()
+  , worklistFinish :: IO ([PreparedModule],PreparedProductContext)
+  , worklistMatches :: HscEnv -> Map.Map ModuleName ModIface -> ProjectionContext
+      -> Set.Set SymbolIdentity -> [PreparedModule] -> IO Bool
+  , worklistFallback :: HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
+      -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
+      -> IO ([PreparedModule],PreparedProductContext)
+  }
+
+observeOriginalProjectionWithRecovery :: OriginalProjectionCollector -> PreparedBodyCache
+  -> CompilerExecutor -> Map.Map SymbolIdentity Word64 -> [String] -> Maybe JsonAuthority
+  -> HscEnv -> Map.Map ModuleName ModIface -> Module -> Maybe ExactScope
+  -> PreparedModuleCompletionInputs -> IO (PreparedModuleObserver,OriginalProductWorklist)
+observeOriginalProjectionWithRecovery collector cache executor retained auxiliaryRoots json
+    env interfaces owner exact inputs = do
+  context <- prepareCompilerProjectionContextForEnvironment env exact retained owner
+    "__original_projection" auxiliaryRoots json
+  worklist <- newOriginalProductWorklist collector cache executor env exact interfaces context
+    (completionExternalOriginals inputs) (completionSourceOwners inputs) (completionSiblings inputs)
+  pure (PreparedModuleObserver (worklistObserve worklist) (worklistComplete worklist),worklist)
+
+-- A later target may add relevant generations or host authority. Adoption
+-- requires the same physical source modules and their relevant raw inputs;
+-- otherwise completed immutable cache nodes seed a fresh exact worklist.
+prepareOriginalProductsWithWorklist :: OriginalProductWorklist
+  -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
+  -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
+prepareOriginalProductsWithWorklist worklist env exact interfaces context external initial = do
+  accepted <- worklistMatches worklist env interfaces context external initial
+  if accepted then worklistFinish worklist
+    else worklistFallback worklist env exact interfaces context external initial
+
 prepareOriginalProductsUsingCollector
   :: Maybe OriginalProjectionCollector -> Maybe PreparedBodyCache -> CompilerExecutor -> HscEnv -> Maybe ExactScope
   -> Map.Map ModuleName ModIface -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
 prepareOriginalProductsUsingCollector collector stable executor env exact interfaces context external initial = do
+  cache <- maybe newPreparedBodyCache pure stable
+  completedRaw <- maybe newOriginalProjectionCache pure collector
+  worklist <- newOriginalProductWorklist completedRaw cache executor env exact interfaces context external
+    (Set.fromList (map pmModule initial)) (Map.unions (map pmSitedSiblings initial))
+  _ <- runCompilerTasks executor
+    (\prepared -> worklistObserve worklist prepared >> pure prepared)
+    (\_ prepared -> worklistComplete worklist prepared) initial
+  worklistFinish worklist
+
+newOriginalProductWorklist :: OriginalProjectionCollector -> PreparedBodyCache -> CompilerExecutor
+  -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
+  -> Set.Set SymbolIdentity -> Set.Set Module -> Map.Map String Id
+  -> IO OriginalProductWorklist
+newOriginalProductWorklist completedRaw cache executor env exact interfaces context external sourceOwners frozenSiblings = do
   timing <- readTimingEnabled
   workRef <- newIORef (0 :: Integer,0 :: Integer)
   reuseRef <- newIORef (0 :: Integer,0 :: Integer)
-  cache <- maybe newPreparedBodyCache pure stable
   acquireOriginal <- case exact of
     Nothing -> pure (\_ _ -> pure Nothing)
     Just scope -> newPreparedOriginalModuleTaskPreparer env cache scope
-  completedRaw <- maybe newOriginalProjectionCache pure collector
-  modulesRef <- newIORef (Map.fromList [(pmModule prepared, prepared) | prepared <- initial])
+  modulesRef <- newIORef Map.empty
   admittedRef <- newIORef Map.empty
   attemptedRef <- newIORef Set.empty
   rawRef <- newIORef Map.empty
-  knownRef <- newIORef (Set.union external (Set.fromList
-    (Map.elems (preparedTopIdentityBindings initial))))
+  knownRef <- newIORef external
   let lower selected prepared = do
         (hit,raw) <- projectCachedOriginalHomeModuleProducts completedRaw env selected context prepared
         atomicModifyIORef' workRef (\(projected,hits) ->
           (if hit then (projected,hits + 1) else (projected + 1,hits),()))
         pure raw
-      completed _ raw = do
+      completed prepared raw = do
+        modifyIORef' modulesRef (Map.insert (pmModule prepared) prepared)
+        modifyIORef' knownRef (`Set.union` Set.fromList
+          (Map.elems (preparedTopIdentityBindings [prepared])))
         modifyIORef' rawRef (Map.insert (rawOriginalProductOwner raw) raw)
         modules <- readIORef modulesRef
         attempted <- readIORef attemptedRef
@@ -324,9 +379,10 @@ prepareOriginalProductsUsingCollector collector stable executor env exact interf
                 , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
                       (mkModuleName (T.unpack (symbolModule identity)))
                 , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
+                , owner `Set.notMember` sourceOwners
                 , Map.notMember owner modules, owner `Set.notMember` attempted])
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
-        let siblings = Map.unions (map pmSitedSiblings (Map.elems modules))
+        let siblings = Map.unions (frozenSiblings : map pmSitedSiblings (Map.elems modules))
         acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner ->
           fmap (fmap (\original -> (owner,original))) (acquireOriginal siblings owner)
         admitted <- readIORef admittedRef
@@ -342,28 +398,52 @@ prepareOriginalProductsUsingCollector collector stable executor env exact interf
            lowered + fromIntegral (length [() | (_,False,_) <- Map.elems acquired])))
         _ <- runCompilerTasks executor
           (\(_,task) -> do
-            prepared <- runPreparedModuleTask task
-            product' <- lower selected prepared
-            pure (prepared,product'))
-          (\_ (prepared,product') -> do
-            modifyIORef' modulesRef (Map.insert (pmModule prepared) prepared)
-            modifyIORef' knownRef (`Set.union` Set.fromList
-              (Map.elems (preparedTopIdentityBindings [prepared])))
-            completed prepared product') tasks
+            original <- runPreparedModuleTask task
+            product' <- lower selected original
+            pure (original,product'))
+          (\_ (original,product') -> completed original product') tasks
         pure ()
-  _ <- runCompilerTasks executor (lower interfaces) completed initial
-  modules <- Map.elems <$> readIORef modulesRef
-  admitted <- readIORef admittedRef
-  raw <- Map.elems <$> readIORef rawRef
-  let (products,_) = settleOriginalHomeModuleProducts env external raw
-  (projected,hits) <- readIORef workRef
-  emitCount timing "original_raw_projected_modules" projected
-  emitCount timing "original_raw_cache_hits" hits
-  (reused,lowered) <- readIORef reuseRef
-  emitCount timing "original_prepared_cache_hits" reused
-  emitCount timing "original_prepared_new_modules" lowered
-  emitCount timing "original_advertised_native_binders" (fromIntegral (Set.size external))
-  pure (modules,PreparedProductContext products admitted modules (Just raw) external Nothing)
+      observe prepared = lower interfaces prepared >> pure ()
+      complete prepared = do
+        captured <- lookupCachedOriginalHomeModuleProducts completedRaw env interfaces context prepared
+        raw <- maybe (lower interfaces prepared) pure captured
+        completed prepared raw
+      finish = do
+        modules <- Map.elems <$> readIORef modulesRef
+        unless (sourceOwners `Set.isSubsetOf` Set.fromList (map pmModule modules))
+          (fail "original product settlement still has queued source owners")
+        admitted <- readIORef admittedRef
+        raw <- Map.elems <$> readIORef rawRef
+        let (products,_) = settleOriginalHomeModuleProducts env external raw
+        (projected,hits) <- readIORef workRef
+        emitCount timing "original_raw_projected_modules" projected
+        emitCount timing "original_raw_cache_hits" hits
+        (reused,lowered) <- readIORef reuseRef
+        emitCount timing "original_prepared_cache_hits" reused
+        emitCount timing "original_prepared_new_modules" lowered
+        emitCount timing "original_advertised_native_binders" (fromIntegral (Set.size external))
+        pure (modules,PreparedProductContext products admitted modules (Just raw) external Nothing)
+      samePhysical left right = do
+        first <- evaluate left >>= makeStableName
+        second <- evaluate right >>= makeStableName
+        pure (first == second)
+      matches selectedEnv selectedInterfaces selectedContext selectedExternal initial = do
+        recorded <- readIORef modulesRef
+        originals <- readIORef rawRef
+        let owners = Set.fromList (map pmModule initial)
+        if selectedExternal /= external || owners /= sourceOwners then pure False else
+          fmap and $ forM initial $ \prepared -> case
+              (Map.lookup (pmModule prepared) recorded,Map.lookup (pmModule prepared) originals) of
+            (Just old,Just oldRaw) -> do
+              sameBody <- samePhysical prepared old
+              selectedRaw <- lookupCachedOriginalHomeModuleProducts completedRaw selectedEnv
+                selectedInterfaces selectedContext prepared
+              case selectedRaw of
+                Just raw | sameBody -> samePhysical raw oldRaw
+                _ -> pure False
+            _ -> pure False
+      fallback = prepareOriginalProductsWithCache cache (Just completedRaw) executor
+  pure (OriginalProductWorklist observe complete finish matches fallback)
 
 -- Captures come from the exact scope, including its admitted checked values,
 -- or the candidate owner. Their original bytes supply type dependency seals;
