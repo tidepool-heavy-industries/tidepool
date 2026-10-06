@@ -39,6 +39,7 @@ import GHC.Iface.Load (findAndReadIface, readIface)
 import GHC.Iface.Errors.Types
   ( MissingInterfaceError(..), ReadInterfaceError(..) )
 import GHC.IfaceToCore (tcTopIfaceBindings)
+import GHC.Iface.Recomp.Binary (computeFingerprint, putNameLiterally)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
 import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Data.Maybe (MaybeErr(..))
@@ -86,13 +87,13 @@ data FatIfaceModule
   | FatIfaceNoExtraDeclarations
   | FatIfaceLoadFailureOutcome String
 
--- | Exact identity of one decoded original interface. The fingerprint is
--- taken from the actual ModIface retained by the loader.
-data FatOriginalVersion = FatOriginalVersion !Module !Fingerprint
+-- | Exact identity of one decoded original interface and its stored Core.
+-- The interface fingerprint alone does not directly hash extra declarations.
+data FatOriginalVersion = FatOriginalVersion !Module !Fingerprint !Fingerprint
   deriving (Eq, Ord)
 
 fatOriginalOwner :: FatOriginalVersion -> Module
-fatOriginalOwner (FatOriginalVersion owner _) = owner
+fatOriginalOwner (FatOriginalVersion owner _ _) = owner
 
 -- | One canonical undirected connected component of private references in an
 -- original fat interface. Bindings retain their authoritative original group
@@ -282,7 +283,8 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Nothing -> pure ()
           return FatIfaceNoExtraDeclarations
         Just ifaceBinds -> do
-          let version = FatOriginalVersion modl (mi_iface_hash (mi_final_exts iface))
+          coreHash <- computeFingerprint putNameLiterally ifaceBinds
+          let version = FatOriginalVersion modl (mi_iface_hash (mi_final_exts iface)) coreHash
           version `seq` pure ()
           coreBinds <- initIfaceCheck doc hscEnv $ do
             typeEnvRef <- liftIO $ newIORef emptyTypeEnv

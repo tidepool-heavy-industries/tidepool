@@ -252,10 +252,14 @@ prepareRecoveredModule hscEnv input =
   acquireRecoveredModule hscEnv input >>= runPreparedModuleTask
 
 acquireRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
-acquireRecoveredModule hscEnv input = do
+acquireRecoveredModule = acquireRecoveredModuleUsingSiteEnvironment Nothing
+
+acquireRecoveredModuleUsingSiteEnvironment :: Maybe PreparedSiteEnvironment
+  -> HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
+acquireRecoveredModuleUsingSiteEnvironment environment hscEnv input = do
   let entries = Map.fromList [(varName identifier, identifier) | identifier <- recoveredEntries input]
   bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
-  task <- acquireTypedBindings ExactBodySubset
+  task <- acquireTypedBindingsWithSiteEnvironment environment ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) Map.empty bindings
   pure $ PreparedModuleTask $ do
@@ -325,10 +329,10 @@ recoveredSubsetScope owner bindings =
     bodies (NonRec _ rhs) = [rhs]
     bodies (Rec pairs) = map snd pairs
 
--- | Completed bodies retain their owner identity. Each acquiring preparer
--- checks its canonical/exact inputs and preparation dependencies before reuse.
+-- | Exact versions and consumed site facts authorize completed-body reuse.
+-- Canonical pure units are coalesced separately from typed site batches.
 data PreparedBodyCache = PreparedBodyCache
-  { cachedExactBodies :: MVar (Map Module (Map [[Word64]] PreparedModule))
+  { cachedExactBodies :: MVar (Map Module (Map [[Word64]] [PreparedModule]))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
   , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, Int) PreparedModule))
   }
@@ -354,7 +358,7 @@ mergePreparedBodyCaches sources = do
     pure (exact, originals)) sources
   components <- mapM (\(cache, keep) -> Map.filterWithKey (\owner _ -> keep owner)
     <$> readMVar (cachedFatComponents cache)) sources >>= mergeComponentBuckets
-  PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
+  PreparedBodyCache <$> newMVar (Map.unionsWith (Map.unionWith (++)) (map fst selected))
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
@@ -368,7 +372,7 @@ selectPreparedBodyCaches sources = do
     pure (exact, originals)) sources
   components <- mapM (\(cache, owners) -> selectOwnerBuckets owners
     <$> readMVar (cachedFatComponents cache)) sources >>= mergeComponentBuckets
-  PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
+  PreparedBodyCache <$> newMVar (Map.unionsWith (Map.unionWith (++)) (map fst selected))
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
@@ -486,7 +490,8 @@ runPreparedBodyTask (PreparedBodyTask action) = action
 newPreparedComponentTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedComponentTaskPreparer env owners stable = do
-  acquireSiteBatch <- newPreparedBodyTaskPreparer env owners stable
+  environment <- resolvePreparedSiteEnvironment env
+  acquireSiteBatch <- newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners stable
   timing <- readTimingEnabled
   pure $ \selection -> do
     let version = fatSelectionVersion selection
@@ -510,7 +515,7 @@ newPreparedComponentTaskPreparer env owners stable = do
           completed <- Shared.lookupCompletedLoadCache bucket key
           task <- case completed of
             Just prepared -> pure (Right (PreparedModuleTask (pure prepared)))
-            Nothing -> acquireRecoveredWithContext env owner context
+            Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context
               (IntMap.elems (fatComponentBindings component))
           pure ((component,key),task)
         -- Site graphs have owner-local indexes. Until their owning type policy
@@ -612,23 +617,38 @@ assembleComponentSelection selection units = do
 newPreparedBodyTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedBodyTaskPreparer env owners bodyCache = do
+  environment <- resolvePreparedSiteEnvironment env
+  newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache
+
+newPreparedBodyTaskPreparerWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv
+  -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
+newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache = do
   scoped <- newMVar Map.empty
   pure $ \owner bindings -> do
     let stable = cachedExactBodies bodyCache
         key = preparedBodyKey bindings
     stableHit <- lookupOwnerEntry owner key <$> readMVar stable
     scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
-    case stableHit `orElse` scopedHit of
+    let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
+          (maybe [] id candidates) of
+            hit:_ -> Just hit
+            [] -> Nothing
+    case matching stableHit `orElse` matching scopedHit of
       Just hit -> pure (Right (PreparedBodyTask (pure (Right hit))))
       Nothing -> do
-        acquired <- acquireRecoveredBodiesUncached env owners owner bindings
+        resolved <- acquireRecoveredContext env owners owner
+        acquired <- case resolved of
+          Left failure -> pure (Left failure)
+          Right context -> acquireRecoveredWithSiteContext (Just environment) env owner context bindings
         pure $ fmap (\task -> PreparedBodyTask $ do
           outcome <- trySynchronous (runPreparedModuleTask task)
           case outcome of
             Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
             Right prepared -> do
-              let cache = if preparedAuthorityDependent prepared then scoped else stable
-              modifyMVar_ cache (pure . insertOwnerEntry owner key prepared)
+              let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
+              modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (++)) owner
+                (Map.singleton key [prepared]))
               pure (Right prepared)) acquired
   where
     orElse (Just hit) _ = Just hit
@@ -645,18 +665,10 @@ newPreparedBodyTaskPreparer env owners bodyCache = do
 -- re-preparation of the same owner (a later recovery round finds more of its
 -- bindings) skip straight to 'prepareRecoveredModule'. Only a successful
 -- read+typecheck is cached; see 'OwnerInterfaceCache'.
-acquireRecoveredBodiesUncached :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
-  -> IO (Either RecoveredModuleFailure PreparedModuleTask)
-acquireRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
-  resolved <- acquireRecoveredContext hscEnv ownerCache owner
-  case resolved of
-    Left failure -> pure (Left failure)
-    Right context -> acquireRecoveredWithContext hscEnv owner context bindings
-
-acquireRecoveredWithContext :: HscEnv -> Module -> OwnerInterfaceContext -> [CoreBind]
-  -> IO (Either RecoveredModuleFailure PreparedModuleTask)
-acquireRecoveredWithContext hscEnv owner context bindings = do
-  prepared <- trySynchronous (acquireRecoveredModule hscEnv
+acquireRecoveredWithSiteContext :: Maybe PreparedSiteEnvironment -> HscEnv -> Module
+  -> OwnerInterfaceContext -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModuleTask)
+acquireRecoveredWithSiteContext environment hscEnv owner context bindings = do
+  prepared <- trySynchronous (acquireRecoveredModuleUsingSiteEnvironment environment hscEnv
     (RecoveredModuleInput owner (ownerInterfaceLocation context)
       (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
   pure $ case prepared of
