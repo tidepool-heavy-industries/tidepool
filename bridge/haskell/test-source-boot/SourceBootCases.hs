@@ -155,7 +155,7 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , generatedActivationPreviewRecipe )
-import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts)
+import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
@@ -4496,9 +4496,17 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       resultType = fmap renderType . crResultType
       loadedOwner = "tidepool-checked-loaded-source module=MetadataOwner"
       checkedOwner = "tidepool-checked module=MetadataOwner target=False"
+      reusedOwner = "tidepool-checked-reused-source module=MetadataOwner"
       frontendCount name diagnostics = length (filter (==
           "tidepool-canonical-frontend module=" ++ name) (lines diagnostics))
         + length (filter (== "tidepool-checked module=" ++ name ++ " target=False") (lines diagnostics))
+      ownerInterface checked = do
+        let env = crHscEnv checked
+            owner = mkModule (stringToUnit "main") (mkModuleName "MetadataOwner")
+        case lookupHpt (hsc_HPT env) (moduleName owner) of
+          Just home | mi_module (hm_iface home) == owner ->
+            serializeOriginalInterface env work (hm_iface home)
+          _ -> fail "loaded metadata lost the original main:MetadataOwner interface"
   forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
@@ -4508,9 +4516,20 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   withResidentPipelineSelected [work] $ \compile -> do
     let checked name = compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
           (work </> name) [work] Nothing
-    ordinary <- compile CheckedEnvironment Set.empty GeneralCompile Nothing
-      (work </> "MetadataTarget.hs") [work] Nothing
+    (ordinary, ordinaryDiagnostics) <- captureDiagnostics $
+      compile CheckedEnvironment Set.empty GeneralCompile Nothing
+        (work </> "MetadataTarget.hs") [work] Nothing
+    unless (resultType ordinary == Just "Int"
+        && frontendCount "MetadataOwner" ordinaryDiagnostics == 1
+        && loadedOwner `elem` lines ordinaryDiagnostics
+        && checkedOwner `notElem` lines ordinaryDiagnostics
+        && counterValues "transaction_reused_source_products" ordinaryDiagnostics == [0]
+        && "tidepool-checked module=MetadataTarget target=True" `elem` lines ordinaryDiagnostics) $ do
+      hPutStrLn stderr ("loaded metadata captured original-cycle diagnostics:\n" ++ ordinaryDiagnostics)
+      fail "cold metadata did not compile its source owner once and check the target"
+    originalInterface <- ownerInterface ordinary
     (exact, diagnostics) <- captureDiagnostics (checked "MetadataTarget.hs")
+    selectedInterface <- ownerInterface exact
     let ownerFrontends = frontendCount "MetadataOwner" diagnostics
         loadedOwnerSeen = loadedOwner `elem` lines diagnostics
         checkedOwnerSeen = checkedOwner `elem` lines diagnostics
@@ -4518,18 +4537,23 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         observations =
           [ ("exact_type_int", resultType exact == Just "Int")
           , ("ordinary_exact_type_equal", resultType ordinary == resultType exact)
-          , ("owner_frontends_once", ownerFrontends == 1)
-          , ("owner_not_loaded_and_checked", not (loadedOwnerSeen && checkedOwnerSeen))
+          , ("owner_frontends_reused", ownerFrontends == 0)
+          , ("owner_reused_original_interface", originalInterface == selectedInterface)
+          , ("owner_reused_source_once", reusedOwner `elem` lines diagnostics
+              && counterValues "transaction_reused_source_products" diagnostics == [1])
+          , ("owner_not_recompiled", not loadedOwnerSeen && not checkedOwnerSeen)
           , ("target_checked", targetCheckedSeen)
           ]
     unless (all snd observations) $ do
       hPutStrLn stderr ("exact loaded metadata captured second-cycle diagnostics:\n" ++ diagnostics)
-      fail ("exact metadata repeated the loaded source frontend or changed its instance result: observations="
+      fail ("exact metadata lost its completed source owner or changed its instance result: observations="
         ++ show observations ++ " ordinary_type=" ++ show (resultType ordinary)
         ++ " exact_type=" ++ show (resultType exact) ++ " owner_frontends=" ++ show ownerFrontends
         ++ " owner_loaded=" ++ show loadedOwnerSeen ++ " owner_checked=" ++ show checkedOwnerSeen)
-    putStrLn ("exact loaded metadata evidence: owner_frontends="
-      ++ show (frontendCount "MetadataOwner" diagnostics))
+    putStrLn ("exact loaded metadata evidence: cold_owner_frontends="
+      ++ show (frontendCount "MetadataOwner" ordinaryDiagnostics)
+      ++ " warm_owner_frontends=" ++ show ownerFrontends
+      ++ " same_original_interface=" ++ show (originalInterface == selectedInterface))
     (extensionOnly, extensionDiagnostics) <- captureDiagnostics
       (checked "MetadataExtensionOnlyTarget.hs")
     let executableOwner env = case lookupHpt (hsc_HPT env) (mkModuleName "MetadataOwner") of
