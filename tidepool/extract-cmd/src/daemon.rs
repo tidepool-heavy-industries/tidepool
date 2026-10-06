@@ -3586,7 +3586,7 @@ mod tests {
                     };
                     permit.grant.jobs > 0 && permit.grant.jobs as usize <= maximum
                         && permit.grant.jobs == permit.grant.capabilities
-                }));
+                }), "each grant must fit its workload allowance");
                 if held.iter().all(|permit| permit.workload == CompileWorkload::Preparation) {
                     let foreground = resources.acquire_with_capacity(CompileWorkload::Foreground, capacity);
                     proptest::prop_assert!(foreground.is_some(), "preparation must preserve foreground progress");
