@@ -99,6 +99,7 @@ def declare_haskell_components():
         name = "tidepool_extract_internal",
         srcs = {
         "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
+        "Tidepool/BoundedRead.hs": "src/Tidepool/BoundedRead.hs",
         "Tidepool/CborEncode.hs": "src/Tidepool/CborEncode.hs",
         "Tidepool/CellProgramState.hs": "src/Tidepool/CellProgramState.hs",
         "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
@@ -228,6 +229,7 @@ def declare_haskell_components():
         name = "tidepool_extract_internal_profile",
         srcs = {
         "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
+        "Tidepool/BoundedRead.hs": "src/Tidepool/BoundedRead.hs",
         "Tidepool/CborEncode.hs": "src/Tidepool/CborEncode.hs",
         "Tidepool/CellProgramState.hs": "src/Tidepool/CellProgramState.hs",
         "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
@@ -3043,6 +3045,7 @@ def declare_haskell_components():
         "Main.hs": "test-source-boot/Main.hs",
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "SourceBootCases.hs": "test-source-boot/SourceBootCases.hs",
+        "BoundedReadTest.hs": "test-source-boot/BoundedReadTest.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
         "Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
@@ -3212,6 +3215,7 @@ def declare_haskell_components():
         "lib/Tidepool/TextFormat.hs": "lib/Tidepool/TextFormat.hs",
         "lib/Tidepool/Tools.hs": "lib/Tidepool/Tools.hs",
         "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
+        "test-source-boot/BoundedReadTest.hs": "test-source-boot/BoundedReadTest.hs",
         "test-source-boot/CandidateExecutionSourcesTest.hs": "test-source-boot/CandidateExecutionSourcesTest.hs",
         "test-source-boot/CandidateGraphDescriptorTest.hs": "test-source-boot/CandidateGraphDescriptorTest.hs",
         "test-source-boot/CodecFixtureSupport.hs": "test-source-boot/CodecFixtureSupport.hs",
