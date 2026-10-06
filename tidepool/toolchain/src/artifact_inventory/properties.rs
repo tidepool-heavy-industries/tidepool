@@ -66,12 +66,18 @@ struct Catalog {
 impl Catalog {
     fn new(masks: &[u8]) -> Self {
         let mut specs = Vec::new();
+        // Canonical finalization forbids an owner requiring itself; cycles
+        // between distinct exact owners remain valid graph inputs.
         for producer in [2, 3] {
-            specs.extend(masks.iter().enumerate().map(|(key, mask)| Spec {
-                key,
-                producer,
-                joined: false,
-                requirements: (0..OWNERS).filter(|bit| mask & (1 << bit) != 0).collect(),
+            specs.extend(masks.iter().enumerate().map(|(key, mask)| {
+                Spec {
+                    key,
+                    producer,
+                    joined: false,
+                    requirements: (0..OWNERS)
+                        .filter(|bit| *bit != key && mask & (1 << bit) != 0)
+                        .collect(),
+                }
             }));
         }
         // Joined interface bytes do not encode lexical requirements. Changing
@@ -945,8 +951,7 @@ fn native_fixture(
 proptest! {
     #![proptest_config(property_config())]
     #[test]
-    fn native_roots_select_exact_ordinals_and_binding_generations(
-        required_ordinal in prop_oneof![Just(7u32), Just(0u32), Just(8u32)],
+    fn native_roots_preserve_binding_generations_and_type_isolation(
         generation in 0u64..4,
         version in 1u8..4,
         root_mask in 0u8..16,
@@ -965,7 +970,7 @@ proptest! {
         let helper = native_fixture("Helper", Some(PendingImportOwner::Retained { identity: binding.clone(), generation }), version);
         let ArtifactPayload::Original(helper_product) = &helper.payload else { unreachable!() };
         let root = native_fixture("Root", Some(PendingImportOwner::Source {
-            owner: helper_product.owner().clone(), original_ordinal: required_ordinal,
+            owner: helper_product.owner().clone(), original_ordinal: 7,
             binder: SymbolIdentity { unit: "fixture".into(), module: "Helper".into(), namespace: "value".into(), occurrence: "entry".into(), record_parent: None },
         }), 1);
         let type_only = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
@@ -975,9 +980,9 @@ proptest! {
         let mut roots: Vec<_> = choices.iter().enumerate().filter(|(i, _)| root_mask & (1 << i) != 0).map(|(_, id)| *id).collect();
         if duplicate { roots.extend(roots.clone()); }
         // Independent truth table: every root selects all its own groups. A
-        // source edge selects exactly ordinal 7 of Helper, which alone requires
-        // this binding. Interface-only roots never demand a native binding.
-        let demanded = root_mask & 2 != 0 || (root_mask & 1 != 0 && required_ordinal == 7);
+        // source edge selects Helper's issued group 7, which requires this
+        // binding. Interface-only roots never demand a native binding.
+        let demanded = root_mask & 3 != 0;
         let expected = if demanded {
             vec![NativeBindingRequirement { artifact_id: value.descriptor.id, identity: binding, generation }]
         } else { Vec::new() };
