@@ -74,7 +74,8 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore )
 import Tidepool.GhcPipeline
-  ( PreparedPipelineResult(..), PipelineResult(..), preparedFreshDependencies, preparedExactCompilation )
+  ( PreparedPipelineResult(..), PipelineResult(..), PreparedModuleObserver(..)
+  , preparedFreshDependencies, preparedExactCompilation )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -148,16 +149,17 @@ newOriginalProjectionCollector = OriginalProjectionCollector <$> newMVar Map.emp
 observeOriginalProjection :: OriginalProjectionCollector
   -> Map.Map SymbolIdentity Word64 -> [String] -> Maybe JsonAuthority
   -> HscEnv -> Map.Map ModuleName ModIface -> Module -> Maybe ExactScope
-  -> IO (PreparedModule -> IO ())
+  -> IO PreparedModuleObserver
 observeOriginalProjection (OriginalProjectionCollector completed) retained auxiliaryRoots json
     environment interfaces owner exact = do
   context <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
     "__original_projection" auxiliaryRoots json
-  pure $ \prepared -> do
-    raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts environment interfaces context prepared)
-    identity <- evaluate prepared >>= makeStableName
-    let selectedContext = originalProjectionContext prepared context
-    modifyMVar_ completed (pure . Map.insert (pmModule prepared) (identity,selectedContext,raw))
+  let observe prepared = do
+        raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts environment interfaces context prepared)
+        identity <- evaluate prepared >>= makeStableName
+        let selectedContext = originalProjectionContext prepared context
+        modifyMVar_ completed (pure . Map.insert (pmModule prepared) (identity,selectedContext,raw))
+  pure (PreparedModuleObserver observe (\_ -> pure ()))
 
 originalProjectionContext :: PreparedModule -> ProjectionContext -> ProjectionContext
 originalProjectionContext prepared context = context
