@@ -15545,6 +15545,65 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay() {
+        async fn run_native_probe(
+            mut session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            context: crate::ActorSessionContext,
+            source: ActorWorkbenchSource,
+            prepared: &PreparedSourceToolset,
+            expected: &str,
+        ) {
+            session.set_image_registry(Arc::clone(prepared.prepared.entry.image_registry()));
+            let entry = session
+                .prepare_startup_entry(prepared.prepared.entry.compiled().code())
+                .unwrap();
+            let ResidentOutcome::Suspended { hole, request, .. } =
+                session.run_startup_entry(entry).unwrap()
+            else {
+                panic!("selected original must execute its actual installer");
+            };
+            assert!(matches!(
+                ResidentRequest::decode(&request, session.data_con_table()).unwrap(),
+                ResidentRequest::AgentTools(
+                    crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(_, _)
+                )
+            ));
+            let dispatch = session
+                .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                .unwrap()
+                .expect("installed dispatcher");
+            assert!(matches!(
+                session.resume(hole, ()).unwrap(),
+                ResidentOutcome::Completed { .. }
+            ));
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let step = workbench
+                .begin_tool(
+                    context.clone(),
+                    Arc::new(dispatch),
+                    "probe".into(),
+                    serde_json::json!({"topic": "selected original"}),
+                )
+                .await
+                .unwrap();
+            let result = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                    .settle_item(context, *fragment, (*outcome).into())
+                    .await
+                    .unwrap(),
+                step => step,
+            };
+            let ResidentWorkbenchStep::Committed { value, output, .. } = result else {
+                panic!(
+                    "selected installer did not execute its native tool: {}",
+                    describe_step(&result)
+                );
+            };
+            assert_eq!(value, Some(serde_json::json!(expected)));
+            assert_eq!(output, expected);
+        }
+
         struct Snapshot {
             _owner: Arc<tempfile::TempDir>,
             identities: Vec<String>,
@@ -15566,7 +15625,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 Some(&self.entries)
             }
         }
-        let (mut session, context, source, _session_root) = host_mount_fixture();
+        let (session, context, source, _session_root) = host_mount_fixture();
         let authored = Arc::new(tempfile::tempdir().unwrap());
         let source_root = authored.path().join("sources");
         std::fs::create_dir(&source_root).unwrap();
@@ -15652,13 +15711,23 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             fresh.completed_entry_selection().unwrap().1,
             successor.completed_entry_selection().unwrap().1
         );
-        assert_ne!(
-            fresh.prepared.entry.compiled().prepared,
-            successor.prepared.entry.compiled().prepared,
-            "a newly admitted source preparation executes the changed untracked input"
-        );
         let completed_executions =
             std::fs::read_to_string(input.with_extension("executions")).unwrap();
+        assert!(
+            completed_executions.lines().any(|input| input == "42"),
+            "a newly admitted source preparation executes the changed untracked input"
+        );
+        // The installer wrapper imports separately certified original groups.
+        // Its prepared bytes can stay equal when the quoted tool body changes.
+        let (successor_session, successor_context, _, _successor_root) = host_mount_fixture();
+        run_native_probe(
+            successor_session,
+            successor_context,
+            source.clone(),
+            &successor,
+            "42",
+        )
+        .await;
         // Reacquire readiness and native images independently of the old ready
         // cache. Selection is the completed artifact, not a fresh TH request.
         source.toolset_preparation = Default::default();
@@ -15690,56 +15759,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
-        session.set_image_registry(Arc::clone(loaded.prepared.entry.image_registry()));
-        let entry = session
-            .prepare_startup_entry(loaded.prepared.entry.compiled().code())
-            .unwrap();
-        let ResidentOutcome::Suspended { hole, request, .. } =
-            session.run_startup_entry(entry).unwrap()
-        else {
-            panic!("loaded original must execute its actual installer");
-        };
-        assert!(matches!(
-            ResidentRequest::decode(&request, session.data_con_table()).unwrap(),
-            ResidentRequest::AgentTools(
-                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(_, _)
-            )
-        ));
-        let dispatch = session
-            .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
-            .unwrap()
-            .expect("installed dispatcher");
-        assert!(matches!(
-            session.resume(hole, ()).unwrap(),
-            ResidentOutcome::Completed { .. }
-        ));
-        let machines = Arc::new(ActorMachineRegistry::new());
-        machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
-        let step = workbench
-            .begin_tool(
-                context.clone(),
-                Arc::new(dispatch),
-                "probe".into(),
-                serde_json::json!({"topic": "completed original"}),
-            )
-            .await
-            .unwrap();
-        let result = match step {
-            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                .settle_item(context, *fragment, (*outcome).into())
-                .await
-                .unwrap(),
-            step => step,
-        };
-        let ResidentWorkbenchStep::Committed { value, output, .. } = result else {
-            panic!(
-                "loaded installer did not execute its native tool: {}",
-                describe_step(&result)
-            );
-        };
-        assert_eq!(value, Some(serde_json::json!("41")));
-        assert_eq!(output, "41");
+        run_native_probe(session, context, source.clone(), &loaded, "41").await;
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
         let (recipe, original) = fresh.completed_entry_selection().unwrap();
