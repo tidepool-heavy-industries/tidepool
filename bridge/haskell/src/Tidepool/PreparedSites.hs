@@ -274,7 +274,7 @@ resolvePreparedSiteEnvironment env = do
       versions = Map.union (versionsOf (map hm_iface (eltsHpt (hsc_HPT env))))
         (Map.union declarationVersions (versionsOf (map snd (moduleEnvToList (eps_PIT external)))))
       declarationVersions = Map.fromList
-        [(owner, version) | (_, fact) <- Map.elems declarations ++ Map.elems recovered
+        [(owner, version) | fact <- map snd (Map.elems declarations) ++ map snd (Map.elems recovered)
           , (owner, version) <- case fact of
               KnownDeclaration owner version _ -> [(owner, version)]
               MissingDeclaration owner version _ -> [(owner, version)]
