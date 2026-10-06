@@ -116,6 +116,12 @@ mod tests {
         let selection = NativeCatalogSourceSelection::capture_under(&root, RootPolicy::Fixture)
             .expect("genuine catalog SHA-256 capture");
         selection.validate_under(RootPolicy::Fixture).unwrap();
+        let mut reordered = selection.clone();
+        reordered.source_files.reverse();
+        assert!(matches!(
+            reordered.validate_under(RootPolicy::Fixture),
+            Err(ModulePackageError::SourceChanged)
+        ));
         let mut legacy = serde_json::to_value(&selection).unwrap();
         legacy["source_files"] = serde_json::json!([["TidepoolCatalog.hs", "0".repeat(64)]]);
         assert!(serde_json::from_value::<NativeCatalogSourceSelection>(legacy).is_err());
