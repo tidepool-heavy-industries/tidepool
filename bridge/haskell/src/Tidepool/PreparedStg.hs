@@ -24,6 +24,8 @@ import Control.Exception
   , throwIO, try )
 import Control.Monad (unless)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
+import Data.List (foldl')
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -310,7 +312,7 @@ recoveredSubsetScope owner bindings =
 -- checks its canonical/exact inputs and preparation dependencies before reuse.
 data PreparedBodyCache = PreparedBodyCache
   { cachedExactBodies :: MVar (Map Module (Map [[Word64]] PreparedModule))
-  , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion (AdmittedFinalizedOriginal,PreparedModule)))
+  , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
   }
 
 newPreparedBodyCache :: IO PreparedBodyCache
@@ -332,7 +334,7 @@ mergePreparedBodyCaches sources = do
       <$> readMVar (cachedOriginalModules cache)
     pure (exact, originals)) sources
   PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
-    <*> newMVar (Map.unionsWith Map.union (map snd selected))
+    <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
 
 -- | Home activation reads only validated owner buckets. Within an owner,
 -- exact subsets and canonical versions keep earlier-source key priority.
@@ -343,7 +345,7 @@ selectPreparedBodyCaches sources = do
     originals <- selectOwnerBuckets owners <$> readMVar (cachedOriginalModules cache)
     pure (exact, originals)) sources
   PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
-    <*> newMVar (Map.unionsWith Map.union (map snd selected))
+    <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
 
 selectOwnerBuckets :: Set.Set Module -> Map Module value -> Map Module value
 selectOwnerBuckets owners entries = Map.fromAscList
@@ -361,6 +363,28 @@ evictPreparedBodyMatching cache stale = do
   modifyMVar_ (cachedOriginalModules cache)
     (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
 
+type PreparedOriginalAlternative = (AdmittedFinalizedOriginal,PreparedModule)
+
+-- Preserve each reusable site view of one canonical body, in completion order.
+-- Unverifiable preparation can retain decoded Core, but has no reusable site
+-- view; keep at most one such fallback until a proven view is available.
+mergeOriginalAlternatives :: [PreparedOriginalAlternative] -> [PreparedOriginalAlternative]
+  -> [PreparedOriginalAlternative]
+mergeOriginalAlternatives = foldl' add
+  where
+    reusable (_,prepared) = preparedSiteDependenciesEquivalent prepared prepared
+    add earlier candidate@(_,prepared)
+      | not (reusable candidate) = if null earlier then [candidate] else earlier
+      | any (\(_,old) -> preparedSiteDependenciesEquivalent old prepared) earlier = earlier
+      | otherwise = filter reusable earlier ++ [candidate]
+
+insertOriginalAlternative :: Module -> OriginalVersion -> PreparedOriginalAlternative
+  -> Map Module (Map OriginalVersion [PreparedOriginalAlternative])
+  -> Map Module (Map OriginalVersion [PreparedOriginalAlternative])
+insertOriginalAlternative owner version alternative =
+  Map.insertWith (Map.unionWith (flip mergeOriginalAlternatives)) owner
+    (Map.singleton version [alternative])
+
 -- Full original groups share the retained body owner with recovered subsets.
 -- Canonical version and current site dependencies admit preparation separately;
 -- a changed site witness can still reuse validated immutable decoded Core.
@@ -372,14 +396,16 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
   siteEnvironment <- resolvePreparedSiteEnvironment env
   pure $ \siblings owner -> do
     let key = originalVersionInRecoveryScope admittedScope owner
-    hit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version
+    alternatives <- maybe (pure []) (\version -> fromMaybe [] . lookupOwnerEntry owner version
       <$> readMVar (cachedOriginalModules cache)) key
-    let previous = (,) <$> key <*> (fst <$> hit)
+    let previous = (,) <$> key <*> (fst <$> listToMaybe alternatives)
+        hit = listToMaybe [prepared | (_,prepared) <- alternatives
+          , preparedSiteDependenciesMatch siteEnvironment siblings prepared]
     original <- recoverAdmittedFinalizedOriginalWithPrevious admittedScope owner previous
     case original of
       Nothing -> pure Nothing
       Just (version,admitted) -> case hit of
-        Just (_,prepared) | preparedSiteDependenciesMatch siteEnvironment siblings prepared ->
+        Just prepared ->
           pure (Just (admitted,True,PreparedModuleTask (pure prepared)))
         _ -> do
           task <- acquirePreparedModuleWithSiteEnvironment siteEnvironment env
@@ -387,7 +413,7 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
           pure (Just (admitted,False,PreparedModuleTask $ do
             prepared <- runPreparedModuleTask task
             modifyMVar_ (cachedOriginalModules cache)
-              (pure . insertOwnerEntry (originalVersionOwner version) version (admitted,prepared))
+              (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
 preparedBodyKey :: [CoreBind] -> [[Word64]]
