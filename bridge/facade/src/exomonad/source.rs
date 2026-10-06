@@ -2287,11 +2287,6 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .layer
             .capture_from_workspace(&self.frozen, &self.workspace)
             .map_err(unavailable)?;
-        if pending.revision.identity == active.identity {
-            return Err(SourceLayerReload::Unchanged {
-                revision: active.identity,
-            });
-        }
         let candidate_paths = pending.include_paths(self.frozen.captured_source_roots().len());
         let diagnostics = self
             .check_candidate(&active, &pending, &candidate_paths, true, also_check)

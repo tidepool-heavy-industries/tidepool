@@ -363,7 +363,7 @@ async fn actor_spec_cost_measurement() {
             before,
             started,
         );
-        assert!(receipt.contains("unchanged"), "{receipt}");
+        assert!(receipt.contains("swapped"), "{receipt}");
 
         std::fs::write(
             campaign
@@ -536,6 +536,40 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
     assert!(receipt.contains("swapped"), "{receipt}");
     assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
 
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn spec_reload_installs_an_already_published_source_revision() {
+    let campaign = start(DESCRIPTION, "one").await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let old_request = policy.snapshot_for_request().expect("installed old spec");
+    assert!(probe(old_request.as_ref()).await.contains("one"));
+    std::fs::write(
+        campaign
+            ._repository
+            .path()
+            .join(".exomonad/Project/Tools.hs"),
+        tools_module(DESCRIPTION, "two"),
+    )
+    .unwrap();
+    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ _ _ -> True; _ -> False })").await;
+    assert!(
+        source_reload.to_string().contains("True"),
+        "{source_reload}"
+    );
+    assert!(
+        probe(policy).await.contains("one"),
+        "source publication has not installed new handlers"
+    );
+    let receipt = reload(policy).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+    assert!(probe(policy).await.contains("two"));
+    assert!(
+        probe(old_request.as_ref()).await.contains("one"),
+        "accepted old call keeps its original handler"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

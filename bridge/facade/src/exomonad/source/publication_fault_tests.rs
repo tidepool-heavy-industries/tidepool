@@ -198,6 +198,9 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
         "the real spec implementation runs through the interactive workbench"
     );
     if fault {
+        let old_request = policy
+            .snapshot_for_request()
+            .expect("old accepted handler/source snapshot");
         let before = layers.layer.read_active().unwrap().unwrap();
         let old_link = std::fs::read_link(layers.layer.active_link()).unwrap();
         let updated = SPEC.replace("value + 2", "value + 200");
@@ -210,11 +213,12 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
                 serde_json::json!({}),
             ))
             .await
-            .expect_err("visible rename and failed source freeze cannot become a committed reload");
+            .expect_err("visible pair and uncertain durability cannot become a committed reload");
         let detail = failure.to_string();
         assert!(
             detail.contains("durability is unconfirmed")
-                && detail.contains("frozen source unavailable"),
+                && detail.contains("paired source revision")
+                && detail.contains("install 2"),
             "{detail}"
         );
         let new_link = std::fs::read_link(layers.layer.active_link()).unwrap();
@@ -222,6 +226,13 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
             new_link, old_link,
             "the real source symlink rename is visible"
         );
+        let repair = layers
+            .layer
+            .read_active()
+            .expect_err("the real side-record repair also encounters the parent fsync fault");
+        assert!(!repair.to_string().is_empty());
+        // The repair's side-record rename is visible even though that separate
+        // durability operation also failed. It never confirms the reload claim.
         let visible = layers.layer.read_active().unwrap().unwrap();
         assert_ne!(visible.identity, before.identity);
         assert_eq!(visible.generation, before.generation + 1);
@@ -241,24 +252,47 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
                 serde_json::json!({"view": "detailed"}),
             ))
             .await
-            .expect("builtin status remains available after the source freeze fails");
+            .expect("builtin status observes the installed pair after durability failure");
         assert!(
             status["items"][0]["output"]
                 .as_str()
                 .unwrap()
-                .contains("spec: none installed"),
+                .contains("install=2"),
             "{status}"
         );
-        policy
+        let new_probe = policy
             .dispatch_json_boxed(invocation(
-                "stale-probe",
+                "new-visible-probe",
                 "probe",
                 serde_json::json!({"number": 40}),
             ))
             .await
-            .expect_err(
-                "the old registered tool cannot dispatch after the source installation is cleared",
-            );
+            .unwrap();
+        assert_eq!(
+            new_probe["items"][0]["output"], "Number 240",
+            "new handlers are active despite durability uncertainty"
+        );
+        let old_probe = old_request
+            .dispatch_json_boxed(invocation(
+                "old-accepted-probe",
+                "probe",
+                serde_json::json!({"number": 40}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            old_probe["items"][0]["output"], "Number 42",
+            "the old accepted snapshot retains its original handlers"
+        );
+        let source_cell = policy.dispatch_json_boxed(ToolInvocation {
+            context: Some(context("new-visible-source")),
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw("import qualified Exomonad.Source.Revision as Revision\nRevision.compiledSourceRevision".into()),
+        }).await.unwrap();
+        assert!(
+            source_cell.to_string().contains(&visible.identity),
+            "new source is active together with its handlers: {source_cell}"
+        );
         assert!(
             matches!(
                 policy
@@ -377,7 +411,7 @@ fn child(mut command: Command, phase: &str, run: &Path) -> std::result::Result<(
 }
 
 #[test]
-fn postrename_fsync_failure_clears_spec_and_fresh_process_recovers_visible_source() {
+fn postrename_fsync_failure_keeps_paired_spec_and_fresh_process_recovers_visible_source() {
     let fixture_root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT");
     let fixture = |prefix: &str| {
         let mut builder = tempfile::Builder::new();
@@ -444,7 +478,7 @@ fn postrename_fsync_failure_clears_spec_and_fresh_process_recovers_visible_sourc
         if phase == "fault" {
             let failures = std::fs::read_to_string(&hits).unwrap().lines().count();
             assert!(failures >= 2,
-                "real parent-directory fsync must fail both publication confirmation and source-freeze repair");
+                "real parent-directory fsync must fail both publication confirmation and explicit side-record repair");
             println!("actual parent-directory fsync failures: {failures}");
         }
     }
