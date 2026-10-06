@@ -389,6 +389,7 @@ test-suite source-boot-product-reuse-test
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
   other-modules:    SourceBootCases
+                    PhysicalExecutableEpochTest
                     BoundedReadTest
                     ExecutionSourceDecodeTest
                     Tidepool.Test.GenuineCandidate

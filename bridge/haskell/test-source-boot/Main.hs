@@ -9,6 +9,7 @@ import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
 import FinalizedCoreTest (finalizedCoreChecks)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
+import PhysicalExecutableEpochTest (physicalExecutableEpoch)
 
 main :: IO ()
 main = runTests tests
@@ -16,6 +17,7 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "source-boot"
   [ testCase "bounded artifact reads" boundedReadChecks
+  , testCase "physical native executable epoch" physicalExecutableEpoch
   , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
   , testCase "execution source decode" $ executionSourceDecodeChecks
