@@ -389,6 +389,37 @@ pub(crate) mod tests {
         std::fs::create_dir(&output).unwrap();
         assert!(entry_path_present(&output).unwrap());
     }
+
+    #[test]
+    fn completed_acquisition_cannot_create_source_after_original_disappears() {
+        let root = tempfile::tempdir().unwrap();
+        let preparation = uuid::Uuid::new_v4();
+        let recipe = recipe("gone");
+        let storage = crate::SourceEntryStorage::FreshCompilation {
+            directory: root.path().to_owned(),
+            preparation,
+        };
+        let original = tidepool_atomic_write::DirectoryAnchor::open_existing(root.path())
+            .unwrap()
+            .child(durable_recipe_key(&recipe).unwrap())
+            .unwrap()
+            .child(preparation.to_string())
+            .unwrap();
+        let entry = original.child("entry").unwrap();
+        assert!(entry_path_present(entry.path()).unwrap());
+        std::fs::remove_dir(entry.path()).unwrap();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let result = retained_installer(
+            &recipe,
+            &storage,
+            "module RetainedMissing where\n__prepared = (1 :: Int)\n",
+            OriginalAcquisition::LoadCompleted,
+        );
+        assert!(result.is_err());
+        assert!(!original.path().join("RetainedMissing.hs").exists());
+        assert!(!entry.path().exists());
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+    }
 }
 
 fn compile_installer(
