@@ -2311,6 +2311,76 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
 }
 
 #[test]
+fn same_cell_private_support_survives_late_type_error_retry() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("QuotedTemplateSupport.hs"),
+        include_str!("fixtures/quoted-template-support.hs"),
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1018),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let imports = SourceImports::from_specs(["QuotedTemplateSupport"]);
+    let before = resident.binding_names_in(public);
+    let refused = try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "private_support_late_type_error",
+        "let privateSupportFirst = taskValue 41\nlet privateSupportSecond = (True :: Int)",
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+    );
+    assert!(matches!(
+        refused,
+        Err(ResidentError::Session(
+            crate::session::SessionError::Compile(_)
+        ))
+    ));
+    assert_eq!(resident.binding_names_in(public), before);
+    try_execute_cell_with_template_imports(
+        &mut resident, public, &effects, &images, (0, 0), "private_support_successful_retry",
+        "let privateSupportFirst = taskValue 41\nlet privateSupportSecond = privateSupportFirst + 1",
+        0, &ScalePublication::Ephemeral, AuthorityChecks::Configured, &imports,
+    ).unwrap();
+    for name in ["privateSupportFirst", "privateSupportSecond"] {
+        assert!(resident.current_binding_in(public, name).is_some());
+    }
+    try_execute_cell_with_template_imports_expectation(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "private_support_retained_result",
+        &guarded_integer_capture_source("privateSupportSecond", 43),
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+        Some(43),
+    )
+    .unwrap();
+}
+
+#[test]
 fn following_cells_preserve_quoted_template_original_without_lexical_promotion() {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();

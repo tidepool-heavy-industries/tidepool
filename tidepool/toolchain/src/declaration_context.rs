@@ -913,12 +913,49 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) groups: Arc<[PendingCertifiedGroup]>,
     materialization: Option<Arc<RetainedArtifactMaterialization>>,
     // Only current-program source-selected support can add these roots.
-    program_support: Option<ArtifactView>,
+    program_support: Option<ProgramSourceSupport>,
     program_source_lexical: Vec<ExactLexicalNode>,
     source_selected_support: BTreeSet<ExactModuleIdentity>,
     source_search_include: Option<Arc<[PathBuf]>>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
     generated_scaffold_imports: Vec<GeneratedScaffoldImportAuthority>,
+}
+
+/// Same-offer support keeps the consumed import graph with its exact custody.
+/// Artifact dependencies alone cannot recover original instance scope.
+#[derive(Clone)]
+struct ProgramSourceSupport {
+    artifacts: ArtifactView,
+    imports: Arc<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>>,
+}
+
+impl ProgramSourceSupport {
+    fn extend(
+        previous: Option<&Self>,
+        artifacts: ArtifactView,
+        imports: impl IntoIterator<Item = (ExactModuleIdentity, Vec<ExactModuleIdentity>)>,
+    ) -> Result<Self, CompileError> {
+        let artifacts = match previous {
+            Some(previous) => previous.artifacts.merge(&artifacts)?,
+            None => artifacts,
+        };
+        let mut retained =
+            previous.map_or_else(BTreeMap::new, |value| value.imports.as_ref().clone());
+        for (owner, mut requirements) in imports {
+            requirements.sort();
+            requirements.dedup();
+            if retained
+                .insert(owner, requirements.clone())
+                .is_some_and(|old| old != requirements)
+            {
+                return Err(failure("program support changed its original import graph"));
+            }
+        }
+        Ok(Self {
+            artifacts,
+            imports: Arc::new(retained),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1518,6 +1555,41 @@ impl ExactProductAdmission<'_> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut scaffold = Vec::new();
+        if let Some(support) = &self.request.program_support {
+            let roots = support
+                .artifacts
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.owner.clone())
+                .collect::<BTreeSet<_>>();
+            let inherited_owners = inherited
+                .lexical_graph()
+                .iter()
+                .map(|node| &node.owner)
+                .collect::<BTreeSet<_>>();
+            let mut pending = exact_roots
+                .intersection(&roots)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            while let Some(owner) = pending.pop() {
+                if !seen.insert(owner.clone())
+                    || imports.contains_key(&owner)
+                    || inherited_owners.contains(&owner)
+                {
+                    continue;
+                }
+                // A missing row remains missing original evidence. Never
+                // replace its unknown home imports with an empty leaf.
+                if let Some(requirements) = support.imports.get(&owner) {
+                    pending.extend(requirements.iter().cloned());
+                    scaffold.push(ExactLexicalNode {
+                        owner,
+                        imports: requirements.clone(),
+                    });
+                }
+            }
+        }
         for (index, authority) in self.request.generated_scaffold_imports.iter().enumerate() {
             let graph = authority
                 .original_instance_graph()
@@ -1657,7 +1729,7 @@ impl ExactCompilationRequest {
         let support = self
             .program_support
             .as_ref()
-            .map(ArtifactView::root_entries)
+            .map(|support| support.artifacts.root_entries())
             .unwrap_or_default();
         let checked_value_imports = self.checked_value_imports.owners().collect::<Vec<_>>();
         if self.artifacts.len() > EXACT_SCOPE_GRAPHS_LIMIT
@@ -2124,7 +2196,7 @@ impl ExactCompilationRequest {
             .chain(selected_originals.keys().cloned())
             .collect::<Vec<_>>();
         let implementations = context.artifact_view().source_implementation_roles();
-        self.program_source_lexical = crate::declaration_join::source_lexical_surface(
+        let program_source_lexical = crate::declaration_join::source_lexical_surface(
             &roots,
             &imports,
             &inherited
@@ -2155,10 +2227,20 @@ impl ExactCompilationRequest {
         let fresh = context
             .artifact_view()
             .select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
-        self.program_support = Some(match &self.program_support {
-            Some(previous) => previous.merge(&fresh)?,
-            None => fresh,
-        });
+        let fresh_owners = fresh
+            .descriptors()
+            .into_iter()
+            .map(|entry| entry.owner)
+            .collect::<BTreeSet<_>>();
+        let program_support = ProgramSourceSupport::extend(
+            self.program_support.as_ref(),
+            fresh,
+            imports
+                .into_iter()
+                .filter(|(owner, _)| fresh_owners.contains(owner)),
+        )?;
+        self.program_source_lexical = program_source_lexical;
+        self.program_support = Some(program_support);
         self.source_selected_support
             .extend(selected_originals.into_keys());
         Ok(context)
@@ -2246,10 +2328,19 @@ impl ExactCompilationRequest {
         let support =
             view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
         let mut request = self.clone();
-        request.program_support = Some(match &self.program_support {
-            Some(previous) => previous.merge(&support)?,
-            None => support,
-        });
+        request.program_support = Some(ProgramSourceSupport::extend(
+            self.program_support.as_ref(),
+            support,
+            planned
+                .original_home_imports()
+                .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
+                .chain(
+                    planned
+                        .source_lexical_imports()
+                        .iter()
+                        .map(|node| (node.owner.clone(), node.imports.clone())),
+                ),
+        )?);
         let owner = identity(
             &planned.product().owner().unit,
             &planned.product().owner().module,
@@ -2434,7 +2525,7 @@ impl ExactCompilationRequest {
         let support_entries = self
             .program_support
             .as_ref()
-            .map(ArtifactView::root_entries)
+            .map(|support| support.artifacts.root_entries())
             .unwrap_or_default();
         selected.extend(
             support_entries
@@ -2479,7 +2570,7 @@ impl ExactCompilationRequest {
             // Earlier admitted program support carries the same original proof
             // as persisted context. This receipt cannot authorize itself.
             let source_view = match &self.program_support {
-                Some(support) => context.artifact_view().merge(support)?,
+                Some(support) => context.artifact_view().merge(&support.artifacts)?,
                 None => context.artifact_view().clone(),
             };
             let entries = source_view.entries();
@@ -6793,7 +6884,7 @@ mod tests {
         );
         let (_, lexical) = effective
             .retain_value_source_surface(
-                request.program_support.as_ref().unwrap(),
+                &request.program_support.as_ref().unwrap().artifacts,
                 request.program_source_lexical(),
             )
             .unwrap();
@@ -6803,6 +6894,7 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
+                .artifacts
                 .root_entries()
                 .iter()
                 .map(|entry| entry.descriptor.owner.clone())
@@ -7189,7 +7281,12 @@ mod tests {
             crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
         );
         assert_eq!(
-            request.program_support.as_ref().unwrap().artifact_ids(),
+            request
+                .program_support
+                .as_ref()
+                .unwrap()
+                .artifacts
+                .artifact_ids(),
             support.artifact_ids()
         );
         // These are the two value-interface consumers after checked/program support.
@@ -7351,9 +7448,56 @@ mod tests {
             .in_program_context(&directory.path().join("program-inputs"), context)
             .unwrap();
         let receipt = import_receipt(directory.path(), &effective, "InstanceRelay");
-        assert!(effective
+        let admission = effective
             .validate_receipt(&receipt, None, &effective.context)
-            .is_ok());
+            .unwrap();
+        let artifacts = effective
+            .context
+            .artifact_view()
+            .merge(&support_view(&[support_product("Consumer")]))
+            .unwrap();
+        let original = ExactProductAdmission {
+            request: &effective,
+            source: &admission,
+        }
+        .original_execution_context(&artifacts)
+        .unwrap();
+        assert!(matches!(original.original_instance_environment(),
+            OriginalInstanceEnvironment::Complete { target }
+                if target == &identity("fixture", "Consumer")));
+        assert_eq!(
+            original
+                .lexical_graph()
+                .iter()
+                .find(|node| node.owner == identity("fixture", "InstanceRelay"))
+                .unwrap()
+                .imports,
+            vec![identity("fixture", "InstanceOwner")]
+        );
+        assert!(original
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner == identity("fixture", "InstanceOwner")));
+        assert!(!original
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner == identity("fixture", "Hidden")));
+        assert!(effective.context.lexical_graph().is_empty());
+        let mut incomplete = effective.clone();
+        Arc::make_mut(&mut incomplete.program_support.as_mut().unwrap().imports)
+            .remove(&identity("fixture", "InstanceOwner"));
+        let incomplete = ExactProductAdmission {
+            request: &incomplete,
+            source: &admission,
+        }
+        .original_execution_context(&artifacts)
+        .unwrap();
+        assert!(
+            matches!(incomplete.original_instance_environment(),
+            OriginalInstanceEnvironment::MissingOriginalOwners(owners)
+                if owners.contains(&identity("fixture", "InstanceOwner"))),
+            "retained interface custody cannot invent an absent original import row"
+        );
         let receipt = import_receipt(directory.path(), &effective, "Hidden");
         assert!(effective
             .validate_receipt(&receipt, None, &effective.context)
@@ -7440,15 +7584,16 @@ mod tests {
             .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")))
             .unwrap();
         let mut request = program_request(directory.path(), context.clone());
-        request.program_support = Some(
-            context
+        request.program_support = Some(ProgramSourceSupport {
+            artifacts: context
                 .artifact_view()
                 .select_roots(vec![
                     entries[&identity("fixture", "InstanceRelay")].descriptor.id,
                 ])
                 .unwrap(),
-        );
-        let support = request.program_support.as_ref().unwrap();
+            imports: Arc::new(BTreeMap::new()),
+        });
+        let support = &request.program_support.as_ref().unwrap().artifacts;
         let mut actual_owners = support
             .descriptors()
             .into_iter()
@@ -7493,7 +7638,7 @@ mod tests {
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
         assert!(context.lexical_graph().is_empty());
         let (retained, lexical) = context
-            .retain_value_source_surface(request.program_support.as_ref().unwrap(), &[])
+            .retain_value_source_surface(&request.program_support.as_ref().unwrap().artifacts, &[])
             .unwrap();
         assert!(support
             .artifact_ids()
@@ -7707,6 +7852,7 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
+                .artifacts
                 .root_entries()
                 .len(),
             2
@@ -7758,6 +7904,7 @@ mod tests {
                 .program_support
                 .as_ref()
                 .unwrap()
+                .artifacts
                 .root_entries()
                 .len(),
             3
@@ -7915,13 +8062,44 @@ mod tests {
             )
             .unwrap();
         assert!(request.program_source_lexical().is_empty());
-        let native = request.program_support.as_ref().unwrap();
+        let native = &request.program_support.as_ref().unwrap().artifacts;
         assert_eq!(native.descriptors().len(), 2);
         assert!(context
             .retain_value_source_surface(native, request.program_source_lexical())
             .unwrap()
             .1
             .is_empty());
+        let current = request
+            .in_program_context(&directory.path().join("program-inputs"), context.clone())
+            .unwrap();
+        let receipt = import_receipt_owner(
+            directory.path(),
+            &current,
+            "main",
+            "Tidepool.Internal.Resume",
+            "none",
+            false,
+        );
+        let admission = current.validate_receipt(&receipt, None, &context).unwrap();
+        let artifacts = context
+            .artifact_view()
+            .merge(&support_view(&[support_product("Consumer")]))
+            .unwrap();
+        let original = ExactProductAdmission {
+            request: &current,
+            source: &admission,
+        }
+        .original_execution_context(&artifacts)
+        .unwrap();
+        assert!(matches!(
+            original.original_instance_environment(),
+            OriginalInstanceEnvironment::Complete { .. }
+        ));
+        assert!(original
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner == identity("main", "Tidepool.Internal.Resume")));
+        assert!(context.lexical_graph().is_empty());
         let next = program_request(directory.path(), context.clone());
         let receipt = import_receipt_owner(
             directory.path(),
@@ -8541,7 +8719,10 @@ mod tests {
             "current worker claims cannot supply absent prior custody"
         );
         let mut local = request.clone();
-        local.program_support = Some(persisted.artifact_view().clone());
+        local.program_support = Some(ProgramSourceSupport {
+            artifacts: persisted.artifact_view().clone(),
+            imports: Arc::new(BTreeMap::new()),
+        });
         let local_admission = local.validate_receipt(receipt, None, &empty).unwrap();
         assert_eq!(
             local_admission.home_imports().unwrap(),
@@ -8595,12 +8776,13 @@ mod tests {
         )
         .expect("actual compiler issues the changed original proof");
         std::fs::write(&support_path, support).unwrap();
-        local.program_support = Some(
-            changed
+        local.program_support = Some(ProgramSourceSupport {
+            artifacts: changed
                 .artifact_view()
                 .interface_projection(&[owner])
                 .unwrap(),
-        );
+            imports: Arc::new(BTreeMap::new()),
+        });
         assert!(
             local.validate_receipt(receipt, None, &persisted).is_err(),
             "local custody cannot override a conflicting persisted canonical owner"
