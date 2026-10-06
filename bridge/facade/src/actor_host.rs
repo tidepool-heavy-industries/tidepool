@@ -232,6 +232,46 @@ type ExomonadHandlerStack = HCons<
 >;
 type ExomonadRoot = ResidentActorRoot<ExomonadHandlerStack, CapturedOutput>;
 
+fn host_handlers(
+    source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
+    journal: tidepool_handlers::JournalHandler,
+    events: RepoEventHandler,
+    worktrees: ActorWorktreeHandler,
+) -> ExomonadHandlerStack {
+    hlist![
+        source_handler(source),
+        journal,
+        events,
+        ActorBoundWorktreeHandler::new(worktrees.clone()),
+        ActorWorktreeRegistryHandler::new(worktrees.clone()),
+        ActorWorktreeAllocationHandler::new(worktrees.clone()),
+        ActorWorktreeIntegrationHandler::new(worktrees.clone()),
+        worktrees,
+    ]
+}
+
+fn host_context_support() -> Vec<exomonad_tool::ToolEffectKey> {
+    vec![exomonad_tool::ToolEffectKey::ContextReadWrite]
+}
+
+fn with_host_interpreters(
+    forest: ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+    config: &ActorHostConfig,
+    runtime: &embedded_harness::EmbeddedHarnessRuntime,
+    recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
+    models: Arc<dyn exomonad_actor::CellModelFactory>,
+) -> Result<ResidentForest<ExomonadHandlerStack, CapturedOutput>, Box<dyn std::error::Error>> {
+    runtime
+        .configure_context_models(config)
+        .map_err(runtime_error)?;
+    let mut forest = forest.with_conversation_reader(embedded_reflect::run_conversation_reader(
+        runtime.store(),
+        recovery,
+    ));
+    forest.set_jev_backend(jev_backend(config));
+    Ok(forest.with_cell_model_factory(models))
+}
+
 #[derive(Clone)]
 struct ActorForkWorkspaceAdmission {
     worktrees: Arc<Mutex<ActorWorktreeHandler>>,
@@ -1910,27 +1950,20 @@ async fn run_owned(
         .with_recovery_journal(actor_recovery.clone())
         .with_child_session_factory(child_session_factory)
         .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
-        .with_image_registry(image_registry)
-        .with_conversation_reader(embedded_reflect::run_conversation_reader(
-            embedded_service.runtime.store(),
-            actor_recovery.clone(),
-        ));
+        .with_image_registry(image_registry);
     // No child bootstrap program: every launch stays on its launching
     // session, as before per-actor machines.
     let _ = &program;
-    forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
     }
-    embedded_service
-        .runtime
-        .configure_context_models(&config)
-        .map_err(runtime_error)?;
-    forest = forest.with_cell_model_factory(cell_model::admitted_factory(
-        &embedded_service,
-        settings,
+    let forest = with_host_interpreters(
+        forest,
         &config,
-    ));
+        &embedded_service.runtime,
+        actor_recovery.clone(),
+        cell_model::admitted_factory(&embedded_service, settings, &config),
+    )?;
     forest.track_resource_release();
     let forest = Arc::new(forest);
     let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())?;
@@ -2973,6 +3006,18 @@ fn driver_sources(
 ) -> Result<DriverSources, Box<dyn std::error::Error>> {
     let declarations = exomonad_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
+    let orchestration = match inputs {
+        Some(inputs) => {
+            let retained = inputs.runtime_orchestration();
+            if tidepool_toolchain::cache::source_root_manifest(&retained)?
+                != tidepool_toolchain::cache::source_root_manifest(&effects.orchestration)?
+            {
+                return Err("frozen orchestration source differs from the host composition".into());
+            }
+            retained
+        }
+        None => effects.orchestration.clone(),
+    };
     let deployment_roots = match inputs {
         Some(inputs) => inputs.runtime_catalog_roots(),
         None => tidepool_toolchain::toolchain::configured_module_source_selection()?
@@ -2982,10 +3027,10 @@ fn driver_sources(
         if roots.first() != Some(&effects.core) {
             return Err("frozen stable effect source selection changed".into());
         }
-        roots.push(effects.orchestration.clone());
+        roots.push(orchestration);
         roots
     } else {
-        let mut roots = effects.include_paths().to_vec();
+        let mut roots = vec![effects.core.clone(), orchestration];
         roots.push(
             inputs
                 .map(|inputs| inputs.runtime_actors())
@@ -3297,16 +3342,12 @@ fn compile_root(
             RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
         let child_worktree_handler = child_worktree_handler.clone();
         let machine = ResidentSession::unbootstrapped(
-            hlist![
-                source_handler(child_source_service.as_ref()),
+            host_handlers(
+                child_source_service.as_ref(),
                 child_journal.clone(),
                 child_event_handler,
-                ActorBoundWorktreeHandler::new(child_worktree_handler.clone()),
-                ActorWorktreeRegistryHandler::new(child_worktree_handler.clone()),
-                ActorWorktreeAllocationHandler::new(child_worktree_handler.clone()),
-                ActorWorktreeIntegrationHandler::new(child_worktree_handler.clone()),
                 child_worktree_handler,
-            ],
+            ),
             CapturedOutput::new(),
             DEFAULT_NURSERY_SIZE,
             Some(library),
@@ -3314,16 +3355,7 @@ fn compile_root(
         Ok(Box::new(machine))
     });
     let mut machine = ResidentSession::unbootstrapped(
-        hlist![
-            source_handler(source),
-            journal,
-            event_handler,
-            ActorBoundWorktreeHandler::new(worktree_handler.clone()),
-            ActorWorktreeRegistryHandler::new(worktree_handler.clone()),
-            ActorWorktreeAllocationHandler::new(worktree_handler.clone()),
-            ActorWorktreeIntegrationHandler::new(worktree_handler.clone()),
-            worktree_handler,
-        ],
+        host_handlers(source, journal, event_handler, worktree_handler),
         CapturedOutput::new(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
@@ -3373,11 +3405,26 @@ fn compile_root(
                 .map_err(std::io::Error::other)?,
         );
     }
+    let workbench = host_workbench_source(config, preamble, include, toolset_support)?;
+    Ok((
+        workbench,
+        ResidentActorRoot::pending(descriptor, machine, entry),
+        compiled,
+        child_session_factory,
+        image_registry,
+    ))
+}
+
+fn host_workbench_source(
+    config: &ActorHostConfig,
+    preamble: String,
+    include: Vec<PathBuf>,
+    toolset_support: Vec<PathBuf>,
+) -> Result<ActorWorkbenchSource, Box<dyn std::error::Error>> {
     // A run that does not supply `Jev.Operators` gets a workbench without `J`,
     // rather than a compile failure over a module nothing on its search path
     // defines. The same answer tells the agent so in its instructions.
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
-    let context_support = vec![exomonad_tool::ToolEffectKey::ContextReadWrite];
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_toolset_support_roots(toolset_support)
         .with_preparation_roles(match &config.workspace_inputs {
@@ -3387,7 +3434,7 @@ fn compile_root(
                 .selected_roles(config.research_policy)?,
             None => Vec::new(),
         })
-        .with_installed_effect_support(context_support)
+        .with_installed_effect_support(host_context_support())
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
         .with_imports("qualified Tidepool.Command as Cmd");
@@ -3400,32 +3447,204 @@ fn compile_root(
             .with_imports("qualified Jev.Core.Schema")
             .with_imports("qualified Jev.Core.Json");
     }
-    Ok((
-        workbench
-            .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
-            .with_imports("qualified Tidepool.Actor as Actor")
-            .with_default_quasiquoters()
-            // Rule two of spec discovery. Rule one is a file in an actor's own
-            // checkout and belongs to no run-wide value; this key is how a
-            // workspace names a spec for actors that have no checkout.
-            .with_spec_if(
-                config
-                    .workspace_inputs
-                    .as_ref()
-                    .and_then(|inputs| inputs.spec.as_deref()),
-            )
-            .with_workspace_modules(
-                config
-                    .workspace_inputs
-                    .as_ref()
-                    .map(|inputs| inputs.modules.clone())
-                    .unwrap_or_default(),
-            ),
-        ResidentActorRoot::pending(descriptor, machine, entry),
-        compiled,
-        child_session_factory,
-        image_registry,
-    ))
+    Ok(workbench
+        .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
+        .with_imports("qualified Tidepool.Actor as Actor")
+        .with_default_quasiquoters()
+        // Rule two of spec discovery. Rule one is a file in an actor's own
+        // checkout and belongs to no run-wide value; this key is how a
+        // workspace names a spec for actors that have no checkout.
+        .with_spec_if(
+            config
+                .workspace_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.spec.as_deref()),
+        )
+        .with_workspace_modules(
+            config
+                .workspace_inputs
+                .as_ref()
+                .map(|inputs| inputs.modules.clone())
+                .unwrap_or_default(),
+        ))
+}
+
+/// Prepare the selected rows with the live host's actual handler and native
+/// interpreter composition. The temporary Store and idle machine admit no
+/// actors; completed entries retain only the independent source deployment.
+pub(crate) async fn prepare_workspace_toolsets(
+    workspace: &Path,
+    directory: &tidepool_atomic_write::DirectoryAnchor,
+    inputs: crate::exomonad::workspace::FrozenWorkspace,
+    source: Arc<crate::exomonad::source::ExomonadSourceReload>,
+) -> Result<BTreeMap<String, uuid::Uuid>, Box<dyn std::error::Error>> {
+    let authored = inputs.config()?;
+    let rows = authored.preparation.selected_roles(authored.research)?;
+    let settings = authored
+        .launch
+        .embedded
+        .as_ref()
+        .ok_or("native preparation requires [launch.embedded]")?
+        .clone();
+    settings.validate()?;
+    let temporary = tempfile::tempdir()?;
+    let runtime_directory =
+        tidepool_atomic_write::DirectoryAnchor::open_existing(temporary.path())?;
+    let config = ActorHostConfig {
+        systemd_slice: Some(authored.launch.systemd_slice),
+        source_exclude: authored.launch.source_exclude,
+        source_import: authored.launch.source,
+        command_resources: None,
+        exomonad_executable: std::env::current_exe()?,
+        workspace_inputs: Some(inputs.clone()),
+        workspace: workspace.to_owned(),
+        haskell_root: inputs.runtime_actors(),
+        run_directory: runtime_directory.clone(),
+        root_binding_path: runtime_directory.path().join("root-binding.json"),
+        embedded: Some(settings.clone()),
+        tmux_session: String::new(),
+        model: authored.defaults.model,
+        effort: authored.defaults.effort.into(),
+        research_policy: authored.research,
+        pane_environment: Default::default(),
+        jev: None,
+    };
+    let DriverSources {
+        workbench_preamble,
+        include,
+        toolset_support,
+        ..
+    } = driver_sources(&config.haskell_root, Some(&inputs), directory.path(), None)?;
+    let workbench = host_workbench_source(&config, workbench_preamble, include, toolset_support)?;
+    let (worktrees, bindings) = actor_worktree_resources_at(&runtime_directory, workspace)?;
+    let authority = ActorWorktreeAuthority::new(
+        runtime_namespace(runtime_directory.path()),
+        Arc::new(Mutex::new(bindings)),
+    );
+    let events = RepoEventHandler::with_registry_namespace(
+        WorktreeMonitor::new(
+            GitCli::new(),
+            EventJournal::open(&runtime_directory, "repo-events.jsonl")?,
+        ),
+        WorktreeRegistry::open(&runtime_directory, "registry")?,
+        EventConfig::default(),
+        runtime_namespace(runtime_directory.path()),
+    );
+    let handlers = host_handlers(
+        Some(&source),
+        tidepool_handlers::JournalHandler::new(tidepool_handlers::SegmentPath::create_exclusive(
+            runtime_directory.path().join("journal.jsonl"),
+        )?)?,
+        events,
+        ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), authority),
+    );
+    let mut supported = host_context_support();
+    supported.extend(tidepool_mcp::InstalledEffectSupport::installed_effect_support(&handlers));
+    let machine = ResidentSession::unbootstrapped(
+        handlers,
+        CapturedOutput::new(),
+        DEFAULT_NURSERY_SIZE,
+        None,
+    );
+    let runtime = embedded_harness::EmbeddedHarnessRuntime::open(
+        runtime_directory.path(),
+        settings.concurrent_jobs,
+    )?;
+    let recovery =
+        exomonad_actor::ActorRecoveryJournal::open(&runtime_directory, "actor-lifecycle.v2.jsonl")?;
+    let (forest, _) = ResidentForest::new(
+        workbench.clone(),
+        tidepool_runtime::session::fresh_session_id(),
+        machine,
+        None,
+        exomonad_actor::Incarnation::FIRST,
+    );
+    let forest = with_host_interpreters(
+        forest,
+        &config,
+        &runtime,
+        recovery,
+        cell_model::admitted_runtime_factory(&runtime, &settings, &config),
+    )?;
+    for key in forest.installed_intrinsic_effect_support() {
+        if !supported.contains(&key) {
+            supported.push(key);
+        }
+    }
+    let frozen = exomonad_actor::ActorSourceLayers::freeze_toolset_layer(
+        source.as_ref(),
+        tidepool_repr::PrincipalId::SYSTEM,
+    )
+    .map_err(std::io::Error::other)?;
+    let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+    // All explicitly requested rows are required work. Runtime proactive
+    // warming continues to use Preparation urgency after its root is ready.
+    let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
+    let outcome = compiler_owner
+        .scope(async {
+            let mut selected = BTreeMap::new();
+            for role in rows {
+                let ready = workbench
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        frozen.clone(),
+                        role.effect_keys(),
+                        &supported,
+                        Arc::clone(&registry),
+                    )
+                    .await?;
+                let (recipe, original) = ready.completed_entry_selection().ok_or_else(|| {
+                    exomonad_actor::ResidentActorWorkbenchError::ActorProtocol(
+                        "source preparation produced no retained original selection".into(),
+                    )
+                })?;
+                selected.insert(recipe.to_owned(), original);
+            }
+            Ok::<_, exomonad_actor::ResidentActorWorkbenchError>(selected)
+        })
+        .await;
+    if !outcome.cleanup.observation().is_confirmed() {
+        return Err(Box::new(SourcePreparationCleanupUnconfirmed {
+            action: outcome.action,
+            cleanup: outcome.cleanup,
+        }));
+    }
+    Ok(outcome.action?)
+}
+
+struct SourcePreparationCleanupUnconfirmed {
+    action: Result<BTreeMap<String, uuid::Uuid>, exomonad_actor::ResidentActorWorkbenchError>,
+    cleanup: exomonad_actor::CompilerPreparationCleanup,
+}
+
+impl fmt::Debug for SourcePreparationCleanupUnconfirmed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourcePreparationCleanupUnconfirmed")
+            .field("action", &self.action)
+            .field("cleanup", &self.cleanup.observation())
+            .finish()
+    }
+}
+
+impl fmt::Display for SourcePreparationCleanupUnconfirmed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "source preparation compiler cleanup is unconfirmed: {:?}",
+            self.cleanup.observation()
+        )?;
+        if let Err(error) = &self.action {
+            write!(formatter, "; {error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SourcePreparationCleanupUnconfirmed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.action.as_ref().err().map(|error| error as _)
+    }
 }
 
 fn render_root_compile_failure(

@@ -135,11 +135,27 @@ enum Command {
         #[arg(long, value_name = "MODULE.FUNCTION")]
         recipe: Option<String>,
     },
+    /// Prepare a reusable immutable deployment for independent runs.
+    ///
+    /// Preparation captures the workspace configuration, prompts and source.
+    /// Reusing it with `init` creates a fresh run each time.
+    Prepare {
+        /// Workspace to prepare. Defaults to the current directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Directory in which to create the immutable deployment.
+        #[arg(long, required = true)]
+        directory: PathBuf,
+    },
     /// Create a project-local actor run in its own tmux session.
     Init {
         /// Repository the ensemble will work in. Defaults to the current project.
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Reuse a prepared deployment directory. Each init still creates a
+        /// fresh run; this does not resume an earlier run.
+        #[arg(long)]
+        prepared: Option<PathBuf>,
         #[arg(long)]
         session: Option<String>,
         #[arg(long)]
@@ -452,8 +468,19 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             }
             tidepool::exomonad::check_recipe(workspace, recipes, recipe).await
         }
+        Command::Prepare {
+            workspace,
+            directory,
+        } => {
+            tidepool::exomonad::prepare(tidepool::exomonad::PrepareOptions {
+                workspace,
+                directory,
+            })
+            .await
+        }
         Command::Init {
             workspace,
+            prepared,
             session,
             recreate,
             no_attach,
@@ -465,6 +492,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             use tidepool::exomonad::PreflightMode;
             tidepool::exomonad::init(tidepool::exomonad::InitOptions {
                 workspace,
+                prepared,
                 session,
                 recreate,
                 no_attach,
@@ -650,18 +678,41 @@ mod tests {
                 "init",
                 "--workspace",
                 "/tmp/project",
+                "--prepared",
+                "/tmp/deployment",
                 "--no-attach"
             ])
                 .unwrap()
                 .command,
             Command::Init {
                 workspace: Some(workspace),
+                prepared: Some(prepared),
                 no_attach: true,
                 no_preflight: false,
                 strict_preflight: false,
                 ..
             } if workspace == std::path::Path::new("/tmp/project")
+                && prepared == std::path::Path::new("/tmp/deployment")
         ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "exomonad",
+                "prepare",
+                "--workspace",
+                "/tmp/project",
+                "--directory",
+                "/tmp/deployment"
+            ])
+            .unwrap()
+            .command,
+            Command::Prepare { workspace: Some(workspace), directory }
+                if workspace == std::path::Path::new("/tmp/project")
+                    && directory == std::path::Path::new("/tmp/deployment")
+        ));
+        assert!(Cli::try_parse_from(["exomonad", "prepare"]).is_err());
+        assert!(
+            Cli::try_parse_from(["exomonad", "prepare", "--directory", "/tmp/deployment"]).is_ok()
+        );
         assert!(matches!(
             Cli::try_parse_from(["exomonad", "init", "--strict-preflight"])
                 .unwrap()

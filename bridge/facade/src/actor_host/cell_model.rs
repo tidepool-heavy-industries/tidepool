@@ -193,6 +193,7 @@ pub(super) fn admitted_factory(
     settings: &EmbeddedLaunchConfig,
     config: &ActorHostConfig,
 ) -> Arc<dyn CellModelFactory> {
+    #[cfg(test)]
     let effort = match config.effort {
         exomonad_actor::ForkEffort::Low => Effort::Low,
         exomonad_actor::ForkEffort::Medium => Effort::Medium,
@@ -211,11 +212,24 @@ pub(super) fn admitted_factory(
             .with_launch_config(config),
         );
     }
+    admitted_runtime_factory(&service.runtime, settings, config)
+}
+
+pub(super) fn admitted_runtime_factory(
+    runtime: &super::embedded_harness::EmbeddedHarnessRuntime,
+    settings: &EmbeddedLaunchConfig,
+    config: &ActorHostConfig,
+) -> Arc<dyn CellModelFactory> {
+    let effort = match config.effort {
+        exomonad_actor::ForkEffort::Low => Effort::Low,
+        exomonad_actor::ForkEffort::Medium => Effort::Medium,
+        exomonad_actor::ForkEffort::High => Effort::High,
+    };
     let settings = settings.clone();
     Arc::new(
         EmbeddedCellModelFactory::<super::embedded_service::EmbeddedAuth, _>::new(
-            service.runtime.store(),
-            service.runtime.scheduler(),
+            runtime.store(),
+            runtime.scheduler(),
             config.model.clone(),
             effort,
             Arc::new(move || responses_client(&settings)),

@@ -142,6 +142,60 @@ impl RuntimeLibraries {
 /// Frozen workspace inputs. Actor launch and compilation use this run's captured
 /// authored sources and its pinned library selection.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum WorkspacePreparation {
+    /// Persisted before compilation. Retrying the same deployment keeps the
+    /// exact original namespace even after completed-output publication fails.
+    Preparing { original: uuid::Uuid },
+    Completed {
+        original: uuid::Uuid,
+        revision: String,
+        entries: BTreeMap<String, uuid::Uuid>,
+    },
+}
+
+/// A run-local reference to an independently retained immutable deployment.
+/// Each run still owns its own identity, actor state and incarnation lease.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedWorkspacePointer {
+    pub(crate) version: u32,
+    pub(crate) directory: PathBuf,
+    pub(crate) selection_digest: String,
+}
+
+impl PreparedWorkspacePointer {
+    pub(crate) fn for_directory(directory: &Path) -> Result<Self> {
+        let directory = directory.canonicalize()?;
+        let selection = std::fs::read(directory.join("workspace/selection.json"))?;
+        Ok(Self {
+            version: 2,
+            directory,
+            selection_digest: blake3::hash(&selection).to_hex().to_string(),
+        })
+    }
+
+    fn read_selection(&self) -> Result<Vec<u8>> {
+        if self.version != 2
+            || !self.directory.is_absolute()
+            || self.directory.canonicalize()? != self.directory
+            || self.selection_digest.len() != 64
+            || !self
+                .selection_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("prepared workspace pointer is unsupported or relocated".into());
+        }
+        let selection = std::fs::read(self.directory.join("workspace/selection.json"))?;
+        if blake3::hash(&selection).to_hex().as_str() != self.selection_digest {
+            return Err("prepared workspace selection changed after publication".into());
+        }
+        Ok(selection)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrozenWorkspace {
     #[serde(default)]
     version: u32,
@@ -166,10 +220,35 @@ pub struct FrozenWorkspace {
     /// Detect added Haskell modules as well as edits to recorded files.
     #[serde(default)]
     runtime_capture_identity: String,
+    runtime_orchestration: PathBuf,
+    #[serde(default)]
+    pub(crate) preparation: Option<WorkspacePreparation>,
+    /// Acquired only after the existing frozen-input loader validates the
+    /// deployment. Deserializing a path never supplies this physical owner.
+    #[serde(skip)]
+    pub(crate) prepared_deployment: Option<std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>>,
 }
 
 impl FrozenWorkspace {
+    /// Reopen a qualified run's exact consumed deployment. Loss of this
+    /// selection is a refusal; a running host cannot admit a new source capture.
+    pub(crate) fn load_prepared_run(workspace: &Path, run_root: &Path) -> Result<Self> {
+        let path = run_root.join("workspace-prepared.json");
+        if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err("prepared run selection is not a regular file".into());
+        }
+        let pointer: PreparedWorkspacePointer = serde_json::from_slice(&std::fs::read(path)?)?;
+        Self::load_prepared(workspace, pointer, false)
+    }
+
+    /// Explicit source capture for preparation, checks and developer consumers.
     pub(crate) fn load(workspace: &Path, run_root: &Path) -> Result<Self> {
+        let pointer = run_root.join("workspace-prepared.json");
+        match std::fs::symlink_metadata(&pointer) {
+            Ok(_) => return Self::load_prepared_run(workspace, run_root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
             .map(DeploymentSources::from_package);
@@ -181,6 +260,15 @@ impl FrozenWorkspace {
         run_root: &Path,
         deployment: Option<DeploymentSources>,
     ) -> Result<Self> {
+        Self::load_with_deployment_selection(workspace, run_root, deployment, None)
+    }
+
+    fn load_with_deployment_selection(
+        workspace: &Path,
+        run_root: &Path,
+        deployment: Option<DeploymentSources>,
+        pinned_selection: Option<Vec<u8>>,
+    ) -> Result<Self> {
         if deployment
             .as_ref()
             .is_some_and(|selection| selection.version != 1)
@@ -189,13 +277,17 @@ impl FrozenWorkspace {
         }
         let directory = run_root.join("workspace");
         let manifest = directory.join("selection.json");
-        if manifest.exists() {
-            let selection: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+        if pinned_selection.is_some() || manifest.exists() {
+            let bytes = match pinned_selection {
+                Some(bytes) => bytes,
+                None => std::fs::read(&manifest)?,
+            };
+            let selection: serde_json::Value = serde_json::from_slice(&bytes)?;
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            let frozen: Self = serde_json::from_value(selection)?;
-            if frozen.version != 4 {
+            let mut frozen: Self = serde_json::from_value(selection)?;
+            if frozen.version != 5 {
                 return Err("unsupported frozen workspace format; start a new run".into());
             }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
@@ -213,6 +305,20 @@ impl FrozenWorkspace {
                 return Err("frozen runtime library deployment changed; start a new swarm".into());
             }
             let capture_root = directory.canonicalize()?;
+            if frozen.include.is_empty() {
+                return Err("frozen workspace lacks its generated resource root".into());
+            }
+            for root in frozen
+                .include
+                .iter()
+                .chain(std::iter::once(&frozen.runtime_orchestration))
+            {
+                if root.canonicalize()? != *root || !root.starts_with(&capture_root) {
+                    return Err(
+                        "frozen workspace source root is outside its original capture".into(),
+                    );
+                }
+            }
             let runtime_roots = frozen.runtime_libraries.roots();
             if let RuntimeLibraries::Captured { .. } = &frozen.runtime_libraries {
                 for (root, sentinel) in runtime_roots
@@ -241,12 +347,54 @@ impl FrozenWorkspace {
                 return Err("frozen runtime library source changed".into());
             }
             for (relative, hash) in &frozen.files {
-                let bytes = std::fs::read(directory.join(relative))?;
-                if blake3::hash(&bytes).to_hex().as_str() != hash {
+                if relative.is_absolute()
+                    || relative
+                        .components()
+                        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+                {
+                    return Err("frozen workspace file inventory escapes its capture".into());
+                }
+                if !matches!(
+                    frozen.preparation,
+                    Some(WorkspacePreparation::Completed { .. })
+                ) {
+                    let bytes = std::fs::read(directory.join(relative))?;
+                    if blake3::hash(&bytes).to_hex().as_str() != hash {
+                        return Err(format!(
+                            "frozen workspace input changed: {}",
+                            relative.display()
+                        )
+                        .into());
+                    }
+                }
+            }
+            let generated = tidepool_mcp::ensure_effects_module(
+                &crate::actor_host::exomonad_effect_declarations(),
+            )?;
+            if inspect_sources(&frozen.runtime_orchestration)?
+                != inspect_sources(&generated.orchestration)?
+            {
+                return Err("frozen workspace orchestration differs from this build".into());
+            }
+            if let Some(WorkspacePreparation::Completed {
+                revision, entries, ..
+            }) = &frozen.preparation
+            {
+                if revision.len() != 64
+                    || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || entries.is_empty()
+                {
                     return Err(
-                        format!("frozen workspace input changed: {}", relative.display()).into(),
+                        "completed workspace preparation lacks its original revision or entries"
+                            .into(),
                     );
                 }
+                if deployment_files(&directory)? != frozen.files {
+                    return Err("prepared workspace deployment inventory changed".into());
+                }
+                frozen.prepared_deployment = Some(std::sync::Arc::new(
+                    tidepool_atomic_write::DirectoryAnchor::open_existing(run_root)?,
+                ));
             }
             return Ok(frozen);
         }
@@ -281,6 +429,16 @@ impl FrozenWorkspace {
             capture,
             &mut files,
         )?;
+        let generated = tidepool_mcp::ensure_effects_module(
+            &crate::actor_host::exomonad_effect_declarations(),
+        )?;
+        capture_sources(
+            &generated.orchestration,
+            Path::new("orchestration"),
+            &directory,
+            &mut files,
+        )?;
+        let runtime_orchestration = directory.join("orchestration");
         for entry in config
             .haskell
             .checks
@@ -392,7 +550,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 4,
+            version: 5,
             identity,
             include,
             modules: config.haskell.modules,
@@ -406,9 +564,206 @@ impl FrozenWorkspace {
             core_identity,
             runtime_libraries,
             runtime_capture_identity: runtime_identity,
+            runtime_orchestration,
+            preparation: None,
+            prepared_deployment: None,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
         Ok(frozen)
+    }
+
+    fn load_prepared(
+        workspace: &Path,
+        pointer: PreparedWorkspacePointer,
+        check_current: bool,
+    ) -> Result<Self> {
+        let selection = pointer.read_selection()?;
+        let deployment = tidepool_toolchain::toolchain::configured_module_package()?
+            .as_ref()
+            .map(DeploymentSources::from_package);
+        let frozen = Self::load_with_deployment_selection(
+            workspace,
+            &pointer.directory,
+            deployment,
+            Some(selection),
+        )?;
+        if !matches!(
+            frozen.preparation,
+            Some(WorkspacePreparation::Completed { .. })
+        ) {
+            return Err(
+                "workspace preparation is incomplete; finish exomonad prepare before init".into(),
+            );
+        }
+        if check_current {
+            frozen.verify_current_inputs(workspace)?;
+        }
+        Ok(frozen)
+    }
+
+    pub(crate) fn select_prepared(
+        workspace: &Path,
+        run_root: &Path,
+        explicit: Option<&Path>,
+    ) -> Result<Self> {
+        let pointer = match explicit {
+            Some(directory) => PreparedWorkspacePointer::for_directory(directory)?,
+            None => {
+                let path = workspace.join(".exomonad/prepared.json");
+                if !path.is_file() {
+                    return Err("workspace has no completed preparation; run exomonad prepare --directory DIRECTORY".into());
+                }
+                serde_json::from_slice(&std::fs::read(path)?)?
+            }
+        };
+        let frozen = Self::load_prepared(workspace, pointer.clone(), true)?;
+        let path = run_root.join("workspace-prepared.json");
+        let bytes = serde_json::to_vec_pretty(&pointer)?;
+        if !tidepool_atomic_write::write_durable_new(&path, &bytes)?
+            && std::fs::read(&path)? != bytes
+        {
+            return Err("run already selected another prepared workspace deployment".into());
+        }
+        Ok(frozen)
+    }
+
+    pub(crate) fn begin_preparation(
+        workspace: &Path,
+        directory: &tidepool_atomic_write::DirectoryAnchor,
+    ) -> Result<Self> {
+        let mut frozen = Self::load(workspace, directory.path())?;
+        frozen.verify_current_inputs(workspace)?;
+        frozen.admit_preparation(directory.path())?;
+        Ok(frozen)
+    }
+
+    fn admit_preparation(&mut self, directory: &Path) -> Result<()> {
+        if self.preparation.is_none() {
+            self.preparation = Some(WorkspacePreparation::Preparing {
+                original: uuid::Uuid::new_v4(),
+            });
+            self.write_selection(directory)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn complete_preparation(
+        &mut self,
+        directory: &tidepool_atomic_write::DirectoryAnchor,
+        revision: String,
+        entries: BTreeMap<String, uuid::Uuid>,
+    ) -> Result<()> {
+        let Some(WorkspacePreparation::Preparing { original }) = &self.preparation else {
+            return Err("only an admitted workspace preparation can complete".into());
+        };
+        if entries.is_empty()
+            || revision.len() != 64
+            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(
+                "workspace preparation must settle original native entries and revision".into(),
+            );
+        }
+        self.files = deployment_files(&directory.path().join("workspace"))?;
+        self.preparation = Some(WorkspacePreparation::Completed {
+            original: *original,
+            revision,
+            entries,
+        });
+        self.write_selection(directory.path())?;
+        self.prepared_deployment = Some(std::sync::Arc::new(
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())?,
+        ));
+        self.seal_preparation(directory)
+    }
+
+    pub(crate) fn seal_preparation(
+        &self,
+        directory: &tidepool_atomic_write::DirectoryAnchor,
+    ) -> Result<()> {
+        if !matches!(
+            self.preparation,
+            Some(WorkspacePreparation::Completed { .. })
+        ) {
+            return Err("only a completed workspace preparation can be sealed".into());
+        }
+        seal_prepared_directory(directory.path())
+    }
+
+    fn write_selection(&self, directory: &Path) -> Result<()> {
+        tidepool_atomic_write::write_durable(
+            &directory.join("workspace/selection.json"),
+            &serde_json::to_vec_pretty(self)?,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn runtime_orchestration(&self) -> PathBuf {
+        self.runtime_orchestration.clone()
+    }
+
+    pub(crate) fn workspace_resources(&self) -> PathBuf {
+        self.include
+            .last()
+            .expect("validated workspace resource root")
+            .clone()
+    }
+
+    pub(crate) fn prepared_source_revision(&self) -> Result<Option<PathBuf>> {
+        match &self.preparation {
+            Some(WorkspacePreparation::Completed { revision, .. }) => {
+                let deployment = self
+                    .prepared_deployment
+                    .as_ref()
+                    .ok_or("completed preparation has no acquired deployment owner")?;
+                Ok(Some(
+                    deployment.path().join("workspace/revisions").join(revision),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn verify_current_inputs(&self, workspace: &Path) -> Result<()> {
+        let (config, text) = super::read_project_config(workspace)?;
+        if text != self.config {
+            return Err(
+                "workspace configuration changed since preparation; prepare a new deployment"
+                    .into(),
+            );
+        }
+        let roots = resolve_source_roots(workspace, &config.haskell)?;
+        if roots.len() != self.captured_source_roots().len() {
+            return Err("workspace source roots changed since preparation".into());
+        }
+        for (current, captured) in roots.iter().zip(self.captured_source_roots()) {
+            if inspect_sources(current)? != inspect_sources(captured)? {
+                return Err(
+                    "workspace source bytes changed since preparation; prepare a new deployment"
+                        .into(),
+                );
+            }
+        }
+        let base = workspace.join(".exomonad");
+        for (name, path) in [
+            ("core", config.prompts.core),
+            ("root", config.prompts.root),
+            ("research", config.prompts.research),
+            ("coding", config.prompts.coding),
+            ("scaffolding", config.prompts.scaffolding),
+            ("integration", config.prompts.integration),
+        ]
+        .into_iter()
+        .filter_map(|(name, path)| path.map(|path| (name.to_owned(), path)))
+        .chain(config.prompts.files)
+        {
+            if self.prompts.get(&name) != Some(&std::fs::read_to_string(base.join(path))?) {
+                return Err(
+                    "workspace prompt changed since preparation; prepare a new deployment".into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn identity(&self) -> &str {
@@ -466,6 +821,67 @@ impl FrozenWorkspace {
         config.launch.validate()?;
         Ok(config)
     }
+}
+
+fn deployment_files(directory: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    fn walk(root: &Path, relative: &Path, files: &mut BTreeMap<PathBuf, String>) -> Result<()> {
+        for entry in std::fs::read_dir(root.join(relative))? {
+            let entry = entry?;
+            let path = relative.join(entry.file_name());
+            if path == Path::new("selection.json") {
+                continue;
+            }
+            let metadata = entry.file_type()?;
+            if metadata.is_dir() {
+                walk(root, &path, files)?;
+            } else if metadata.is_file() {
+                files.insert(
+                    path,
+                    blake3::hash(&std::fs::read(entry.path())?)
+                        .to_hex()
+                        .to_string(),
+                );
+            } else if metadata.is_symlink() {
+                // Active source publication is a pointer, never copied compiler bytes.
+                let target = std::fs::read_link(entry.path())?;
+                if entry.path().canonicalize()?.starts_with(root) {
+                    files.insert(
+                        path,
+                        blake3::hash(target.as_os_str().as_encoded_bytes())
+                            .to_hex()
+                            .to_string(),
+                    );
+                } else {
+                    return Err("prepared workspace alias escapes its owned deployment".into());
+                }
+            } else {
+                return Err("unsupported prepared workspace file".into());
+            }
+        }
+        Ok(())
+    }
+    let mut files = BTreeMap::new();
+    walk(directory, Path::new(""), &mut files)?;
+    Ok(files)
+}
+
+fn seal_prepared_directory(directory: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let metadata = entry.file_type()?;
+        if metadata.is_dir() {
+            seal_prepared_directory(&entry.path())?;
+        } else if metadata.is_file() {
+            let mut permissions = entry.metadata()?.permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            std::fs::set_permissions(entry.path(), permissions)?;
+        }
+    }
+    let mut permissions = directory.metadata()?.permissions();
+    permissions.set_mode(permissions.mode() & !0o222);
+    std::fs::set_permissions(directory, permissions)?;
+    Ok(())
 }
 
 /// The generated interface is appended as the last source root. An authored
@@ -1069,6 +1485,181 @@ mod tests {
     }
 
     #[test]
+    fn preparing_retry_preserves_original_nonce_and_refuses_mutable_source_drift() {
+        let (_libraries, selection) = deployment_fixture();
+        let project = deployment_project(
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['src']\n[prompts]\nroot = 'root.md'\n",
+        );
+        let authored = project.path().join(".exomonad/src");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(
+            authored.join("Original.hs"),
+            "module Original where\noriginal = (37 :: Int)\n",
+        )
+        .unwrap();
+        let prompt = project.path().join(".exomonad/root.md");
+        std::fs::write(&prompt, "original root prompt").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut frozen = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            directory.path(),
+            Some(selection.clone()),
+        )
+        .unwrap();
+        frozen.verify_current_inputs(project.path()).unwrap();
+        frozen.admit_preparation(directory.path()).unwrap();
+        let Some(WorkspacePreparation::Preparing { original }) = frozen.preparation else {
+            panic!("preparing nonce must be published before compilation");
+        };
+        let before = std::fs::read(directory.path().join("workspace/selection.json")).unwrap();
+        let mut retry = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            directory.path(),
+            Some(selection),
+        )
+        .unwrap();
+        retry.admit_preparation(directory.path()).unwrap();
+        assert!(
+            matches!(retry.preparation, Some(WorkspacePreparation::Preparing { original: selected }) if selected == original)
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
+            before
+        );
+        std::fs::write(&prompt, "changed root prompt").unwrap();
+        assert!(retry
+            .verify_current_inputs(project.path())
+            .unwrap_err()
+            .to_string()
+            .contains("prompt changed"));
+        std::fs::write(&prompt, "original root prompt").unwrap();
+        std::fs::write(authored.join("Added.hs"), "module Added where\n").unwrap();
+        assert!(retry
+            .verify_current_inputs(project.path())
+            .unwrap_err()
+            .to_string()
+            .contains("source bytes changed"));
+        assert_eq!(
+            std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn qualified_run_refuses_lost_or_unreadable_selection_without_source_capture() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let run = tempfile::tempdir().unwrap();
+        let pointer = run.path().join("workspace-prepared.json");
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let refuse = || {
+            assert!(FrozenWorkspace::load_prepared_run(project.path(), run.path()).is_err());
+            assert!(std::fs::read_dir(run.path())
+                .unwrap()
+                .all(|entry| { entry.unwrap().file_name() == "workspace-prepared.json" }));
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        };
+        // A consumed selection that disappears cannot become a fresh capture.
+        std::fs::write(&pointer, b"prior consumed selection").unwrap();
+        std::fs::remove_file(&pointer).unwrap();
+        refuse();
+
+        std::os::unix::fs::symlink(run.path().join("missing-selection"), &pointer).unwrap();
+        refuse();
+        assert!(FrozenWorkspace::load(project.path(), run.path()).is_err());
+        assert!(!run.path().join("workspace").exists());
+        std::fs::remove_file(&pointer).unwrap();
+
+        std::fs::create_dir(&pointer).unwrap();
+        refuse();
+        std::fs::remove_dir(&pointer).unwrap();
+
+        std::fs::write(&pointer, b"malformed pointer").unwrap();
+        refuse();
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0)).unwrap();
+        assert_eq!(
+            std::fs::read(&pointer).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "this qualification runs under the supported unprivileged account"
+        );
+        refuse();
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn prepared_pointer_refuses_changed_or_removed_metadata_before_decoding() {
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let directory = tempfile::tempdir().unwrap();
+        let anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        FrozenWorkspace::begin_preparation(project.path(), &anchor).unwrap();
+        let pointer = PreparedWorkspacePointer::for_directory(directory.path()).unwrap();
+        let original = pointer.read_selection().unwrap();
+        let manifest = directory.path().join("workspace/selection.json");
+        let mut selected: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        // None of these edits can turn a published selection into an absent
+        // recipe and silently enable fresh compilation during run recovery.
+        for replacement in [
+            serde_json::Value::Null,
+            serde_json::json!({"state": "completed", "entries": {}}),
+            serde_json::json!({"state": "completed", "entries": {"changed": uuid::Uuid::new_v4()}}),
+        ] {
+            selected["preparation"] = replacement;
+            std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
+            assert!(pointer
+                .read_selection()
+                .unwrap_err()
+                .to_string()
+                .contains("selection changed"));
+        }
+        // Hash refusal precedes deserialization, including malformed metadata.
+        std::fs::write(&manifest, b"invalid selection").unwrap();
+        assert!(pointer
+            .read_selection()
+            .unwrap_err()
+            .to_string()
+            .contains("selection changed"));
+        std::fs::remove_file(&manifest).unwrap();
+        assert!(pointer.read_selection().is_err());
+        std::fs::write(&manifest, &original).unwrap();
+        let legacy = PreparedWorkspacePointer {
+            version: 1,
+            ..pointer
+        };
+        assert!(legacy
+            .read_selection()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported"));
+    }
+
+    #[test]
+    fn selected_preparation_refuses_incomplete_or_legacy_formats_before_run_pointer() {
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let directory = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        FrozenWorkspace::begin_preparation(project.path(), &anchor).unwrap();
+        let error =
+            FrozenWorkspace::select_prepared(project.path(), run.path(), Some(directory.path()))
+                .unwrap_err();
+        assert!(error.to_string().contains("incomplete"), "{error}");
+        assert!(!run.path().join("workspace-prepared.json").exists());
+        let manifest = directory.path().join("workspace/selection.json");
+        let mut selected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        selected["version"] = serde_json::json!(4);
+        std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
+        let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
+        assert!(!run.path().join("workspace-prepared.json").exists());
+    }
+
+    #[test]
     fn deployed_libraries_retain_original_roots_without_run_copy() {
         let (_fixture, selection) = deployment_fixture();
         let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
@@ -1330,7 +1921,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 4);
+        assert_eq!(selection["version"], 5);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
