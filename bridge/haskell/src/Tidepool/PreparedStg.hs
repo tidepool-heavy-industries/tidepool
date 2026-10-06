@@ -306,8 +306,8 @@ recoveredSubsetScope owner bindings =
     bodies (NonRec _ rhs) = [rhs]
     bodies (Rec pairs) = map snd pairs
 
--- | Only an owner-issued census of intrinsic-free exact bodies permits
--- daemon reuse. Authority-dependent preparation belongs to one admitted request.
+-- | Completed bodies retain their owner identity. Each acquiring preparer
+-- checks its canonical/exact inputs and preparation dependencies before reuse.
 data PreparedBodyCache = PreparedBodyCache
   { cachedExactBodies :: MVar (Map Module (Map [[Word64]] PreparedModule))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion (AdmittedFinalizedOriginal,PreparedModule)))
@@ -361,33 +361,33 @@ evictPreparedBodyMatching cache stale = do
   modifyMVar_ (cachedOriginalModules cache)
     (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
 
--- Full original groups belong to the same retained body owner as recovered
--- subsets. Only completed intrinsic-free preparation is shared across scopes;
--- site-bearing bodies can reuse within this one acquired request preparer.
+-- Full original groups share the retained body owner with recovered subsets.
+-- Canonical version and current site dependencies admit preparation separately;
+-- a changed site witness can still reuse validated immutable decoded Core.
 newPreparedOriginalModuleTaskPreparer :: HscEnv -> PreparedBodyCache -> ExactScope
   -> IO (Map String Id -> Module
     -> IO (Maybe (AdmittedFinalizedOriginal,Bool,PreparedModuleTask)))
 newPreparedOriginalModuleTaskPreparer env cache scope = do
   admittedScope <- admitOriginalRecoveryScope env scope
-  scoped <- newMVar Map.empty
+  siteEnvironment <- resolvePreparedSiteEnvironment env
   pure $ \siblings owner -> do
     let key = originalVersionInRecoveryScope admittedScope owner
-    stableHit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version <$> readMVar (cachedOriginalModules cache)) key
-    scopedHit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version <$> readMVar scoped) key
-    let hit = case stableHit of Just found -> Just found; Nothing -> scopedHit
-        previous = (,) <$> key <*> (fst <$> hit)
+    hit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version
+      <$> readMVar (cachedOriginalModules cache)) key
+    let previous = (,) <$> key <*> (fst <$> hit)
     original <- recoverAdmittedFinalizedOriginalWithPrevious admittedScope owner previous
     case original of
       Nothing -> pure Nothing
       Just (version,admitted) -> case hit of
-        Just (_,prepared) -> pure (Just (admitted,True,PreparedModuleTask (pure prepared)))
-        Nothing -> do
-          task <- acquirePreparedModule env (admittedOriginalLocation admitted) siblings
-            (admittedOriginalModule admitted)
+        Just (_,prepared) | preparedSiteDependenciesMatch siteEnvironment siblings prepared ->
+          pure (Just (admitted,True,PreparedModuleTask (pure prepared)))
+        _ -> do
+          task <- acquirePreparedModuleWithSiteEnvironment siteEnvironment env
+            (admittedOriginalLocation admitted) siblings (admittedOriginalModule admitted)
           pure (Just (admitted,False,PreparedModuleTask $ do
             prepared <- runPreparedModuleTask task
-            let selected = if preparedAuthorityDependent prepared then scoped else cachedOriginalModules cache
-            modifyMVar_ selected (pure . insertOwnerEntry (originalVersionOwner version) version (admitted,prepared))
+            modifyMVar_ (cachedOriginalModules cache)
+              (pure . insertOwnerEntry (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
 preparedBodyKey :: [CoreBind] -> [[Word64]]

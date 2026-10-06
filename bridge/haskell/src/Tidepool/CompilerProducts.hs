@@ -431,8 +431,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             Nothing -> report OriginalRecovery ReuseMiss Absent version (Just 0)
             Just (_,hit,_) -> do
               report OriginalRecovery ReuseWork Recovery version Nothing
-              report OriginalRecovery (if hit then ReuseHit else ReuseMiss)
-                (if hit then Matched else Recovery) version Nothing
+              -- A prepared hit also retained its decoded canonical original.
+              -- A prepared miss alone says nothing about decoded-Core reuse.
+              when hit (report OriginalRecovery ReuseHit Matched version Nothing)
               report PreparedBody (if hit then ReuseHit else ReuseMiss)
                 (if hit then Matched else Recovery) version (if hit then Just 0 else Nothing)
           pure (fmap (\value -> (owner,value)) original)
