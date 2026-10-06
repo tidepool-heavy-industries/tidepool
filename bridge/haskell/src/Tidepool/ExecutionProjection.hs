@@ -318,7 +318,8 @@ data RawModuleProducts = RawModuleProducts
 -- Home-unit classification and interface ownership also affect projection;
 -- neither a nominal owner nor a request identifier admits a hit.
 data OriginalProjectionEntry = OriginalProjectionEntry
-  (StableName PreparedModule) ProjectionContext (Set UnitId) Bool RawModuleProducts
+  (StableName PreparedModule) (Set Name) (Set SymbolIdentity) (Set SymbolIdentity)
+  ProjectionContext (Set UnitId) Bool RawModuleProducts
 
 newtype OriginalProjectionCache = OriginalProjectionCache
   (MVar (Map Module [OriginalProjectionEntry]))
@@ -356,21 +357,24 @@ projectCachedOriginalHomeModuleProducts (OriginalProjectionCache entries) env in
         ++ [binder | (binding,_) <- pmBindings prepared, binder <- topBinders binding]
       names = Set.fromList (map varName identifiers)
       symbols = Set.fromList (Map.elems identities ++ map (idSymbol "value") identifiers)
-      normalized = context
+      normalize relevantNames relevantSymbols tops = context
         { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
-        , projectionRetainedGenerations = Map.restrictKeys (projectionRetainedGenerations context) symbols
-        , projectionCurrentOriginals = Map.restrictKeys (projectionCurrentOriginals context) names
+        , projectionRetainedGenerations = Map.restrictKeys (projectionRetainedGenerations context) relevantSymbols
+        , projectionCurrentOriginals = Map.restrictKeys (projectionCurrentOriginals context) relevantNames
         , projectionAuxiliaryRoots = Set.toAscList (Set.fromList (projectionAuxiliaryRoots context)
-            `Set.intersection` Set.fromList (Map.elems identities)) }
-      matches (OriginalProjectionEntry old oldContext oldHomes oldInterface _) =
-        identity == old && normalized == oldContext && homes == oldHomes && hasInterface == oldInterface
+            `Set.intersection` tops) }
+      tops = Set.fromList (Map.elems identities)
+      normalized = normalize names symbols tops
+      matches (OriginalProjectionEntry old oldNames oldSymbols oldTops oldContext oldHomes oldInterface _) =
+        identity == old && homes == oldHomes && hasInterface == oldInterface
+          && normalize oldNames oldSymbols oldTops == oldContext
   known <- Map.findWithDefault [] owner <$> readMVar entries
-  case [raw | entry@(OriginalProjectionEntry _ _ _ _ raw) <- known, matches entry] of
+  case [raw | entry@(OriginalProjectionEntry _ _ _ _ _ _ _ raw) <- known, matches entry] of
     raw:_ -> pure (True,raw)
     [] -> do
       raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts env interfaces context prepared)
       modifyMVar_ entries (pure . Map.insertWith (++) owner
-        [OriginalProjectionEntry identity normalized homes hasInterface raw])
+        [OriginalProjectionEntry identity names symbols tops normalized homes hasInterface raw])
       pure (False,raw)
 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
