@@ -15552,6 +15552,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             prepared: &PreparedSourceToolset,
             expected: &str,
         ) {
+            let before = tidepool_extract_cmd::extract_spawn_count();
             session.set_image_registry(Arc::clone(prepared.prepared.entry.image_registry()));
             let entry = session
                 .prepare_startup_entry(prepared.prepared.entry.compiled().code())
@@ -15602,6 +15603,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             };
             assert_eq!(value, Some(serde_json::json!(expected)));
             assert_eq!(output, expected);
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                before,
+                "native installation and tool execution must use the selected original"
+            );
         }
 
         struct Snapshot {
@@ -15728,6 +15734,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             "42",
         )
         .await;
+        assert_eq!(
+            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+            completed_executions,
+            "executing the successor native body must not replay its quotation"
+        );
         // Reacquire readiness and native images independently of the old ready
         // cache. Selection is the completed artifact, not a fresh TH request.
         source.toolset_preparation = Default::default();
