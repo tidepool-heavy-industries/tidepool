@@ -8735,7 +8735,7 @@ pub(super) mod tests {
             let PreparedSettlement::Done { value } = resumed.settlement else {
                 panic!("resume returns Done answer")
             };
-            let HaskellValue::Con(identity, fields) =
+            let HaskellValue::Con(identity, ref fields) =
                 engine.machine.observe_handle(program, value, 100).unwrap()
             else {
                 panic!("resumed answer is a Null constructor")
