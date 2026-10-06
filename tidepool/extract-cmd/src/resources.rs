@@ -59,10 +59,20 @@ fn read(directory: &Path, name: &str) -> Option<String> {
 
 fn cgroup_directory() -> Option<(PathBuf, PathBuf)> {
     let membership = fs::read_to_string("/proc/self/cgroup").ok()?;
+    let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    cgroup_directory_from(&membership, &mounts)
+}
+
+fn cgroup_directory_from(membership: &str, mounts: &str) -> Option<(PathBuf, PathBuf)> {
     let member = membership
         .lines()
         .find_map(|line| line.strip_prefix("0::"))?;
-    let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    if Path::new(member)
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return None;
+    }
     mounts.lines().find_map(|line| {
         let (details, filesystem) = line.split_once(" - ")?;
         if filesystem.split_whitespace().next()? != "cgroup2" {
