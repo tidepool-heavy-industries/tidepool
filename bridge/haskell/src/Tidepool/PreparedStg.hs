@@ -598,6 +598,8 @@ assembleComponentSelection selection units = do
       tagsDisjoint = snd (foldl (\(known,valid) item ->
         (plusNameEnv known (pmTagSigs item), valid && disjointNameEnv known (pmTagSigs item)))
         (emptyNameEnv,True) prepared)
+      siblings = mergeConsistentIds (map pmSitedSiblings prepared)
+      entries = mergeConsistentIds (map preparedExpectedEntries prepared)
   unless (not (null prepared)
       && all ((== version) . fatComponentVersion) (fatSelectionComponents selection)
       && all ((== owner) . pmModule) prepared
@@ -605,16 +607,30 @@ assembleComponentSelection selection units = do
       && Set.fromList supplied == expected && length supplied == Set.size expected
       && length names == Set.size (Set.fromList names)
       && length spellings == Set.size (Set.fromList spellings)
-      && tagsDisjoint && length siteUnits <= 1)
+      && tagsDisjoint && length siteUnits <= 1
+      && maybe False (const True) siblings && maybe False (const True) entries)
     (ioError (userError "canonical fat component assembly has inconsistent or overlapping evidence"))
   let base = case siteUnits of site:_ -> site; [] -> head prepared
   pure base
     { preparedBindings = concatMap pmBindings prepared
     , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
     , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
-    , preparedSitedSiblings = Map.unions (map pmSitedSiblings prepared)
-    , preparedExpectedEntries = Map.unions (map preparedExpectedEntries prepared)
+    , preparedSitedSiblings = fromMaybe Map.empty siblings
+    , preparedExpectedEntries = fromMaybe Map.empty entries
     }
+
+-- Shared owner facts may occur in several units, but conflicting typed
+-- identities cannot be hidden by the order of component assembly.
+mergeConsistentIds :: Ord key => [Map key Id] -> Maybe (Map key Id)
+mergeConsistentIds = foldl' addMap (Just Map.empty)
+  where
+    addMap known incoming = foldl' addId known (Map.toAscList incoming)
+    addId Nothing _ = Nothing
+    addId (Just known) (key, incoming) = case Map.lookup key known of
+      Nothing -> Just (Map.insert key incoming known)
+      Just previous
+        | varName previous == varName incoming && eqType (idType previous) (idType incoming) -> Just known
+        | otherwise -> Nothing
 
 -- | Exact defining/site context acquisition stays on the coordinator. Tasks
 -- contain only immutable inputs, lowering and short exact-body cache commits.
