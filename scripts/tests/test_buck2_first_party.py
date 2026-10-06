@@ -260,7 +260,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.assertIn(resource, group["resources"])
         for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
                          "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
-            self.assertIn(variable, group["env"])
+            self.assertIn(variable, group["resource_env"])
 
     def test_generated_haskell_source_exports_preserve_compiler_filenames(self):
         self.write("exomonad/actor/Cargo.toml", "[package]\nname = 'exomonad-actor'\n")
@@ -562,6 +562,91 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(group["resource_env"]["EXOMONAD_NIX_BIN"],
                          "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
 
+    def test_facade_recipe_sources_are_declared_in_focused_and_aggregate_execution(self):
+        result = self.generate("--package", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        compiler_sources = {
+            "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location //bridge/mcp:effects_generated)",
+            "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+            "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+            "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+            "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+            "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+            "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+            "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        }
+        ordinary_controls = {
+            "TIDEPOOL_KEEP_TEST_LOGS": "1",
+            "EXOMONAD_NIX_OFFLINE": "1",
+        }
+        wrappers = []
+        definitions = GENERATOR.parents[1] / "build/rust/defs.bzl"
+        namespace = {
+            "sh_test": lambda **arguments: wrappers.append(arguments),
+            "read_root_config": lambda *_: "/declared/compiler",
+        }
+        exec("\n".join(line for line in definitions.read_text().splitlines()
+                       if not line.startswith("load(")), namespace)
+        runner_path = GENERATOR.parents[1] / "build/rust/isolated-libtest.py"
+        spec = importlib.util.spec_from_file_location("recipe_resource_runner", runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        for name in ("facade_prepared_recipe_contract_test",
+                     "facade_recipe_source_capture_test", "tidepool_unit_tests_all"):
+            with self.subTest(target=name):
+                group = self.rule("bridge/facade", name, "tidepool_rust_test_cases")
+                self.assertEqual(group["binary"], ":tidepool_unit_tests")
+                self.assertIs(group["haskell_worker"], True)
+                self.assertEqual(group["env"], ordinary_controls)
+                self.assertFalse(set(group["env"]) & set(group["resource_env"]))
+                for variable, path in compiler_sources.items():
+                    self.assertEqual(group["resource_env"][variable], path)
+                for label in ("//bridge/mcp:effects_generated",
+                              "//bridge/haskell:facade_embedded_sources",
+                              "//build/package:compiler_deployment",
+                              "//build/package:tidepool_extract_runtime_libraries"):
+                    self.assertIn(label, group["resources"])
+                if name == "facade_prepared_recipe_contract_test":
+                    self.assertNotIn("TIDEPOOL_RECIPE_WORKSPACE", group["resource_env"])
+                else:
+                    self.assertEqual(group["resource_env"]["TIDEPOOL_RECIPE_WORKSPACE"],
+                                     "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad")
+                    self.assertIn("//exomonad/examples/workspace:facade_test_sources", group["resources"])
+                if name == "tidepool_unit_tests_all":
+                    self.assertNotIn("exact_tests", group)
+                    self.assertIn("TIDEPOOL_BROWSER_DRIVER", group["resource_env"])
+                else:
+                    self.assertEqual(group["expected_count"], 1)
+                    self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", group["resource_env"])
+                    self.assertNotIn("//web:dist", group["resources"])
+                namespace["tidepool_rust_test_cases"](**group)
+                wrapper = wrappers.pop()
+                args = wrapper["args"]
+                declared = [args[index + 1] for index, value in enumerate(args)
+                            if value == "--resource-env"]
+                environment = dict(wrapper["env"])
+                expected = {key: str(self.root / key) for key in compiler_sources}
+                if name != "facade_prepared_recipe_contract_test":
+                    expected["TIDEPOOL_RECIPE_WORKSPACE"] = str(self.root / "workspace")
+                environment.update(expected)
+                environment.update({
+                    "TIDEPOOL_TEST_SYSTEMD_RUN": sys.executable,
+                    "TIDEPOOL_TEST_SYSTEMCTL": sys.executable,
+                    "UNDECLARED_RESOURCE": "/ambient/resource",
+                })
+                record = {}
+                command, _ = runner.delegated_command(
+                    ["/declared/libtest"], 300, "app.slice", record,
+                    environment=environment, declared_resources=declared)
+                for key, value in expected.items():
+                    self.assertIn(key, declared)
+                    self.assertIn("--setenv=" + key + "=" + value, command)
+                    self.assertIn(key, record["environment_names"])
+                self.assertNotIn("UNDECLARED_RESOURCE", record["environment_names"])
+        binary = self.rule("bridge/facade", "tidepool_unit_tests", "tidepool_rust_binary")
+        self.assertFalse(set(binary.get("env", {})) & set(compiler_sources))
+        self.assertNotIn("resources", binary)
+
     def test_facade_unit_root_uses_embedded_profile_support_and_browser_resources(self):
         metadata = json.loads(self.metadata.read_text())
         facade = next(package for package in metadata["packages"] if package["name"] == "tidepool")
@@ -754,9 +839,9 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             "TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", "TIDEPOOL_EXTRACT_WORKER",
             "TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
             "TIDEPOOL_HASKELL_ACTORS_DIR", "TIDEPOOL_M3_FIXTURE_DIR", "TIDEPOOL_PRELUDE_DIR",
+            "LD_LIBRARY_PATH",
         })
         self.assertEqual(unit["env"], {
-            "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
             "TIDEPOOL_KEEP_TEST_LOGS": "1",
         })
         self.assertFalse(set(unit["resource_env"]) & set(unit["env"]))
