@@ -1,6 +1,6 @@
 //! Exercises the compiled helper receipt parser and host assertion boundary.
 //! Receipt strings are parser inputs; actor publication is not exercised here.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tidepool_bridge::FromHaskell;
 use tidepool_codegen::host_fns::RuntimeError as HaskellError;
 use tidepool_codegen::prepared_program::ExecutionError;
@@ -95,7 +95,6 @@ fn run() {
         required("TIDEPOOL_PRELUDE_DIR"),
         required("TIDEPOOL_HASKELL_ACTORS_DIR"),
     ];
-    let refs: Vec<&Path> = includes.iter().map(PathBuf::as_path).collect();
     let preamble = "{-# LANGUAGE DataKinds, OverloadedStrings #-}\nmodule RecipeContract where\nimport Control.Monad.Freer\nimport qualified Tidepool.Check as Check\n";
     let expression = include_str!("prepared_contract_expression.hs");
     let source = tidepool_runtime::session::assemble_expression_module(
@@ -106,12 +105,9 @@ fn run() {
         tidepool_runtime::session::ExpressionLift::Effectful,
     );
     std::fs::write(scratch.join("contract.hs"), &source).unwrap();
-    let compiled = tidepool_runtime::compile_haskell(
-        &source,
-        tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET,
-        &refs,
-    )
-    .unwrap();
+    let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
+    let compiled =
+        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}).unwrap();
     let cases = [
         (
             "committed",
@@ -150,9 +146,9 @@ fn run() {
             cells: vec![],
             attempts: vec![],
         };
-        let result = tidepool_runtime::run_prepared_program(
-            compiled.prepared.clone().into_prepared(),
-            &compiled.table,
+        let result = tidepool_runtime::run_compiled_target(
+            &compiled,
+            target,
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             &mut host,
             &(),
