@@ -21,6 +21,7 @@ const REPORT_VERSION: u32 = 2;
 /// receives a manifest index, never a command string derived from a program.
 enum Command {
     ValidateFixture {
+        admission: CorpusSourceAdmission,
         directory: PathBuf,
         source: PathBuf,
         targets: PathBuf,
@@ -48,6 +49,13 @@ enum Command {
         output: PathBuf,
         index: usize,
     },
+}
+
+/// A build output needs replay-eligible evidence. A fresh native test consumes
+/// its completed observations without granting source replay or build reuse.
+enum CorpusSourceAdmission {
+    ImmutableBuild,
+    CompletedOriginal,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -117,11 +125,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let command = parse_arguments()?;
     match command {
         Command::ValidateFixture {
+            admission,
             directory,
             source,
             targets,
             include,
-        } => validate_fixture(&directory, &source, &targets, &include),
+        } => validate_fixture(admission, &directory, &source, &targets, &include),
         Command::VerifyCohort {
             directory,
             expectations,
@@ -150,8 +159,16 @@ fn parse_arguments() -> Result<Command, Box<dyn Error>> {
 
 fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
     if let [mode, directory, source, targets, roots @ ..] = values.as_slice() {
-        if mode == "validate-fixture" {
+        let admission = if mode == "validate-fixture" {
+            Some(CorpusSourceAdmission::ImmutableBuild)
+        } else if mode == "validate-original" {
+            Some(CorpusSourceAdmission::CompletedOriginal)
+        } else {
+            None
+        };
+        if let Some(admission) = admission {
             return Ok(Command::ValidateFixture {
+                admission,
                 directory: directory.into(),
                 source: source.into(),
                 targets: targets.into(),
@@ -219,11 +236,12 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus validate-fixture DIRECTORY SOURCE TARGETS [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus (validate-fixture|validate-original) DIRECTORY SOURCE TARGETS [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
 }
 
 fn validate_fixture(
+    admission: CorpusSourceAdmission,
     directory: &Path,
     source: &Path,
     targets: &Path,
@@ -268,11 +286,22 @@ fn validate_fixture(
     }
     let (table, _) = read_metadata(&fs::read(directory.join("meta.cbor"))?)?;
     let dependencies = fs::read(directory.join("dependencies.json"))?;
-    tidepool_toolchain::artifacts::validate_prepared_fixture_sources(
-        &dependencies,
-        source,
-        include,
-    )?;
+    match admission {
+        CorpusSourceAdmission::ImmutableBuild => {
+            tidepool_toolchain::artifacts::validate_prepared_fixture_sources(
+                &dependencies,
+                source,
+                include,
+            )?
+        }
+        CorpusSourceAdmission::CompletedOriginal => {
+            tidepool_toolchain::artifacts::validate_completed_corpus_sources(
+                &dependencies,
+                source,
+                include,
+            )?
+        }
+    }
     let mut expected_files = BTreeSet::from([
         "manifest.json".to_string(),
         "meta.cbor".into(),
@@ -1374,7 +1403,20 @@ mod tests {
         assert!(matches!(
             parse_values(["validate-fixture", "directory", "source", "targets", "first-root", "second-root"].into_iter().map(OsString::from).collect())
             .unwrap(),
-            Command::ValidateFixture { include, .. } if include == [PathBuf::from("first-root"), PathBuf::from("second-root")]
+            Command::ValidateFixture { admission: CorpusSourceAdmission::ImmutableBuild, include, .. } if include == [PathBuf::from("first-root"), PathBuf::from("second-root")]
+        ));
+        assert!(matches!(
+            parse_values(
+                ["validate-original", "directory", "source", "targets"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect()
+            )
+            .unwrap(),
+            Command::ValidateFixture {
+                admission: CorpusSourceAdmission::CompletedOriginal,
+                ..
+            }
         ));
         assert!(matches!(
             parse_values(

@@ -1803,7 +1803,7 @@ impl ModuleCandidateOffer {
             _ => {
                 return Err(CompileError::ExtractFailed(
                     "program support lacks one authenticated generated source owner".into(),
-                ))
+                ));
             }
         };
         let support = program_support_artifacts(
@@ -2938,6 +2938,31 @@ pub fn validate_prepared_fixture_sources(
     Ok(())
 }
 
+/// Validate observations from a fresh corpus compilation owned by a native
+/// test run. This admits the completed output only: compile-time execution
+/// remains ineligible for source replay and does not prove a hermetic action.
+/// Observed Haskell sources must still belong to the declared source trees.
+pub fn validate_completed_corpus_sources(
+    evidence_bytes: &[u8],
+    source: &Path,
+    include: &[PathBuf],
+) -> Result<(), CompileError> {
+    let evidence: cache::DependencyEvidence =
+        serde_json::from_slice(evidence_bytes).map_err(|error| {
+            CompileError::ExtractFailed(format!("corpus dependency evidence: {error}"))
+        })?;
+    validate_declared_source_closure(&evidence, source, include)?;
+    cache::CompletedSourceEvidence::from_worker_evidence(
+        evidence,
+        source,
+        &std::fs::read_to_string(source)?,
+    )
+    .ok_or_else(|| {
+        CompileError::ExtractFailed("corpus consumed bytes or import witnesses changed".into())
+    })?;
+    Ok(())
+}
+
 fn validate_build_action_source_closure(
     evidence_bytes: &[u8],
     source: &Path,
@@ -2952,6 +2977,14 @@ fn validate_build_action_source_closure(
             "build-action source evidence is incomplete".into(),
         ));
     }
+    validate_declared_source_closure(&evidence, source, include)
+}
+
+fn validate_declared_source_closure(
+    evidence: &cache::DependencyEvidence,
+    source: &Path,
+    include: &[PathBuf],
+) -> Result<(), CompileError> {
     let mut declared = std::collections::BTreeSet::from([std::fs::canonicalize(source)?]);
     for root in include {
         let manifest = cache::source_root_manifest(root)
@@ -5636,8 +5669,10 @@ mod module_product_tests {
                 .replace("QUOTE_INPUT_PATH", input.to_str().unwrap()),
         )
         .unwrap();
-        let include = [root.path().to_owned()];
         let source = include_str!("../tests/fixtures/completed-source/QuotedConsumer.hs");
+        let earlier = root.path().join("earlier");
+        std::fs::create_dir(&earlier).unwrap();
+        let include = [earlier.clone(), root.path().to_owned()];
         let invocation = CompileInvocation {
             source,
             targets: &["result"],
@@ -5743,13 +5778,62 @@ mod module_product_tests {
                 &root.path().join(format!("offer-{exact}-{value}")),
             )
             .unwrap();
-            assert!(selected.is_none_or(|selected| !selected
-                .by_owner
-                .contains_key(&(quoted_owner.unit.clone(), quoted_owner.module.clone()))));
+            assert!(selected.is_none_or(|selected| {
+                !selected
+                    .by_owner
+                    .contains_key(&(quoted_owner.unit.clone(), quoted_owner.module.clone()))
+            }));
             if exact {
                 let admission = compiled.exact_source_admission.as_ref().unwrap();
                 assert!(!admission.evidence.cache_safe && !admission.evidence.selection_complete);
                 assert!(admission.evidence.revalidate(source).is_ok());
+                // The native test owns this completed quotation output; it
+                // does not issue a replay recipe or a hermetic build artifact.
+                let consumer = root.path().join("QuotedConsumer.hs");
+                std::fs::write(&consumer, source).unwrap();
+                let mut observations = admission.evidence.clone().into_evidence();
+                for consumed in &mut observations.sources {
+                    if consumed.path == Path::new(cache::GENERATED_SOURCE) {
+                        consumed.path = consumer.clone();
+                    }
+                }
+                for module in &mut observations.modules {
+                    if module.source == Path::new(cache::GENERATED_SOURCE) {
+                        module.source = consumer.clone();
+                    }
+                }
+                let observations = serde_json::to_vec(&observations).unwrap();
+                validate_completed_corpus_sources(&observations, &consumer, &include).unwrap();
+                assert!(
+                    validate_prepared_fixture_sources(&observations, &consumer, &include).is_err(),
+                    "completed TH output cannot become an immutable build recipe"
+                );
+                assert!(
+                    validate_completed_corpus_sources(
+                        &observations,
+                        &consumer,
+                        std::slice::from_ref(&earlier),
+                    )
+                    .is_err(),
+                    "an observed provider outside the declared trees is refused"
+                );
+                let provider_bytes = std::fs::read(&provider).unwrap();
+                let mut changed = provider_bytes.clone();
+                changed.extend_from_slice(b"\n-- changed after compilation\n");
+                std::fs::write(&provider, changed).unwrap();
+                assert!(
+                    validate_completed_corpus_sources(&observations, &consumer, &include).is_err(),
+                    "completed output still validates consumed source bytes"
+                );
+                std::fs::write(&provider, provider_bytes).unwrap();
+                let shadow = earlier.join("QuotedOriginal.hs");
+                std::fs::write(&shadow, "module QuotedOriginal where\nvalue = 0\n").unwrap();
+                assert!(
+                    validate_completed_corpus_sources(&observations, &consumer, &include).is_err(),
+                    "completed output still validates negative import witnesses"
+                );
+                std::fs::remove_file(shadow).unwrap();
+                validate_completed_corpus_sources(&observations, &consumer, &include).unwrap();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(&quoted_owner),
                     &admission.home_imports().unwrap(),

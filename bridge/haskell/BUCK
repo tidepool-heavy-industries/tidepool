@@ -1,7 +1,7 @@
 load("//build/haskell:probe_opacity.bzl", "native_probe_opacity")
 load(":rust_inputs.bzl", "declare_rust_test_inputs")
 load(":components.bzl", "declare_haskell_components")
-load("//build/haskell:corpus_fixture.bzl", "tidepool_prepared_corpus", "tidepool_native_oracle", "tidepool_corpus_test")
+load("//build/haskell:corpus_fixture.bzl", "tidepool_prepared_corpus", "tidepool_native_oracle", "tidepool_corpus_test", "tidepool_fresh_corpus_test")
 load("//build/haskell:prepared_fixture.bzl", "tidepool_prepared_fixture")
 load("@prelude//:rules.bzl", "export_file", "filegroup", "haskell_binary", "haskell_library", "sh_test")
 # Production libraries, workers, helpers and counted suites share Cabal metadata.
@@ -228,28 +228,6 @@ tidepool_prepared_fixture(
     source = "test-prepared-stg/JsonReply.hs",
     targets = ["__prepared", "__payload"],
     source_roots = [("//bridge/mcp:effects_generated", "")] + _CORPUS_LIBRARY_ROOTS,
-    visibility = ["PUBLIC"],
-)
-
-tidepool_prepared_corpus(
-    name = "corpus_suite",
-    source = "test/Suite.hs",
-    module = "Suite",
-    targets_file = "test/SuiteTargets",
-    source_roots = _CORPUS_LIBRARY_ROOTS,
-    all_tops = True,
-    metadata_targets = ["con_left", "con_right", "con_just", "con_nothing", "showInt"],
-    visibility = ["PUBLIC"],
-)
-
-tidepool_native_oracle(
-    name = "oracle_suite",
-    corpus = ":corpus_suite",
-    module = "Suite",
-    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
-    source_roots = _CORPUS_LIBRARY_ROOTS + [(":suite_source_root", ""), (":native_oracle_sources", "")],
-    classifications = "test-prepared-stg/suite-oracle/SuiteOracleClassifications.json",
-    nonterminating = "test-prepared-stg/suite-oracle/SuiteOracleNonterminating.txt",
     visibility = ["PUBLIC"],
 )
 
@@ -528,10 +506,18 @@ tidepool_native_oracle(
     visibility = ["PUBLIC"],
 )
 
-tidepool_corpus_test(
+tidepool_fresh_corpus_test(
     name = "corpus_suite_test",
-    corpus = ":corpus_suite",
-    expectations = ":oracle_suite",
+    source = "test/Suite.hs",
+    module = "Suite",
+    targets_file = "test/SuiteTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    all_tops = True,
+    metadata_targets = ["con_left", "con_right", "con_just", "con_nothing", "showInt"],
+    oracle_source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    oracle_source_roots = _CORPUS_LIBRARY_ROOTS + [(":suite_source_root", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/SuiteOracleClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/SuiteOracleNonterminating.txt",
     visibility = ["PUBLIC"],
 )
 

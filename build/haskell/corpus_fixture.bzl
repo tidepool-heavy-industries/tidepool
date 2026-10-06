@@ -8,10 +8,14 @@ def _output(dependency):
     return outputs[0]
 
 def _roots(command, roots):
-    for tree, subdirectory in roots:
+    for tree, subdirectory in _checked_roots(roots):
+        command.add("--include", cmd_args(tree, format = "{}/" + subdirectory) if subdirectory else tree)
+
+def _checked_roots(roots):
+    for _tree, subdirectory in roots:
         if subdirectory.startswith("/") or any([part in [".", ".."] for part in subdirectory.split("/")]):
             fail("source subtree must be a relative directory")
-        command.add("--include", cmd_args(tree, format = "{}/" + subdirectory) if subdirectory else tree)
+    return roots
 
 PreparedCorpusInfo = provider(fields = {
     "directory": Artifact,
@@ -128,6 +132,78 @@ def tidepool_corpus_test(name, corpus, expectations, visibility = []):
             "$(location " + expectations + ")",
         ],
         resources = [corpus, expectations, "//tidepool/prepared-corpus:prepared-corpus"],
+        test_rule_timeout_ms = 14400000,
+        visibility = visibility,
+    )
+
+def _fresh_corpus_inputs_impl(ctx):
+    libdir = read_root_config("nix", "ghc_libdir", "")
+    if not libdir.startswith("/nix/store/"):
+        fail("fresh corpus requires the pinned production GHC package closure")
+    inputs = ctx.actions.write_json("inputs.json", {
+        "version": 1,
+        "producer": _output(ctx.attrs.producer),
+        "validator": _output(ctx.attrs.validator),
+        "source": ctx.attrs.source,
+        "module": ctx.attrs.module,
+        "targets": ctx.attrs.targets_file,
+        "source_roots": _checked_roots(ctx.attrs.source_roots),
+        "all_tops": ctx.attrs.all_tops,
+        "metadata_targets": ctx.attrs.metadata_targets,
+        "ghc_libdir": libdir,
+        "runtime_libraries": _output(ctx.attrs.runtime_libraries),
+        "ghc": _output(ctx.attrs.ghc),
+        "oracle_driver": ctx.attrs.oracle_driver,
+        "oracle_source": ctx.attrs.oracle_source,
+        "oracle_source_roots": _checked_roots(ctx.attrs.oracle_source_roots),
+        "classifications": ctx.attrs.classifications,
+        "nonterminating": ctx.attrs.nonterminating,
+        "timeout": ctx.attrs.timeout,
+    }, with_inputs = True)
+    return [DefaultInfo(default_output = inputs, other_outputs = [
+        ctx.attrs.source, ctx.attrs.targets_file, ctx.attrs.oracle_source,
+        ctx.attrs.classifications, ctx.attrs.nonterminating, ctx.attrs.oracle_driver,
+        _output(ctx.attrs.producer), _output(ctx.attrs.validator),
+        _output(ctx.attrs.runtime_libraries), _output(ctx.attrs.ghc),
+    ] + [tree for tree, _subdirectory in ctx.attrs.source_roots + ctx.attrs.oracle_source_roots])]
+
+_fresh_corpus_inputs = rule(
+    impl = _fresh_corpus_inputs_impl,
+    attrs = {
+        "source": attrs.source(),
+        "module": attrs.string(),
+        "targets_file": attrs.source(),
+        "source_roots": attrs.list(attrs.tuple(attrs.source(), attrs.string())),
+        "all_tops": attrs.bool(default = False),
+        "metadata_targets": attrs.list(attrs.string(), default = []),
+        "oracle_source": attrs.source(),
+        "oracle_source_roots": attrs.list(attrs.tuple(attrs.source(), attrs.string())),
+        "classifications": attrs.source(),
+        "nonterminating": attrs.source(),
+        "timeout": attrs.int(default = 10),
+        "producer": attrs.exec_dep(default = "//bridge/haskell:execution_corpus_producer", providers = [RunInfo]),
+        "validator": attrs.exec_dep(default = "//tidepool/prepared-corpus:prepared-corpus", providers = [RunInfo]),
+        "runtime_libraries": attrs.dep(default = "//build/package:tidepool_extract_runtime_libraries"),
+        "ghc": attrs.exec_dep(default = "toolchains//:ghc", providers = [RunInfo]),
+        "oracle_driver": attrs.source(default = "//build/haskell:suite_oracle_driver"),
+    },
+)
+
+def tidepool_fresh_corpus_test(name, visibility = [], **kwargs):
+    """Compile an effectful cohort once during each native test invocation."""
+    inputs_name = name + "_inputs"
+    _fresh_corpus_inputs(name = inputs_name, **kwargs)
+    sh_test(
+        name = name,
+        test = "//build/haskell:corpus_test",
+        args = [
+            "--fresh",
+            "$(location toolchains//:python)",
+            "$(location //build/haskell:corpus_fixture_driver)",
+            "$(location :" + inputs_name + ")",
+        ],
+        env = {"PATH": read_root_config("nix", "action_path")},
+        resources = [":" + inputs_name, "toolchains//:python", "//build/haskell:corpus_fixture_driver"],
         test_rule_timeout_ms = 14400000,
         visibility = visibility,
     )

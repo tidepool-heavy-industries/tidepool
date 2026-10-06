@@ -44,6 +44,10 @@ its eligibility flags. Cache publication, source replay recipes and sealed
 compile-input reuse keep their stricter eligibility gates. Build actions also
 require the declared input closure; completed runtime output does not establish
 a hermetic build input proof.
+The native Suite corpus integration test uses completed source observations
+and the same declared-source-tree guard for its run-owned output. This checks
+observed Haskell bytes and import choices without converting compile-time
+execution into a replay recipe or a hermetic Buck fixture.
 
 Before publication and on each lookup, validate consumed source bytes and
 negative resolution witnesses. The generated request path is normalized to a
