@@ -235,9 +235,10 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
                   (Map.lookup key (finalizedLocalAdmissions finalized))]
           admittedContext = case preparedRawProducts productContext of
             Nothing -> productContext
-            Just raw -> productContext {preparedProductInventory = fst
+            Just raw | not (Set.null withheld) -> productContext {preparedProductInventory = fst
               (settleOriginalHomeModuleProductsWithoutOwners environment
                 (preparedExternalBinders productContext) withheld raw)}
+            Just _ -> productContext
       (availability,products,packages) <- admitModuleProducts originalInterfaces admittedContext
         (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared)
         (pprPackageImports prepared)
