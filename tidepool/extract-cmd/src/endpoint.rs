@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::{daemon, process, ExtractCmd, ExtractRun, SpawnError};
+use crate::{daemon, process, CompileWorkload, ExtractCmd, ExtractRun, SpawnError};
 
 static PHYSICAL_REQUEST_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
@@ -595,6 +595,7 @@ pub enum CompilerTermination {
 /// one resident GHC transaction and dropping the lease releases admission.
 #[derive(Debug)]
 pub struct CompilerTransaction {
+    workload: CompileWorkload,
     identity: CompilerIdentity,
     transport: Option<TransactionTransport>,
     failed: bool,
@@ -1050,11 +1051,19 @@ impl CompilerEndpoint {
     }
 
     pub fn transaction(self) -> Result<CompilerTransaction, SpawnError> {
-        self.transaction_with_cancellation(None)
+        self.transaction_with_cancellation(CompileWorkload::Foreground, None)
+    }
+
+    pub fn transaction_for_workload(
+        self,
+        workload: CompileWorkload,
+    ) -> Result<CompilerTransaction, SpawnError> {
+        self.transaction_with_cancellation(workload, None)
     }
 
     fn transaction_with_cancellation(
         self,
+        workload: CompileWorkload,
         cancellation: Option<CompilerTransactionCancellation>,
     ) -> Result<CompilerTransaction, SpawnError> {
         self.transaction_with_cancellation_timeout(cancellation, DIRECT_HANDSHAKE_TIMEOUT)
@@ -1104,9 +1113,10 @@ impl CompilerEndpoint {
                 TransactionTransport::Direct(endpoint)
             }
             Transport::Daemon { socket, epoch } => {
-                let transaction = daemon::begin_transaction_with_cancellation(
+                let transaction = daemon::begin_transaction_for_workload(
                     &socket,
                     &epoch,
+                    workload,
                     cancellation.as_ref(),
                 )
                 .map_err(|error| {
@@ -1166,6 +1176,7 @@ impl CompilerEndpoint {
             "compiler transaction admitted"
         );
         Ok(CompilerTransaction {
+            workload,
             identity,
             transport: Some(transport),
             failed: false,
@@ -1268,6 +1279,7 @@ impl CompilerEndpoint {
 }
 
 struct TransactionScope {
+    workload: CompileWorkload,
     transaction: Option<CompilerTransaction>,
     program: Option<OsString>,
     cancellation: Option<CompilerTransactionCancellation>,
@@ -1316,9 +1328,11 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
             ),
         ));
     }
-    let transaction =
-        CompilerEndpoint::bind_unscoped_with_cancellation(cmd, cancellation.as_ref())?
-            .transaction_with_cancellation(cancellation)?;
+    let workload = TRANSACTION_SCOPE
+        .with(|scope| scope.borrow().as_ref().map(|state| state.workload))
+        .unwrap_or(CompileWorkload::Foreground);
+    let transaction = CompilerEndpoint::bind_unscoped_with_cancellation(cmd, cancellation.as_ref())?
+        .transaction_with_cancellation(workload, cancellation)?;
     let identity = transaction.identity.clone();
     TRANSACTION_SCOPE.with(|scope| -> Result<(), SpawnError> {
         let mut scope = scope.borrow_mut();
@@ -1403,7 +1417,7 @@ pub fn with_compiler_transaction<T>(
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(None, close_sink, action)
+    with_compiler_transaction_inner(CompileWorkload::Foreground, None, close_sink, action)
 }
 
 /// As [`with_compiler_transaction`], with an external cancellation edge that
@@ -1413,10 +1427,31 @@ pub fn with_compiler_transaction_cancellable<T>(
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(Some(cancellation), close_sink, action)
+    with_compiler_transaction_inner(CompileWorkload::Foreground, Some(cancellation), close_sink, action)
+}
+
+/// Declare the workload before the first bind admits the pinned transaction.
+/// Invoke inside the blocking compiler task; the typed class is not propagated
+/// implicitly across async or OS-thread boundaries.
+pub fn with_compiler_transaction_for_workload<T>(
+    workload: CompileWorkload,
+    close_sink: impl FnOnce(CompilerTransactionClose),
+    action: impl FnOnce() -> T,
+) -> CompilerTransactionOutcome<T> {
+    with_compiler_transaction_inner(workload, None, close_sink, action)
+}
+
+pub fn with_compiler_transaction_cancellable_for_workload<T>(
+    workload: CompileWorkload,
+    cancellation: CompilerTransactionCancellation,
+    close_sink: impl FnOnce(CompilerTransactionClose),
+    action: impl FnOnce() -> T,
+) -> CompilerTransactionOutcome<T> {
+    with_compiler_transaction_inner(workload, Some(cancellation), close_sink, action)
 }
 
 fn with_compiler_transaction_inner<T>(
+    workload: CompileWorkload,
     cancellation: Option<CompilerTransactionCancellation>,
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
@@ -1427,6 +1462,7 @@ fn with_compiler_transaction_inner<T>(
             "compiler transaction scopes cannot nest"
         );
         *scope.borrow_mut() = Some(TransactionScope {
+            workload,
             transaction: None,
             program: None,
             cancellation,
@@ -1461,6 +1497,8 @@ impl CompilerTransaction {
     }
 
     fn execute_inner(&mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        let mut cmd = cmd.clone();
+        cmd.request.set_workload(self.workload);
         let cwd = std::env::current_dir()
             .map_err(|source| SpawnError::indeterminate("current directory", source))?;
         let start = Instant::now();
@@ -2364,6 +2402,7 @@ mod tests {
         let (stream, peer) = UnixStream::pair().unwrap();
         drop(peer);
         let mut transaction = CompilerTransaction {
+            workload: CompileWorkload::Foreground,
             identity: CompilerIdentity::direct([1; 32], [2; 32]),
             transport: Some(TransactionTransport::Daemon {
                 transaction: daemon::DaemonTransaction::for_test(stream),

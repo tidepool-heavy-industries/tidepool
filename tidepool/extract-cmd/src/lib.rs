@@ -28,6 +28,7 @@ pub mod exec_check;
 pub mod frontend;
 mod process;
 mod request;
+mod resources;
 pub use endpoint::{
     with_compiler_transaction, with_compiler_transaction_cancellable, CompilerEndpoint,
     CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause, CompilerScratchFailure,
@@ -36,11 +37,12 @@ pub use endpoint::{
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
     CompilerTransactionOutcome, CompilerTransactionRetirement, CompilerWorkerRetirement,
     DirectCompilerRetirement,
+    with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
-    ExtractRequest, InspectionNamespace, InspectionScope, ProtocolError, StructuredInspection,
-    SymbolIdentity,
+    CompileWorkload, ExtractRequest, InspectionNamespace, InspectionScope, ProtocolError,
+    StructuredInspection, SymbolIdentity,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -776,6 +778,11 @@ impl ExtractCmd {
     /// encoded typed request. Most callers should bind and execute an endpoint;
     /// this is for endpoint infrastructure and tests that inspect the
     /// transport encoding.
+    pub fn workload(&mut self, workload: CompileWorkload) -> &mut Self {
+        self.request.set_workload(workload);
+        self
+    }
+
     pub fn worker_argv(&self) -> Vec<OsString> {
         self.request.worker_argv()
     }
