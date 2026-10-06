@@ -3,6 +3,7 @@ module ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection) where
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import Control.Monad (forM_, unless)
 import Control.Monad.State.Strict (runStateT)
+import Data.List (sort)
 import Data.IntMap.Strict qualified as IntMap
 import GHC.Core.TyCon (PrimRep(..))
 import Data.Map.Strict qualified as Map
@@ -10,21 +11,30 @@ import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC.Builtin.Types (boolTy)
 import GHC.Builtin.Types.Prim (addrPrimTy)
-import GHC.Stg.Syntax (GenStgTopBinding(..))
+import GHC.Stg.Syntax
+import GHC.Types.CostCentre (dontCareCCS)
+import GHC.Types.Literal (Literal(..))
 import GHC.Types.Id (mkVanillaGlobal)
-import GHC.Types.Name (mkExternalName)
+import GHC.Types.Name (mkExternalName, mkSystemName)
 import GHC.Types.Name.Env (emptyNameEnv)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
-import GHC.Types.Unique (mkUnique)
-import GHC.Types.Var.Set (emptyVarSet)
+import GHC.Types.Unique (mkUnique, getKey)
+import GHC.Types.Var (varUnique, varName)
+import GHC.Types.Var.Set (emptyVarSet, emptyDVarSet, mkVarSet)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Module (mkModule, mkModuleName)
 import GHC.Unit.Types (stringToUnit)
 import Tidepool.EffectSchema qualified as Effect
 import Tidepool.ExecutionProjection
+import Tidepool.ExecutionEncode (encodeProjectedGroup)
 import Tidepool.ExecutionSchema
 import Tidepool.PreparedSites (PreparedSite(..), SiteRejection(..))
-import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon)
+import Tidepool.PreparedStg
+  ( pmModule, pmCoverage, pmBindings, pmSitedSiblings, pmYieldSites
+  , pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
+  , preparedBindingGroups, preparedUsesSiteAuthority
+  , preparedRejectsIntrinsic, preparedExpectedEntry )
 import Tidepool.TypePolicy qualified as TypePolicy
 
 -- Pure projection checks use compiler-owned Ids and graphs, without compiling
@@ -32,6 +42,7 @@ import Tidepool.TypePolicy qualified as TypePolicy
 -- than the order of binder lookup or graph traversal.
 verifyModuleEvidenceProjection :: IO ()
 verifyModuleEvidenceProjection = do
+  verifyGroupSelection context prepared
   groups <- project prepared
   assert (length groups == 3) "module evidence fixture lost a group"
   (firstBody, secondBody, emptyBody) <- case groups of
@@ -66,12 +77,18 @@ verifyModuleEvidenceProjection = do
   rejectShape "invalid reachable root"
     "finite type graph contains an out-of-range node" (prepared
     { preparedPreparedSites = [site alpha 21 "invalid-root" 0 999999 []] })
+  compareFilterOracle context (prepared
+    { preparedPreparedSites = [site alpha 21 "invalid-root" 0 999999 []] })
   rejectShape "invalid reachable edge"
     "finite type graph contains an out-of-range node" (prepared
     { preparedPreparedSites = [site alpha 22 "invalid-edge" 0 (raw firstRoot) []]
     , preparedTypeGraph = graph { typeGraphEdges = IntMap.insert (index firstRoot)
         [(TypeBody, TypeNodeId 999999)] (typeGraphEdges graph) }
     })
+  compareFilterOracle context (prepared
+    { preparedPreparedSites = [site alpha 22 "invalid-edge" 0 (raw firstRoot) []]
+    , preparedTypeGraph = graph { typeGraphEdges = IntMap.insert (index firstRoot)
+        [(TypeBody, TypeNodeId 999999)] (typeGraphEdges graph) } })
   rejectShape "duplicate selected site id"
     "duplicate selected prepared site id 23" (prepared
     { preparedPreparedSites = [site alpha 23 "duplicate-one" 0 (raw firstRoot) [],
@@ -93,7 +110,7 @@ verifyModuleEvidenceProjection = do
     }) of
     Left (RejectedTypedSite "empty-root rejection") -> pure ()
     outcome -> fail ("empty-root fast path bypassed typed rejection: " ++ show outcome)
-  putStrLn "module evidence projection: 13 checks passed"
+  putStrLn "module evidence projection: group selection and evidence checks passed"
  where
   owner = mkModule (stringToUnit "main") (mkModuleName "ModuleEvidence")
   binder unique occurrence = mkVanillaGlobal
@@ -167,3 +184,166 @@ nominalHead graph root = do
       IntMap.findWithDefault [] (fromIntegral raw) (typeGraphEdges graph), actual == role] of
     [target] -> Just target
     _ -> Nothing
+
+-- The reference selector deliberately retains the old full-module filter.
+-- Compare complete projection/refusal outcomes and CBOR, not just membership.
+verifyGroupSelection :: ProjectionContext -> PreparedModule -> IO ()
+verifyGroupSelection context prepared = do
+  compareFilterOracle context prepared
+  compareFilterOracle context (prepared
+    { preparedSiteRejections = [SiteRejection (head owners) "original rejection"] })
+  let intrinsic = prepared
+        { preparedIntrinsicNames = Set.singleton (varName (head owners)) }
+  compareFilterOracle context intrinsic
+  case projectPreparedModuleGroups context intrinsic of
+    Left (UnelaboratedCompilerIntrinsic _) -> pure ()
+    outcome -> fail ("owning group view bypassed intrinsic refusal: " ++ show outcome)
+  compareFilterOracle context recursive
+  forM_ [take 1 recursiveSymbols, recursiveSymbols] $ \retained -> do
+    let retainedContext = context
+          { projectionRetainedGenerations = Map.fromList [(symbol, 7) | symbol <- retained] }
+    compareFilterOracle retainedContext recursive
+    projected <- either (fail . show) pure (projectPreparedModuleGroups retainedContext recursive)
+    assert (map projectedOriginalOrdinal projected ==
+      if length retained == 1 then [0, 1] else [0])
+      "retained recursive selection split a group or renumbered a survivor"
+  let rejectedSibling = prepared
+        { preparedSiteRejections = [SiteRejection (head owners) "unselected sibling rejection"] }
+  selected <- either (fail . show) pure (projectPreparedModuleGroupsSelected context
+    rejectedSibling (Just (Set.singleton 2)))
+  assert (map projectedOriginalOrdinal selected == [2])
+    "selected group inherited an unrelated sibling rejection or changed ordinal"
+  let sibling = last owners
+      siblingSymbol = SymbolIdentity "main" "ModuleEvidence" "value" "gamma" Nothing
+      referring = prepared
+        { preparedBindings =
+            [(StgTopLifted (StgNonRec first (StgRhsClosure emptyDVarSet dontCareCCS
+                ReEntrant [] (StgApp sibling []) addrPrimTy)), emptyVarSet)
+            , last (pmBindings prepared)]
+        , preparedPreparedSites = [], preparedSiteRejections = [] }
+      siblingRetained = context
+        { projectionRetainedGenerations = Map.singleton siblingSymbol 9 }
+  compareFilterOracle siblingRetained referring
+  referred <- either (fail . show) pure (projectPreparedModuleGroups context referring)
+  assert (map globalIdentity (projectedGlobals (projectedBody (head referred))) == [siblingSymbol])
+    "singleton projection lost the original sibling import identity"
+  forM_ (preparedBindingGroups metadata) $ \(_, view) -> do
+    (binding, free) <- case pmBindings view of
+      [item] -> pure item
+      _ -> fail "owning view did not contain exactly one original group"
+    assert (sort (map unique (nonDetEltsUniqSet free)) == sort (map unique owners))
+      "singleton view lost the original IdSet"
+    assert (pmModule view == pmModule metadata && pmCoverage view == pmCoverage metadata
+      && Map.map unique (pmSitedSiblings view) == Map.map unique (pmSitedSiblings metadata)
+      && pmYieldSites view == pmYieldSites metadata
+      && pmRequestSiteTyCon view == pmRequestSiteTyCon metadata
+      && pmTypeGraph view == pmTypeGraph metadata
+      && map (Effect.ysSite . psSite) (pmPreparedSites view) ==
+        map (Effect.ysSite . psSite) (pmPreparedSites metadata)
+      && map srMessage (pmSiteRejections view) == map srMessage (pmSiteRejections metadata)
+      && preparedUsesSiteAuthority view
+      && all (preparedRejectsIntrinsic view) owners
+      && map (fmap unique . preparedExpectedEntry view) owners == map (Just . unique) owners
+      && length (topBinders binding) == 1)
+      "singleton view changed compiler-owned sibling/site/type/entry metadata"
+  -- The first view needs only the first input cell; it never searches its tail.
+  let prefix = prepared { preparedBindings = head (pmBindings prepared) :
+        error "singleton selection scanned later groups" }
+  assert (length (pmBindings (snd (head (preparedBindingGroups prefix)))) == 1)
+    "singleton selection did not retain one group"
+  let collision = prepared
+        { preparedBindings =
+            [(StgTopStringLit (mkVanillaGlobal
+              (mkSystemName (mkUnique 'c' index) (mkVarOcc occurrence)) addrPrimTy)
+              "collision", emptyVarSet)
+            | (index, occurrence) <- zip [1 ..] ["sat", "sat.1", "sat"]]
+        , preparedPreparedSites = [], preparedSiteRejections = [] }
+  collisionGroup <- either (fail . show) pure (projectPreparedModuleGroupsSelected context
+    collision (Just (Set.singleton 2)))
+  assert (map (map symbolOccurrence . projectedBinders) collisionGroup == [["sat.2"]])
+    "group selection rebuilt the identity universe after filtering"
+  forM_ [16, 64, 256] $ \count -> do
+    let workload = prepared
+          { preparedBindings =
+              [(StgTopStringLit (binder (100 + index) ("group" ++ show index))
+                  "small group", emptyVarSet) | index <- [1 .. count]]
+          , preparedPreparedSites = [], preparedSiteRejections = [] }
+        views = preparedBindingGroups workload
+        newVisits = sum [length (pmBindings view) | (_, view) <- views]
+        -- Count every candidate the independent full-filter oracle examines.
+        oldVisits = sum [length (pmBindings workload) | _ <- views]
+    compareFilterOracle context workload
+    assert (newVisits == count && oldVisits == count * count)
+      "many-small-groups selection did not have the expected operation counts"
+    putStrLn ("group selection workload: groups=" ++ show count
+      ++ " singleton-items=" ++ show newVisits ++ " reference-candidates=" ++ show oldVisits)
+ where
+  assert condition message = unless condition (fail message)
+  unique = getKey . varUnique
+  owners = [identifier | (binding, _) <- pmBindings prepared, identifier <- topBinders binding]
+  binder index occurrence = mkVanillaGlobal
+    (mkExternalName (mkUnique 'g' index) (pmModule prepared) (mkVarOcc occurrence) noSrcSpan) addrPrimTy
+  first = binder 1 "recursiveFirst"
+  second = binder 2 "recursiveSecond"
+  rhs = StgRhsClosure emptyDVarSet dontCareCCS ReEntrant [] (StgLit LitNullAddr) addrPrimTy
+  recursive = prepared
+    { preparedBindings = [head (pmBindings prepared),
+        (StgTopLifted (StgRec [(first, rhs), (second, rhs)]), emptyVarSet)]
+    , preparedPreparedSites = [], preparedSiteRejections = [] }
+  recursiveSymbols =
+    [ SymbolIdentity "main" "ModuleEvidence" "value" occurrence Nothing
+    | occurrence <- ["recursiveFirst", "recursiveSecond"] ]
+  metadata = prepared
+    { preparedBindings = [(binding, mkVarSet owners) | (binding, _) <- pmBindings prepared]
+    , preparedSitedSiblings = Map.fromList [(show index, identifier)
+        | (index, identifier) <- zip [0 :: Int ..] owners]
+    , preparedYieldSites = map psSite (pmPreparedSites prepared)
+    , preparedSiteRejections = [SiteRejection (head owners) "retained metadata"]
+    , preparedAuthorityDependent = True
+    , preparedIntrinsicNames = Set.fromList (map varName owners)
+    , preparedExpectedEntries = Map.fromList [(varName identifier, identifier) | identifier <- owners] }
+
+compareFilterOracle :: ProjectionContext -> PreparedModule -> IO ()
+compareFilterOracle context prepared = do
+  let originals = pmBindings prepared
+      referenceViews =
+        [ (fromIntegral ordinal, prepared { preparedBindings = filter
+              (\(candidate, _) -> map varUnique (topBinders candidate) ==
+                map varUnique (topBinders binding)) originals })
+        | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals ]
+      reference = concat <$> traverse (\(ordinal, view) -> do
+        graph <- referenceTypeGraph view
+        map (\group -> group { projectedOriginalOrdinal = ordinal }) <$>
+          projectPreparedModuleGroups context (view { preparedTypeGraph = graph })) referenceViews
+      actual = projectPreparedModuleGroups context prepared
+  unless (actual == reference)
+    (fail ("owning singleton projection differs from full-filter oracle: " ++ show (actual, reference)))
+  case (actual, reference) of
+    (Right groups, Right expected) -> unless
+      (map encodeProjectedGroup groups == map encodeProjectedGroup expected)
+      (fail "owning singleton projection changed original group CBOR")
+    _ -> pure ()
+
+-- Independent worklist and the old whole-map filters preserve the original
+-- key order. Missing roots/edges refuse rather than disappear during lookup.
+referenceTypeGraph :: PreparedModule -> Either ProjectionError TypePolicy.TypeGraph
+referenceTypeGraph prepared = do
+  reached <- walk Set.empty roots
+  pure (TypeGraph
+    (IntMap.filterWithKey (\key _ -> key `Set.member` reached) (typeGraphNodes graph))
+    (IntMap.filterWithKey (\key _ -> key `Set.member` reached) (typeGraphEdges graph)))
+ where
+  graph = pmTypeGraph prepared
+  owners = Set.fromList [getKey (varUnique identifier)
+    | (binding, _) <- pmBindings prepared, identifier <- topBinders binding]
+  roots = [node | site <- pmPreparedSites prepared
+    , getKey (varUnique (psOwner site)) `Set.member` owners
+    , node <- psWireNode site : psInputNodes site]
+  walk visited [] = Right visited
+  walk visited (TypeNodeId raw : pending)
+    | key `Set.member` visited = walk visited pending
+    | IntMap.member key (typeGraphNodes graph) = walk (Set.insert key visited)
+        (map snd (IntMap.findWithDefault [] key (typeGraphEdges graph)) ++ pending)
+    | otherwise = Left (UnsupportedPreparedShape
+        "finite type graph contains an out-of-range node")
+   where key = fromIntegral raw

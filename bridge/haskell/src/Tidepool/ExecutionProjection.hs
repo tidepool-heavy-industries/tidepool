@@ -108,7 +108,7 @@ import Tidepool.Identity (varId)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
   , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon
-  , filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
+  , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
@@ -453,20 +453,18 @@ projectPreparedModuleGroupsFor purpose context prepared selection =
 projectPreparedModuleGroupOutcomesFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
 projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
-  [(ordinal, groupBinderSymbols item, projectOne ordinal item) | (ordinal, item) <- surviving]
+  [(ordinal, groupBinderSymbols item, projectOne ordinal item onlyGroup)
+  | (ordinal, item, onlyGroup) <- surviving]
   where
     identities = buildTopIdentityMap [prepared]
     originals = pmBindings prepared
     evidenceIndex = indexPreparedEvidence prepared
-    ordinalByFirst = Map.fromList
-      [ (getKey (varUnique first), fromIntegral ordinal)
-      | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals
-      , first : _ <- [topBinders binding] ]
     surviving =
-      [ (ordinal, item)
-      | item@(binding, _) <- pmBindings (dropRetainedTops context prepared)
-      , first : _ <- [topBinders binding]
-      , Just ordinal <- [Map.lookup (getKey (varUnique first)) ordinalByFirst]
+      [ (ordinal, item, onlyGroup)
+      | (ordinal, onlyGroup) <- preparedBindingGroups prepared
+      , item@(binding, _) <- pmBindings onlyGroup
+      , not (null (topBinders binding))
+      , keepPreparedTop context binding
       , maybe True (Set.member ordinal) selection ]
     allSymbols = Set.fromList
       [ symbol
@@ -476,9 +474,7 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
       mapMaybe (lookupVarEnv identities) (topBinders binding)
     owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
-    projectOne ordinal (binding, _) = do
-      let onlyGroup = filterPreparedBindings (\(selected,_) ->
-            map (getKey . varUnique) (topBinders selected) == map (getKey . varUnique) (topBinders binding)) prepared
+    projectOne ordinal (binding, _) onlyGroup = do
       refuseUnelaboratedIntrinsics [prepared] [onlyGroup]
       case [ srMessage rejection
            | rejection <- selectOwnedEvidence (topBinders binding)
@@ -1106,9 +1102,11 @@ topBinders (StgTopLifted binding) = bindingBinders binding
 -- 'topSymbols'/'homeModules' are built from the unfiltered module list
 -- upstream of this filter, never from this one.
 dropRetainedTops :: ProjectionContext -> PreparedModule -> PreparedModule
-dropRetainedTops context prepared = filterPreparedBindings keep prepared
-  where
-    keep (binding, _) = not (all (isJust . retainedGenerationOf context) (topBinders binding))
+dropRetainedTops context = filterPreparedBindings (keepPreparedTop context . fst)
+
+keepPreparedTop :: ProjectionContext -> CgStgTopBinding -> Bool
+keepPreparedTop context binding =
+  not (all (isJust . retainedGenerationOf context) (topBinders binding))
 
 -- | Assign stable identities to internal tops before any target reachability
 -- filtering.  Internal names may repeat (and a generated suffix may already
@@ -1400,8 +1398,16 @@ selectTypeGraph :: TypePolicy.TypeGraph -> [TypeNodeId]
 selectTypeGraph _ [] = Right TypePolicy.emptyTypeGraph
 selectTypeGraph graph roots = do
   reachable <- reachableTypeNodes graph roots
-  pure (TypeGraph (IntMap.filterWithKey (\index _ -> index `Set.member` reachable) (TypePolicy.tgNodes graph))
-    (IntMap.filterWithKey (\index _ -> index `Set.member` reachable) (TypePolicy.tgEdges graph)))
+  -- Reachability already authenticated every node and edge. Select those
+  -- original ascending keys without scanning unrelated module evidence.
+  nodes <- traverse (\index -> case IntMap.lookup index (TypePolicy.tgNodes graph) of
+      Just node -> Right (index, node)
+      Nothing -> Left (UnsupportedPreparedShape
+        "finite type graph contains an out-of-range node")) (Set.toAscList reachable)
+  pure (TypeGraph (IntMap.fromDistinctAscList nodes)
+    (IntMap.fromDistinctAscList
+      [(index, edges) | index <- Set.toAscList reachable
+      , Just edges <- [IntMap.lookup index (TypePolicy.tgEdges graph)]]))
 
 lowerSelectedTypeGraph :: Int -> TypePolicy.TypeGraph
   -> P (TypeGraph, TypeNodeId -> P TypeNodeId)

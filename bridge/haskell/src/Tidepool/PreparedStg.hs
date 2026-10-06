@@ -6,7 +6,7 @@
 module Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..)
   , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
-  , filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
+  , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule
   , RecoveredModuleInput(..)
   , RecoveredModuleFailure(..)
@@ -24,7 +24,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
 import GHC.Core.FVs (exprSomeFreeVars)
@@ -113,6 +113,14 @@ pmRequestSiteTyCon = preparedRequestSiteTyCon
 filterPreparedBindings :: ((CgStgTopBinding, IdSet) -> Bool) -> PreparedModule -> PreparedModule
 filterPreparedBindings keep prepared = prepared
   { preparedBindings = filter keep (preparedBindings prepared) }
+
+-- | Original-order views of this owner's existing groups. Each view retains
+-- every module, tag, sibling and typed-site fact; no caller supplies a body.
+-- Identity assignment must still use the complete module before selection.
+preparedBindingGroups :: PreparedModule -> [(Word32, PreparedModule)]
+preparedBindingGroups prepared =
+  [ (fromIntegral ordinal, prepared { preparedBindings = [item] })
+  | (ordinal, item) <- zip [0 :: Int ..] (preparedBindings prepared) ]
 
 -- | Intrinsics use original GHC Names, independently of their diagnostic text.
 preparedRejectsIntrinsic :: PreparedModule -> Id -> Bool
