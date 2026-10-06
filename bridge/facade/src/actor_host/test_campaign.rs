@@ -1066,7 +1066,10 @@ mod tests {
             }
             .call("prepared-children", "display True");
         }));
-        assert!(result.is_err(), "the fixture must reject its mismatched tool locally");
+        assert!(
+            result.is_err(),
+            "the fixture must reject its mismatched tool locally"
+        );
         assert!(response.await.is_err(), "no invalid tool call was sent");
     }
 }
