@@ -15543,73 +15543,73 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    async fn run_native_quoted_probe(
+        mut session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: crate::ActorSessionContext,
+        source: ActorWorkbenchSource,
+        prepared: &tidepool_runtime::session::PreparedSourceEntry,
+        expected: &str,
+    ) {
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        session.set_image_registry(Arc::clone(prepared.image_registry()));
+        let entry = session
+            .prepare_startup_entry(prepared.compiled().code())
+            .unwrap();
+        let ResidentOutcome::Suspended { hole, request, .. } =
+            session.run_startup_entry(entry).unwrap()
+        else {
+            panic!("selected original must execute its actual installer");
+        };
+        assert!(matches!(
+            ResidentRequest::decode(&request, session.data_con_table()).unwrap(),
+            ResidentRequest::AgentTools(
+                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(_, _)
+            )
+        ));
+        let dispatch = session
+            .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+            .unwrap()
+            .expect("installed dispatcher");
+        assert!(matches!(
+            session.resume(hole, ()).unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let step = workbench
+            .begin_tool(
+                context.clone(),
+                Arc::new(dispatch),
+                "probe".into(),
+                serde_json::json!({"topic": "selected original"}),
+            )
+            .await
+            .unwrap();
+        let result = match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                .settle_item(context, *fragment, (*outcome).into())
+                .await
+                .unwrap(),
+            step => step,
+        };
+        let ResidentWorkbenchStep::Committed { value, output, .. } = result else {
+            panic!(
+                "selected installer did not execute its native tool: {}",
+                describe_step(&result)
+            );
+        };
+        assert_eq!(value, Some(serde_json::json!(expected)));
+        assert_eq!(output, expected);
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before,
+            "native installation and tool execution must use the selected original"
+        );
+    }
+
     #[tokio::test]
     async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay() {
-        async fn run_native_probe(
-            mut session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
-            context: crate::ActorSessionContext,
-            source: ActorWorkbenchSource,
-            prepared: &PreparedSourceToolset,
-            expected: &str,
-        ) {
-            let before = tidepool_extract_cmd::extract_spawn_count();
-            session.set_image_registry(Arc::clone(prepared.prepared.entry.image_registry()));
-            let entry = session
-                .prepare_startup_entry(prepared.prepared.entry.compiled().code())
-                .unwrap();
-            let ResidentOutcome::Suspended { hole, request, .. } =
-                session.run_startup_entry(entry).unwrap()
-            else {
-                panic!("selected original must execute its actual installer");
-            };
-            assert!(matches!(
-                ResidentRequest::decode(&request, session.data_con_table()).unwrap(),
-                ResidentRequest::AgentTools(
-                    crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(_, _)
-                )
-            ));
-            let dispatch = session
-                .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
-                .unwrap()
-                .expect("installed dispatcher");
-            assert!(matches!(
-                session.resume(hole, ()).unwrap(),
-                ResidentOutcome::Completed { .. }
-            ));
-            let machines = Arc::new(ActorMachineRegistry::new());
-            machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None);
-            let step = workbench
-                .begin_tool(
-                    context.clone(),
-                    Arc::new(dispatch),
-                    "probe".into(),
-                    serde_json::json!({"topic": "selected original"}),
-                )
-                .await
-                .unwrap();
-            let result = match step {
-                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                    .settle_item(context, *fragment, (*outcome).into())
-                    .await
-                    .unwrap(),
-                step => step,
-            };
-            let ResidentWorkbenchStep::Committed { value, output, .. } = result else {
-                panic!(
-                    "selected installer did not execute its native tool: {}",
-                    describe_step(&result)
-                );
-            };
-            assert_eq!(value, Some(serde_json::json!(expected)));
-            assert_eq!(output, expected);
-            assert_eq!(
-                tidepool_extract_cmd::extract_spawn_count(),
-                before,
-                "native installation and tool execution must use the selected original"
-            );
-        }
-
         struct Snapshot {
             _owner: Arc<tempfile::TempDir>,
             identities: Vec<String>,
@@ -15726,11 +15726,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         // The installer wrapper imports separately certified original groups.
         // Its prepared bytes can stay equal when the quoted tool body changes.
         let (successor_session, successor_context, _, _successor_root) = host_mount_fixture();
-        run_native_probe(
+        run_native_quoted_probe(
             successor_session,
             successor_context,
             source.clone(),
-            &successor,
+            &successor.prepared.entry,
             "42",
         )
         .await;
@@ -15770,7 +15770,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
-        run_native_probe(session, context, source.clone(), &loaded, "41").await;
+        run_native_quoted_probe(
+            session,
+            context,
+            source.clone(),
+            &loaded.prepared.entry,
+            "41",
+        )
+        .await;
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
         let (recipe, original) = fresh.completed_entry_selection().unwrap();
@@ -15985,10 +15992,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         std::fs::write(&quotation_input, "42").unwrap();
         let installation =
             crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
-        let templates = [tidepool_runtime::session::TurnTemplate {
-            kind: tidepool_runtime::session::TemplateSelector::BindDiscard,
-            source: proof.original_source().into(),
-        }];
+        let dispatcher_effects = format!(
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
+            installation.effect_row,
+        );
+        let mut imports = source.workbench_imports.clone();
+        imports.extend_text("qualified QuotedAgentSpec");
+        imports.extend_text("qualified Tidepool.Agent.Contract");
+        imports.extend_text("qualified Tidepool.Effects.Core");
+        imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
+        imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+        let templates = resident_workbench_templates(
+            &source.preamble,
+            &dispatcher_effects,
+            &imports.template_text(),
+        );
         let scratch = tempfile::tempdir().unwrap();
         let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let ordinary =
@@ -16013,13 +16031,45 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let tidepool_runtime::session::TurnResult::Bind { compiled, .. } = ordinary else {
             panic!("ordinary quotation request must complete its actual discarded bind")
         };
+        let compiled = Arc::new(compiled);
         let successor = compiled.original_compile_input().unwrap();
         assert_eq!(
             proof.original_input_identity(),
             successor.original_input_identity()
         );
-        assert_ne!(first._prepared.entry.compiled().prepared, compiled.prepared);
         assert!(successor.replay_eligible_identity().is_none());
+        let ordinary_executions =
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+        assert!(ordinary_executions.lines().any(|input| input == "42"));
+        let before_native = tidepool_extract_cmd::extract_spawn_count();
+        let ready = tidepool_runtime::session::PreparedSourceEntry::prepare(
+            Arc::clone(&compiled),
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        )
+        .unwrap();
+        let (ordinary_session, ordinary_context, _, _ordinary_root) = host_mount_fixture();
+        run_native_quoted_probe(
+            ordinary_session,
+            ordinary_context,
+            source.clone(),
+            &ready,
+            "42",
+        )
+        .await;
+        let (original_session, original_context, _, _original_root) = host_mount_fixture();
+        run_native_quoted_probe(
+            original_session,
+            original_context,
+            source.clone(),
+            &first._prepared.entry,
+            "41",
+        )
+        .await;
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_native);
+        assert_eq!(
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+            ordinary_executions
+        );
         workbench.access.with_machine(context, move |session, _, _| {
             let entry = session.prepare_startup_entry(compiled.code())?;
             assert!(entry.compile_input_identity().is_none(), "changed untracked quotation output cannot authorize durable successor continuity");
