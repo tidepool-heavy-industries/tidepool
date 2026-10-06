@@ -278,9 +278,7 @@ pub(super) struct EntryPreparation {
 
 impl EntryPreparation {
     pub(super) fn reserve(output: &Path) -> Result<Self, CompileError> {
-        if output.exists() {
-            return Err(invalid("requires an absent ready entry output"));
-        }
+        require_absent_output(output)?;
         let parent =
             std::fs::canonicalize(output.parent().ok_or_else(|| invalid("output parent"))?)?;
         let _parent = tidepool_atomic_write::DirectoryAnchor::open_existing(&parent)
@@ -327,11 +325,12 @@ impl EntryPreparation {
         deployment: &AdmittedCompilerDeployment,
         targets: &[&str],
     ) -> Result<(), CompileError> {
-        if targets != ["__prepared"] || self.output.exists() {
+        if targets != ["__prepared"] {
             return Err(invalid(
                 "requires one original settled target and absent output",
             ));
         }
+        require_absent_output(&self.output)?;
         let manifest = EntryManifest {
             schema: ENTRY_SCHEMA,
             purpose: EntryPurpose::OriginalSource,
@@ -355,6 +354,7 @@ impl EntryPreparation {
         load_selected_production_entry(&self.staging, &authority, sources)?;
         sync_entry_tree(&self.staging)?;
         checkpoint(EntryCheckpoint::ReadyRename)?;
+        require_absent_output(&self.output)?;
         std::fs::rename(&self.staging, &self.output)?;
         // A failure here means the entry is visible. Confirm its durability
         // through the completed loader, never by repeating source execution.
@@ -369,6 +369,14 @@ impl EntryPreparation {
                 source,
             })?;
         Ok(())
+    }
+}
+
+fn require_absent_output(output: &Path) -> Result<(), CompileError> {
+    match std::fs::symlink_metadata(output) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(invalid("requires an absent ready entry output")),
     }
 }
 

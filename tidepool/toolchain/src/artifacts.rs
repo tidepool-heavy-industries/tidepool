@@ -5556,6 +5556,25 @@ mod module_product_tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg(unix)]
+    fn production_entry_dangling_output_refuses_reservation_before_compilation() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (1 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[root.path().to_owned()], &source).unwrap();
+        let output = root.path().join("entry");
+        let absent_target = root.path().join("absent-target");
+        std::os::unix::fs::symlink(&absent_target, &output).unwrap();
+        assert!(matches!(
+            prepare_frozen_production_entry(&sources, root.path(), &output),
+            Err(CompileError::ExtractFailed(_))
+        ));
+        assert_eq!(std::fs::read_link(&output).unwrap(), absent_target);
+        assert!(!root.path().join("entry.preparing").exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn production_entry_reservation_sync_failure_refuses_retry_before_compilation() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("Input.hs");
