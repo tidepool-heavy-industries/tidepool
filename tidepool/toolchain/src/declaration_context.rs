@@ -5346,11 +5346,16 @@ mod tests {
         let path = root.join("Ref.hs");
         std::fs::write(&path, source).unwrap();
         let mut admission = support_admission(root);
-        admission.evidence.sources = vec![crate::cache::SourceEvidence {
+        let mut evidence = admission.evidence.into_evidence();
+        evidence
+            .sources
+            .retain(|source| source.path == Path::new(crate::cache::GENERATED_SOURCE));
+        evidence.sources.push(crate::cache::SourceEvidence {
             path: path.clone(),
             sha256: sha256(source.as_bytes()),
-        }];
-        admission.evidence.modules = vec![crate::cache::ModuleEvidence {
+        });
+        evidence.resolutions.clear();
+        evidence.modules = vec![crate::cache::ModuleEvidence {
             unit: unit.into(),
             module: "Tidepool.Agent.Ref".into(),
             boot: false,
@@ -5358,7 +5363,12 @@ mod tests {
             imports: vec![],
             product: crate::cache::ProductAvailability::InterfaceOnly,
         }];
-        admission.evidence_bytes = serde_json::to_vec(&admission.evidence).unwrap();
+        admission.evidence_bytes = serde_json::to_vec(&evidence).unwrap();
+        admission.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
+            evidence,
+            "module Target where\n",
+        )
+        .unwrap();
         admission
     }
 
@@ -5497,10 +5507,15 @@ mod tests {
             .is_err());
         assert!(hidden.lexical_graph().is_empty());
         assert!(request.program_support.is_none());
-        let mut uncaptured = interface_only_agent_ref_admission(directory.path(), "main");
-        uncaptured.evidence.modules[0].source = directory.path().join("uncaptured.hs");
+        let uncaptured = interface_only_agent_ref_admission(directory.path(), "main");
+        let mut uncaptured = uncaptured.evidence.into_evidence();
+        uncaptured.modules[0].source = directory.path().join("uncaptured.hs");
+        assert!(crate::cache::CompletedSourceEvidence::from_normalized(
+            uncaptured,
+            "module Target where\n",
+        )
+        .is_err());
         for (case, producer, admissions) in [
-            ("uncaptured source", [2; 32], vec![uncaptured]),
             ("unadmitted source", [2; 32], vec![]),
             (
                 "different producer",

@@ -115,7 +115,9 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         .filter(|group| group.owner().module.starts_with("CandidateDemand"))
         .all(|group| group.origin() == ProductOrigin::Fresh));
     assert_eq!(
-        evaluator.run_target(&cold, "__prepared", frunk::HNil).json(),
+        evaluator
+            .run_target(&cold, "__prepared", frunk::HNil)
+            .json(),
         expected
     );
 
@@ -164,7 +166,9 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     }
     require_validation_only(&warm, "OptionalSupport");
     assert_eq!(
-        evaluator.run_target(&warm, "__prepared", frunk::HNil).json(),
+        evaluator
+            .run_target(&warm, "__prepared", frunk::HNil)
+            .json(),
         expected
     );
 
@@ -227,7 +231,9 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         "the issued native sibling must not need Core recovery"
     );
     assert_eq!(
-        evaluator.run_target(&later, "__prepared", frunk::HNil).json(),
+        evaluator
+            .run_target(&later, "__prepared", frunk::HNil)
+            .json(),
         sibling_expected
     );
 }
