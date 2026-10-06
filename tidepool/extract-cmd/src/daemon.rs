@@ -1500,6 +1500,7 @@ struct ResourceUsage {
     preparation: usize,
     foreground: usize,
     cpus: usize,
+    preparation_cpus: usize,
     slots: Vec<usize>,
 }
 
@@ -1527,7 +1528,10 @@ impl Drop for ResourcePermit {
         usage.cpus -= self.grant.capabilities as usize;
         match self.workload {
             CompileWorkload::Foreground => usage.foreground -= 1,
-            CompileWorkload::Preparation => usage.preparation -= 1,
+            CompileWorkload::Preparation => {
+                usage.preparation -= 1;
+                usage.preparation_cpus -= self.grant.capabilities as usize;
+            }
         }
     }
 }
@@ -1649,16 +1653,18 @@ impl ResourceAdmission {
             return None;
         }
         let foreground_cpus = capacity.cpus.min(self.foreground_jobs);
-        let reserved =
-            if workload == CompileWorkload::Preparation && usage.slots[reserved_slot] == 0 {
-                foreground_cpus
-            } else {
-                0
-            };
-        let available = capacity
-            .cpus
-            .saturating_sub(usage.cpus)
-            .saturating_sub(reserved);
+        let mut available = capacity.cpus.saturating_sub(usage.cpus);
+        if workload == CompileWorkload::Preparation {
+            // Accepted grants cannot change when another transaction finishes.
+            // Keep preparation within its own budget even while a foreground
+            // worker holds less than the full reserved foreground allowance.
+            available = available.min(
+                capacity
+                    .cpus
+                    .saturating_sub(foreground_cpus)
+                    .saturating_sub(usage.preparation_cpus),
+            );
+        }
         let cpus = available.min(match workload {
             CompileWorkload::Foreground => self.foreground_jobs,
             CompileWorkload::Preparation => self.preparation_jobs,
@@ -1675,7 +1681,10 @@ impl ResourceAdmission {
         usage.cpus += cpus;
         match workload {
             CompileWorkload::Foreground => usage.foreground += 1,
-            CompileWorkload::Preparation => usage.preparation += 1,
+            CompileWorkload::Preparation => {
+                usage.preparation += 1;
+                usage.preparation_cpus += cpus;
+            }
         }
         Some(ResourcePermit {
             owner: std::sync::Arc::clone(self),
@@ -3450,6 +3459,55 @@ mod tests {
     }
 
     #[test]
+    fn queued_foreground_grants_cannot_loan_preparation_the_reserved_cpu_budget() {
+        let resources = ResourceAdmission::new(2, 2 * WARM_WORKER_MB);
+        let capacity = admission_capacity(5, 2 * WARM_WORKER_MB);
+        let first = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        let spill = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        let queued = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!((first.slot, spill.slot, queued.slot), (0, 1, 0));
+        assert_eq!(
+            (
+                first.grant.capabilities,
+                spill.grant.capabilities,
+                queued.grant.capabilities
+            ),
+            (2, 2, 1)
+        );
+        drop((first, spill));
+
+        let preparation = resources
+            .acquire_with_capacity(CompileWorkload::Preparation, capacity)
+            .unwrap();
+        assert_eq!(preparation.slot, 1);
+        assert_eq!(
+            preparation.grant.capabilities, 3,
+            "preparation cannot borrow the CPU missing from an immutable foreground grant"
+        );
+        drop(queued);
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(foreground.slot, 0);
+        assert_eq!(
+            foreground.grant.capabilities, 2,
+            "the full foreground allowance remains available after predecessor cleanup"
+        );
+        assert_eq!(resources.usage.lock().unwrap().cpus, 5);
+        drop((preparation, foreground));
+        let usage = resources.usage.lock().unwrap();
+        assert_eq!(usage.cpus, 0);
+        assert_eq!(usage.preparation_cpus, 0);
+        assert_eq!(usage.jobs, 0);
+    }
+
+    #[test]
     fn live_memory_accounts_for_idle_residents_and_preserves_real_limits() {
         let resources = ResourceAdmission::new(3, 3 * WARM_WORKER_MB);
         assert!(resources
@@ -3482,16 +3540,30 @@ mod tests {
             .is_none());
     }
 
+    fn admission_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
     proptest::proptest! {
+        #![proptest_config(admission_property_config())]
         #[test]
         fn admission_histories_never_loan_foreground_or_exceed_cpu_capacity(
             cpus in 1usize..=32,
+            workers in 1usize..=5,
+            foreground_jobs in 1usize..=4,
+            preparation_jobs in 1usize..=8,
             history in proptest::collection::vec((0u8..3, 0usize..12), 1..100)
         ) {
             // The oracle recomputes occupancy/CPU from live permits. Shrinking
             // preserves explicit acquisition/release operations and logical handles.
-            let resources = ResourceAdmission::new(4, 4 * WARM_WORKER_MB);
-            let capacity = admission_capacity(cpus, 4 * WARM_WORKER_MB);
+            let resources = ResourceAdmission::with_limits(workers, workers as u64 * WARM_WORKER_MB, foreground_jobs, preparation_jobs);
+            let capacity = admission_capacity(cpus, workers as u64 * WARM_WORKER_MB);
             let mut held: Vec<ResourcePermit> = Vec::new();
             for (operation, index) in history {
                 match operation {
@@ -3503,52 +3575,102 @@ mod tests {
                     _ => {},
                 }
                 let used: usize = held.iter().map(|permit| permit.grant.capabilities as usize).sum();
+                let preparation_cpus: usize = held.iter().filter(|permit| permit.workload == CompileWorkload::Preparation).map(|permit| permit.grant.capabilities as usize).sum();
                 proptest::prop_assert!(used <= cpus);
                 proptest::prop_assert!(held.iter().filter(|permit| permit.workload == CompileWorkload::Preparation).all(|permit| permit.slot != 0));
-                if !held.iter().any(|permit| permit.slot == 0) {
-                    proptest::prop_assert!(used <= cpus.saturating_sub(cpus.min(2)));
+                proptest::prop_assert!(preparation_cpus <= cpus.saturating_sub(cpus.min(foreground_jobs)));
+                proptest::prop_assert!(held.iter().all(|permit| {
+                    let maximum = match permit.workload {
+                        CompileWorkload::Foreground => foreground_jobs,
+                        CompileWorkload::Preparation => preparation_jobs,
+                    };
+                    permit.grant.jobs > 0 && permit.grant.jobs as usize <= maximum
+                        && permit.grant.jobs == permit.grant.capabilities
+                }));
+                if held.iter().all(|permit| permit.workload == CompileWorkload::Preparation) {
+                    let foreground = resources.acquire_with_capacity(CompileWorkload::Foreground, capacity);
+                    proptest::prop_assert!(foreground.is_some(), "preparation must preserve foreground progress");
+                    let foreground = foreground.unwrap();
+                    proptest::prop_assert_eq!(foreground.slot, 0);
+                    proptest::prop_assert_eq!(foreground.grant.capabilities as usize, cpus.min(foreground_jobs));
+                    drop(foreground);
                 }
+                let mut slots = vec![0; workers];
+                for permit in &held { slots[permit.slot] += 1; }
                 let actual = resources.usage.lock().unwrap();
                 proptest::prop_assert_eq!(actual.cpus, used);
+                proptest::prop_assert_eq!(actual.preparation_cpus, preparation_cpus);
                 proptest::prop_assert_eq!(actual.jobs, held.len());
-                proptest::prop_assert_eq!(actual.slots.iter().sum::<usize>(), held.len());
+                proptest::prop_assert_eq!(actual.foreground, held.iter().filter(|permit| permit.workload == CompileWorkload::Foreground).count());
+                proptest::prop_assert_eq!(actual.preparation, held.iter().filter(|permit| permit.workload == CompileWorkload::Preparation).count());
+                proptest::prop_assert_eq!(&actual.slots, &slots);
             }
+            drop(held);
+            let actual = resources.usage.lock().unwrap();
+            proptest::prop_assert_eq!((actual.cpus, actual.preparation_cpus, actual.jobs), (0, 0, 0));
+            proptest::prop_assert!(actual.slots.iter().all(|used| *used == 0));
         }
     }
 
     #[test]
     fn failed_acceptance_releases_slot_and_grant_without_worker_execution() {
-        let resources = ResourceAdmission::new(1, WARM_WORKER_MB);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let (mut connection, peer) = UnixStream::pair().unwrap();
-        let worker_connection = connection.try_clone().unwrap();
-        drop(peer);
-        let mut identity = AdmissionId(0);
-        assert!(matches!(
-            admit_job_observed(
-                &[sender],
-                None,
-                &resources,
-                CompileWorkload::Foreground,
-                Job::Transaction(worker_connection),
-                &mut connection,
-                &mut identity,
-                admission_capacity(4, WARM_WORKER_MB)
-            ),
-            Admission::Continue
-        ));
-        let pending = receiver.recv().unwrap();
-        assert_eq!(pending.resource_permit.slot, 0);
-        assert!(pending.accepted.recv().is_err());
-        assert_eq!(resources.usage.lock().unwrap().jobs, 1);
-        drop(pending);
-        assert_eq!(resources.usage.lock().unwrap().jobs, 0);
-        assert!(resources
-            .acquire_with_capacity(
-                CompileWorkload::Foreground,
-                admission_capacity(4, WARM_WORKER_MB)
-            )
-            .is_some());
+        for (workload, workers, slot) in [
+            (CompileWorkload::Foreground, 1, 0),
+            (CompileWorkload::Preparation, 2, 1),
+        ] {
+            let memory = workers as u64 * WARM_WORKER_MB;
+            let resources = ResourceAdmission::new(workers, memory);
+            let capacity = admission_capacity(4, memory);
+            let (senders, receivers): (Vec<_>, Vec<_>) = (0..workers)
+                .map(|_| std::sync::mpsc::sync_channel(1))
+                .unzip();
+            let (mut connection, peer) = UnixStream::pair().unwrap();
+            let worker_connection = connection.try_clone().unwrap();
+            drop(peer);
+            let mut identity = AdmissionId(0);
+            assert!(matches!(
+                admit_job_observed(
+                    &senders,
+                    None,
+                    &resources,
+                    workload,
+                    Job::Transaction(worker_connection),
+                    &mut connection,
+                    &mut identity,
+                    capacity
+                ),
+                Admission::Continue
+            ));
+            let pending = receivers[slot].recv().unwrap();
+            assert_eq!(pending.resource_permit.slot, slot);
+            assert!(pending.accepted.recv().is_err());
+            {
+                let usage = resources.usage.lock().unwrap();
+                assert_eq!(usage.jobs, 1);
+                assert_eq!(
+                    usage.cpus,
+                    pending.resource_permit.grant.capabilities as usize
+                );
+                assert_eq!(
+                    usage.preparation_cpus,
+                    if workload == CompileWorkload::Preparation {
+                        usage.cpus
+                    } else {
+                        0
+                    }
+                );
+            }
+            drop(pending);
+            {
+                let usage = resources.usage.lock().unwrap();
+                assert_eq!((usage.jobs, usage.cpus, usage.preparation_cpus), (0, 0, 0));
+                assert!(usage.slots.iter().all(|used| *used == 0));
+            }
+            let foreground = resources
+                .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+                .unwrap();
+            assert_eq!(foreground.grant.capabilities, 2);
+        }
     }
 
     #[test]
