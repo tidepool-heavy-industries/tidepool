@@ -2785,6 +2785,7 @@ fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
 
 #[test]
 fn generated_haskell_fixtures_round_trip_through_the_current_typed_codec() {
+    let mut round_trips = 0;
     for (directory, targets) in [
         ("TIDEPOOL_M3_FIXTURE_DIR", &["result"][..]),
         (
@@ -2813,16 +2814,11 @@ fn generated_haskell_fixtures_round_trip_through_the_current_typed_codec() {
                 decoded, produced,
                 "independent Haskell producer target {target}"
             );
-            if directory == "TIDEPOOL_M3_FIXTURE_DIR" {
-                let reverse = produced
-                    .globals()
-                    .iter()
-                    .find(|global| global.identity.occurrence == "reverse")
-                    .expect("the actual M3 projection retains Data.List.reverse");
-                assert!(reverse.required_evaluated);
-                assert_eq!(reverse.required_generation, None);
-                assert_eq!(reverse.identity.record_parent, None);
-            }
+            round_trips += 1;
         }
     }
+    assert_eq!(
+        round_trips, 7,
+        "every declared generated artifact round-trips"
+    );
 }

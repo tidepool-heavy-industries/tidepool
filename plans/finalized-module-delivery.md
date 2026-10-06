@@ -151,9 +151,11 @@ fill worker slots.
    task with its narrower effect row and original typed reply. The historical
    descendant test is gated out of this native
    profile; a zero-match selection cannot substitute for live recursion.
-4. Run the structural prepared corpus and validate all seven registered embedded
-   artifacts in
-   [embedded-fixtures.json](../bridge/haskell/test-prepared-stg/embedded-fixtures.json).
+4. Run the structural prepared corpus and validate all seven generated artifacts
+   through `generated_haskell_fixtures_round_trip_through_the_current_typed_codec`
+   in [prepared_execution.rs](../tidepool/runtime/tests/prepared_execution.rs).
+   Their current source and target sets belong to the declared prepared fixture
+   producers in [bridge/haskell/BUCK](../bridge/haskell/BUCK).
    Use the same matched compiler/resource closure, not a historical cohort.
    Regenerate artifacts through their declared producer when required by the
    schema/ABI migration; never edit version bytes. Retain the corpus and artifact
