@@ -1059,7 +1059,9 @@ verifySiteDependencyHistories dir = do
     let partial = hscUpdateHPT (\homes -> addToHpt homes (moduleName carrierOwner) partialHome) fork
     unavailable <- prepareRecoveredModule partial (recoveredFixtureInput "TypedPreparationOwner" changedCarrier)
     environment <- resolvePreparedSiteEnvironment partial
-    assert (not (preparedSiteDependenciesMatch environment Map.empty unavailable)
+    assert (null (pmYieldSites unavailable)
+        && any (isInfixOf "missing RequestSite type authority" . srMessage) (pmSiteRejections unavailable)
+        && not (preparedSiteDependenciesMatch environment Map.empty unavailable)
         && not (preparedSiteDependenciesEquivalent unavailable unavailable))
       "partial current home details authorized an older imported declaration"
   absentSource <- writeTypedPreparationFixture absentDir

@@ -1,20 +1,16 @@
 module Tidepool.PreparedSites
   ( buildYieldSite
   , PreparedSite(..)
-  , SiteAuthority
-  , resolveSiteAuthority
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment
   , preparedSiteRequestAuthority
   , PreparedSiteDependencies, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
   , elaboratePreparedSitesWithDependencies
   , resolveRequestSiteTyCon
   , SiteRejection(..)
-  , elaboratePreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
   , resolvePreparedInterfaceSiblings
   , IntrinsicCensus, censusPreparedIntrinsics, intrinsicFree, intrinsicNames
-  , resolveRecoveredSiblings, requestSiteAuthority
   , requestReplyIndex
   ) where
 
@@ -144,31 +140,6 @@ censusPreparedIntrinsics tycons bindings = IntrinsicCensus dependent names surfa
       Tick _ body -> exprTypes body
       _ -> []
 
--- | Resolve package or hydrated-home siblings under their actual defining
--- unit. An unrelated same-spelled module cannot satisfy a surface call.
-resolveRecoveredSiblings :: HscEnv -> [CoreBind] -> IO (Map String Id)
-resolveRecoveredSiblings env bindings = do
-  let IntrinsicCensus _ _ surfaces = censusPreparedIntrinsics [] bindings
-  rows <- traverse resolve surfaces
-  pure (Map.fromList [row | Just row <- rows])
-  where
-    resolve surface = case (lookupPreparedVerb surface, nameModule_maybe (idName surface)) of
-      (Just spec, Just surfaceOwner) -> do
-        found <- findImportedModule env (mkModuleName (vsSitedModule spec)) NoPkgQual
-        case found of
-          Found _ owner | moduleUnit owner == moduleUnit surfaceOwner -> do
-            name <- initIfaceLoad env (lookupOrig owner (mkVarOcc (vsSitedName spec)))
-            existing <- lookupType env name
-            loaded <- case existing of
-              Just thing -> pure (Succeeded thing)
-              Nothing -> initIfaceLoad env (importDecl name)
-            pure $ case loaded of
-              Succeeded (AnId identifier) | nameModule_maybe (idName identifier) == Just owner ->
-                Just (vsName spec, identifier)
-              _ -> Nothing
-          _ -> pure Nothing
-      _ -> pure Nothing
-
 data SiteAuthority = SiteAuthority
   { requestSiteTyCon :: Maybe TyCon
   , responseResultTyCon :: Maybe TyCon
@@ -248,7 +219,7 @@ data PreparedSiteDependencies = PreparedSiteDependencies
   (Map String Id) (Map DependencyQuery DependencyFact)
 
 preparedSiteRequestAuthority :: PreparedSiteEnvironment -> Maybe TyCon
-preparedSiteRequestAuthority = requestSiteAuthority . environmentAuthority
+preparedSiteRequestAuthority = requestSiteTyCon . environmentAuthority
 
 preparedSiteDependenciesMatch :: PreparedSiteEnvironment -> Map String Id
   -> PreparedSiteDependencies -> Bool
@@ -454,14 +425,6 @@ observeDependency environment owned imported query = case query of
     orElse (Just value) _ = Just value
     orElse Nothing alternative = alternative
 
-requestSiteAuthority :: SiteAuthority -> Maybe TyCon
-requestSiteAuthority = requestSiteTyCon
-
--- | Resolve wrapper authority from each type's defining module. The real GHC
--- TyCon crosses into evidence; rendered spelling never carries authority.
-resolveSiteAuthority :: HscEnv -> IO SiteAuthority
-resolveSiteAuthority env = environmentAuthority <$> resolvePreparedSiteEnvironment env
-
 -- Resolve the defining declaration through GHC's module/interface authority.
 -- Projection compares this exact TyCon, never its rendered module spelling.
 resolveRequestSiteTyCon :: HscEnv -> IO (Maybe TyCon)
@@ -518,13 +481,6 @@ data SiteRejection = SiteRejection
 -- site argument, preserving the sibling's returning behavior. OPAQUE prevents
 -- inlining but not demand analysis: a whole-body error would mark callers as
 -- bottoming before this pass replaces the call.
-elaboratePreparedSites :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
-  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection])
-elaboratePreparedSites env authority siblings bindings = do
-  (rewritten, yields, issued, graph, failures, _) <-
-    elaboratePreparedSitesTracked env authority siblings bindings
-  pure (rewritten, yields, issued, graph, failures)
-
 -- | The queried objects and this witness come from the same elaboration. The
 -- caller cannot supply a dependency census or replace the resolved authority.
 elaboratePreparedSitesWithDependencies :: HscEnv -> PreparedSiteEnvironment
