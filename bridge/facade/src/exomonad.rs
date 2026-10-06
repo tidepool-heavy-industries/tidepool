@@ -2963,10 +2963,11 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            pinned.trimmed(),
-            git_stdout(example_skills().parent().unwrap(), &["rev-parse", "HEAD"])
-                .await
-                .trim()
+            git_stdout(&workspace, &["ls-tree", "HEAD", ".exomonad/workspace"]).await,
+            format!(
+                "160000 commit {}\t.exomonad/workspace\n",
+                scaffold::DEFAULT_WORKSPACE_REV,
+            ),
         );
     }
 
