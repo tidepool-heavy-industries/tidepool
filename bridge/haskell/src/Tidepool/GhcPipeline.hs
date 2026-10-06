@@ -1558,6 +1558,23 @@ data MemoSelectionKey = MemoSelectionKey Fingerprint (Set.Set SymbolIdentity)
   (Map.Map (String,String) HomeDependencyDigest)
   deriving (Eq, Ord)
 
+data MemoSelectionRefusal
+  = MemoSelectionOwner | MemoSelectionUnsealedClosure | MemoSelectionUnsealedUsage
+  | MemoSelectionSourceHash | MemoSelectionRetained | MemoSelectionHomeDependencies
+  | MemoSelectionExactEnvironmentAndUsages | MemoSelectionIncarnation
+  deriving (Eq, Show)
+
+memoSelectionRefusalName :: MemoSelectionRefusal -> String
+memoSelectionRefusalName reason = case reason of
+  MemoSelectionOwner -> "owner"
+  MemoSelectionUnsealedClosure -> "unsealed_closure"
+  MemoSelectionUnsealedUsage -> "unsealed_usage"
+  MemoSelectionSourceHash -> "source_hash"
+  MemoSelectionRetained -> "retained"
+  MemoSelectionHomeDependencies -> "home_dependencies"
+  MemoSelectionExactEnvironmentAndUsages -> "exact_environment_and_usages"
+  MemoSelectionIncarnation -> "incarnation"
+
 memoSelectionKey :: MemoValidity -> MemoSelectionKey
 memoSelectionKey validity = MemoSelectionKey (memoSourceHash validity)
   (memoRetained validity) (memoHomeDependencies validity) (memoIncarnation validity)
@@ -2250,27 +2267,32 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     selectedVersionsRef <- liftIO (newIORef Map.empty)
     executableObservationsRef <- liftIO $ if memoTrace
       then Just <$> newIORef Map.empty else pure Nothing
+    -- 'null' forces only through the first refusal, preserving the selection
+    -- predicate's short circuit. Rendering/full refusal enumeration is opt-in.
+    let selectionRefusals :: ModSummary -> CompletedModuleVersion -> [MemoSelectionRefusal]
+        selectionRefusals summary node =
+          let entry = completedModuleEntry node
+              validity = gmeValidity entry
+          in [reason | (valid, reason) <-
+               [(payloadOwner (gmePayload entry) == ms_mod summary, MemoSelectionOwner)
+               ,(ms_mod summary `Set.notMember` unsealedClosure, MemoSelectionUnsealedClosure)
+               ,(not (usesUnsealedSourceInputs unsealedInputs previous entry), MemoSelectionUnsealedUsage)
+               ,(memoSourceHash validity == ms_hs_hash summary, MemoSelectionSourceHash)
+               ,(memoRetained validity == retainedFor summary, MemoSelectionRetained)
+               ,(memoHomeDependencies validity == homeDependencyWitnesses summary, MemoSelectionHomeDependencies)
+               ,(sameExactEnvironment summary validity, MemoSelectionExactEnvironmentAndUsages)
+               ,(not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
+                   || (isJust incarnation && memoIncarnation validity == incarnation), MemoSelectionIncarnation)]
+             , not valid]
     case cycleState of
       TransactionCycle _ memo _ versions _ _ _ _ -> liftIO $ do
-        let matching summary node =
-              let entry = completedModuleEntry node
-                  validity = gmeValidity entry
-              in payloadOwner (gmePayload entry) == ms_mod summary
-                && ms_mod summary `Set.notMember` unsealedClosure
-                && not (usesUnsealedSourceInputs unsealedInputs previous entry)
-                && memoSourceHash validity == ms_hs_hash summary
-                && memoRetained validity == retainedFor summary
-                && memoHomeDependencies validity == homeDependencyWitnesses summary
-                && sameExactEnvironment summary validity
-                && (not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
-                  || (isJust incarnation && memoIncarnation validity == incarnation))
-            select summary = do
+        let select summary = do
               byIngress <- Map.lookup (ms_mod summary) versions
               let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
                     (homeDependencyWitnesses summary) (incarnationFor summary)
                     (exactImportEnvironment summary)
               narrowed <- Map.lookup ingress byIngress
-              find (matching summary) (Map.elems narrowed)
+              find (null . selectionRefusals summary) (Map.elems narrowed)
             selected = Map.fromList [(ms_mod summary,node)
               | summary <- Map.elems summaryByDependency, ms_mod summary /= targetOwner
               , Just node <- [select summary]]
@@ -2601,20 +2623,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             observation state narrowed originating failures omitted = MemoSelectionTrace
               state (unitString (moduleUnit (ms_mod summary))) keySha narrowed originating failures omitted
                 (Map.lookup (ms_mod summary) observedExecutables)
-            failedChecks node =
-              let entry = completedModuleEntry node
-                  validity = gmeValidity entry
-              in [label | (valid, label) <-
-                   [(payloadOwner (gmePayload entry) == ms_mod summary, "owner")
-                   ,(ms_mod summary `Set.notMember` unsealedClosure, "unsealed_closure")
-                   ,(not (usesUnsealedSourceInputs unsealedInputs previous entry), "unsealed_usage")
-                   ,(memoSourceHash validity == ms_hs_hash summary, "source_hash")
-                   ,(memoRetained validity == retainedFor summary, "retained")
-                   ,(memoHomeDependencies validity == homeDependencyWitnesses summary, "home_dependencies")
-                   ,(sameExactEnvironment summary validity, "exact_environment_and_usages")
-                   ,(not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
-                       || (isJust incarnation && memoIncarnation validity == incarnation), "incarnation")]
-                 , not valid]
             selection = case cycleState of
               StandaloneCycle -> observation MemoStandalone 0 Nothing [] 0
               TransactionCycle _ _ _ versions _ _ _ _
@@ -2628,7 +2636,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       in case Map.lookup ingress byIngress of
                         Nothing -> observation MemoIngressAbsent 0 Nothing [] 0
                         Just narrowed ->
-                          let checked = [(node, failedChecks node) | node <- Map.elems narrowed]
+                          let checked = [(node, map memoSelectionRefusalName (selectionRefusals summary node))
+                                | node <- Map.elems narrowed]
                               selected = Map.lookup (ms_mod summary) observedSelections
                               rejected = [(gmeCycle (completedModuleEntry node), checks)
                                 | (node, checks) <- checked, not (null checks)]
