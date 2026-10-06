@@ -4298,6 +4298,7 @@ mod tests {
 
     #[test]
     fn compiler_timings_and_structure_are_forwarded_to_the_daemon_trace() {
+        let reuse = r#"tidepool-reuse {"schema":1,"cycle":621890506509752,"purpose":"general","stage":"source_frontend","decision":"hit","reason":"matched","items":1,"bytes":null,"observed_ns":621890512307275,"unit":"main","module":"CompilerWidthLeaf00","version_kind":"source_fingerprint","version":"cb94c89252fb7ccb94e11ddcdd6331e6"}"#;
         let trace = CapturedWriter::default();
         let subscriber = tracing_subscriber(
             CapturedWriter::default(),
@@ -4320,6 +4321,14 @@ tidepool-canonical-frontend module=Original\n\
 tidepool-canonical-finalization module=Original\n\
 tidepool-checked module=Inspect target=False\n\
 tidepool-target phase=desugar module=Execute\n",
+            );
+            log_compile_timing(
+                "run-7",
+                "abcdef0123456789",
+                format!(
+                    "  {reuse}\ntidepool-reuse-error: witness failed\nOriginal.hs:1: error: tidepool-reuse is not in scope\n"
+                )
+                .as_bytes(),
             );
         });
 
@@ -4350,15 +4359,16 @@ tidepool-target phase=desugar module=Execute\n",
                 "tidepool-canonical-finalization module=Original",
                 "tidepool-checked module=Inspect target=False",
                 "tidepool-target phase=desugar module=Execute",
+                reuse,
             ]
         );
     }
 
     #[test]
     fn machine_stderr_is_kept_in_daemon_log_but_removed_from_diagnostics() {
-        let stderr = b"ghc: panic!\ntidepool-timing phase=load ms=12\n  tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"\n  tidepool-checked module=Foo target=True\ntidepool-dependency-witness nodes=3\nuseful detail\n";
+        let stderr = b"ghc: panic!\ntidepool-timing phase=load ms=12\n  tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"\n  tidepool-checked module=Foo target=True\ntidepool-dependency-witness nodes=3\n  tidepool-reuse {\"schema\":1}\ntidepool-reuse-error: witness failed\nOriginal.hs:1: error: tidepool-reuse is not in scope\nuseful detail\n";
         let diagnostic = String::from_utf8(diagnostic_stderr(stderr)).unwrap();
-        assert_eq!(diagnostic, "ghc: panic!\nuseful detail");
+        assert_eq!(diagnostic, "ghc: panic!\ntidepool-reuse-error: witness failed\nOriginal.hs:1: error: tidepool-reuse is not in scope\nuseful detail");
         let filtered = String::from_utf8_lossy(stderr);
         assert!(filtered.contains("tidepool-timing"));
         assert!(filtered.contains("tidepool-checked"));

@@ -67,6 +67,13 @@ fn meta_execution_lines_are_measurements_only_at_the_prefix_boundary() {
             "Original.hs:1: error: tidepool-meta-execution is not in scope",
             false,
         ),
+        ("tidepool-reuse {\"schema\":1}", true),
+        ("  tidepool-reuse {\"schema\":1}", true),
+        ("tidepool-reuse-error: witness failed", false),
+        (
+            "Original.hs:1: error: tidepool-reuse is not in scope",
+            false,
+        ),
     ] {
         assert_eq!(is_machine_stderr_line(line), machine);
     }
