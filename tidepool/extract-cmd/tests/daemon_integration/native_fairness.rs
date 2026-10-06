@@ -204,11 +204,40 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
         .iter()
         .filter(|r| message(r, "compiler request started"))
         .collect();
-    let foreground_start = starts
+    let prep_one_id = observation
+        .0
+        .as_ref()
+        .and_then(|r| r["span"]["admission_id"].as_u64());
+    let foreground_candidates: Vec<_> = starts
         .iter()
-        .filter(|r| r["span"]["compiler_workload"] == "foreground")
-        .last()
-        .copied();
+        .copied()
+        .filter(|r| {
+            r["span"]["compiler_workload"] == "foreground"
+                && prep_one_id
+                    .is_some_and(|id| r["span"]["admission_id"].as_u64().is_some_and(|n| n > id))
+        })
+        .collect();
+    let foreground_start = if foreground_candidates.len() == 1 {
+        Some(foreground_candidates[0])
+    } else {
+        None
+    };
+    let waiting_digest = observation
+        .1
+        .as_ref()
+        .and_then(|r| r["fields"]["compile_request"].as_str())
+        .filter(|digest| digest.len() == 16 && digest.bytes().all(|c| c.is_ascii_hexdigit()));
+    let second_preparation: Vec<_> = physical
+        .iter()
+        .copied()
+        .filter(|r| {
+            waiting_digest
+                .is_some_and(|digest| r["fields"]["compile_request"].as_str() == Some(digest))
+                && r["span"]["compiler_workload"] == "preparation"
+                && prep_one_id
+                    .is_some_and(|id| r["span"]["admission_id"].as_u64().is_some_and(|n| n > id))
+        })
+        .collect();
     let prep_finish = observation.0.as_ref().and_then(|start| {
         physical
             .iter()
@@ -228,17 +257,20 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
         }
         _ => false,
     };
-    let queued_digest_matches = observation.1.as_ref().is_some_and(|waiting| {
-        physical.iter().any(|r| {
-            r["fields"]["compile_request"] == waiting["fields"]["compile_request"]
-                && r["span"]["compiler_workload"] == "preparation"
-        })
-    });
+    let queued_digest_matches = second_preparation.len() == 1
+        && observation.0.as_ref().is_some_and(|start| {
+            waiting_digest.is_some_and(|digest| {
+                start["fields"]["compile_request"]
+                    .as_str()
+                    .is_some_and(|first| first != digest)
+            })
+        });
     let report = json!({"schema":1,"workload":"compiler-only source graph and warm source repeat",
         "graph_modules":65,"physical_requests":physical,"queue_observations":all.iter()
             .filter(|r| message(r,"compiler job dequeued")).collect::<Vec<_>>(),
         "preparation_started":observation.0,"second_preparation_waiting":observation.1,
-        "queued_digest_matches":queued_digest_matches,"reserved_slot_overlap_observed":overlap,
+        "queued_digest_matches":queued_digest_matches,"foreground_start":foreground_start,
+        "second_preparation_finished":second_preparation,"reserved_slot_overlap_observed":overlap,
         "worker_pids":worker_pids,"cleanup_confirmed":true,"status":if overlap {"observed"} else {"inconclusive"}});
     fs::write(
         root.join("fairness.json"),
@@ -276,7 +308,15 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
     let mut identities = std::collections::HashSet::new();
     for row in &physical {
         let span = &row["span"];
-        assert!(identities.insert(span["physical_execution"].as_str().unwrap()));
+        let digest = row["fields"]["compile_request"]
+            .as_str()
+            .expect("actual logical request digest");
+        assert!(digest.len() == 16 && digest.bytes().all(|c| c.is_ascii_hexdigit()));
+        let physical_id = span["physical_execution"]
+            .as_str()
+            .expect("actual physical request identity");
+        assert!(!physical_id.is_empty());
+        assert!(identities.insert(physical_id));
         assert_eq!(span["request_ordinal"], 1);
         assert_eq!(row["fields"]["exit_code"], 0);
         let preparation = span["compiler_workload"] == "preparation";
