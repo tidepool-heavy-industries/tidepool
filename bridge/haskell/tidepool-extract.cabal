@@ -88,6 +88,7 @@ library tidepool-extract-internal
     Tidepool.CompilerProducts
     Tidepool.CompileInput
     Tidepool.PrimOps
+    Tidepool.CompilerExecution
     Tidepool.PreparedStg
     Tidepool.PreparedStg.Internal
     Tidepool.PreparedRecovery

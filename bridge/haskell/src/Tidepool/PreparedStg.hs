@@ -12,7 +12,7 @@ module Tidepool.PreparedStg
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
   , prepareRecoveredBodies
-  , PreparedBodyCache, newPreparedBodyCache, evictPreparedBodyMatching
+  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, evictPreparedBodyMatching
   , newPreparedBodyPreparer
   ) where
 
@@ -270,6 +270,11 @@ newtype PreparedBodyCache =
 
 newPreparedBodyCache :: IO PreparedBodyCache
 newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty
+
+-- | Attempt additions are private until their compiler context is promoted.
+copyPreparedBodyCache :: PreparedBodyCache -> IO PreparedBodyCache
+copyPreparedBodyCache (PreparedBodyCache cacheRef) =
+  PreparedBodyCache <$> (readMVar cacheRef >>= newMVar)
 
 evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
 evictPreparedBodyMatching (PreparedBodyCache cacheRef) stale =
