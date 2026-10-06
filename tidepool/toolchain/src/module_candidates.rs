@@ -4446,7 +4446,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_canonical_candidate_remains_a_hard_deployment_refusal() {
+    fn corrupt_canonical_certificate_remains_a_hard_deployment_refusal() {
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let mut record = candidate_fixture(root.path(), "Library");
@@ -4465,13 +4465,9 @@ mod tests {
         .unwrap();
         assert_eq!(admitted.by_owner.len(), 1);
 
-        record.module_interface_proof = None;
-        record
-            .module_interface
-            .as_mut()
-            .unwrap()
-            .certificate_path = PathBuf::from("../invalid-certificate");
-        let include = record.include.clone();
+        // Keep the same in-memory canonical proof and alter only its sealed
+        // certification, so both controls traverse canonical validation.
+        record.original_certification.push(0);
         let selected = select_records_inner(
             b"endpoint",
             &include,
