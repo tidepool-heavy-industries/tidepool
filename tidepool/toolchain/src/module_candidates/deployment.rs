@@ -5,17 +5,17 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tidepool_repr::execution_schema::{InventoryOperation, ParseError};
 
-use super::{absolute, sha, version_hash, Record, CANDIDATE_LIMIT, RECORD_LIMIT};
+use super::{absolute, sha, version_hash, Record, RECORD_LIMIT};
 use crate::toolchain::CompilerDeploymentAuthority;
 
 mod source_selection;
 pub use source_selection::{NativeCatalogSourceSelection, NativeSourceRole};
-
-const CATALOG_LIMIT: usize = 1 << 20;
-const TOTAL_LIMIT: usize = 128 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModulePackageError {
@@ -60,12 +60,38 @@ pub enum ModulePackageError {
 fn canonical_error(error: crate::recovery_artifacts::RecoveryArtifactError) -> ModulePackageError {
     use crate::recovery_artifacts::RecoveryArtifactError as Error;
     match error {
+        Error::InventoryAccounting(_) => ModulePackageError::Bounds,
         Error::DigestMismatch(path)
         | Error::CertifiedOwnersDigestMismatch(path)
         | Error::InvalidCapturedPayload(path)
         | Error::InvalidModuleCertificate(path) => ModulePackageError::ArtifactChanged(path),
         Error::Unreadable { path, error } => io(&path, error),
         _ => ModulePackageError::Format("canonical module interface"),
+    }
+}
+
+fn decode_error(error: ParseError, format: &'static str) -> ModulePackageError {
+    match error {
+        ParseError::InventoryByteLimit { .. }
+        | ParseError::ModuleByteLimit { .. }
+        | ParseError::ByteLimit { .. }
+        | ParseError::LimitExceeded(_) => ModulePackageError::Bounds,
+        _ => ModulePackageError::Format(format),
+    }
+}
+
+fn certification_error(
+    error: crate::certified_products::CertificationError,
+    format: &'static str,
+) -> ModulePackageError {
+    match error {
+        crate::certified_products::CertificationError::Product(error) => {
+            decode_error(error, format)
+        }
+        crate::certified_products::CertificationError::SizeLimit { .. } => {
+            ModulePackageError::Bounds
+        }
+        _ => ModulePackageError::Format(format),
     }
 }
 
@@ -148,15 +174,95 @@ fn reject_source_aliases(root: &Path) -> Result<(), ModulePackageError> {
     Ok(())
 }
 
-fn read(path: &Path, limit: usize) -> Result<Vec<u8>, ModulePackageError> {
+fn read(
+    path: &Path,
+    limit: usize,
+    inventory: &InventoryOperation,
+) -> Result<Vec<u8>, ModulePackageError> {
+    let limit = limit.min(inventory.limits().max_bytes);
     let length = fs::metadata(path).map_err(|e| io(path, e))?.len();
     if length > limit as u64 {
         return Err(ModulePackageError::Bounds);
     }
-    let bytes = fs::read(path).map_err(|e| io(path, e))?;
-    if bytes.len() > limit {
-        return Err(ModulePackageError::Bounds);
+    crate::certified_products::read_bounded_with_operation(path, limit as u64, inventory).map_err(
+        |error| match error {
+            crate::certified_products::CertificationError::Product(_) => ModulePackageError::Bounds,
+            _ => ModulePackageError::ArtifactChanged(path.to_owned()),
+        },
+    )
+}
+
+fn decode_json<T: DeserializeOwned>(
+    bytes: &[u8],
+    inventory: &InventoryOperation,
+    format: &'static str,
+) -> Result<T, ModulePackageError> {
+    // Account the input visit and decoded string copies before deserialization.
+    inventory
+        .charge(
+            bytes
+                .len()
+                .checked_mul(2)
+                .ok_or(ModulePackageError::Bounds)?,
+        )
+        .map_err(|_| ModulePackageError::Bounds)?;
+    inventory
+        .reserve::<T>(1)
+        .map_err(|_| ModulePackageError::Bounds)?;
+    serde_json::from_slice(bytes).map_err(|_| ModulePackageError::Format(format))
+}
+
+fn encode_json<T: Serialize>(
+    value: &T,
+    inventory: &InventoryOperation,
+    limit: usize,
+    format: &'static str,
+    pretty: bool,
+) -> Result<Vec<u8>, ModulePackageError> {
+    struct Size {
+        bytes: usize,
+        limit: usize,
     }
+    impl std::io::Write for Size {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|size| *size <= self.limit)
+                .ok_or_else(|| std::io::Error::other("catalog JSON byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut size = Size { bytes: 0, limit };
+    let measured = if pretty {
+        serde_json::to_writer_pretty(&mut size, value)
+    } else {
+        serde_json::to_writer(&mut size, value)
+    };
+    measured.map_err(|error| {
+        if error.is_io() {
+            ModulePackageError::Bounds
+        } else {
+            ModulePackageError::Format(format)
+        }
+    })?;
+    inventory
+        .charge(
+            size.bytes
+                .checked_mul(2)
+                .ok_or(ModulePackageError::Bounds)?,
+        )
+        .map_err(|_| ModulePackageError::Bounds)?;
+    let mut bytes = Vec::with_capacity(size.bytes);
+    let encoded = if pretty {
+        serde_json::to_writer_pretty(&mut bytes, value)
+    } else {
+        serde_json::to_writer(&mut bytes, value)
+    };
+    encoded.map_err(|_| ModulePackageError::Format(format))?;
     Ok(bytes)
 }
 
@@ -246,9 +352,23 @@ impl DeploymentModulePackage {
         authority: &CompilerDeploymentAuthority,
         policy: RootPolicy,
     ) -> Result<Self, ModulePackageError> {
-        let mut package = Self::read_catalog_under(path, authority, policy)?;
+        Self::load_with_inventory(
+            path,
+            authority,
+            policy,
+            Arc::new(InventoryOperation::new(Default::default())),
+        )
+    }
+
+    fn load_with_inventory(
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+        policy: RootPolicy,
+        inventory: Arc<InventoryOperation>,
+    ) -> Result<Self, ModulePackageError> {
+        let mut package = Self::read_catalog_with_inventory(path, authority, policy, &inventory)?;
         // Validate configured products before candidate admission.
-        package.records = package.read_records(package.producer_identity())?;
+        package.records = package.read_records(package.producer_identity(), inventory)?;
         Ok(package)
     }
 
@@ -268,9 +388,31 @@ impl DeploymentModulePackage {
         authority: &CompilerDeploymentAuthority,
         policy: RootPolicy,
     ) -> Result<Self, ModulePackageError> {
-        let bytes = read(path, CATALOG_LIMIT)?;
-        let catalog: Catalog = serde_json::from_slice(&bytes)
-            .map_err(|_| ModulePackageError::Format("catalog JSON"))?;
+        Self::read_catalog_with_inventory(
+            path,
+            authority,
+            policy,
+            &InventoryOperation::new(Default::default()),
+        )
+    }
+
+    fn read_catalog_with_inventory(
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+        policy: RootPolicy,
+        inventory: &InventoryOperation,
+    ) -> Result<Self, ModulePackageError> {
+        let bytes = read(path, inventory.limits().max_bytes, inventory)?;
+        let catalog: Catalog = decode_json(&bytes, inventory, "catalog JSON")?;
+        inventory
+            .reserve::<ModuleFiles>(catalog.modules.len())
+            .and_then(|_| inventory.reserve::<FileRef>(catalog.execution_graphs.len()))
+            .and_then(|_| {
+                inventory.reserve::<source_selection::NativeCatalogSourceFile>(
+                    catalog.source_selection.source_files.len(),
+                )
+            })
+            .map_err(|_| ModulePackageError::Bounds)?;
         if catalog.schema != 4 {
             return Err(ModulePackageError::Format("catalog schema"));
         }
@@ -293,11 +435,16 @@ impl DeploymentModulePackage {
         {
             return Err(ModulePackageError::RootMoved);
         }
-        if catalog.modules.is_empty() || catalog.modules.len() > CANDIDATE_LIMIT {
+        if catalog.modules.is_empty() {
             return Err(ModulePackageError::Bounds);
         }
-        let source_identity = sha(&serde_json::to_vec(&catalog.source_selection)
-            .map_err(|_| ModulePackageError::Format("source selection"))?);
+        let source_identity = sha(&encode_json(
+            &catalog.source_selection,
+            inventory,
+            inventory.limits().max_bytes,
+            "source selection",
+            false,
+        )?);
         Ok(Self {
             catalog,
             artifact_root,
@@ -310,7 +457,8 @@ impl DeploymentModulePackage {
     fn read_ref(
         &self,
         reference: &FileRef,
-        remaining: &mut usize,
+        limit: usize,
+        inventory: &InventoryOperation,
     ) -> Result<Vec<u8>, ModulePackageError> {
         if reference.path.as_os_str().is_empty()
             || reference
@@ -324,10 +472,10 @@ impl DeploymentModulePackage {
         if absolute(&path).as_ref() != Some(&path) {
             return Err(ModulePackageError::RootMoved);
         }
-        let bytes = read(&path, RECORD_LIMIT.min(*remaining))?;
-        *remaining = remaining
-            .checked_sub(bytes.len())
-            .ok_or(ModulePackageError::Bounds)?;
+        if reference.length > limit as u64 {
+            return Err(ModulePackageError::Bounds);
+        }
+        let bytes = read(&path, limit, inventory)?;
         if bytes.len() as u64 != reference.length || sha(&bytes) != reference.sha256 {
             return Err(ModulePackageError::ArtifactChanged(path));
         }
@@ -365,20 +513,42 @@ impl DeploymentModulePackage {
             .collect())
     }
 
-    fn read_records(&self, producer: &[u8]) -> Result<Vec<Record>, ModulePackageError> {
+    fn read_records(
+        &self,
+        producer: &[u8],
+        inventory: Arc<InventoryOperation>,
+    ) -> Result<Vec<Record>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
-        let mut remaining = TOTAL_LIMIT;
-        let mut records = Vec::new();
+        inventory
+            .reserve::<Record>(self.catalog.modules.len())
+            .and_then(|_| {
+                inventory.reserve::<((String, String), [usize; 4])>(self.catalog.modules.len())
+            })
+            .and_then(|_| {
+                inventory.reserve::<([u8; 32], [usize; 8])>(self.catalog.execution_graphs.len())
+            })
+            .map_err(|_| ModulePackageError::Bounds)?;
+        let mut records = Vec::with_capacity(self.catalog.modules.len());
         let mut owners = BTreeSet::new();
         let mut graphs = std::collections::BTreeMap::new();
-        if self.catalog.execution_graphs.len() > CANDIDATE_LIMIT {
-            return Err(ModulePackageError::Bounds);
-        }
-        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+            inventory.clone(),
+        );
         for reference in &self.catalog.execution_graphs {
-            let bytes = self.read_ref(reference, &mut remaining)?;
+            let bytes = self.read_ref(
+                reference,
+                crate::execution_source::GRAPH_BYTES_LIMIT,
+                &inventory,
+            )?;
+            let wire = inventory
+                .decode_value(&bytes, crate::execution_source::GRAPH_BYTES_LIMIT)
+                .map_err(|error| decode_error(error, "execution graph"))?;
+            inventory
+                .charge_value_copies(&wire, 2)
+                .map_err(|_| ModulePackageError::Bounds)?;
+            drop(wire);
             let digest = super::parse_sha(&reference.sha256)
                 .ok_or(ModulePackageError::Format("execution graph digest"))?;
             let graph = crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
@@ -390,15 +560,29 @@ impl DeploymentModulePackage {
             }
         }
         for files in &self.catalog.modules {
-            let owner: Owner =
-                serde_json::from_slice(&self.read_ref(&files.owner, &mut remaining)?)
-                    .map_err(|_| ModulePackageError::Format("owner JSON"))?;
+            let owner: Owner = decode_json(
+                &self.read_ref(&files.owner, RECORD_LIMIT, &inventory)?,
+                &inventory,
+                "owner JSON",
+            )?;
+            inventory
+                .charge(
+                    owner
+                        .unit
+                        .len()
+                        .checked_add(owner.module.len())
+                        .ok_or(ModulePackageError::Bounds)?,
+                )
+                .and_then(|_| inventory.reserve::<PathBuf>(owner.include.len()))
+                .map_err(|_| ModulePackageError::Bounds)?;
             if !owners.insert((owner.unit.clone(), owner.module.clone())) {
                 return Err(ModulePackageError::Format("duplicate module owner"));
             }
-            let evidence: super::shared_evidence::SharedEvidence =
-                serde_json::from_slice(&self.read_ref(&files.evidence, &mut remaining)?)
-                    .map_err(|_| ModulePackageError::Format("dependency evidence JSON"))?;
+            let evidence: super::shared_evidence::SharedEvidence = decode_json(
+                &self.read_ref(&files.evidence, RECORD_LIMIT, &inventory)?,
+                &inventory,
+                "dependency evidence JSON",
+            )?;
             let mut record = Record {
                 evidence: evidence.clone(),
                 module_interface_proof: None,
@@ -417,9 +601,13 @@ impl DeploymentModulePackage {
                     source: owner.source,
                     source_sha256: owner.source_sha256,
                     target_source: owner.target_source,
-                    products: self.read_ref(&files.products, &mut remaining)?,
-                    interface: self.read_ref(&files.interface, &mut remaining)?,
-                    package_imports: self.read_ref(&files.packages, &mut remaining)?,
+                    products: self.read_ref(
+                        &files.products,
+                        inventory.limits().max_module_bytes,
+                        &inventory,
+                    )?,
+                    interface: self.read_ref(&files.interface, RECORD_LIMIT, &inventory)?,
+                    package_imports: self.read_ref(&files.packages, RECORD_LIMIT, &inventory)?,
                     version_origin: owner
                         .version_origin
                         .unwrap_or(super::CandidateVersionOrigin::Ordinary),
@@ -430,7 +618,11 @@ impl DeploymentModulePackage {
                         skinny_iface_sha256: [0; 32],
                         product_sha256: [0; 32],
                     }),
-                    original_certification: self.read_ref(&files.certification, &mut remaining)?,
+                    original_certification: self.read_ref(
+                        &files.certification,
+                        RECORD_LIMIT,
+                        &inventory,
+                    )?,
                     module_interface: Some(files.module_interface.clone()),
                     execution_source_sha256: owner.execution_source_sha256,
                 },
@@ -439,7 +631,6 @@ impl DeploymentModulePackage {
                 return Err(ModulePackageError::Format("original full owner"));
             }
             let reference = &files.module_interface;
-            let mut captured_bytes = 0usize;
             for relative in [
                 &reference.interface.interface_path,
                 &reference.interface.package_imports_path,
@@ -461,14 +652,7 @@ impl DeploymentModulePackage {
                 if absolute(&path).as_ref() != Some(&path) {
                     return Err(ModulePackageError::RootMoved);
                 }
-                let length = fs::metadata(&path).map_err(|error| io(&path, error))?.len();
-                captured_bytes = captured_bytes
-                    .checked_add(usize::try_from(length).map_err(|_| ModulePackageError::Bounds)?)
-                    .ok_or(ModulePackageError::Bounds)?;
             }
-            remaining = remaining
-                .checked_sub(captured_bytes)
-                .ok_or(ModulePackageError::Bounds)?;
             let canonical = crate::recovery_artifacts::recover_module_interface(
                 &self.artifact_root,
                 reference,
@@ -484,7 +668,7 @@ impl DeploymentModulePackage {
             {
                 return Err(ModulePackageError::Format("canonical producer/source"));
             }
-            crate::certified_products::validate_canonical_native_bytes(
+            crate::certified_products::validate_canonical_native_bytes_with_operation(
                 &record.original_owner.owner(),
                 &record.original_certification,
                 &record.interface,
@@ -494,8 +678,9 @@ impl DeploymentModulePackage {
                         .ok_or(ModulePackageError::Format("canonical source digest"))?,
                 ),
                 &canonical,
+                &inventory,
             )
-            .map_err(|_| ModulePackageError::Format("canonical native binding"))?;
+            .map_err(|error| certification_error(error, "canonical native binding"))?;
             record.module_interface_proof = Some(canonical);
             if let Some(digest) = record.execution_source_sha256 {
                 let graph = graphs
@@ -520,18 +705,15 @@ impl DeploymentModulePackage {
             }
             let requirements = crate::prepared_artifact::production_requirements()
                 .map_err(|_| ModulePackageError::Format("host requirements"))?;
-            let parsed = tidepool_repr::execution_schema::parse_module_products(
-                &record.products,
-                &requirements,
-                super::product_decode_limits(),
-            )
-            .map_err(|_| ModulePackageError::Format("original module products"))?;
+            let parsed = inventory
+                .parse_module_products(&record.products, &requirements)
+                .map_err(|error| decode_error(error, "original module products"))?;
             if parsed.len() != 1
                 || parsed[0].unit != record.unit
                 || parsed[0].module != record.module
                 || parsed[0].interface != record.interface
                 || record.interface.is_empty()
-                || sha(&read(&record.source, RECORD_LIMIT)?) != record.source_sha256
+                || sha(&read(&record.source, RECORD_LIMIT, &inventory)?) != record.source_sha256
                 || record
                     .evidence
                     .modules
@@ -555,14 +737,15 @@ impl DeploymentModulePackage {
             }
             use sha2::Digest;
             let iface_sha: [u8; 32] = sha2::Sha256::digest(&record.interface).into();
-            crate::recovery_artifacts::validate_package_imports(
+            crate::recovery_artifacts::validate_package_imports_with_validation(
                 &record.package_imports,
                 &record.unit,
                 &record.module,
                 &iface_sha,
                 &self.artifact_root,
+                &mut validation,
             )
-            .map_err(|_| ModulePackageError::Format("package imports"))?;
+            .map_err(canonical_error)?;
             records.push(record);
         }
         for record in &records {
@@ -653,6 +836,7 @@ mod tests {
     use super::super::tests::{package_bundle, product_bytes};
     use super::*;
     use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
+    use tidepool_repr::execution_schema::InventoryDecodeLimits;
 
     struct Fixture {
         _root: tempfile::TempDir,
@@ -882,6 +1066,146 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&Value::Array(fields), &mut bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn complete_catalog_preserves_more_than_optional_candidate_capacity() {
+        let names = (0..129)
+            .map(|index| format!("Owner{index:03}"))
+            .collect::<Vec<_>>();
+        let expected = names.iter().cloned().collect::<BTreeSet<_>>();
+        let fixture = Fixture::with_modules(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let path = fixture.output.join("catalog.json");
+        let catalog = fixture.catalog();
+        assert_eq!(catalog.modules.len(), expected.len());
+        let package = fixture.load().unwrap();
+        assert_eq!(package.records.len(), expected.len());
+        assert_eq!(
+            package
+                .records
+                .iter()
+                .map(|record| record.module.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+
+        // JSON whitespace changes no receipt or source selection. Exact metadata
+        // uses the enclosing inventory budget, not a small cache-manifest cap.
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.resize(bytes.len().max((1 << 20) + 1), b' ');
+        fs::write(&path, &bytes).unwrap();
+        let package = fixture.load().unwrap();
+        assert_eq!(package.records.len(), expected.len());
+        assert_eq!(
+            package
+                .records
+                .iter()
+                .map(|record| record.module.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+
+        let mut incomplete = catalog.clone();
+        incomplete.modules.pop().unwrap();
+        fs::write(&path, serde_json::to_vec(&incomplete).unwrap()).unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::IncompleteProduct { .. })
+        ));
+        fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        let last = catalog.modules.last().unwrap();
+        fs::write(
+            fixture.output.join(&last.products.path),
+            b"changed original",
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::ArtifactChanged(_))
+        ));
+    }
+
+    #[test]
+    fn complete_catalog_reads_share_work_and_refuse_byte_limits() {
+        let fixture = Fixture::with_modules(&["A", "B"]);
+        let path = fixture.output.join("catalog.json");
+        let package = DeploymentModulePackage::read_catalog_under(
+            &path,
+            &fixture.authority,
+            RootPolicy::Fixture,
+        )
+        .unwrap();
+        let first = &package.catalog.modules[0].products;
+        let second = &package.catalog.modules[1].products;
+        let limits = InventoryDecodeLimits {
+            max_work: usize::try_from(first.length + second.length + 1).unwrap(),
+            ..Default::default()
+        };
+        for reference in [first, second] {
+            assert!(package
+                .read_ref(
+                    reference,
+                    limits.max_module_bytes,
+                    &InventoryOperation::new(limits)
+                )
+                .is_ok());
+        }
+        let shared = InventoryOperation::new(limits);
+        assert!(package
+            .read_ref(first, limits.max_module_bytes, &shared)
+            .is_ok());
+        assert!(matches!(
+            package.read_ref(second, limits.max_module_bytes, &shared),
+            Err(ModulePackageError::Bounds)
+        ));
+
+        let bytes = fs::metadata(&path).unwrap().len();
+        for limits in [
+            InventoryDecodeLimits {
+                max_bytes: usize::try_from(bytes - 1).unwrap(),
+                ..Default::default()
+            },
+            InventoryDecodeLimits {
+                max_work: 1,
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                DeploymentModulePackage::load_with_inventory(
+                    &path,
+                    &fixture.authority,
+                    RootPolicy::Fixture,
+                    Arc::new(InventoryOperation::new(limits))
+                ),
+                Err(ModulePackageError::Bounds)
+            ));
+        }
+        assert_eq!(fixture.load().unwrap().records.len(), 2);
+    }
+
+    #[test]
+    fn complete_catalog_keeps_record_and_module_file_bounds() {
+        let fixture = Fixture::new();
+        let catalog = fixture.catalog();
+        for (reference, limit) in [
+            (&catalog.modules[0].owner, RECORD_LIMIT),
+            (
+                &catalog.modules[0].products,
+                InventoryDecodeLimits::default().max_module_bytes,
+            ),
+        ] {
+            let path = fixture.output.join(&reference.path);
+            let original = fs::read(&path).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len((limit as u64) + 1)
+                .unwrap();
+            assert!(matches!(fixture.load(), Err(ModulePackageError::Bounds)));
+            fs::write(&path, original).unwrap();
+        }
+        assert_eq!(fixture.load().unwrap().records.len(), 1);
     }
 
     #[test]
@@ -1487,7 +1811,21 @@ mod tests {
     }
 }
 
-fn write_ref(root: &Path, relative: PathBuf, bytes: &[u8]) -> Result<FileRef, ModulePackageError> {
+fn write_ref(
+    root: &Path,
+    relative: PathBuf,
+    bytes: &[u8],
+    limit: usize,
+    inventory: &InventoryOperation,
+) -> Result<FileRef, ModulePackageError> {
+    let limit = limit.min(inventory.limits().max_bytes);
+    if bytes.len() > limit {
+        return Err(ModulePackageError::Bounds);
+    }
+    inventory
+        .charge(bytes.len())
+        .and_then(|_| inventory.reserve::<FileRef>(1))
+        .map_err(|_| ModulePackageError::Bounds)?;
     let path = root.join(&relative);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| io(parent, e))?
@@ -1523,6 +1861,7 @@ fn export_under(
     prepared: &super::PreparedPublication<'_>,
     policy: RootPolicy,
 ) -> Result<(), ModulePackageError> {
+    let inventory = &prepared.inventory;
     let producer = prepared.endpoint_identity;
     let include = prepared.include;
     let evidence = prepared.evidence;
@@ -1545,15 +1884,20 @@ fn export_under(
     }
     let records = &prepared.records;
     require_complete_cohort(&records, evidence)?;
-    if records.is_empty() || records.len() > CANDIDATE_LIMIT {
+    if records.is_empty() {
         return Err(ModulePackageError::Bounds);
     }
     for record in records {
         require_complete_cohort(records, &record.evidence)?;
     }
     validate_closed(records, source_selection)?;
-    let mut modules = Vec::new();
-    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    inventory
+        .reserve::<ModuleFiles>(records.len())
+        .and_then(|_| inventory.reserve::<FileRef>(prepared.graphs.len()))
+        .map_err(|_| ModulePackageError::Bounds)?;
+    let mut modules = Vec::with_capacity(records.len());
+    let mut validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(inventory.clone());
     for record in records {
         let canonical =
             record
@@ -1572,13 +1916,26 @@ fn export_under(
         if record.original_certification.is_empty() {
             return Err(ModulePackageError::Format("missing native certification"));
         }
+        for (bytes, limit) in [
+            (
+                record.products.as_slice(),
+                inventory.limits().max_module_bytes,
+            ),
+            (record.interface.as_slice(), RECORD_LIMIT),
+            (record.package_imports.as_slice(), RECORD_LIMIT),
+            (record.original_certification.as_slice(), RECORD_LIMIT),
+        ] {
+            if bytes.len() > limit {
+                return Err(ModulePackageError::Bounds);
+            }
+        }
         let module_interface = crate::recovery_artifacts::materialize_module_interface(
             output_root,
             canonical,
             &mut validation,
             crate::recovery_artifacts::MaterializationMode::Durable,
         )
-        .map_err(|_| ModulePackageError::Format("canonical module materialization"))?;
+        .map_err(canonical_error)?;
         let directory =
             PathBuf::from("modules")
                 .join(sha(format!("{}:{}", record.unit, record.module).as_bytes()));
@@ -1599,30 +1956,50 @@ fn export_under(
             owner: write_ref(
                 output_root,
                 directory.join("owner.json"),
-                &serde_json::to_vec(&owner)
-                    .map_err(|_| ModulePackageError::Format("owner encoding"))?,
+                &encode_json(&owner, inventory, RECORD_LIMIT, "owner encoding", false)?,
+                RECORD_LIMIT,
+                inventory,
             )?,
             products: write_ref(
                 output_root,
                 directory.join("products.cbor"),
                 &record.products,
+                inventory.limits().max_module_bytes,
+                inventory,
             )?,
-            interface: write_ref(output_root, directory.join("skinny.hi"), &record.interface)?,
+            interface: write_ref(
+                output_root,
+                directory.join("skinny.hi"),
+                &record.interface,
+                RECORD_LIMIT,
+                inventory,
+            )?,
             packages: write_ref(
                 output_root,
                 directory.join("packages.cbor"),
                 &record.package_imports,
+                RECORD_LIMIT,
+                inventory,
             )?,
             evidence: write_ref(
                 output_root,
                 directory.join("dependencies.json"),
-                &serde_json::to_vec(&record.evidence)
-                    .map_err(|_| ModulePackageError::Format("evidence encoding"))?,
+                &encode_json(
+                    &record.evidence,
+                    inventory,
+                    RECORD_LIMIT,
+                    "evidence encoding",
+                    false,
+                )?,
+                RECORD_LIMIT,
+                inventory,
             )?,
             certification: write_ref(
                 output_root,
                 directory.join("home-certification.cbor"),
                 &record.original_certification,
+                RECORD_LIMIT,
+                inventory,
             )?,
         });
     }
@@ -1634,6 +2011,8 @@ fn export_under(
                 output_root,
                 PathBuf::from(format!("execution-{}.cbor", super::hex(digest))),
                 graph.bytes(),
+                crate::execution_source::GRAPH_BYTES_LIMIT,
+                inventory,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1645,11 +2024,19 @@ fn export_under(
         modules,
         execution_graphs,
     };
-    let bytes = serde_json::to_vec_pretty(&catalog)
-        .map_err(|_| ModulePackageError::Format("catalog encoding"))?;
-    if bytes.len() > CATALOG_LIMIT {
-        return Err(ModulePackageError::Bounds);
-    }
-    write_ref(output_root, PathBuf::from("catalog.json"), &bytes)?;
+    let bytes = encode_json(
+        &catalog,
+        inventory,
+        inventory.limits().max_bytes,
+        "catalog encoding",
+        true,
+    )?;
+    write_ref(
+        output_root,
+        PathBuf::from("catalog.json"),
+        &bytes,
+        inventory.limits().max_bytes,
+        inventory,
+    )?;
     Ok(())
 }
