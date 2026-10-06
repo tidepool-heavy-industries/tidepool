@@ -577,6 +577,12 @@ tidepool_rust_isolated_test(
     visibility = ["PUBLIC"],
 )
 
+export_file(
+    name = "quoted_agent_provider_fixture",
+    src = "src/fixtures/quoted-agent-provider.hs",
+    visibility = ["PUBLIC"],
+)
+
 filegroup(
     name = "native_qualification_inputs",
     srcs = {
