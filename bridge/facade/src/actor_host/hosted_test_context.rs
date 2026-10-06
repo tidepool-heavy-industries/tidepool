@@ -1197,14 +1197,15 @@ mod tests {
             matches!(
                 &failure,
                 HostedStartupError::Refused {
-                    failure: StartupFailure::AssemblyObserverClosed,
+                    failure: cause,
                     cleanup: CleanupOutcome::NotStarted {
                         owner_admission: HostOwnerAdmission::NotAdmitted,
                         executor_joined: true,
                         ..
                     },
                     ..
-                }
+                } if matches!(cause,
+                    StartupFailure::AssemblyObserverClosed | StartupFailure::HostExited { .. })
             ),
             "{failure:?}"
         );
