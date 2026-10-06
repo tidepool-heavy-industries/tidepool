@@ -179,11 +179,17 @@ fn many_real_rows_validate_and_duplicate_owners_or_group_ordinals_fail() {
             )
         })
         .collect();
-    let bytes = inventory(rows);
-    let products = InventoryOperation::new(limits(bytes.len(), bytes.len()))
-        .parse_module_products(&bytes, &requirements())
-        .unwrap();
-    assert_eq!(products.len(), 129);
+    for count in [127, 128, 129] {
+        let bytes = inventory(rows[..count].to_vec());
+        let mut policy = limits(bytes.len(), bytes.len());
+        // This fixture probes owner cardinality rather than cumulative work.
+        // Keep a generous finite budget for all three complete inventories.
+        policy.max_work = 32 << 20;
+        let products = InventoryOperation::new(policy)
+            .parse_module_products(&bytes, &requirements())
+            .unwrap();
+        assert_eq!(products.len(), count);
+    }
 
     let duplicate_owner = inventory(vec![
         row("unit", "Same", &[1], &[]),
