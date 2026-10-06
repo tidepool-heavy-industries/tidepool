@@ -1717,8 +1717,11 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         &mut resident,
         &fixture.recipe,
         include_str!("fixtures/activation-preview-retained-prefix.hs"),
-        1,
+        2,
     );
+    let unrelated_binding = resident
+        .current_binding_in(ScopeId::ROOT, "unrelatedPreviewPrefix")
+        .expect("genuine unrelated completed binding is present before request compilation");
     let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
     resident
         .set_run_context(SessionRunContext {
@@ -1806,6 +1809,18 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    offer
+        .apply_to(&mut command)
+        .expect("genuine preview offer accepts its original retained context");
+    assert!(
+        tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
+            .unwrap()
+            .retained_generations()
+            .is_empty(),
+        "successful pure preview transports no retained-generation fields"
+    );
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
     command.retained_generation(
         tidepool_extract_cmd::SymbolIdentity {
             unit: retained.0.unit,
@@ -1816,10 +1831,15 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         },
         retained.1,
     );
-    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    let refused_request = command.request_bytes();
     assert!(
         offer.apply_to(&mut command).is_err(),
         "genuine preview offer refuses an explicit retained heap input"
+    );
+    assert_eq!(
+        command.request_bytes(),
+        refused_request,
+        "explicit refusal cannot mutate the request"
     );
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
     drop(offer);
@@ -1848,6 +1868,10 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     assert_eq!(
         resident.public_visibility_snapshot_in(ScopeId::ROOT),
         visibility
+    );
+    assert_eq!(
+        resident.current_binding_in(ScopeId::ROOT, "unrelatedPreviewPrefix"),
+        Some(unrelated_binding)
     );
 }
 

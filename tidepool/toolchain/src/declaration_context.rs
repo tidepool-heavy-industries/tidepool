@@ -4369,6 +4369,153 @@ mod tests {
         );
     }
 
+    type PolicyKey = (u8, u8, u8, u8, Option<u8>);
+    type PolicyRow = (PolicyKey, u64, u8);
+    type PolicySemanticKey = (String, String, String, String, Option<String>);
+
+    fn policy_key(key: PolicyKey) -> PolicySemanticKey {
+        (
+            format!("unit{}", key.0),
+            format!("Module{}", key.1),
+            if key.2 == 0 { "value" } else { "constructor" }.into(),
+            format!("binding{}", key.3),
+            key.4.map(|parent| format!("Record{parent}")),
+        )
+    }
+
+    fn policy_symbol(key: PolicyKey) -> tidepool_extract_cmd::SymbolIdentity {
+        let (unit, module, namespace, occurrence, record_parent) = policy_key(key);
+        tidepool_extract_cmd::SymbolIdentity {
+            unit,
+            module,
+            namespace,
+            occurrence,
+            record_parent,
+        }
+    }
+
+    fn policy_import(row: PolicyRow) -> crate::certified_products::PendingImportOwner {
+        use crate::certified_products::PendingImportOwner;
+        let (unit, module, namespace, occurrence, record_parent) = policy_key(row.0);
+        let binder = tidepool_repr::execution_schema::SymbolIdentity {
+            unit: unit.clone(),
+            module: module.clone(),
+            namespace,
+            occurrence,
+            record_parent,
+        };
+        match row.2 {
+            0 => PendingImportOwner::Retained {
+                identity: binder,
+                generation: row.1,
+            },
+            1 => PendingImportOwner::RetainedPackage {
+                unit,
+                module,
+                binder,
+                generation: row.1,
+                interface_digest: [1; 32],
+            },
+            2 => PendingImportOwner::Source {
+                owner: tidepool_repr::execution_schema::CachedHomeOwner {
+                    unit,
+                    module,
+                    module_version: tidepool_repr::execution_schema::ModuleVersion([2; 32]),
+                    skinny_iface_sha256: [3; 32],
+                    product_sha256: [4; 32],
+                },
+                original_ordinal: 0,
+                binder,
+            },
+            3 => PendingImportOwner::Package {
+                unit,
+                module,
+                binder,
+                interface_digest: [5; 32],
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn policy_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(policy_property_config())]
+        #[test]
+        fn retained_purpose_matrix_matches_list_oracle_under_unrelated_and_repeated_imports(
+            tail in proptest::collection::vec(
+                ((0u8..3, 0u8..3, 0u8..2, 0u8..3, proptest::option::of(0u8..3)), 1u64..4, 0u8..4),
+                0..20,
+            ),
+            explicit in proptest::collection::vec(
+                ((0u8..3, 0u8..3, 0u8..2, 0u8..3, proptest::option::of(0u8..3)), 1u64..4),
+                0..8,
+            ),
+        ) {
+            // Representation-only policy rows issue no certificate or site authority.
+            // Every case includes both retained roles, ignored conflicting rows,
+            // exact duplication, and a distinct record parent for the same spelling.
+            let first = (0, 0, 0, 0, None);
+            let package = (1, 1, 0, 1, None);
+            let mut rows = vec![
+                (first, 1, 0), (package, 2, 1), (first, 3, 2),
+                (package, 3, 3), (first, 1, 0), ((0, 0, 0, 0, Some(0)), 2, 0),
+            ];
+            rows.extend(tail);
+            let explicit: BTreeMap<_, _> = explicit.into_iter()
+                .map(|(key, generation)| (policy_symbol(key), generation)).collect();
+            for request in [
+                BTreeMap::new(), explicit,
+                BTreeMap::from([(policy_symbol(first), 3)]),
+                BTreeMap::from([(policy_symbol(package), 1)]),
+            ] {
+                // Independent oracle scans semantic pairs; it never calls the
+                // production union routine or constructs admitted native evidence.
+                let mut pairs = request.iter().map(|(key, generation)| (
+                    (key.unit.clone(), key.module.clone(), key.namespace.clone(),
+                        key.occurrence.clone(), key.record_parent.clone()), *generation,
+                )).collect::<Vec<_>>();
+                pairs.extend(rows.iter().filter(|row| row.2 < 2)
+                    .map(|row| (policy_key(row.0), row.1)));
+                let conflicts = pairs.iter().any(|(key, generation)| pairs.iter()
+                    .any(|(other, value)| key == other && generation != value));
+                pairs.sort();
+                pairs.dedup();
+                for order in [rows.clone(), rows.iter().copied().rev().collect(), rows.repeat(2)] {
+                    let imports = order.into_iter().map(policy_import).collect::<Vec<_>>();
+                    let native = retained_generation_inputs(
+                        RetainedGenerationPolicy::PreserveCertifiedDemand,
+                        request.clone(), imports.iter(),
+                    );
+                    proptest::prop_assert_eq!(native.is_err(), conflicts);
+                    if let Ok(native) = native {
+                        let mut actual = native.into_iter().map(|(key, generation)| (
+                            (key.unit, key.module, key.namespace, key.occurrence, key.record_parent), generation,
+                        )).collect::<Vec<_>>();
+                        actual.sort();
+                        proptest::prop_assert_eq!(&actual, &pairs);
+                    }
+                    let preview = retained_generation_inputs(
+                        RetainedGenerationPolicy::PureActivationPreview,
+                        request.clone(), imports.iter(),
+                    );
+                    proptest::prop_assert_eq!(preview.is_err(), !request.is_empty());
+                    if let Ok(preview) = preview {
+                        proptest::prop_assert!(preview.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn certified_demand_tags_preserve_full_identity_and_refuse_generation_conflicts() {
         use crate::certified_products::PendingImportOwner;
