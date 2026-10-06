@@ -43,7 +43,12 @@ def validate(packages_source: str, plan: dict, arguments: list[str]) -> list[str
     )
     roster = re.search(r"^ghcPackages\s*=\s*\[(.*?)\]", packages_source, re.MULTILINE | re.DOTALL)
     require(roster is not None, "unsupported Hadrian ghcPackages declaration")
-    identifiers = set(re.findall(r"\b[A-Za-z][A-Za-z0-9]*\b", roster.group(1)))
+    members = roster.group(1)
+    require(
+        re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9]*(?:\s*,\s*[A-Za-z][A-Za-z0-9]*)*\s*", members) is not None,
+        "unsupported Hadrian ghcPackages members",
+    )
+    identifiers = set(re.findall(r"[A-Za-z][A-Za-z0-9]*", members))
     declarations = re.findall(r'^([A-Za-z][A-Za-z0-9]*)\s*=\s*lib\s+"([^"]+)"', packages_source, re.MULTILINE)
     known = {name for identifier, name in declarations if identifier in identifiers}
     missing = set(packages) - known
@@ -102,6 +107,11 @@ unused = lib "unused"
     def test_changed_primary_layout_refuses(self):
         with self.assertRaises(SettingsError):
             validate("ghcPackages = makePackages", self.plan, self.arguments)
+
+    def test_comment_is_not_package_membership(self):
+        source = self.source.replace("[ base, cabalSyntax ]", "[ base -- cabalSyntax\n ]")
+        with self.assertRaises(SettingsError):
+            validate(source, self.plan, self.arguments)
 
     def test_duplicate_package_refuses(self):
         with self.assertRaises(SettingsError):
