@@ -35,8 +35,9 @@ import Tidepool.FatIface
   ( FatIfaceLookup(..), FatIfaceModule(..), lookupModuleOutcomeWith
   , FatIfaceMissing(..)
   , lookupFatIfaceExact, lookupFatIfaceBodies, evictFatIfaceMatching
-  , newFatIfaceCache
-  , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface
+  , newFatIfaceCache, copyFatIfaceCache
+  , OwnerInterfaceContext(..), newOwnerInterfaceCache, copyOwnerInterfaceCache
+  , lookupOwnerInterface, evictOwnerInterfaceMatching
   )
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies, pmBindings)
@@ -121,6 +122,14 @@ scenario = do
       privateBodies <- liftIO newPreparedBodyCache
       privatePrepared <- liftIO $ prepareRecoveredBodies hsc privateOwners privateBodies
         privateOwner privateGroups >>= either (fail . show) pure
+      privateOwnerClone <- liftIO (copyOwnerInterfaceCache privateOwners)
+      privateOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
+      liftIO (assert (maybe False (const True) privateOwnerContext)
+        "owner cache copy omitted a completed interface context")
+      liftIO (evictOwnerInterfaceMatching privateOwners (== privateOwner))
+      clonedOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
+      liftIO (assert (maybe False (const True) clonedOwnerContext)
+        "evicting the source owner cache changed its independent copy")
       liftIO $ assert (any ((== "privateHelper") . occNameString . nameOccName . varName)
         (concatMap (topBinders . fst) (pmBindings privatePrepared)))
         "native preparation omitted the defining private helper"
@@ -202,6 +211,32 @@ verifyCacheConcurrency owner = do
     "same-module callers did not receive the shared completion"
   loadCount <- readIORef loads
   assert (loadCount == 1) "same-module callers ran more than one loader"
+  completedClone <- copyFatIfaceCache cache
+  clonedOutcome <- lookupModuleOutcomeWith completedClone owner (do
+    atomicModifyIORef' loads (\n -> (n + 1, ()))
+    pure (FatIfaceLoadFailureOutcome "completed cache entry was lost"))
+  assert (case clonedOutcome of FatIfaceNoExtraDeclarations -> True; _ -> False)
+    "copying a completed module outcome triggered a new load"
+  loadCountAfterClone <- readIORef loads
+  assert (loadCountAfterClone == 1) "completed cache copy ran its loader"
+
+  sourceCache <- newFatIfaceCache
+  sourceEntered <- newEmptyMVar
+  sourceRelease <- newEmptyMVar
+  sourceResult <- newEmptyMVar
+  _ <- forkIO $ lookupModuleOutcomeWith sourceCache owner
+    (putMVar sourceEntered () >> readMVar sourceRelease
+      >> pure (FatIfaceLoadFailureOutcome "in-flight entries must not copy")) >>= putMVar sourceResult
+  takeMVar sourceEntered
+  inFlightClone <- copyFatIfaceCache sourceCache
+  cloneResult <- timeout 1000000 $ lookupModuleOutcomeWith inFlightClone owner
+    (pure FatIfaceNoExtraDeclarations)
+  assert (isNoExtraOutcome cloneResult)
+    "copying a cache retained an in-flight generation from its source"
+  putMVar sourceRelease ()
+  sourceLoaded <- timeout 1000000 (readMVar sourceResult)
+  assert (isFailureOutcome "in-flight entries must not copy" sourceLoaded)
+    "source cache load failed to settle after its copy was made"
 
   failureCache <- newFatIfaceCache
   failureLoads <- newIORef (0 :: Int)
@@ -213,19 +248,23 @@ verifyCacheConcurrency owner = do
   assert (failureCount == 1 && isFailureOutcome "interface read failed" failure1
       && isFailureOutcome "interface read failed" failure2)
     "a real load failure was not retained as the shared cache outcome"
+  copiedFailureCache <- copyFatIfaceCache failureCache
+  copiedFailure <- lookupModuleOutcomeWith copiedFailureCache owner failing
+  copiedFailureCount <- readIORef failureLoads
+  assert (isFailureOutcome "interface read failed" copiedFailure && copiedFailureCount == 1)
+    "copying the cache lost its completed failure outcome"
 
   cancelledCache <- newFatIfaceCache
   cancelEntered <- newEmptyMVar
   cancelBlock <- newEmptyMVar
   cancelLoads <- newIORef (0 :: Int)
-  cancelledOwner <- newEmptyMVar
   retryingWaiter <- newEmptyMVar
   ownerThread <- forkIO $ lookupModuleOutcomeWith cancelledCache owner (do
     n <- atomicModifyIORef' cancelLoads (\count -> (count + 1, count + 1))
     if n == 1
       then putMVar cancelEntered () >> takeMVar cancelBlock
       else pure ()
-    pure FatIfaceNoExtraDeclarations) >>= putMVar cancelledOwner
+    pure FatIfaceNoExtraDeclarations)
   takeMVar cancelEntered
   _ <- forkIO $ lookupModuleOutcomeWith cancelledCache owner (do
     atomicModifyIORef' cancelLoads (\n -> (n + 1, ()))

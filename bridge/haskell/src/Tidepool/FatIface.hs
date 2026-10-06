@@ -7,11 +7,12 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, evictFatIfaceMatching
   , FatIfaceModule(..), lookupModuleOutcomeWith
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
+  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
+  , copyOwnerInterfaceCache, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
@@ -128,6 +129,16 @@ newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceEntry))
 -- | Create an empty cache.
 newFatIfaceCache :: IO FatIfaceCache
 newFatIfaceCache = FatIfaceCache <$> newMVar Map.empty
+
+-- | Copy completed module outcomes into an independent cache. In-flight
+-- generations belong to the source context and are deliberately not shared.
+copyFatIfaceCache :: FatIfaceCache -> IO FatIfaceCache
+copyFatIfaceCache (FatIfaceCache cacheRef) = do
+  entries <- readMVar cacheRef
+  FatIfaceCache <$> newMVar (Map.mapMaybe completed entries)
+  where
+    completed (FatIfaceCached outcome) = Just (FatIfaceCached outcome)
+    completed FatIfaceLoading{} = Nothing
 
 -- | Drop every cached module outcome whose 'Module' key matches the given
 -- predicate. Used by the resident daemon to invalidate a request's own
@@ -319,6 +330,11 @@ newtype OwnerInterfaceCache =
 
 newOwnerInterfaceCache :: IO OwnerInterfaceCache
 newOwnerInterfaceCache = OwnerInterfaceCache <$> newMVar Map.empty
+
+-- | Copy the already-read owner contexts into an independent cache.
+copyOwnerInterfaceCache :: OwnerInterfaceCache -> IO OwnerInterfaceCache
+copyOwnerInterfaceCache (OwnerInterfaceCache cacheRef) =
+  OwnerInterfaceCache <$> (readMVar cacheRef >>= newMVar)
 
 lookupOwnerInterface :: OwnerInterfaceCache -> Module
   -> IO (Maybe OwnerInterfaceContext)
