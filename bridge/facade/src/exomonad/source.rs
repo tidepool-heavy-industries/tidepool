@@ -2287,6 +2287,9 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .layer
             .capture_from_workspace(&self.frozen, &self.workspace)
             .map_err(unavailable)?;
+        // A Source effect may already have published these bytes while this
+        // actor still serves an older dispatcher. Explicit spec reload prepares
+        // a fresh original even when the global run revision has not changed.
         let candidate_paths = pending.include_paths(self.frozen.captured_source_roots().len());
         let diagnostics = self
             .check_candidate(&active, &pending, &candidate_paths, true, also_check)
