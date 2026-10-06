@@ -386,7 +386,7 @@ async fn explicit_display_is_the_only_value_presentation() {
             &store,
             committed(
                 policy.as_ref(),
-                "display (let (a, b, text) = retainedHistory in if a == 41 && b == 42 && text == \"abc\" then a + b + T.length text else error \"lost original expression values\")",
+                "display (let (a, b, text) = retainedHistory in if a == 41 && b == 42 && text == \"abc\" then a + b + T.length text else (-1 :: Int))",
             ),
         )
         .await;
