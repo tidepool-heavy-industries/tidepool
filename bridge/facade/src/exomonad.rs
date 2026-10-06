@@ -66,6 +66,7 @@ impl Default for NewOptions {
 
 pub struct InitOptions {
     pub workspace: Option<PathBuf>,
+    pub prepared: Option<PathBuf>,
     pub session: Option<String>,
     pub recreate: bool,
     pub no_attach: bool,
@@ -949,19 +950,9 @@ fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std:
     Ok(workspace)
 }
 
-pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let workspace = resolve_workspace(options.workspace)?;
-    // A run starts nothing before its workspace is known to exist: no build,
-    // no tmux session, no scaffolding.
-    let configuration = read_project_config(&workspace)?.0;
-    let selected_backend = configuration.launch.backend;
-    if selected_backend == ExomonadBackend::Codex {
-        return Err(runtime_error(
-            "the Codex backend is retired; historical runs cannot be resumed",
-        ));
-    }
-    let (state_boundary, state_relative) = durable_state_scope()?;
-    let slice = configuration.launch.systemd_slice;
+async fn enter_workspace_budget(
+    slice: &exomonad_node::systemd_slice::SystemdSlice,
+) -> Result<(), Box<dyn std::error::Error>> {
     let limits = slice.inspect().await?;
     if slice.current_membership().is_err() {
         use std::os::unix::process::CommandExt;
@@ -983,6 +974,80 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             .into());
     }
     tracing::info!(slice = slice.as_str(), ?limits, "selected swarm budget");
+    Ok(())
+}
+
+pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = resolve_workspace(options.workspace)?;
+    let configuration = read_project_config(&workspace)?.0;
+    if configuration.launch.backend == ExomonadBackend::Codex {
+        return Err(runtime_error(
+            "the Codex backend is retired; workspace preparation requires embedded native support",
+        ));
+    }
+    enter_workspace_budget(&configuration.launch.systemd_slice).await?;
+    let requested = if options.directory.is_absolute() {
+        options.directory
+    } else {
+        std::env::current_dir()?.join(options.directory)
+    };
+    let directory = std::sync::Arc::new(
+        tidepool_atomic_write::DirectoryAnchor::open_existing("/")?
+            .child(requested.strip_prefix("/")?)?,
+    );
+    let mut frozen = workspace::FrozenWorkspace::begin_preparation(&workspace, &directory)?;
+    if !matches!(
+        frozen.preparation,
+        Some(workspace::WorkspacePreparation::Completed { .. })
+    ) {
+        let source = std::sync::Arc::new(source::ExomonadSourceReload::new_owned(
+            frozen.clone(),
+            workspace.clone(),
+            directory.path().to_owned(),
+            frozen.runtime_stdlib(),
+            source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
+        )?);
+        let entries = crate::actor_host::prepare_workspace_toolsets(
+            &workspace,
+            &directory,
+            frozen.clone(),
+            source,
+        )
+        .await?;
+        let revision = source::SourceLayer::new(directory.path())
+            .read_active()?
+            .ok_or("workspace preparation did not settle its original source revision")?;
+        frozen.complete_preparation(&directory, revision.identity, entries)?;
+    }
+    let pointer = workspace::PreparedWorkspacePointer {
+        version: 1,
+        directory: directory.path().to_owned(),
+    };
+    tidepool_atomic_write::write_durable(
+        &workspace.join(".exomonad/prepared.json"),
+        &serde_json::to_vec_pretty(&pointer)?,
+    )?;
+    println!(
+        "Prepared workspace deployment: {}",
+        directory.path().display()
+    );
+    Ok(())
+}
+
+pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = resolve_workspace(options.workspace)?;
+    // A run starts nothing before its workspace is known to exist: no build,
+    // no tmux session, no scaffolding.
+    let configuration = read_project_config(&workspace)?.0;
+    let selected_backend = configuration.launch.backend;
+    if selected_backend == ExomonadBackend::Codex {
+        return Err(runtime_error(
+            "the Codex backend is retired; historical runs cannot be resumed",
+        ));
+    }
+    let (state_boundary, state_relative) = durable_state_scope()?;
+    let slice = configuration.launch.systemd_slice;
+    enter_workspace_budget(&slice).await?;
     if options.preflight != PreflightMode::Skip {
         let observation = launch_preflight::LaunchObservation::observe(&workspace);
         let lines = launch_preflight::assess(&observation, options.preflight);
@@ -1035,9 +1100,11 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         ))
     })?;
     record_run_backend(&run_root, &run_id, selected_backend)?;
-    // The source owner freezes the inputs here. The root's required installer
-    // preparation validates this exact closure before publishing readiness.
-    workspace::FrozenWorkspace::load(&workspace, &run_root)?;
+    workspace::FrozenWorkspace::select_prepared(
+        &workspace,
+        &run_root,
+        options.prepared.as_deref(),
+    )?;
     if options.recreate {
         let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
             runtime_error(format!(
@@ -1523,6 +1590,9 @@ async fn run_host(
     }
 
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
+    if !options.resume_root && workspace_inputs.preparation.is_some() {
+        workspace_inputs.verify_current_inputs(&options.workspace)?;
+    }
     let accepted_source = source::SourceLayer::new(&options.run_root)
         .ensure_active(&workspace_inputs)?
         .identity;
@@ -3014,6 +3084,7 @@ mod tests {
 
         let error = init(InitOptions {
             workspace: Some(workspace.path().to_path_buf()),
+            prepared: None,
             session: None,
             recreate: false,
             no_attach: true,
