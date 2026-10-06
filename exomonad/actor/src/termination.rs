@@ -17,10 +17,91 @@ pub enum ActorExitKind {
 /// Successful domain values are deliberately absent. They remain in the
 /// shared Haskell exit cell carried by `Tidepool.Actor.ActorRef`; this record
 /// supplies only the Rust-owned lifecycle fact that sequences reading it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActorTerminal {
     pub kind: ActorExitKind,
     pub summary: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_failure_diagnostic",
+        deserialize_with = "deserialize_failure_diagnostic"
+    )]
+    pub diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+}
+
+const RETAINED_FAILURE_MESSAGE_BYTES: usize = 16 * 1024;
+
+pub(crate) fn retain_failure_diagnostic(
+    diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
+    diagnostic.map(|mut diagnostic| {
+        diagnostic.message = crate::workbench_display::bounded_output(
+            &diagnostic.message,
+            RETAINED_FAILURE_MESSAGE_BYTES,
+        );
+        diagnostic
+    })
+}
+
+fn serialize_failure_diagnostic<S: serde::Serializer>(
+    diagnostic: &Option<tidepool_toolchain::failclass::FailureEnvelope>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeStruct;
+    let Some(diagnostic) = diagnostic else {
+        return serializer.serialize_none();
+    };
+    let mut state = serializer.serialize_struct("ActorFailureDiagnostic", 4)?;
+    state.serialize_field("class", &diagnostic.class)?;
+    state.serialize_field("phase", &diagnostic.phase)?;
+    state.serialize_field("cause", &diagnostic.cause)?;
+    state.serialize_field("message", &diagnostic.message)?;
+    state.end()
+}
+
+fn deserialize_failure_diagnostic<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<tidepool_toolchain::failclass::FailureEnvelope>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Fields {
+        class: tidepool_toolchain::failclass::FailureClass,
+        phase: tidepool_toolchain::failclass::Phase,
+        cause: Option<tidepool_toolchain::failclass::CompileFailureCause>,
+        message: String,
+    }
+    let fields = Option::<Fields>::deserialize(deserializer)?;
+    Ok(retain_failure_diagnostic(fields.map(|fields| {
+        tidepool_toolchain::failclass::FailureEnvelope {
+            class: fields.class,
+            phase: fields.phase,
+            cause: fields.cause,
+            message: fields.message,
+        }
+    })))
+}
+
+impl ActorTerminal {
+    pub fn new(kind: ActorExitKind, summary: impl Into<String>) -> Self {
+        Self {
+            kind,
+            summary: summary.into(),
+            diagnostic: None,
+        }
+    }
+
+    pub(crate) fn failed(
+        summary: String,
+        diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+    ) -> Self {
+        Self {
+            kind: ActorExitKind::Failed,
+            summary,
+            diagnostic: retain_failure_diagnostic(diagnostic),
+        }
+    }
 }
 
 /// Runtime lifecycle facts; `Live` does not claim application readiness.
@@ -226,7 +307,11 @@ impl RetainedActorExit {
     /// own tests. Returning an error rather than replacing the value makes
     /// competing cleanup paths an explicit invariant violation while
     /// preserving the first result.
-    pub(crate) fn publish(&self, terminal: ActorTerminal) -> Result<(), ActorExitAlreadyPublished> {
+    pub(crate) fn publish(
+        &self,
+        mut terminal: ActorTerminal,
+    ) -> Result<(), ActorExitAlreadyPublished> {
+        terminal.diagnostic = retain_failure_diagnostic(terminal.diagnostic);
         {
             let mut retained = self.state.lifecycle.lock();
             if let ActorLifecycle::Exited(existing) = &retained.current {
@@ -277,7 +362,94 @@ mod tests {
         ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: summary.into(),
+            diagnostic: None,
         }
+    }
+
+    #[test]
+    fn terminal_retains_bounded_diagnostic_and_serializes_original_category() {
+        use tidepool_toolchain::failclass::{
+            CompileFailureCause, FailureClass, FailureEnvelope, Phase,
+        };
+        let original = FailureEnvelope {
+            class: FailureClass::UserHaskell,
+            phase: Phase::Compile,
+            cause: Some(CompileFailureCause::SourceDiagnostics),
+            message: format!(
+                "FailureOrigin.hs:4:9\n{}\nmissingChildFailureOrigin",
+                "αβγ\n".repeat(10_000)
+            ),
+        };
+        let terminal = ActorTerminal::failed(
+            "Haskell compilation failed (1 diagnostic)".into(),
+            Some(original.clone()),
+        );
+        let diagnostic = terminal.diagnostic.as_ref().expect("original diagnostic");
+        assert_eq!(diagnostic.class, original.class);
+        assert_eq!(diagnostic.phase, original.phase);
+        assert_eq!(diagnostic.cause, original.cause);
+        assert!(diagnostic.message.len() <= RETAINED_FAILURE_MESSAGE_BYTES);
+        assert!(diagnostic.message.starts_with("FailureOrigin.hs:4:9"));
+        assert!(diagnostic.message.ends_with("missingChildFailureOrigin"));
+        let encoded = serde_json::to_value(&terminal).expect("operator terminal evidence");
+        assert_eq!(encoded["diagnostic"]["class"], "user-haskell");
+        assert_eq!(encoded["diagnostic"]["phase"], "compile");
+        assert_eq!(
+            encoded["diagnostic"]["cause"],
+            serde_json::to_value(&diagnostic.cause).unwrap()
+        );
+        assert_eq!(encoded["diagnostic"]["message"], diagnostic.message);
+        let retained = RetainedActorExit::new();
+        retained.publish(terminal.clone()).unwrap();
+        assert!(retained.publish(completed("later cleanup")).is_err());
+        assert_eq!(retained.get(), Some(terminal));
+        assert!(serde_json::to_value(completed("ordinary exit"))
+            .unwrap()
+            .get("diagnostic")
+            .is_none());
+    }
+
+    #[test]
+    fn terminal_deserialization_bounds_diagnostics_and_refuses_malformed_categories() {
+        let terminal = serde_json::json!({
+            "kind": "failed", "summary": "concise original summary",
+            "diagnostic": {
+                "class": "user-haskell", "phase": "compile",
+                "message": "λ\n".repeat(RETAINED_FAILURE_MESSAGE_BYTES),
+            },
+        });
+        // Cause encoding is owned by the existing classifier, not duplicated here.
+        let mut terminal = terminal;
+        terminal["diagnostic"]["cause"] = serde_json::to_value(
+            tidepool_toolchain::failclass::CompileFailureCause::SourceDiagnostics,
+        )
+        .unwrap();
+        let parsed: ActorTerminal = serde_json::from_value(terminal.clone()).unwrap();
+        let diagnostic = parsed.diagnostic.as_ref().unwrap();
+        assert!(diagnostic.message.len() <= RETAINED_FAILURE_MESSAGE_BYTES);
+        assert_eq!(
+            diagnostic.class,
+            tidepool_toolchain::failclass::FailureClass::UserHaskell
+        );
+        assert_eq!(
+            diagnostic.phase,
+            tidepool_toolchain::failclass::Phase::Compile
+        );
+        assert_eq!(parsed.summary, "concise original summary");
+        for (key, invalid) in [
+            ("class", serde_json::json!("invented-class")),
+            ("phase", serde_json::json!("invented-phase")),
+            ("cause", serde_json::json!({"invented": true})),
+            ("message", serde_json::json!(17)),
+            ("extra", serde_json::json!("unchecked metadata")),
+        ] {
+            let mut malformed = terminal.clone();
+            malformed["diagnostic"][key] = invalid;
+            assert!(serde_json::from_value::<ActorTerminal>(malformed).is_err());
+        }
+        let mut unknown_terminal_field = terminal;
+        unknown_terminal_field["extra"] = serde_json::json!("unchecked field");
+        assert!(serde_json::from_value::<ActorTerminal>(unknown_terminal_field).is_err());
     }
 
     #[test]
@@ -351,6 +523,7 @@ mod tests {
         let requested = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "cancel bootstrap".into(),
+            diagnostic: None,
         };
         assert_eq!(retained.request_shutdown(requested.clone()), requested);
         assert_eq!(
@@ -439,6 +612,7 @@ mod tests {
             .publish(ActorTerminal {
                 kind: ActorExitKind::Failed,
                 summary: "second".into(),
+                diagnostic: None,
             })
             .expect_err("second publish must fail");
 

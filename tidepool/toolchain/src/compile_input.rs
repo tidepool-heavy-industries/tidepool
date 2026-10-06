@@ -122,8 +122,8 @@ fn same_sites(left: &[YieldSite], right: &[YieldSite]) -> bool {
 }
 
 /// Failure to authenticate the compiler's complete consumed package inputs.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompileInputError {
     #[error("compiler input proof unavailable: {}", path.display())]
     Unavailable { path: PathBuf },

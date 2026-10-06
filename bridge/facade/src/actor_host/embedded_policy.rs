@@ -532,6 +532,7 @@ mod tests {
             .shutdown(exomonad_actor::ActorTerminal {
                 kind: exomonad_actor::ActorExitKind::Completed,
                 summary: "builtin schema contract checked".into(),
+                diagnostic: None,
             })
             .await
             .unwrap();

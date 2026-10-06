@@ -3492,8 +3492,8 @@ fn activation_compile_diagnostic(
     error: &CompileError,
 ) -> tidepool_toolchain::failclass::FailureEnvelope {
     let mut diagnostic = classify_compile(error);
-    // Activation source is generated. Preserve original diagnostic coordinates
-    // without inventing an authored excerpt or a wrapper-to-cell offset.
+    // Preserve original diagnostic coordinates without inventing an authored
+    // excerpt or a wrapper-to-cell offset.
     diagnostic.message = crate::workbench_display::bounded_output(
         &tidepool_runtime::session::render_cell_compile_error(error, ""),
         ACTIVATION_COMPILE_DIAGNOSTIC_BYTES,
@@ -3606,6 +3606,10 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn into_kernel_behavior_error(self) -> crate::KernelBehaviorError {
+        crate::KernelBehaviorError::with_diagnostic(self.to_string(), self.failure_diagnostic())
+    }
+
     pub(crate) fn recovered_bindings(&self) -> &[String] {
         match self {
             Self::CompletedResultObservation {
@@ -3621,8 +3625,8 @@ impl ResidentActorWorkbenchError {
         match self {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),
-            Self::Compile(error) => Some(classify_compile(error)),
-            Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
+            Self::Compile(error) => Some(activation_compile_diagnostic(error)),
+            Self::CellCheck(failure) => Some(activation_compile_diagnostic(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
             Self::Resident(ResidentError::Session(error))
@@ -15035,6 +15039,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         crate::ActorTerminal {
             kind: crate::ActorExitKind::Cancelled,
             summary: "child preparation retired".into(),
+            diagnostic: None,
         }
     }
 

@@ -27,6 +27,7 @@ async fn retirement_releases_inherited_capture_while_metadata_remains() {
     let terminal = ActorTerminal {
         kind: crate::ActorExitKind::Completed,
         summary: "capture retirement".into(),
+        diagnostic: None,
     };
     retain_retired_metadata(&forest.environment, actor.identity(), &terminal);
     assert!(matches!(
@@ -234,6 +235,7 @@ async fn requested_retirement_refuses_provider_before_terminal_publication() {
     let requested = ActorTerminal {
         kind: crate::ActorExitKind::Completed,
         summary: "retirement during readiness".into(),
+        diagnostic: None,
     };
     actor.terminal().request_shutdown(requested.clone());
     assert!(

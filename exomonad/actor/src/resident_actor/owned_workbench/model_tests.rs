@@ -401,6 +401,7 @@ async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked(
             retirement.request_shutdown(crate::ActorTerminal {
                 kind: crate::ActorExitKind::Cancelled,
                 summary: "model test retirement".into(),
+                diagnostic: None,
             });
         } else {
             control.request_cancellation();

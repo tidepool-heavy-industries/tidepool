@@ -229,6 +229,7 @@ async fn new(State(state): State<AttachmentState>) -> Response {
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "host attachment service closed".into(),
+                            diagnostic: None,
                         })
                         .await
                     {
@@ -327,6 +328,7 @@ async fn stop(
             .shutdown_with_cleanup(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "operator stopped workbench".into(),
+                diagnostic: None,
             })
             .await;
         if matches!(&result, Ok(shutdown) if shutdown.cleanup.is_confirmed()) {
@@ -1074,6 +1076,7 @@ mod lifecycle_tests {
                 if self.fail_shutdown {
                     Err(KernelBehaviorError {
                         detail: "test shutdown failure".into(),
+                        diagnostic: None,
                     })
                 } else {
                     Ok(())

@@ -463,6 +463,7 @@ where
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "child launch parent admission unavailable".into(),
+                diagnostic: None,
             })
             .await
         {
@@ -499,6 +500,7 @@ where
                                 .shutdown(ActorTerminal {
                                     kind: ActorExitKind::Cancelled,
                                     summary: "fork group admission failed".into(),
+                                    diagnostic: None,
                                 })
                                 .await
                             {

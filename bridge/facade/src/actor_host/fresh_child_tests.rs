@@ -327,6 +327,7 @@ async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "test teardown".into(),
+            diagnostic: None,
         })
         .await
         .expect("child shuts down");

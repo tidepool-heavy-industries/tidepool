@@ -275,6 +275,7 @@ impl Fixture {
                 ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "invocation fixture complete".into(),
+                    diagnostic: None,
                 },
             )
             .await
@@ -544,6 +545,7 @@ async fn blocked_settlement_notice_does_not_prevent_invocation_cancellation() {
                 terminal: ActorTerminal {
                     kind: ActorExitKind::Cancelled,
                     summary: "test channel filler".into(),
+                    diagnostic: None,
                 },
             })
             .unwrap();
@@ -659,6 +661,7 @@ async fn invocation_cleanup_preserves_completed_worker_terminal() {
     let completed = ActorTerminal {
         kind: ActorExitKind::Completed,
         summary: "worker result retained".into(),
+        diagnostic: None,
     };
     let shutdown = worker
         .shutdown_with_cleanup(completed.clone())
@@ -717,6 +720,7 @@ fn unconfirmed_invocation_cleanup_preserves_committed_reply_and_receipts() {
     let terminal = ActorTerminal {
         kind: ActorExitKind::Completed,
         summary: "reply complete".into(),
+        diagnostic: None,
     };
     for (expected_variant, step) in [
         (0, KernelStep::Continue(response.clone())),
@@ -1272,6 +1276,7 @@ async fn interrupted_scope_retirement_admission_retries_original_terminal_once()
     let completed = ActorTerminal {
         kind: ActorExitKind::Completed,
         summary: "original successful worker outcome".into(),
+        diagnostic: None,
     };
     let shutdown = worker
         .shutdown_with_cleanup(completed.clone())
@@ -1290,6 +1295,7 @@ async fn interrupted_scope_retirement_admission_retries_original_terminal_once()
         terminal: ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "channel filler".into(),
+            diagnostic: None,
         },
     };
     for _ in 0..DEPLOYMENT_CHANNEL_CAPACITY {
@@ -1536,6 +1542,7 @@ async fn interrupted_unsubmitted_rollback_notice_retries_original_watch_transiti
         terminal: ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "channel filler".into(),
+            diagnostic: None,
         },
     };
     for _ in 0..DEPLOYMENT_CHANNEL_CAPACITY {

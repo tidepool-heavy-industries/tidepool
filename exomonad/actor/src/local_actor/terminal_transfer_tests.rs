@@ -6,6 +6,7 @@ use tokio::sync::{oneshot, Semaphore};
 #[derive(Clone, Copy)]
 enum FirstFailure {
     TerminalTransfer,
+    TerminalTransferDiagnostic,
     Ordinary,
 }
 
@@ -73,14 +74,32 @@ impl KernelBehavior for CompletionProbe {
             OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
                 behavior.completions += 1;
                 if behavior.completions == 1 {
-                    let source = KernelInvocationFailure::CleanupUnconfirmed {
-                        publication: None,
-                        receipts: Vec::new(),
-                        actor,
-                        detail: "controlled finalization refusal".into(),
+                    let source = if matches!(
+                        behavior.failure,
+                        FirstFailure::TerminalTransferDiagnostic
+                    ) {
+                        KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
+                            actor,
+                            detail: "controlled finalization refusal".into(),
+                            diagnostic: Some(tidepool_toolchain::failclass::FailureEnvelope {
+                                class: tidepool_toolchain::failclass::FailureClass::UserHaskell,
+                                phase: tidepool_toolchain::failclass::Phase::Compile,
+                                cause: Some(tidepool_toolchain::failclass::CompileFailureCause::SourceDiagnostics),
+                                message: "typed carrier control".into(),
+                            }),
+                        }
+                    } else {
+                        KernelInvocationFailure::CleanupUnconfirmed {
+                            publication: None,
+                            receipts: Vec::new(),
+                            actor,
+                            detail: "controlled finalization refusal".into(),
+                        }
                     };
                     return Err(match behavior.failure {
-                        FirstFailure::TerminalTransfer => {
+                        FirstFailure::TerminalTransfer
+                        | FirstFailure::TerminalTransferDiagnostic => {
                             KernelInvocationFailure::TerminalTransferFailed {
                                 actor,
                                 request: crate::RequestId(19),
@@ -238,6 +257,42 @@ async fn owned_terminal_transfer_failure_settles_caller_before_failed_retirement
 }
 
 #[tokio::test]
+async fn owned_terminal_transfer_retains_diagnostic_after_settling_caller() {
+    let (actor, task) = spawn_local_actor(
+        None,
+        CompletionProbe {
+            failure: FirstFailure::TerminalTransferDiagnostic,
+            completions: 0,
+            cleanup_calls: Arc::new(AtomicUsize::new(0)),
+            cleanup_entered: None,
+            cleanup_release: Arc::new(Semaphore::new(1)),
+        },
+    )
+    .await
+    .expect("spawn actor");
+    let failure = tokio::time::timeout(Duration::from_secs(5), send_workbench(&actor))
+        .await
+        .expect("caller settles")
+        .expect("caller reply")
+        .expect_err("original terminal-transfer refusal");
+    let original = failure
+        .failure_diagnostic()
+        .expect("typed original cause")
+        .clone();
+    let terminal = tokio::time::timeout(Duration::from_secs(5), actor.terminal().wait())
+        .await
+        .expect("failed retirement settles");
+    assert_eq!(terminal.kind, ActorExitKind::Failed);
+    assert_eq!(terminal.diagnostic, Some(original));
+    assert!(actor
+        .terminal()
+        .cleanup()
+        .expect("cleanup outcome")
+        .is_confirmed());
+    task.await.expect("actor task");
+}
+
+#[tokio::test]
 async fn ordinary_owned_completion_failure_keeps_actor_reusable() {
     let cleanup_calls = Arc::new(AtomicUsize::new(0));
     let (actor, task) = spawn_local_actor(
@@ -272,6 +327,7 @@ async fn ordinary_owned_completion_failure_keeps_actor_reusable() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "control complete".into(),
+            diagnostic: None,
         })
         .await
         .expect("retire control actor");

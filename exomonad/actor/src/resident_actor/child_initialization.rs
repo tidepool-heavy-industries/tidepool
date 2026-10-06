@@ -205,6 +205,7 @@ impl ForkChildRelease {
         {
             return Err(crate::KernelBehaviorError {
                 detail: "child release differs from its committed group allocation".into(),
+                diagnostic: None,
             });
         }
         if let Some(capture) = &inherited {
@@ -214,6 +215,7 @@ impl ForkChildRelease {
                     .inherited_scope()
                     .map_err(|error| crate::KernelBehaviorError {
                         detail: error.to_string(),
+                        diagnostic: None,
                     })?
                     .is_none()
                 || admitted.fork_boundary() != publication_boundary.as_ref()
@@ -223,6 +225,7 @@ impl ForkChildRelease {
                 return Err(crate::KernelBehaviorError {
                     detail: "final inherited release differs from its original context admission"
                         .into(),
+                    diagnostic: None,
                 });
             }
         }

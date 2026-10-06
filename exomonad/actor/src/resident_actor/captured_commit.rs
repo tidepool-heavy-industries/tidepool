@@ -331,6 +331,7 @@ where
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "captured fork group admission rejected".into(),
+                            diagnostic: None,
                         })
                         .await
                     {
@@ -447,6 +448,7 @@ where
                 Err(error) => {
                     return Err(KernelBehaviorError {
                         detail: error.to_string(),
+                        diagnostic: None,
                     });
                 }
             }
@@ -457,6 +459,7 @@ where
         if authority.owner() != context.actor {
             return Err(KernelBehaviorError {
                 detail: "fork publication authority belongs to another actor".into(),
+                diagnostic: None,
             });
         }
         let valid = {
@@ -474,6 +477,7 @@ where
         if !valid {
             return Err(KernelBehaviorError {
                 detail: "fork release differs from committed admission".into(),
+                diagnostic: None,
             });
         }
         let authority = Arc::clone(authority);

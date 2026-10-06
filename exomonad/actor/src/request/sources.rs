@@ -413,6 +413,7 @@ mod tests {
             .publish(crate::ActorTerminal {
                 kind: crate::ActorExitKind::Completed,
                 summary: "done".into(),
+                diagnostic: None,
             })
             .unwrap();
         old_address.stop(None);

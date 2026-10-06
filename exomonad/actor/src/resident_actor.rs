@@ -476,7 +476,7 @@ fn retain_retired_metadata<H, O>(
 ) {
     environment.fork_groups.fail_issuer_checkpoints(actor);
     if let Some(recovery) = &environment.recovery {
-        if let Err(error) = recovery.retire(actor, terminal.kind, terminal.summary.clone()) {
+        if let Err(error) = recovery.retire(actor, terminal.clone()) {
             tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
         }
     }
@@ -2893,6 +2893,7 @@ where
                 receipts: failure.receipts,
                 actor: context.actor,
                 detail,
+                diagnostic: None,
             };
         }
         KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
@@ -3306,6 +3307,7 @@ fn admit_context_authority(
             actor,
             detail: "context authority requires an exact synchronous ContextReadWrite invocation"
                 .into(),
+            diagnostic: None,
         });
     }
     Ok(())
@@ -3635,6 +3637,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     receipts: Vec::new(),
                     actor: context.actor,
                     detail: "issued tool installation belongs to another actor".into(),
+                    diagnostic: None,
                 });
             }
             Some(lease) => Some(lease),
@@ -3660,6 +3663,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 receipts: Vec::new(),
                 actor: context.actor,
                 detail: "actor has no active Haskell application workbench".into(),
+                diagnostic: None,
             });
         }
         let invocation_key = control
@@ -3717,6 +3721,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     actor,
                     detail: "selected notebook contract differs from the issued installation"
                         .into(),
+                    diagnostic: None,
                 });
             }
             let keys = selected.effect_keys();
@@ -3733,6 +3738,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     actor,
                     detail: "selected notebook effects exceed its scheduling or actor authority"
                         .into(),
+                    diagnostic: None,
                 });
             }
             if !current_builtin {
@@ -3775,6 +3781,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                             WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
                         }
                         .into(),
+                        diagnostic: None,
                     });
                 }
                 Ok(Some(reply)) => return Ok(WorkbenchPreflight::Retained(reply)),
@@ -3794,6 +3801,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 receipts: Vec::new(),
                 actor: context.actor,
                 detail: "cannot admit exact source layer: the source installation is unavailable; repair it with reload_helpers".into(),
+                diagnostic: None,
             })?.source().clone()
         };
         let compilation_authority = if current_builtin {
@@ -3817,6 +3825,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 receipts: Vec::new(),
                 actor,
                 detail: "root startup is pending durable release".into(),
+                diagnostic: None,
             });
         }
         let public_owner = {
@@ -3827,6 +3836,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     receipts: Vec::new(),
                     actor,
                     detail: "publication owner has no registered actor".into(),
+                    diagnostic: None,
                 })?;
             let owner =
                 record
@@ -3836,6 +3846,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         receipts: Vec::new(),
                         actor,
                         detail: "durable actor public surface is not initialized".into(),
+                        diagnostic: None,
                     })?;
             if record.terminal.is_some()
                 || record.descriptor.placement() != self.descriptor.placement()
@@ -3847,6 +3858,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     receipts: Vec::new(),
                     actor,
                     detail: "publication owner differs from current actor admission".into(),
+                    diagnostic: None,
                 });
             }
             owner.clone()
@@ -3868,6 +3880,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     receipts: Vec::new(),
                     actor,
                     detail: error.to_string(),
+                    diagnostic: None,
                 })?;
             control.bind_context(binding.clone());
         }
@@ -3899,19 +3912,23 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn failure(error: impl std::fmt::Display) -> KernelBehaviorError {
-        KernelBehaviorError {
-            detail: error.to_string(),
-        }
+        KernelBehaviorError::new(error.to_string())
+    }
+
+    fn workbench_failure(error: ResidentActorWorkbenchError) -> KernelBehaviorError {
+        error.into_kernel_behavior_error()
     }
 
     fn invocation_failure(
         actor: ActorRef,
-        error: impl std::fmt::Display,
+        error: impl Into<KernelBehaviorError>,
     ) -> KernelInvocationFailure {
+        let error = error.into();
         KernelInvocationFailure::Failed {
             receipts: Vec::new(),
             actor,
-            detail: error.to_string(),
+            detail: error.detail,
+            diagnostic: error.diagnostic,
         }
     }
 
@@ -4841,6 +4858,7 @@ where
             return Err(ResidentCallError::Call(KernelCallFailure::Handler {
                 actor: target,
                 detail: "child starts after this tool block completes; register a watch or call it in a later tool invocation".into(),
+                diagnostic: None,
             }));
         }
         ancestry.enter(target).map_err(ResidentCallError::Call)?;
@@ -5631,6 +5649,7 @@ where
                                             .shutdown(ActorTerminal {
                                                 kind: ActorExitKind::Cancelled,
                                                 summary: "fork group admission failed".into(),
+                                                diagnostic: None,
                                             })
                                             .await
                                         {
@@ -6326,6 +6345,7 @@ where
                                     "supervisor {}@{} requested retirement",
                                     context.actor.id.0, context.actor.incarnation.0
                                 ),
+                                diagnostic: None,
                             },
                         )
                         .await
@@ -6512,6 +6532,7 @@ where
                                         "campaign {} cleanup requested by {}@{}",
                                         group.0, context.actor.id.0, context.actor.incarnation.0
                                     ),
+                                    diagnostic: None,
                                 },
                             )
                             .await
@@ -6859,6 +6880,7 @@ where
                                     .shutdown_with_cleanup(ActorTerminal {
                                         kind: ActorExitKind::Cancelled,
                                         summary: "deferred invocation-owned worker refused".into(),
+                                        diagnostic: None,
                                     })
                                     .await
                                 {
@@ -6943,6 +6965,7 @@ where
                             .shutdown(ActorTerminal {
                                 kind: ActorExitKind::Cancelled,
                                 summary: "fork group admission aborted".into(),
+                                diagnostic: None,
                             })
                             .await
                         {
@@ -8224,6 +8247,7 @@ where
             receipts: Vec::new(),
             actor: kernel.identity(),
             detail: detail.into(),
+            diagnostic: None,
         };
         if self.child_release.matches_replay(
             &release,
@@ -8337,6 +8361,7 @@ where
             receipts: Vec::new(),
             actor: kernel.identity(),
             detail: detail.into(),
+            diagnostic: None,
         };
         if self.context(kernel.identity()).placement != frame.context.placement
             || self
@@ -8403,6 +8428,7 @@ where
                 receipts: Vec::new(),
                 actor: kernel.identity(),
                 detail: "child initialization no longer owns its original placement".into(),
+                diagnostic: None,
             });
         }
         Ok(())
@@ -8551,13 +8577,13 @@ where
                         terminal,
                     }));
                 }
-                let detail = match result {
-                    Ok(outcome) => {
-                        format!("child durable initialization was not published: {outcome:?}")
-                    }
-                    Err(error) => error.to_string(),
-                };
-                Err(Self::invocation_failure(kernel.identity(), detail))
+                Err(match result {
+                    Ok(outcome) => Self::invocation_failure(
+                        kernel.identity(),
+                        format!("child durable initialization was not published: {outcome:?}"),
+                    ),
+                    Err(error) => Self::invocation_failure(kernel.identity(), error),
+                })
             }
         }
     }
@@ -8641,12 +8667,10 @@ where
                 )?;
                 Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
                     output: (),
-                    terminal: ActorTerminal {
-                        kind: ActorExitKind::Failed,
-                        summary: format!(
-                            "child durability confirmation unavailable after bounded retries: {error}"
-                        ),
-                    },
+                    terminal: ActorTerminal::failed(
+                        format!("child durability confirmation unavailable after bounded retries: {error}"),
+                        error.failure_diagnostic(),
+                    ),
                 }))
             }
         }
@@ -8670,15 +8694,10 @@ where
                         readiness: _,
                         checkpoint,
                     } = frame;
-                    let result =
-                        behavior
-                            .initialize(&kernel, &context, boot)
-                            .await
-                            .map_err(|error| KernelInvocationFailure::Failed {
-                                receipts: Vec::new(),
-                                actor: context.actor,
-                                detail: error.to_string(),
-                            });
+                    let result = behavior
+                        .initialize(&kernel, &context, boot)
+                        .await
+                        .map_err(|error| Self::invocation_failure(context.actor, error));
                     drop((lexical, checkpoint));
                     (behavior, crate::OwnedActorCompletion::new(move |_| result))
                 })
@@ -11576,6 +11595,7 @@ where
                     .shutdown(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: summary.into(),
+                        diagnostic: None,
                     })
                     .await
                 {
@@ -11793,6 +11813,7 @@ where
                     .shutdown(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: summary.into(),
+                        diagnostic: None,
                     })
                     .await
                 {
@@ -11822,7 +11843,7 @@ where
                 .runner
                 .retire_root_placement(placement)
                 .await
-                .map_err(Self::failure)
+                .map_err(Self::workbench_failure)
         })
     }
     fn replace<'a>(
@@ -11833,7 +11854,7 @@ where
         Box::pin(async move {
             self.prepare_successor(kernel, definition)
                 .await
-                .map_err(Self::failure)
+                .map_err(Self::workbench_failure)
         })
     }
 
@@ -11843,7 +11864,7 @@ where
         successor: &KernelContext,
     ) -> Result<(), KernelBehaviorError> {
         self.transfer_replacement(predecessor, successor)
-            .map_err(Self::failure)
+            .map_err(Self::workbench_failure)
     }
 
     fn replacement_retired(&mut self, context: &KernelContext, terminal: &ActorTerminal) {
@@ -11854,7 +11875,7 @@ where
         &'a mut self,
         _kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async move { self.activate_successor().map_err(Self::failure) })
+        Box::pin(async move { self.activate_successor().map_err(Self::workbench_failure) })
     }
 
     fn source<'a>(
@@ -11885,6 +11906,7 @@ where
                 .filter(|source| source.target == delivery.target)
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "source delivery does not match an installed connection".into(),
+                    diagnostic: None,
                 })?;
             let delivery = self.environment.requests.accept_source_delivery(delivery);
             if self.checkpoint.is_some() {
@@ -11895,7 +11917,7 @@ where
                 .runner
                 .map_source(context.clone(), Arc::clone(&source.entry), delivery.event)
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             let (_, step) = self
                 .run_receiver(
                     kernel,
@@ -11905,7 +11927,7 @@ where
                     message,
                 )
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             Ok(step)
         })
     }
@@ -11924,6 +11946,7 @@ where
             return Err(KernelBehaviorError {
                 detail: "drain requires a live stateful actor; replace a failed handler first"
                     .into(),
+                diagnostic: None,
             });
         }
         Ok(())
@@ -11943,6 +11966,7 @@ where
             else {
                 return Err(KernelBehaviorError {
                     detail: "drain reached an actor without its receiver".into(),
+                    diagnostic: None,
                 });
             };
             let context = self.context(kernel.identity());
@@ -11951,7 +11975,7 @@ where
                 .runner
                 .resume_value(context.clone(), receiver.continuation, None::<()>)
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             self.stabilize_program(
                 kernel,
                 &context,
@@ -11960,7 +11984,7 @@ where
                 None,
             )
             .await
-            .map_err(Self::failure)
+            .map_err(Self::workbench_failure)
         })
     }
 
@@ -12015,7 +12039,7 @@ where
             let public_owner = match self.descriptor.persistence_policy() {
                 crate::ActorPersistencePolicy::Ephemeral => ActorPublicOwnerPlane::Ephemeral(
                     WorkbenchPublicOwner::issue(&context, &self.descriptor, None)
-                        .map_err(Self::failure)?,
+                        .map_err(KernelInvocationFailure::into_behavior_error)?,
                 ),
                 crate::ActorPersistencePolicy::Durable => {
                     let owner = self
@@ -12087,6 +12111,7 @@ where
                     .fork_group()
                     .ok_or_else(|| KernelBehaviorError {
                         detail: "deferred fork has no group".into(),
+                        diagnostic: None,
                     })?;
                 self.environment
                     .fork_groups
@@ -12094,6 +12119,7 @@ where
                     .and_then(|gate| gate.mark_ready())
                     .map_err(|error| KernelBehaviorError {
                         detail: error.to_string(),
+                        diagnostic: None,
                     })?;
                 return Ok(KernelStep::Continue(()));
             }
@@ -12122,7 +12148,7 @@ where
                     .runner
                     .bind_durable_root_public_owner(context.clone(), owner.clone())
                     .await
-                    .map_err(Self::failure)?
+                    .map_err(Self::workbench_failure)?
                     .into_parts();
                 {
                     let mut records = self.environment.actors.lock();
@@ -12130,14 +12156,14 @@ where
                         Self::failure("prepared root allocation retired before publication")
                     })?;
                     settle_root_public_owner_record(record, &context, &owner, &outcome, readiness)
-                        .map_err(Self::failure)?;
+                        .map_err(Self::workbench_failure)?;
                 }
                 match outcome {
                     tidepool_runtime::session::PublicManifestCommit::Durable => {},
                     tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
                         let readiness = self.environment.runner.confirm_initial_durable_public_owner(
                             context.clone(), owner.clone(),
-                        ).await.map_err(Self::failure)?;
+                        ).await.map_err(Self::workbench_failure)?;
                         let mut records = self.environment.actors.lock();
                         let record = records.get_mut(&context.actor).ok_or_else(|| Self::failure(
                             "prepared root allocation retired before confirmation",
@@ -12145,7 +12171,7 @@ where
                         settle_root_public_owner_record(record, &context, &owner,
                             &tidepool_runtime::session::PublicManifestCommit::Durable,
                             Some(readiness),
-                        ).map_err(Self::failure)?;
+                        ).map_err(Self::workbench_failure)?;
                     }
                     other => return Err(Self::failure(format!(
                         "prepared root public owner was not published: {other:?}",
@@ -12159,10 +12185,11 @@ where
             }
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "resident actor boot was consumed twice".into(),
+                diagnostic: None,
             })?;
             self.initialize(kernel, &context, boot)
                 .await
-                .map_err(Self::failure)
+                .map_err(Self::workbench_failure)
         })
     }
 
@@ -12201,6 +12228,7 @@ where
                             kind: ActorExitKind::Cancelled,
                             summary: "fork admission stopped before interrupted tool settlement"
                                 .into(),
+                            diagnostic: None,
                         })
                         .await
                     {
@@ -12235,7 +12263,7 @@ where
                         .collect(),
                 )
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             self.settled_fork_boundaries.push(boundary);
             Ok(crate::WorkbenchBoundaryReconciliation::Settled)
         })
@@ -12289,9 +12317,10 @@ where
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "enclosing tool output was aborted".into(),
+                            diagnostic: None,
                         })
                         .await
-                        .map_err(Self::failure)?;
+                        .map_err(KernelInvocationFailure::into_behavior_error)?;
                 }
                 cleanup.children.pop();
                 owner.retain_cleanup(cleanup.clone());
@@ -12300,7 +12329,7 @@ where
                 .runner
                 .retire_fork_scopes(context.clone(), cleanup.scopes.clone())
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             cleanup.scopes.clear();
             owner.retain_cleanup(cleanup);
             self.workbench_executions
@@ -12343,6 +12372,7 @@ where
                         .shutdown(ActorTerminal {
                             kind: ActorExitKind::Cancelled,
                             summary: "fork admission stopped before tool completion".into(),
+                            diagnostic: None,
                         })
                         .await
                     {
@@ -12459,11 +12489,7 @@ where
         Ok(crate::OwnedActorTask::new(Box::pin(async move {
             let result = runner.validate_fork_child_scope(context, lexical).await;
             crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
-                result.map_err(|error| KernelInvocationFailure::Failed {
-                    receipts: Vec::new(),
-                    actor: kernel.identity(),
-                    detail: error.to_string(),
-                })?;
+                result.map_err(|error| Self::invocation_failure(kernel.identity(), error))?;
                 behavior.advance_child_release(kernel, release)
             })
         })))
@@ -12488,7 +12514,7 @@ where
                     request,
                 )
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             Ok(step)
         })
     }
@@ -12508,9 +12534,10 @@ where
             let (reply, step) = self
                 .run_receiver(kernel, &context, Some(caller), &ancestry, request)
                 .await
-                .map_err(Self::failure)?;
+                .map_err(Self::workbench_failure)?;
             let reply = reply.ok_or_else(|| KernelBehaviorError {
                 detail: "synchronous mailbox handler produced no reply".into(),
+                diagnostic: None,
             })?;
             Ok(match step {
                 KernelStep::Continue(()) => KernelStep::Continue(reply),
@@ -12570,6 +12597,7 @@ where
                                     receipts: Vec::new(),
                                     actor,
                                     detail: "retained tool reply has no result".into(),
+                                    diagnostic: None,
                                 }
                             })?;
                             serde_json::from_str(&output.output)
@@ -12578,6 +12606,7 @@ where
                                     receipts: Vec::new(),
                                     actor,
                                     detail: format!("retained tool result is invalid: {error}"),
+                                    diagnostic: None,
                                 })
                         });
                     return crate::OwnedActorTask::new(Box::pin(async move {
@@ -12599,6 +12628,7 @@ where
                                 receipts: Vec::new(),
                                 actor,
                                 detail: detail.into(),
+                                diagnostic: None,
                             })
                         })
                     }));
@@ -12687,6 +12717,7 @@ where
                     actor: context.actor,
                     detail: "hosted checkpoint capture requires an exact provider invocation"
                         .into(),
+                    diagnostic: None,
                 });
             }
             let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
@@ -12697,6 +12728,7 @@ where
                         receipts: Vec::new(),
                         actor: context.actor,
                         detail: "actor has no installed tool policy".into(),
+                        diagnostic: None,
                     });
                 }
             };
@@ -12708,6 +12740,7 @@ where
                     receipts: Vec::new(),
                     actor: context.actor,
                     detail: "unknown tool or invalid argument kind".into(),
+                    diagnostic: None,
                 });
             }
             let arguments = match invocation.arguments {
@@ -12752,6 +12785,7 @@ where
                                 receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: "actor tool invocation replied more than once".into(),
+                                diagnostic: None,
                             });
                         }
                         outcome = self
@@ -12766,6 +12800,7 @@ where
                             receipts: Vec::new(),
                             actor: context.actor,
                             detail: "actor awaited another tool invocation without replying".into(),
+                            diagnostic: None,
                         })?;
                         self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Tools(next));
@@ -12774,6 +12809,7 @@ where
                                 receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: error.to_string(),
+                                diagnostic: None,
                             }
                         })?;
                         return Ok(KernelStep::Continue(output));
@@ -12783,6 +12819,7 @@ where
                             receipts: Vec::new(),
                             actor: context.actor,
                             detail: "actor completed a tool invocation without replying".into(),
+                            diagnostic: None,
                         })?;
                         self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Terminal);
@@ -12791,6 +12828,7 @@ where
                                 receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: error.to_string(),
+                                diagnostic: None,
                             }
                         })?;
                         return Ok(KernelStep::Stop {
@@ -12864,6 +12902,7 @@ where
                         receipts: Vec::new(),
                         actor: context.actor,
                         detail: "display actor is unavailable or invocation was cancelled".into(),
+                        diagnostic: None,
                     });
                 }
                 let expansion = self.expand_display(
@@ -12883,6 +12922,7 @@ where
                     receipts: Vec::new(),
                     actor: context.actor,
                     detail: error.to_string(),
+                    diagnostic: error.failure_diagnostic(),
                 })?;
                 let operation = WorkbenchOperationReceipt {
                     display_publication: None,
@@ -12962,6 +13002,7 @@ where
                             receipts: Vec::new(),
                             actor: context.actor,
                             detail: format!("cannot capture public workbench view: {error}"),
+                            diagnostic: None,
                         })?,
                 )
             };
@@ -13216,6 +13257,7 @@ where
                             .shutdown(ActorTerminal {
                                 kind: ActorExitKind::Cancelled,
                                 summary: "route callback failed before publication".into(),
+                                diagnostic: None,
                             })
                             .await
                         {
@@ -13317,7 +13359,7 @@ where
                 })));
             };
             self.validate_child_initialization_frame(kernel, &pending.frame)
-                .map_err(Self::failure)?;
+                .map_err(KernelInvocationFailure::into_behavior_error)?;
             return Ok(self.child_confirmation_task(kernel, pending));
         }
         // Remaining program stabilization is still the original serial driver.
@@ -13354,7 +13396,7 @@ where
                 return self
                     .initialize(kernel, &context, boot)
                     .await
-                    .map_err(Self::failure);
+                    .map_err(Self::workbench_failure);
             }
             let PendingActorProgram {
                 outcome, cleanup, ..
@@ -13363,6 +13405,7 @@ where
                 .take()
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "resident actor resumed without a pending Haskell action".into(),
+                    diagnostic: None,
                 })?;
             let mut handler = self.suspended_cast.take();
             if let Some(handler) = &mut handler {
@@ -13383,7 +13426,7 @@ where
                         outcome,
                     )
                     .await
-                    .map_err(Self::failure)
+                    .map_err(Self::workbench_failure)
                 } else {
                     self.stabilize_program(
                         kernel,
@@ -13393,7 +13436,7 @@ where
                         None,
                     )
                     .await
-                    .map_err(Self::failure)
+                    .map_err(Self::workbench_failure)
                 }
             };
             let step = match &cleanup {
@@ -13492,7 +13535,7 @@ where
             let (hook, realm) = self.shutdown_components(kernel, terminal, deadline).await;
             for component in [hook, realm] {
                 if let crate::CleanupComponentOutcome::Unconfirmed(detail) = component {
-                    return Err(KernelBehaviorError { detail });
+                    return Err(KernelBehaviorError::new(detail));
                 }
             }
             Ok(())
@@ -15272,10 +15315,7 @@ where
 }
 
 fn completed_terminal() -> ActorTerminal {
-    ActorTerminal {
-        kind: ActorExitKind::Completed,
-        summary: "completed".into(),
-    }
+    ActorTerminal::new(ActorExitKind::Completed, "completed")
 }
 
 fn cell_check_rejection(
@@ -15659,6 +15699,7 @@ pub(crate) async fn shutdown_forest_root(
         root.shutdown_with_cleanup(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "forest host shutdown".into(),
+            diagnostic: None,
         }),
     )
     .await;
@@ -16168,6 +16209,7 @@ mod tests {
             terminal: crate::ActorTerminal {
                 kind: crate::ActorExitKind::Cancelled,
                 summary: summary.to_owned(),
+                diagnostic: None,
             },
         };
 
@@ -16218,6 +16260,7 @@ mod tests {
             terminal: crate::ActorTerminal {
                 kind: crate::ActorExitKind::Cancelled,
                 summary: "filler".into(),
+                diagnostic: None,
             },
         };
         sender.try_send(filler).expect("one slot of capacity");
@@ -16229,6 +16272,7 @@ mod tests {
                 terminal: crate::ActorTerminal {
                     kind: crate::ActorExitKind::Cancelled,
                     summary: "would overflow".into(),
+                    diagnostic: None,
                 },
             }),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
@@ -16244,6 +16288,7 @@ mod tests {
                         terminal: crate::ActorTerminal {
                             kind: crate::ActorExitKind::Cancelled,
                             summary: "settlement".into(),
+                            diagnostic: None,
                         },
                     })
                     .await

@@ -5,7 +5,7 @@
 //! a restarted host reports those as lost instead of pretending to serialize
 //! the resident heap.
 
-use crate::{ActorDescriptor, ActorExitKind, ActorPlacement, ActorRef};
+use crate::{ActorDescriptor, ActorPlacement, ActorRef};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -222,12 +222,10 @@ impl DurableActorAdmission {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DurableActorTerminal {
-    pub kind: ActorExitKind,
-    pub summary: String,
-}
+/// Persist the original bounded lifecycle result, without a second projection.
+/// Old V5 terminals default the absent diagnostic; older readers reject the
+/// additive diagnostic field under their owned record's unknown-field policy.
+pub type DurableActorTerminal = crate::ActorTerminal;
 
 /// Pins one exact observed public manifest revision. Runtime additionally
 /// validates the graph checksum, artifact closure and sealed bootstrap inventory.
@@ -694,10 +692,9 @@ impl ActorRecoveryJournal {
     pub(crate) fn retire(
         &self,
         actor: ActorRef,
-        kind: ActorExitKind,
-        summary: String,
+        mut terminal: crate::ActorTerminal,
     ) -> std::io::Result<()> {
-        let terminal = DurableActorTerminal { kind, summary };
+        terminal.diagnostic = crate::termination::retain_failure_diagnostic(terminal.diagnostic);
         let mut state = self.state.lock();
         ensure_writable(&state)?;
         let record = state.records.get(&actor).ok_or_else(|| {
@@ -1273,10 +1270,30 @@ fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActorId, ActorPlacement, EffectiveRole, Incarnation};
+    use crate::{ActorExitKind, ActorId, ActorPlacement, EffectiveRole, Incarnation};
     use tidepool_codegen::scope::ScopeId;
     use tidepool_codegen::suspension::RealmId;
     use tidepool_repr::SessionId;
+
+    #[test]
+    fn v5_terminal_without_diagnostic_remains_readable() {
+        let row = parse_row(r#"{"version":5,"sequence":3,"event":"retired","actor":{"id":7,"incarnation":3},"terminal":{"kind":"failed","summary":"original failure"}}"#)
+            .expect("existing V5 terminal row");
+        let EventKind::Retired { actor, terminal } = row.event else {
+            panic!("retired row must stay retired");
+        };
+        assert_eq!(
+            actor,
+            ActorRef {
+                id: ActorId(7),
+                incarnation: Incarnation(3)
+            }
+        );
+        assert_eq!(
+            terminal,
+            crate::ActorTerminal::new(ActorExitKind::Failed, "original failure")
+        );
+    }
 
     #[test]
     fn embedded_application_intent_and_binding_survive_cold_reopen() {
@@ -1371,7 +1388,10 @@ mod tests {
             .prepare_application(actor, directory.path().join("binding.json"), None)
             .unwrap();
         journal
-            .retire(actor, ActorExitKind::Completed, "done".into())
+            .retire(
+                actor,
+                crate::ActorTerminal::new(ActorExitKind::Completed, "done"),
+            )
             .unwrap();
         assert!(journal.bind_application(actor, "thread".into()).is_err());
         let row = Row {
@@ -1443,7 +1463,10 @@ mod tests {
             .bind_application(actor, "conversation-7".into())
             .unwrap();
         journal
-            .retire(actor, ActorExitKind::Completed, "done".into())
+            .retire(
+                actor,
+                crate::ActorTerminal::new(ActorExitKind::Completed, "done"),
+            )
             .unwrap();
         drop(journal);
         let records = ActorRecoveryJournal::open(&anchor, "actors.jsonl")

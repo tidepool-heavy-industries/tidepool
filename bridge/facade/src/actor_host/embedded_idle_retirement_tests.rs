@@ -268,6 +268,7 @@ fn requested_retirement() -> ActorTerminal {
     ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "native idle Store acceptance".into(),
+        diagnostic: None,
     }
 }
 
