@@ -209,10 +209,54 @@ fn group_inventory(group: &ProjectedGroup) -> Value {
     ])
 }
 
+/// A singleton product and the exact bounded bytes that issued it. Construction
+/// stays with the decoder; later certification borrows this immutable pairing.
+#[derive(Debug)]
+pub(crate) struct CandidateProduct {
+    bytes: Vec<u8>,
+    decoded: RawModuleProduct,
+}
+
+impl CandidateProduct {
+    fn decode_product(bytes: &[u8]) -> Option<RawModuleProduct> {
+        let requirements = crate::prepared_artifact::production_requirements().ok()?;
+        let mut products = tidepool_repr::execution_schema::parse_module_products(
+            bytes,
+            &requirements,
+            product_decode_limits(),
+        )
+        .ok()?;
+        if products.len() != 1 {
+            return None;
+        }
+        products.pop()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: Vec<u8>) -> Option<Self> {
+        let decoded = Self::decode_product(&bytes)?;
+        Some(Self { bytes, decoded })
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub(crate) fn decoded(&self) -> &RawModuleProduct {
+        &self.decoded
+    }
+}
+
+impl std::ops::Deref for CandidateProduct {
+    type Target = RawModuleProduct;
+    fn deref(&self) -> &Self::Target {
+        &self.decoded
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct CandidateBundle {
     pub owner: CachedHomeOwner,
-    pub product: RawModuleProduct,
+    pub product: CandidateProduct,
     pub source: PathBuf,
     pub source_sha256: String,
     pub iface_path: PathBuf,
@@ -220,7 +264,6 @@ pub(crate) struct CandidateBundle {
     pub package_imports_path: PathBuf,
     pub package_imports_sha256: String,
     pub package_imports_bytes: Vec<u8>,
-    pub product_bytes: Vec<u8>,
     pub evidence: shared_evidence::SharedEvidence,
     pub target_source: String,
     pub origin: CandidateOrigin,
@@ -265,7 +308,7 @@ pub(crate) fn record_deployment_acceptance(
         .collect();
     tracing::info!(target: "tidepool_toolchain::module_candidates",
         deployment_accepted_modules = accepted.len() as u64,
-        deployment_original_product_bytes = accepted.iter().map(|b| b.product_bytes.len() as u64).sum::<u64>(),
+        deployment_original_product_bytes = accepted.iter().map(|b| b.product.bytes().len() as u64).sum::<u64>(),
         "deployment module products accepted");
 }
 
@@ -1569,7 +1612,6 @@ fn select_records_inner(
     context: Option<&ExactCandidateContext>,
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
-    let requirements = crate::prepared_artifact::production_requirements().ok()?;
     let mut validated = BTreeMap::new();
     let mut package_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let mut validation_elapsed = std::time::Duration::ZERO;
@@ -1605,25 +1647,14 @@ fn select_records_inner(
         }
         let decode_started = std::time::Instant::now();
         decoded_bytes += record.products.len() as u64;
-        let parsed = tidepool_repr::execution_schema::parse_module_products(
-            &record.products,
-            &requirements,
-            product_decode_limits(),
-        );
+        let parsed = CandidateProduct::decode_product(&record.products);
         decode_elapsed += decode_started.elapsed();
-        let Ok(parsed) = parsed else { continue };
-        if parsed.len() != 1 {
-            continue;
-        }
-        let matching: Vec<_> = parsed
-            .into_iter()
-            .filter(|p| {
-                p.unit == record.unit
-                    && p.module == record.module
-                    && p.interface == record.interface
-            })
-            .collect();
-        if matching.len() != 1 || record.interface.is_empty() {
+        let Some(product) = parsed else { continue };
+        if product.unit != record.unit
+            || product.module != record.module
+            || product.interface != record.interface
+            || record.interface.is_empty()
+        {
             continue;
         }
         let evidence_count = record
@@ -1717,7 +1748,6 @@ fn select_records_inner(
         )
         .ok()?;
         let record = ValidatedRecord::admit(record, canonical)?;
-        let product = matching.into_iter().next()?;
         if generation_dependent(&product) {
             continue;
         }
@@ -1851,7 +1881,10 @@ fn select_records_inner(
         let core_reference = canonical_reference.core.as_ref()?;
         let bundle = CandidateBundle {
             owner: owner.clone(),
-            product,
+            product: CandidateProduct {
+                bytes: std::mem::take(&mut record.data.products),
+                decoded: product,
+            },
             source: record.source.clone(),
             source_sha256: record.source_sha256.clone(),
             iface_path: iface_path.clone(),
@@ -1859,7 +1892,6 @@ fn select_records_inner(
             package_imports_path: package_imports_path.clone(),
             package_imports_sha256: sha(&record.package_imports),
             package_imports_bytes: std::mem::take(&mut record.data.package_imports),
-            product_bytes: std::mem::take(&mut record.data.products),
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin,
@@ -1880,7 +1912,7 @@ fn select_records_inner(
         let selected = &by_owner[&(record.unit.clone(), record.module.clone())];
         let product_path =
             scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
-        tidepool_atomic_write::write_best_effort(&product_path, &selected.product_bytes).ok()?;
+        tidepool_atomic_write::write_best_effort(&product_path, selected.product.bytes()).ok()?;
         manifest.push(candidate_manifest_row(CandidateManifestRow {
             unit: &owner.unit,
             module: &owner.module,
@@ -2329,7 +2361,7 @@ mod tests {
         assert_eq!(bundle.product.groups.len(), 6037);
         assert!(!generation_dependent(&bundle.product));
         assert_eq!(bundle.owner.module_version.0, original_version);
-        assert_eq!(bundle.product_bytes, original_products);
+        assert_eq!(bundle.product.bytes(), original_products);
         assert_eq!(fs::read(&bundle.iface_path).unwrap(), original_interface);
         assert_eq!(
             fs::read(&bundle.package_imports_path).unwrap(),
@@ -2567,6 +2599,21 @@ mod tests {
     }
 
     #[test]
+    fn candidate_product_carrier_keeps_exact_decode_and_refuses_corrupt_bytes() {
+        let bytes = product_bytes("u", "Library", &[0x42]);
+        let carrier = CandidateProduct::decode(bytes.clone()).unwrap();
+        assert_eq!(carrier.bytes(), bytes);
+        assert_eq!(carrier.decoded().unit, "u");
+        assert_eq!(carrier.decoded().module, "Library");
+        assert_eq!(carrier.decoded().interface, [0x42]);
+        assert!(CandidateProduct::decode(b"corrupt product".to_vec()).is_none());
+        assert!(CandidateProduct::decode(vec![0; PRODUCT_MAX_BYTES + 1]).is_none());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(CandidateProduct::decode(trailing).is_none());
+    }
+
+    #[test]
     fn execution_capability_requires_current_full_local_source_owner() {
         let root = tempfile::tempdir().unwrap();
         let (graph, owners) =
@@ -2574,13 +2621,7 @@ mod tests {
         let record = candidate_fixture(root.path(), "Unrelated");
         let make_bundle = |owner: CachedHomeOwner, proof: bool| CandidateBundle {
             owner,
-            product: tidepool_repr::execution_schema::parse_module_products(
-                &record.products,
-                &crate::prepared_artifact::production_requirements().unwrap(),
-                product_decode_limits(),
-            )
-            .unwrap()
-            .remove(0),
+            product: CandidateProduct::decode(record.products.clone()).unwrap(),
             source: record.source.clone(),
             source_sha256: record.source_sha256.clone(),
             iface_path: root.path().join("fixture.hi"),
@@ -2588,7 +2629,6 @@ mod tests {
             package_imports_path: root.path().join("fixture.packages"),
             package_imports_sha256: sha(&record.package_imports),
             package_imports_bytes: record.package_imports.clone(),
-            product_bytes: record.products.clone(),
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin: CandidateOrigin::Ordinary,
@@ -3387,7 +3427,7 @@ mod tests {
         let original = fs::read(row[13].as_text().unwrap()).unwrap();
         let bundle = &selected.by_owner[&("u".into(), "D".into())];
         assert_eq!(original, expected_products);
-        assert_eq!(original, bundle.product_bytes);
+        assert_eq!(original, bundle.product.bytes());
         let packages = fs::read(row[11].as_text().unwrap()).unwrap();
         assert_eq!(packages, expected_packages);
         assert_eq!(packages, bundle.package_imports_bytes);
@@ -3526,7 +3566,7 @@ mod tests {
             vec![("u".into(), "A".into())]
         );
         assert_eq!(
-            selected.by_owner[&("u".into(), "A".into())].product_bytes,
+            selected.by_owner[&("u".into(), "A".into())].product.bytes(),
             a.products
         );
 
@@ -3914,7 +3954,7 @@ mod tests {
         assert_eq!(selected.by_owner.len(), 1);
         let offered = &selected.by_owner[&("u".into(), "Library".into())];
         assert_eq!(offered.owner, computed_owner(&current));
-        assert_eq!(offered.product_bytes, current.products);
+        assert_eq!(offered.product.bytes(), current.products);
         assert_eq!(fs::read(&offered.iface_path).unwrap(), current.interface);
 
         let shadow = tempfile::tempdir().unwrap();

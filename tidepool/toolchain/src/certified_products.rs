@@ -4218,14 +4218,6 @@ pub(crate) fn certify_products(
                     &mut validation,
                 )
                 .map_err(|_| CertificationError::StaleEvidence)?;
-                let original = parse_module_products(
-                    &bundle.product_bytes,
-                    &requirements,
-                    crate::module_candidates::product_decode_limits(),
-                )?;
-                if matching_product(&original, &key.0, &key.1)? != &bundle.product {
-                    return Err(CertificationError::Mismatch("original product bytes"));
-                }
                 if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
                     return Err(CertificationError::Mismatch("candidate current source"));
                 }
@@ -4258,11 +4250,11 @@ pub(crate) fn certify_products(
                         return Err(CertificationError::Mismatch("candidate direct imports"));
                     }
                 }
-                // `bundle.product` is a clone of the exact parsed original.
+                // The candidate carrier owns the original bounded decode and its bytes.
                 (
-                    &bundle.product,
-                    bundle.product_bytes.as_slice(),
-                    bundle.product_bytes.as_slice(),
+                    bundle.product.decoded(),
+                    bundle.product.bytes(),
+                    bundle.product.bytes(),
                     bundle.package_imports_bytes.as_slice(),
                     sha(&serde_json::to_vec(&*bundle.evidence).map_err(|_| {
                         CertificationError::Mismatch("dependency witness encoding")
@@ -6979,7 +6971,7 @@ pub(crate) mod tests {
         (
             crate::module_candidates::CandidateBundle {
                 owner,
-                product,
+                product: crate::module_candidates::CandidateProduct::decode(product_bytes).unwrap(),
                 source,
                 source_sha256: hex(&accepted.source_sha256),
                 iface_path: interface_path,
@@ -6987,7 +6979,6 @@ pub(crate) mod tests {
                 package_imports_path: package_path,
                 package_imports_sha256: hex(&sha(&package_bytes)),
                 package_imports_bytes: package_bytes,
-                product_bytes,
                 evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
