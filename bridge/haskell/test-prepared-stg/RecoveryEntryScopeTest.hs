@@ -6,7 +6,10 @@ import Control.Exception (SomeException, finally, try)
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
+import Data.IORef (newIORef)
 import GHC
+import GHC.Builtin.Types (nilDataCon, intTy)
+import GHC.Core.DataCon (dataConWorkId)
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.FVs (exprSomeFreeVars)
@@ -14,9 +17,16 @@ import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
-import GHC.Types.Id (idArity, idType, idTagSig_maybe, idCbvMarks_maybe, asNonWorkerLikeId, isDeadEndId, localiseId, setIdArity, setIdDmdSig)
+import GHC.Types.Id (idArity, idType, idTagSig_maybe, idCbvMarks_maybe, asNonWorkerLikeId, isDeadEndId, localiseId, setIdArity, setIdDmdSig, setIdType)
 import GHC.Types.Demand (nopSig)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, nameModule_maybe, wiredInNameTyThing_maybe)
+import GHC.Types.TyThing (TyThing(..))
+import GHC.Types.TypeEnv (emptyTypeEnv)
+import GHC.IfaceToCore (tcTopIfaceBindings)
+import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
+import GHC.Unit.Module.ModIface (mi_extra_decls)
+import GHC.Utils.Outputable (text)
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Types.Name.Env (lookupNameEnv)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, isId)
@@ -31,7 +41,7 @@ import System.IO (hClose, openTempFile)
 import System.Process (readProcess)
 import Tidepool.FatIface
   (FatIfaceLookup(..), OwnerInterfaceContext(..), lookupFatIfaceExact,
-   lookupOwnerInterface, newFatIfaceCache, newOwnerInterfaceCache)
+   lookupOwnerInterface, newFatIfaceCache, newOwnerInterfaceCache, readExactInterface)
 import Tidepool.PreparedStg
   (PreparedModule, RecoveredModuleInput(..), newPreparedBodyCache,
    pmBindings, pmTagSigs, prepareRecoveredBodies, prepareRecoveredModule)
@@ -44,6 +54,7 @@ entryScopeTests :: TestTree
 entryScopeTests = testGroup "exact original entry scope"
   [ testCase "native constructor and function entry facts survive partial preparation" nativeEntries
   , testCase "original CBV worker survives stripped occurrence metadata" originalCbvWorker
+  , testCase "wired constructor worker retains exact canonical entry authority" wiredConstructorEntry
   ]
 
 -- Compile an independent native original, then read its fat Core through the
@@ -163,6 +174,71 @@ nativeEntries = do
         refused <- try (lower (map (mapBindingReferences missing) strictLeaf))
           :: IO (Either SomeException PreparedModule)
         case refused of Left _ -> pure (); Right _ -> fail "missing private reference escaped scope refusal"
+        -- An external but nonwired Name still needs its declaring-interface
+        -- entry; the GHC wired source cannot manufacture ordinary entries.
+        missingExternal <- try (prepareRecoveredModule env
+          (RecoveredModuleInput owner (ownerInterfaceLocation context) [] strictLeaf
+            (Map.delete (varName (entry "leaf")) entries)))
+          :: IO (Either SomeException PreparedModule)
+        case missingExternal of
+          Left _ -> pure ()
+          Right _ -> fail "absent nonwired canonical entry escaped scope refusal"
+
+-- GHC deliberately excludes wired declarations from .hi files. Recover an
+-- actual GHC.Types original that refers to the compiler's list worker, then
+-- prepare its genuine defining group through the production owner.
+wiredConstructorEntry :: IO ()
+wiredConstructorEntry = do
+  libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
+  forM_ [True, False] $ \ignore -> runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags ((if ignore then gopt_set else gopt_unset)
+      (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas)
+    env <- getSession
+    liftIO $ do
+      let worker = dataConWorkId nilDataCon
+          workerName = varName worker
+          doc = text "genuine wired constructor entry control"
+      owner <- maybe (fail "wired worker has no exact owner") pure (nameModule_maybe workerName)
+      case wiredInNameTyThing_maybe workerName of
+        Just (AnId canonical) -> assert
+          (varName canonical == workerName && eqType (idType canonical) (idType worker))
+          "wired worker Name does not carry its exact GHC-issued Id"
+        _ -> fail "wired list worker Name is not an AnId"
+      (iface, _) <- readExactInterface env owner >>= either (fail . show) pure
+      extra <- maybe (fail "wired owner's original Core is absent") pure (mi_extra_decls iface)
+      decoded <- initIfaceCheck doc env $ do
+        types <- liftIO (newIORef emptyTypeEnv)
+        initIfaceLcl owner doc NotBoot (tcTopIfaceBindings types extra)
+      let refersToWorker rhs = any ((== workerName) . varName)
+            (nonDetEltsUniqSet (exprSomeFreeVars isId rhs))
+      root <- case [binder | binding <- decoded, (binder,rhs) <- pairs binding,
+                      nameModule_maybe (varName binder) == Just owner, refersToWorker rhs] of
+        binder : _ -> pure binder
+        [] -> fail "genuine wired-owner original does not reference the list worker"
+      fat <- newFatIfaceCache
+      original <- lookupFatIfaceExact env fat (varName root) >>= \case
+        FatIfaceFound bindings -> pure bindings
+        _ -> fail "selected wired-owner original is absent"
+      owners <- newOwnerInterfaceCache
+      bodies <- newPreparedBodyCache
+      prepared <- prepareRecoveredBodies env owners bodies owner original >>= either (fail . show) pure
+      context <- lookupOwnerInterface owners owner >>= maybe (fail "wired owner context absent") pure
+      let entries = ownerInterfaceEntries context
+      assert (Map.notMember workerName entries)
+        "control no longer exercises a wired declaration omitted from the interface"
+      canonicalRoot <- maybe (fail "original root absent from declaring interface") pure
+        (Map.lookup (varName root) entries)
+      assertEntry canonicalRoot prepared
+      assert (not (eqType (idType worker) intTy)) "wired worker type fault is ineffective"
+      let wrongType = map (mapBindingReferences
+            (Map.singleton workerName (setIdType worker intTy))) original
+      refused <- try (prepareRecoveredModule env (RecoveredModuleInput owner
+        (ownerInterfaceLocation context) [] wrongType entries))
+        :: IO (Either SomeException PreparedModule)
+      case refused of
+        Left _ -> pure ()
+        Right _ -> fail "altered wired worker type escaped canonical scope refusal"
 
 -- A genuine package-original WorkerLike Id carries GHC's strict argument
 -- contract. Compare unchanged recovery with metadata-stripped occurrences;

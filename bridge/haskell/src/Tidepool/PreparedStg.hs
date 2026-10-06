@@ -66,7 +66,8 @@ import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var (Id, isId, varName, varUnique)
-import GHC.Types.Name (Name, isExternalName, nameModule_maybe)
+import GHC.Types.Name (Name, isExternalName, nameModule_maybe, wiredInNameTyThing_maybe)
+import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Env (plusNameEnv, emptyNameEnv, disjointNameEnv)
@@ -877,7 +878,15 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
           , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
           , preparedExpectedEntries = Map.empty
           }
-      canonicalReference reference = case Map.lookup (varName reference) entries of
+      -- Wired-in declarations are deliberately absent from interface files.
+      -- Their exact Names carry GHC's canonical TyThing, including implicit
+      -- constructor workers. All references retain the same owner/type check.
+      canonicalEntry name = case Map.lookup name entries of
+        Just original -> Just original
+        Nothing -> case wiredInNameTyThing_maybe name of
+          Just (AnId original) -> Just original
+          _ -> Nothing
+      canonicalReference reference = case canonicalEntry (varName reference) of
         Just original
           | varName original == varName reference
           , nameModule_maybe (varName original) == Just thisModule
