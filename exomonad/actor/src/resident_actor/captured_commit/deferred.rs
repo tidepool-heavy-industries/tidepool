@@ -30,7 +30,7 @@ pub(in crate::resident_actor) fn prepare_deferred<H, O>(
     parent_descriptor: ActorDescriptor,
     publication: ForkPublication,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    continuation: ResidentHole,
+    continuation: ForkContinuation,
     group: crate::ForkGroupId,
 ) -> PreparedDeferredCommit
 where

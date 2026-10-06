@@ -2643,6 +2643,60 @@ pub(crate) enum ResidentActorBoundary {
     WatchForget(WatchForget),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ForkReply {
+    Actor,
+    Forks,
+}
+
+pub(crate) struct ForkContinuation {
+    pub(crate) hole: ResidentHole,
+    reply: ForkReply,
+}
+
+impl ForkContinuation {
+    pub(crate) fn for_reply(hole: ResidentHole, reply: ForkReply) -> Self {
+        Self { hole, reply }
+    }
+
+    fn actor(hole: ResidentHole) -> Self {
+        Self {
+            hole,
+            reply: ForkReply::Actor,
+        }
+    }
+
+    pub(crate) fn forks(hole: ResidentHole) -> Self {
+        Self {
+            hole,
+            reply: ForkReply::Forks,
+        }
+    }
+
+    fn resume<H, O, T>(
+        self,
+        session: &mut ResidentSession<H, O>,
+        result: Result<T, String>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        match (self.reply, result) {
+            (ForkReply::Actor, Ok(value)) => session
+                .resume_classified(self.hole, value)
+                .map_err(classify_resumption),
+            (ForkReply::Actor, Err(detail)) => session
+                .abort(self.hole.cont_id(), detail)
+                .map_err(ResidentActorWorkbenchError::Resident),
+            (ForkReply::Forks, result) => session
+                .resume_classified(self.hole, result)
+                .map_err(classify_resumption),
+        }
+    }
+}
+
 pub(crate) enum ForkGroupBoundary {
     CheckCheckpoint {
         continuation: ResidentHole,
@@ -2668,21 +2722,21 @@ pub(crate) enum ForkGroupBoundary {
         lifetime: crate::WorkerLifetime,
     },
     Begin {
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         relative: bool,
         group: String,
         branches: Vec<String>,
     },
     Commit {
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         group: crate::ForkGroupId,
     },
     CommitCaptured {
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         group: crate::ForkGroupId,
     },
     Abort {
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         group: crate::ForkGroupId,
     },
     Cleanup {
@@ -8242,7 +8296,7 @@ where
                         group,
                         branches,
                     )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                        continuation: hole,
+                        continuation: ForkContinuation::forks(hole),
                         relative,
                         group,
                         branches,
@@ -8251,7 +8305,7 @@ where
                         group,
                     )) => Ok(ResidentActorBoundary::ForkGroup(
                         ForkGroupBoundary::Commit {
-                            continuation: hole,
+                            continuation: ForkContinuation::forks(hole),
                             group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
                                 ResidentActorWorkbenchError::ActorProtocol(format!(
                                     "invalid fork group id {group}"
@@ -8261,7 +8315,7 @@ where
                     )),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(group)) => Ok(ResidentActorBoundary::ForkGroup(
                         ForkGroupBoundary::CommitCaptured {
-                            continuation: hole,
+                            continuation: ForkContinuation::forks(hole),
                             group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
                                 ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
                             })?),
@@ -8270,7 +8324,7 @@ where
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksAbortWith(
                         group,
                     )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                        continuation: hole,
+                        continuation: ForkContinuation::forks(hole),
                         group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
                                 "invalid fork group id {group}"
@@ -8438,7 +8492,7 @@ where
                             branches,
                         ),
                     ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                        continuation: hole,
+                        continuation: ForkContinuation::actor(hole),
                         relative,
                         group,
                         branches,
@@ -8447,7 +8501,7 @@ where
                         crate::generated::actor::ActorReq::ActorCommitForkGroupWith(group),
                     ) => Ok(ResidentActorBoundary::ForkGroup(
                         ForkGroupBoundary::Commit {
-                            continuation: hole,
+                            continuation: ForkContinuation::actor(hole),
                             group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
                                 ResidentActorWorkbenchError::ActorProtocol(format!(
                                     "invalid fork group id {group}"
@@ -8458,7 +8512,7 @@ where
                     ResidentRequest::Actor(
                         crate::generated::actor::ActorReq::ActorAbortForkGroupWith(group),
                     ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                        continuation: hole,
+                        continuation: ForkContinuation::actor(hole),
                         group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
                                 "invalid fork group id {group}"
@@ -9680,7 +9734,7 @@ where
     pub(crate) async fn resume_fork_group(
         &self,
         context: crate::ActorSessionContext,
-        hole: ResidentHole,
+        hole: ForkContinuation,
         group: crate::ForkGroupId,
         group_path: String,
         paths: Vec<String>,
@@ -9692,9 +9746,7 @@ where
                         "fork group identity exceeds Haskell Int".into(),
                     )
                 })?;
-                session
-                    .resume_classified(hole, Ok::<_, String>((group, group_path, paths)))
-                    .map_err(classify_resumption)
+                hole.resume(session, Ok((group, group_path, paths)))
             })
             .await
     }
@@ -10546,14 +10598,12 @@ where
     pub(crate) async fn resume_fork_failure(
         &self,
         context: crate::ActorSessionContext,
-        hole: ResidentHole,
+        hole: ForkContinuation,
         detail: String,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, Err::<(), _>(detail))
-                    .map_err(classify_resumption)
+                hole.resume(session, Err::<(), _>(detail))
             })
             .await
     }
@@ -10561,14 +10611,10 @@ where
     pub(crate) async fn resume_fork_unit(
         &self,
         context: crate::ActorSessionContext,
-        hole: ResidentHole,
+        hole: ForkContinuation,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, Ok::<(), String>(()))
-                    .map_err(classify_resumption)
-            })
+            .with_machine(context, move |session, _, _| hole.resume(session, Ok(())))
             .await
     }
 
@@ -12356,21 +12402,36 @@ pub(crate) mod request_tests {
         ActorWorkbenchSource,
         tempfile::TempDir,
     ) {
+        host_mount_fixture_with_effects(
+            configure,
+            &[
+                tidepool_mcp::notifications_decl(),
+                tidepool_mcp::sleep_decl(),
+            ],
+            "'[Exomonad.Notifications, Sleep]",
+        )
+    }
+
+    fn host_mount_fixture_with_effects(
+        configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
+        declarations: &[tidepool_mcp::EffectDecl],
+        effects_alias: &str,
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
         tidepool_testing::eval_harness::require_extract();
-        let declarations = [
-            tidepool_mcp::notifications_decl(),
-            tidepool_mcp::sleep_decl(),
-        ];
-        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+        let effects = tidepool_mcp::ensure_effects_module(declarations).expect("actor effects");
         let include = fixture_include_roots(&effects);
         let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_notebook_preamble(&declarations, false),
+            &tidepool_mcp::build_notebook_preamble(declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad",
         );
-        let effects_alias = "'[Exomonad.Notifications, Sleep]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_244);
         let session_root = tempfile::tempdir().expect("session root");
         let mut lib = SessionLib::open(
@@ -20751,6 +20812,253 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert!(declared.epoch > bound.epoch);
         assert!(declared.declaration_tip.0 > bound.declaration_tip.0);
         assert_eq!(declared.bindings, bound.bindings);
+    }
+
+    fn fork_reply_fixture() -> (
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
+        let (session, context, source, root) = host_mount_fixture_with_effects(
+            |_| {},
+            &[tidepool_mcp::actor_decl(), tidepool_mcp::forks_decl()],
+            "'[Core.Actor, Core.Forks]",
+        );
+        let fixture_dir = root.path().join("fork-reply-fixtures");
+        std::fs::create_dir(&fixture_dir).expect("fixture directory");
+        std::fs::write(
+            fixture_dir.join("ForkReplyContracts.hs"),
+            include_str!("fixtures/ForkReplyContracts.hs"),
+        )
+        .expect("fork reply contract fixture");
+        let mut include = source.base_include.to_vec();
+        include.push(fixture_dir);
+        let source = ActorWorkbenchSource::new(
+            insert_preamble_imports(
+                &source.preamble,
+                "qualified Tidepool.Effects.Core as Core\nqualified ForkReplyContracts as Contracts",
+            ),
+            include,
+        );
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        (machines, context, source, root)
+    }
+
+    async fn fork_reply_boundary(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: &crate::ActorSessionContext,
+        source: &ActorWorkbenchSource,
+        text: &str,
+    ) -> ForkGroupBoundary {
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: text.into(),
+                },
+                None,
+            )
+            .await
+            .expect("authentic fork request suspends");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("expected a suspended fork request");
+        };
+        let ResidentActorBoundary::ForkGroup(boundary) = runner
+            .capture_boundary(
+                context.clone(),
+                (*outcome).into(),
+                context.placement.resource_scope,
+            )
+            .await
+            .expect("fork request decodes through its production owner")
+        else {
+            panic!("expected a fork-group boundary");
+        };
+        boundary
+    }
+
+    #[tokio::test]
+    async fn fork_group_replies_preserve_actor_and_forks_answer_contracts() {
+        with_test_compiler_owner(async {
+            let (machines, context, source, _root) = fork_reply_fixture();
+            let workbench =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let runner = ResidentActorRunner::new(machines, source.clone());
+            for text in [
+                "Contracts.actorBegin",
+                "Contracts.actorCommit",
+                "Contracts.actorAbort",
+                "Contracts.forksBegin",
+                "Contracts.forksCommit",
+                "Contracts.forksAbort",
+            ] {
+                let boundary =
+                    fork_reply_boundary(&workbench, &runner, &context, &source, text).await;
+                let completed = match boundary {
+                    ForkGroupBoundary::Begin { continuation, .. } => {
+                        runner
+                            .resume_fork_group(
+                                context.clone(),
+                                continuation,
+                                crate::ForkGroupId(7),
+                                "group".into(),
+                                vec!["branch".into()],
+                            )
+                            .await
+                    }
+                    ForkGroupBoundary::Commit { continuation, .. }
+                    | ForkGroupBoundary::Abort { continuation, .. } => {
+                        runner.resume_fork_unit(context.clone(), continuation).await
+                    }
+                    _ => panic!("unexpected fork boundary"),
+                }
+                .expect("the declared answer shape resumes its exact continuation");
+                assert!(
+                    matches!(completed, ResidentOutcome::Completed { .. }),
+                    "{text}"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn forks_refusal_resumes_the_declared_left_answer() {
+        with_test_compiler_owner(async {
+            let (machines, context, source, _root) = fork_reply_fixture();
+            let workbench =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let runner = ResidentActorRunner::new(machines, source.clone());
+            let boundary = fork_reply_boundary(
+                &workbench,
+                &runner,
+                &context,
+                &source,
+                "Contracts.forksRefusal",
+            )
+            .await;
+            let ForkGroupBoundary::Begin { continuation, .. } = boundary else {
+                panic!("expected a fallible begin request");
+            };
+            let completed = runner
+                .resume_fork_failure(context, continuation, "admission refused".into())
+                .await
+                .expect("the fallible fork answer remains an in-band Left");
+            assert!(matches!(completed, ResidentOutcome::Completed { .. }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn actor_fork_refusal_consumes_once_and_keeps_prior_group_admission() {
+        with_test_compiler_owner(async {
+            let (machines, context, source, _root) = fork_reply_fixture();
+            let workbench =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let runner = ResidentActorRunner::new(machines, source.clone());
+            let first = fork_reply_boundary(
+                &workbench,
+                &runner,
+                &context,
+                &source,
+                "Contracts.actorDuplicateBegin",
+            )
+            .await;
+            let ForkGroupBoundary::Begin {
+                continuation,
+                group,
+                branches,
+                ..
+            } = first
+            else {
+                panic!("first begin")
+            };
+            let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+            let (admitted, reservations) = groups
+                .begin(
+                    context.actor,
+                    crate::ActorPath::parse(&group).unwrap(),
+                    branches
+                        .into_iter()
+                        .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
+                        .collect(),
+                    None,
+                )
+                .expect("first external group admission commits");
+            let next = runner
+                .resume_fork_group(
+                    context.clone(),
+                    continuation,
+                    admitted,
+                    group,
+                    reservations
+                        .into_iter()
+                        .map(|reservation| reservation.allocated.to_string())
+                        .collect(),
+                )
+                .await
+                .expect("first admission reaches the second request");
+            let ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
+                continuation,
+                group,
+                branches,
+                ..
+            }) = runner
+                .capture_boundary(context.clone(), next, context.placement.resource_scope)
+                .await
+                .unwrap()
+            else {
+                panic!("second begin")
+            };
+            let refusal = groups
+                .begin(
+                    context.actor,
+                    crate::ActorPath::parse(&group).unwrap(),
+                    branches
+                        .into_iter()
+                        .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
+                        .collect(),
+                    None,
+                )
+                .expect_err("duplicate path refuses without replacing its original admission");
+            let retry = ForkContinuation::actor(continuation.hole.clone());
+            let id = continuation.hole.cont_id().to_owned();
+            let failure = runner
+                .resume_fork_failure(context.clone(), continuation, refusal.to_string())
+                .await;
+            assert!(matches!(
+                failure,
+                Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(_)))
+            ));
+            runner
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert!(!session.parked_holes().contains(&id.as_str()));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let retried = runner
+                .resume_fork_failure(context.clone(), retry, "repeated refusal".into())
+                .await;
+            assert!(matches!(
+                retried,
+                Err(ResidentActorWorkbenchError::Resident(
+                    ResidentError::WrongContinuation { .. }
+                ))
+            ));
+            assert!(
+                groups.completion_boundary(admitted, context.actor).is_ok(),
+                "the earlier external admission survives fragment failure"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

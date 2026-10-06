@@ -39,7 +39,7 @@ mod tool_support;
 mod workbench_ledger;
 
 #[cfg(test)]
-pub(crate) use drain_wait::{DrainWaitEvent, wait_drain_event};
+pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
 pub(crate) use owned_workbench::{
     ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
 };
@@ -49,11 +49,11 @@ use display_settlement::{
     DisplayReceiptSubmission,
 };
 use invocation_work::{
-    InvocationWork, ensure_workbench_execution_id, retain_invocation_cleanup_summary,
+    ensure_workbench_execution_id, retain_invocation_cleanup_summary, InvocationWork,
 };
 use status_rendering::{
-    RevisionIdentities, RosterSnapshot, render_bindings_section, render_job_line,
-    render_revisions_section, render_roster_changes, render_source_drift_section,
+    render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
+    render_source_drift_section, RevisionIdentities, RosterSnapshot,
 };
 use workbench_ledger::{WorkbenchBoundaryRecord, WorkbenchExecutions, WorkbenchReplayFailure};
 
@@ -62,12 +62,13 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellSourceSpan, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
-    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDisplayOutput,
-    WorkbenchDisplayPage, WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer, truncate_preview_at_line,
+    truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
+    WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -75,9 +76,9 @@ use tracing::Instrument;
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::{RequestRegistry, RequestReservationOwner};
 use crate::resident_workbench::{
-    AgentStopProjection, ForkGroupBoundary, PreparedCell, ResidentActorBoundary,
-    ResidentActorStartupStep, ResidentKernelBoundary, ResidentWorkbenchFragment,
-    ResidentWorkbenchStep, ResidentWorkbenchSuspension,
+    AgentStopProjection, ForkContinuation, ForkGroupBoundary, ForkReply, PreparedCell,
+    ResidentActorBoundary, ResidentActorStartupStep, ResidentKernelBoundary,
+    ResidentWorkbenchFragment, ResidentWorkbenchStep, ResidentWorkbenchSuspension,
 };
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
@@ -1304,11 +1305,9 @@ mod display_tests {
         assert_eq!(owner.slots[&slot].page_ordinal, 1);
         assert!(owner.slots[&slot].pending.is_none());
         assert!(owner.slots[&slot].callback.is_none());
-        assert!(
-            owner
-                .stage(actor, terminal_page(), None, false, 8192, None)
-                .is_err()
-        );
+        assert!(owner
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .is_err());
         assert!(owner.select(actor, request.page.identity, 1).is_err());
     }
 
@@ -3184,11 +3183,9 @@ impl CurrentEffectOwner<'_> {
     fn invocation_work(&self) -> Option<Arc<InvocationWork>> {
         match self {
             Self::Workbench(execution) => {
-                assert!(
-                    execution
-                        .invocation_work
-                        .matches(execution.context.actor, &execution.reservation_owner)
-                );
+                assert!(execution
+                    .invocation_work
+                    .matches(execution.context.actor, &execution.reservation_owner));
                 Some(execution.invocation_work.clone())
             }
             Self::Actor { .. } => None,
@@ -4919,6 +4916,11 @@ where
     ) -> child_launch::PreparedChildLaunch {
         tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = start.child.descriptor.label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
+        let fork_reply = if child.fork_workspace.is_some() {
+            ForkReply::Forks
+        } else {
+            ForkReply::Actor
+        };
         let fork_group = child.descriptor.fork_group();
         let original_placement = child.descriptor.placement();
         let invocation_work = effect_owner.invocation_work();
@@ -5130,6 +5132,7 @@ where
                 control: effect_owner.control(),
                 invocation_work,
                 parent_hole,
+                fork_reply,
                 fork_group,
                 original_placement,
             },
@@ -6979,7 +6982,7 @@ where
                 }
                 self.environment
                     .runner
-                    .resume_unit(context.clone(), continuation)
+                    .resume_fork_unit(context.clone(), continuation)
                     .await
             }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Cleanup {
@@ -11644,7 +11647,7 @@ where
         context: &ActorSessionContext,
         publication: &ForkPublication,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         group: crate::ForkGroupId,
     ) -> captured_commit::PreparedDeferredCommit {
         captured_commit::prepare_deferred(
@@ -11682,7 +11685,7 @@ where
         context: &ActorSessionContext,
         publication: &ForkPublication,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         group: crate::ForkGroupId,
     ) -> captured_commit::PreparedCapturedCommit {
         captured_commit::prepare(
@@ -11720,7 +11723,7 @@ where
         context: &ActorSessionContext,
         publication: &ForkPublication,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        continuation: ResidentHole,
+        continuation: ForkContinuation,
         group: crate::ForkGroupId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let prepared =
@@ -15792,9 +15795,10 @@ async fn tracked_stopped_projection(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildExitObservations, checkpoint_capture_delivered, disposition_for_non_command_failure,
+        checkpoint_capture_delivered, disposition_for_non_command_failure,
         failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
         workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
+        ChildExitObservations,
     };
 
     #[test]
@@ -15917,45 +15921,37 @@ mod tests {
             incarnation: 1,
             watch_id: 9,
         };
-        assert!(
-            super::ForkPublication::Route(boundary.clone())
-                .hosted_boundary()
-                .is_none()
-        );
-        assert!(
-            super::ForkPublication::Workbench {
-                boundary: Some(boundary),
-                capture: None,
-            }
+        assert!(super::ForkPublication::Route(boundary.clone())
             .hosted_boundary()
-            .is_none()
-        );
+            .is_none());
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(boundary),
+            capture: None,
+        }
+        .hosted_boundary()
+        .is_none());
         let direct = tidepool_runtime::session::WorkbenchForkBoundary::Execution {
             actor_id: 1,
             incarnation: 1,
             execution_id: WorkbenchExecutionId::from_digest([7; 16]),
         };
-        assert!(
-            super::ForkPublication::Workbench {
-                boundary: Some(direct),
-                capture: None
-            }
-            .hosted_boundary()
-            .is_none()
-        );
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(direct),
+            capture: None
+        }
+        .hosted_boundary()
+        .is_none());
         let hosted = tidepool_runtime::session::WorkbenchForkBoundary::external(
             "thread".into(),
             "request".into(),
             "call".into(),
         );
-        assert!(
-            super::ForkPublication::Workbench {
-                boundary: Some(hosted),
-                capture: None
-            }
-            .hosted_boundary()
-            .is_some()
-        );
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(hosted),
+            capture: None
+        }
+        .hosted_boundary()
+        .is_some());
     }
 
     #[tokio::test]
@@ -16493,11 +16489,9 @@ mod tests {
             response.results[2].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(
-            response
-                .render_text()
-                .contains("awaitSettled :: Response result -> Await (Settlement result)")
-        );
+        assert!(response
+            .render_text()
+            .contains("awaitSettled :: Response result -> Await (Settlement result)"));
         let structured = serde_json::to_value(&response).unwrap();
         assert_eq!(
             structured["results"][0]["outcome"]["matches"][0]["availability"],
@@ -16556,11 +16550,9 @@ mod tests {
             response.results[0].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(
-            response
-                .render_text()
-                .contains("investigate :: FilePath -> IO ()")
-        );
+        assert!(response
+            .render_text()
+            .contains("investigate :: FilePath -> IO ()"));
     }
 
     /// The defect this path exists for: `Cmd.CommandResult` is a qualified type
@@ -16798,11 +16790,9 @@ mod tests {
             response.results[0].outcome,
             crate::lookup_tool::LookupOutcome::Found { .. }
         ));
-        assert!(
-            response
-                .render_text()
-                .contains("readOutput :: Job -> IO Text")
-        );
+        assert!(response
+            .render_text()
+            .contains("readOutput :: Job -> IO Text"));
     }
 
     /// Queries answered locally consume no compiler result and a dotted
@@ -17110,11 +17100,9 @@ mod tests {
             response.items[3].kind,
             Some(WorkbenchCellItemKind::Expression)
         );
-        assert!(
-            response.items[2..]
-                .iter()
-                .all(|item| item.installed_bindings.is_empty())
-        );
+        assert!(response.items[2..]
+            .iter()
+            .all(|item| item.installed_bindings.is_empty()));
     }
 
     #[test]
@@ -17260,11 +17248,9 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(
-            receipt
-                .output
-                .contains("private bindings (discarded unless this cell publishes): commandJob")
-        );
+        assert!(receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes): commandJob"));
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed
@@ -17303,11 +17289,9 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(
-            receipt
-                .output
-                .contains("private bindings (discarded unless this cell publishes): commandJob")
-        );
+        assert!(receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes): commandJob"));
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed

@@ -13,6 +13,7 @@ pub(super) struct ChildLaunchContinuation {
     pub control: Option<Arc<crate::WorkbenchExecutionControl>>,
     pub invocation_work: Option<Arc<InvocationWork>>,
     pub parent_hole: ResidentHole,
+    pub fork_reply: ForkReply,
     pub fork_group: Option<crate::ForkGroupId>,
     pub original_placement: crate::ActorPlacement,
 }
@@ -47,6 +48,7 @@ struct LaunchedChild {
 pub(super) struct ChildLaunchResume {
     context: ActorSessionContext,
     parent_hole: ResidentHole,
+    fork_reply: ForkReply,
     fork_group: Option<crate::ForkGroupId>,
     invocation_work: Option<Arc<InvocationWork>>,
     original_placement: crate::ActorPlacement,
@@ -429,6 +431,7 @@ where
     ChildLaunchResume {
         context: continuation.context,
         parent_hole: continuation.parent_hole,
+        fork_reply: continuation.fork_reply,
         fork_group: continuation.fork_group,
         invocation_work: continuation.invocation_work,
         original_placement: continuation.original_placement,
@@ -449,6 +452,7 @@ where
     let ChildLaunchResume {
         context,
         parent_hole,
+        fork_reply,
         fork_group,
         invocation_work,
         original_placement,
@@ -512,7 +516,11 @@ where
             }
             return environment
                 .runner
-                .resume_fork_failure(context.clone(), parent_hole, error.to_string())
+                .resume_fork_failure(
+                    context.clone(),
+                    ForkContinuation::for_reply(parent_hole, fork_reply),
+                    error.to_string(),
+                )
                 .await;
         }
         Err(error) => return Err(error),

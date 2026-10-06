@@ -13,7 +13,7 @@ struct Continuation {
     parent_descriptor: ActorDescriptor,
     publication: ForkPublication,
     control: Arc<crate::WorkbenchExecutionControl>,
-    continuation: ResidentHole,
+    continuation: ForkContinuation,
     group: crate::ForkGroupId,
     owns_group: bool,
     committed_authority: Option<Arc<crate::lineage::CommittedForkGroups>>,
@@ -75,7 +75,7 @@ pub(super) fn prepare<H, O>(
     parent_descriptor: ActorDescriptor,
     publication: ForkPublication,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    continuation: ResidentHole,
+    continuation: ForkContinuation,
     group: crate::ForkGroupId,
 ) -> PreparedCapturedCommit
 where
@@ -351,7 +351,7 @@ where
                         .runner
                         .abort_live(
                             frame.context,
-                            frame.continuation,
+                            frame.continuation.hole,
                             "captured fork admission interrupted".into(),
                         )
                         .await;
