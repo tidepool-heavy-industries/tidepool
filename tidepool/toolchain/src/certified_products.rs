@@ -3626,6 +3626,21 @@ fn validate_exact_cached_closure(
 ) -> CertResult<()> {
     use crate::cache::ImportQualifier;
     use crate::module_candidates::dependencies::CandidateDependencyInventory;
+    let mut accepted = BTreeMap::new();
+    for module in &receipt.modules {
+        if accepted
+            .insert((module.unit.clone(), module.module.clone()), module)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch("duplicate receipt module"));
+        }
+    }
+    if accepted
+        .values()
+        .all(|module| module.origin != ProductOrigin::Cached)
+    {
+        return Ok(());
+    }
     let mut protected = BTreeSet::new();
     for entry in context.interface_owners() {
         protected.insert((entry.owner.unit, entry.owner.module));
@@ -3653,15 +3668,6 @@ fn validate_exact_cached_closure(
             .map(|row| (row.unit.clone(), row.module.clone())),
     );
     let mut package_validation = PackageInterfaceValidation::default();
-    let mut accepted = BTreeMap::new();
-    for module in &receipt.modules {
-        if accepted
-            .insert((module.unit.clone(), module.module.clone()), module)
-            .is_some()
-        {
-            return Err(CertificationError::Mismatch("duplicate receipt module"));
-        }
-    }
     // An offered dependency rejected by the worker cannot satisfy this receipt.
     let mut accepted_candidates = BTreeMap::new();
     for (key, module) in &accepted {
@@ -7050,6 +7056,30 @@ pub(crate) mod tests {
             original_a,
             original_b,
         )
+    }
+
+    #[test]
+    fn exact_cached_closure_without_cached_modules_does_not_walk_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut receipt, current, original_a, original_b) = cached_closure_pair(root.path());
+        let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([3; 32], &[original_a, original_b])
+            .unwrap();
+        for module in &mut receipt.modules {
+            module.origin = ProductOrigin::Fresh;
+        }
+        receipt.finalization = fixture_finalization(None, &receipt.modules);
+        let before = context.artifact_view().inventory().metrics();
+        validate_exact_cached_closure(None, &receipt, &context, &current, &BTreeMap::new())
+            .unwrap();
+        assert_eq!(context.artifact_view().inventory().metrics(), before);
+        receipt.modules.push(receipt.modules[0].clone());
+        assert!(matches!(
+            validate_exact_cached_closure(None, &receipt, &context, &current, &BTreeMap::new()),
+            Err(CertificationError::Mismatch("duplicate receipt module"))
+        ));
+        assert_eq!(context.artifact_view().inventory().metrics(), before);
     }
 
     #[test]
