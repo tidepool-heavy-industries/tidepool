@@ -753,8 +753,9 @@ pub struct MaterializedExactDeclarationContext {
     pub lexical: Vec<ExactLexicalNode>,
 }
 
-/// One completed private file owner for an immutable selected artifact graph.
-/// Parents keep borrowed paths alive; request scratch owns only its manifest.
+/// Private files and newly certified entries added by one immutable graph view.
+/// Parents retain inherited rows and group payloads; requests assemble borrowed
+/// selections without storing a copy of every ancestor in each descendant.
 pub(crate) struct RetainedArtifactMaterialization {
     _directory: tempfile::TempDir,
     _parents: Vec<Arc<Self>>,
@@ -764,6 +765,94 @@ pub(crate) struct RetainedArtifactMaterialization {
     graph_paths: BTreeMap<[u8; 32], PathBuf>,
     #[cfg(test)]
     payload_work: recovery_artifacts::RecoveryArtifactWork,
+}
+
+impl RetainedArtifactMaterialization {
+    fn visit_owners<'a>(&'a self, seen: &mut BTreeSet<usize>, visit: &mut impl FnMut(&'a Self)) {
+        if !seen.insert(self as *const Self as usize) {
+            return;
+        }
+        for parent in &self._parents {
+            parent.visit_owners(seen, visit);
+        }
+        visit(self);
+    }
+
+    fn selected_rows<'a>(
+        &'a self,
+        metadata: &ArtifactMetadataSnapshot,
+    ) -> BTreeMap<ArtifactId, &'a RetainedArtifactRow> {
+        let selected = metadata
+            .entries
+            .values()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        let mut rows = BTreeMap::new();
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            for (id, row) in &owner.rows {
+                if selected.contains(id) {
+                    rows.insert(*id, row);
+                }
+            }
+        });
+        rows
+    }
+
+    fn selected_group_refs<'a>(
+        owners: impl IntoIterator<Item = &'a Self>,
+        metadata: &ArtifactMetadataSnapshot,
+    ) -> Vec<&'a PendingCertifiedGroup> {
+        let available = metadata
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((
+                    (
+                        product.owner().unit.as_str(),
+                        product.owner().module.as_str(),
+                    ),
+                    product.owner(),
+                )),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut groups = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        for owner in owners {
+            owner.visit_owners(&mut visited, &mut |owner| {
+                for group in owner.groups.iter() {
+                    let native = group.owner();
+                    if available
+                        .get(&(native.unit.as_str(), native.module.as_str()))
+                        .is_some_and(|selected| **selected == *native)
+                        && seen.insert((
+                            native.unit.as_str(),
+                            native.module.as_str(),
+                            native.module_version.0,
+                            group.group().original_ordinal(),
+                        ))
+                    {
+                        groups.push(group);
+                    }
+                }
+            });
+        }
+        groups
+    }
+
+    fn graph_path_refs<'a>(&'a self) -> BTreeMap<[u8; 32], &'a PathBuf> {
+        let mut paths = BTreeMap::new();
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            paths.extend(
+                owner
+                    .graph_paths
+                    .iter()
+                    .map(|(digest, path)| (*digest, path)),
+            );
+        });
+        paths
+    }
 }
 
 #[derive(Clone)]
@@ -3227,19 +3316,18 @@ impl ExactDeclarationContext {
         metadata: &ArtifactMetadataSnapshot,
     ) -> Result<(), CompileError> {
         let retained = self.inventory.retained_materialization();
-        let empty = BTreeMap::new();
-        self.validate_artifacts_with_owned_rows(
-            artifacts,
-            metadata,
-            retained.as_ref().map_or(&empty, |retained| &retained.rows),
-        )
+        let rows = retained
+            .as_ref()
+            .map(|retained| retained.selected_rows(metadata))
+            .unwrap_or_default();
+        self.validate_artifacts_with_owned_rows(artifacts, metadata, &rows)
     }
 
     fn validate_artifacts_with_owned_rows(
         &self,
         artifacts: &[DeclarationArtifact],
         metadata: &ArtifactMetadataSnapshot,
-        owned: &BTreeMap<ArtifactId, RetainedArtifactRow>,
+        owned: &BTreeMap<ArtifactId, &RetainedArtifactRow>,
     ) -> Result<(), CompileError> {
         metadata.validate_native_selection()?;
         let mut seen = BTreeSet::new();
@@ -3594,26 +3682,18 @@ impl ExactDeclarationContext {
             .prefix("tidepool-exact-artifacts-")
             .tempdir()?;
         let root = directory.path();
-        let mut rows = BTreeMap::new();
-        let selected_ids = metadata
-            .entries
-            .values()
-            .map(|entry| entry.descriptor.id)
-            .collect::<BTreeSet<_>>();
+        let mut inherited_rows = BTreeMap::new();
         for parent in &parents {
-            for (id, row) in &parent.rows {
-                if selected_ids.contains(id) {
-                    rows.entry(*id).or_insert_with(|| row.clone());
-                }
-            }
+            inherited_rows.extend(parent.selected_rows(metadata));
         }
-        let inherited_row_count = rows.len();
+        let inherited_row_count = inherited_rows.len();
         let entries = metadata.entries.values().cloned().collect::<Vec<_>>();
         let new_entries = entries
             .iter()
-            .filter(|entry| !rows.contains_key(&entry.descriptor.id))
+            .filter(|entry| !inherited_rows.contains_key(&entry.descriptor.id))
             .cloned()
             .collect::<Vec<_>>();
+        let mut rows = BTreeMap::new();
         let mut validation = PackageInterfaceValidation::default();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
@@ -3642,15 +3722,17 @@ impl ExactDeclarationContext {
             start.elapsed(),
             context_bytes,
         );
+        let mut selected_rows = inherited_rows;
+        selected_rows.extend(rows.iter().map(|(id, row)| (*id, row)));
         let artifacts = entries
             .iter()
-            .map(|entry| rows[&entry.descriptor.id].artifact.clone())
+            .map(|entry| selected_rows[&entry.descriptor.id].artifact.clone())
             .collect::<Vec<_>>();
         let start = std::time::Instant::now();
         // The recovery writer issued every row from owned immutable bytes and
         // checked its private file once. Validate selection metadata without
         // rereading those same private payloads.
-        self.validate_artifacts_with_owned_rows(&artifacts, metadata, &rows)?;
+        self.validate_artifacts_with_owned_rows(&artifacts, metadata, &selected_rows)?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
             crate::timing::NO_ROUND,
@@ -3659,48 +3741,23 @@ impl ExactDeclarationContext {
             context_bytes,
         );
         let available = original_products(&entries);
-        let available_owners = available
-            .iter()
-            .map(|product| {
-                (
-                    (
-                        product.owner().unit.as_str(),
-                        product.owner().module.as_str(),
-                    ),
-                    product.owner(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let mut inherited_groups = Vec::new();
-        let mut seen_groups = BTreeSet::new();
-        for parent in &parents {
-            for group in parent.groups.iter() {
-                if available_owners
-                    .get(&(group.owner().unit.as_str(), group.owner().module.as_str()))
-                    .is_some_and(|owner| **owner == *group.owner())
-                    && seen_groups.insert((
-                        group.owner().unit.clone(),
-                        group.owner().module.clone(),
-                        group.owner().module_version.0,
-                        group.group().original_ordinal(),
-                    ))
-                {
-                    inherited_groups.push(group.clone());
-                }
-            }
-        }
+        let inherited_groups = RetainedArtifactMaterialization::selected_group_refs(
+            parents.iter().map(Arc::as_ref),
+            metadata,
+        )
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
         let inherited_group_handle_clones = inherited_groups.len();
         let new_products = original_products(&new_entries);
         let start = std::time::Instant::now();
-        inherited_groups.extend(
-            certify_owned_products_in_context_with_validation(
-                &new_products,
-                &inherited_groups,
-                &available,
-                &mut validation,
-            )
-            .map_err(failure)?,
-        );
+        let groups = certify_owned_products_in_context_with_validation(
+            &new_products,
+            &inherited_groups,
+            &available,
+            &mut validation,
+        )
+        .map_err(failure)?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
             crate::timing::NO_ROUND,
@@ -3710,9 +3767,10 @@ impl ExactDeclarationContext {
         );
         let mut graph_paths = parents
             .iter()
-            .flat_map(|parent| parent.graph_paths.iter())
-            .map(|(digest, path)| (*digest, path.clone()))
+            .flat_map(|parent| parent.graph_path_refs())
+            .map(|(digest, path)| (digest, path.clone()))
             .collect::<BTreeMap<_, _>>();
+        let inherited_graphs = graph_paths.keys().copied().collect::<BTreeSet<_>>();
         let mut scope_written_bytes = 0;
         let execution_scope = execution_scope_value_with_graph_paths(
             &entries,
@@ -3723,8 +3781,9 @@ impl ExactDeclarationContext {
         let work = validation.work();
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_immutable_materialization",
             retained_entries = inherited_row_count, new_entries = new_entries.len(),
-            retained_metadata_row_clones = inherited_row_count, inherited_group_handle_clones,
-            retained_graph_path_clones = parents.iter().map(|parent| parent.graph_paths.len()).sum::<usize>(),
+            retained_metadata_row_clones = 0, inherited_row_lookups = inherited_row_count, inherited_group_handle_clones,
+            transient_graph_path_clones = inherited_graphs.len(),
+            retained_graph_paths = graph_paths.len() - inherited_graphs.len(),
             recovery_read_bytes = work.read_bytes, recovery_written_bytes = work.written_bytes,
             recovery_decoded_bytes = work.decoded_bytes, recovery_hash_bytes = work.hash_bytes,
             scope_written_bytes, "completed private artifact ownership");
@@ -3732,9 +3791,12 @@ impl ExactDeclarationContext {
             _directory: directory,
             _parents: parents,
             rows,
-            groups: inherited_groups.into(),
+            groups: groups.into(),
             execution_scope,
-            graph_paths,
+            graph_paths: graph_paths
+                .into_iter()
+                .filter(|(digest, _)| !inherited_graphs.contains(digest))
+                .collect(),
             #[cfg(test)]
             payload_work: work,
         })
@@ -3766,12 +3828,18 @@ impl ExactDeclarationContext {
         let retained = self.inventory.retain_materialization(|parents| {
             self.materialize_retained_artifacts(metadata, parents)
         })?;
+        let selected_rows = retained.selected_rows(metadata);
         let artifacts = metadata
             .entries
             .values()
-            .map(|entry| retained.rows[&entry.descriptor.id].artifact.clone())
+            .map(|entry| selected_rows[&entry.descriptor.id].artifact.clone())
             .collect::<Vec<_>>();
-        let groups = Arc::clone(&retained.groups);
+        let groups: Arc<[PendingCertifiedGroup]> =
+            RetainedArtifactMaterialization::selected_group_refs([retained.as_ref()], metadata)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into();
         let artifacts_by_owner = artifacts
             .iter()
             .map(|artifact| {
@@ -3818,7 +3886,7 @@ impl ExactDeclarationContext {
                                 [&identity(&iface.unit, &iface.module)]
                                 .descriptor
                                 .package_imports_sha256)),
-                            retained.rows[&metadata.entries[&identity(&iface.unit, &iface.module)]
+                            selected_rows[&metadata.entries[&identity(&iface.unit, &iface.module)]
                                 .descriptor
                                 .id]
                                 .interface_evidence
@@ -4752,7 +4820,11 @@ mod tests {
             .unwrap();
         assert_eq!(second.artifacts, paths);
         assert_eq!(second.semantic_sha256, semantic);
-        assert!(Arc::ptr_eq(&groups, &second.groups));
+        assert_eq!(groups, second.groups);
+        assert!(groups
+            .iter()
+            .zip(second.groups.iter())
+            .all(|(left, right)| std::ptr::eq(left.group(), right.group())));
         assert!(Arc::ptr_eq(
             &weak.upgrade().unwrap(),
             second.materialization.as_ref().unwrap()
@@ -4848,59 +4920,84 @@ mod tests {
 
     #[test]
     fn retained_materialization_many_descendants_measure_metadata_and_payload_work() {
-        let (mut context, producer) = metadata_fixture();
-        let scratch = tempfile::tempdir().unwrap();
-        let first = context
-            .prepare_compilation(&scratch.path().join("base"), &producer)
-            .unwrap();
-        let mut previous = first.artifacts;
-        let mut written_bytes = first
-            .materialization
-            .as_ref()
-            .unwrap()
-            .payload_work
-            .written_bytes;
-        let mut inherited_rows = 0;
-        let descendants = 24;
-        for index in 0..descendants {
-            let product = crate::certified_products::fixture_finalized_product(
-                support_product(&format!("Growing{index}")),
-                context.producer,
-            );
-            context = Arc::new(
-                context
-                    .as_ref()
-                    .clone()
-                    .extend_checked_original_products(context.producer, &[product])
-                    .unwrap(),
-            );
-            let request = context
-                .prepare_compilation(&scratch.path().join(format!("child{index}")), &producer)
+        for descendants in [24, 100] {
+            let (mut context, producer) = metadata_fixture();
+            let scratch = tempfile::tempdir().unwrap();
+            let first = context
+                .prepare_compilation(&scratch.path().join("base"), &producer)
                 .unwrap();
-            for artifact in &previous {
-                assert!(request.artifacts.contains(artifact));
-            }
-            let retained = request.materialization.as_ref().unwrap();
-            assert_eq!(retained._parents.len(), 1);
-            let retained_files = std::fs::read_dir(retained._directory.path().join("artifacts"))
+            let mut previous = first.artifacts;
+            let mut written_bytes = first
+                .materialization
+                .as_ref()
                 .unwrap()
-                .map(|entry| entry.unwrap().metadata().unwrap().len())
-                .sum::<u64>();
+                .payload_work
+                .written_bytes;
+            let mut inherited_rows = 0;
+            for index in 0..descendants {
+                let product = crate::certified_products::fixture_finalized_product(
+                    support_product(&format!("Growing{index}")),
+                    context.producer,
+                );
+                context = Arc::new(
+                    context
+                        .as_ref()
+                        .clone()
+                        .extend_checked_original_products(context.producer, &[product])
+                        .unwrap(),
+                );
+                let request = context
+                    .prepare_compilation(&scratch.path().join(format!("child{index}")), &producer)
+                    .unwrap();
+                for artifact in &previous {
+                    assert!(request.artifacts.contains(artifact));
+                }
+                let retained = request.materialization.as_ref().unwrap();
+                assert_eq!(retained._parents.len(), 1);
+                assert_eq!(
+                    retained.rows.len(),
+                    1,
+                    "a descendant retains only its new row"
+                );
+                let mut stored_rows = 0;
+                retained.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                    stored_rows += owner.rows.len();
+                });
+                assert_eq!(
+                    stored_rows,
+                    index + 5,
+                    "ancestor row storage grows linearly"
+                );
+                let retained_files =
+                    std::fs::read_dir(retained._directory.path().join("artifacts"))
+                        .unwrap()
+                        .map(|entry| entry.unwrap().metadata().unwrap().len())
+                        .sum::<u64>();
+                assert_eq!(
+                    retained.payload_work.written_bytes, retained_files,
+                    "only this descendant's new private payloads were written"
+                );
+                assert!(retained.payload_work.written_bytes > 0);
+                inherited_rows += previous.len();
+                written_bytes += retained.payload_work.written_bytes;
+                previous = request.artifacts;
+            }
             assert_eq!(
-                retained.payload_work.written_bytes, retained_files,
-                "only this descendant's new private payloads were written"
+                inherited_rows,
+                descendants * 4 + descendants * (descendants - 1) / 2
             );
-            assert!(retained.payload_work.written_bytes > 0);
-            inherited_rows += previous.len();
-            written_bytes += retained.payload_work.written_bytes;
-            previous = request.artifacts;
+            let retained = context.inventory.retained_materialization().unwrap();
+            let mut stored_rows = 0;
+            let mut stored_groups = 0;
+            let mut stored_graph_paths = 0;
+            retained.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                stored_rows += owner.rows.len();
+                stored_groups += owner.groups.len();
+                stored_graph_paths += owner.graph_paths.len();
+            });
+            assert_eq!(stored_rows, descendants + 4);
+            println!("retained-descendants count={descendants} immutable_written_bytes={written_bytes} transient_inherited_rows={inherited_rows} retained_row_handles={stored_rows} retained_group_handles={stored_groups} retained_graph_handles={stored_graph_paths} final_rows={}", previous.len());
         }
-        assert_eq!(
-            inherited_rows,
-            descendants * 4 + descendants * (descendants - 1) / 2
-        );
-        println!("retained-descendants count={descendants} immutable_written_bytes={written_bytes} inherited_row_copies={} final_rows={}",
-            inherited_rows, previous.len());
     }
 
     #[test]

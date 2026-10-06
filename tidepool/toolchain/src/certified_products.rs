@@ -4025,8 +4025,6 @@ pub(crate) fn certify_products(
     }
     let parsed_fresh = fresh_products.products();
     let fresh_product_bytes = fresh_products.bytes;
-    let requirements = crate::prepared_artifact::production_requirements()
-        .map_err(|_| CertificationError::Mismatch("production requirements"))?;
     if let Some(admission) = exact {
         validate_exact_cached_closure(
             candidates,

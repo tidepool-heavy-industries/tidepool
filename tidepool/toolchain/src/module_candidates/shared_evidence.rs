@@ -372,16 +372,18 @@ mod tests {
     fn publication_stage_rechecks_negative_shadow_witnesses() {
         let (root, mut record, _) = fixture();
         let shadow = root.path().join("higher-priority-Library.hs");
+        let module = record.module.clone();
+        let source = record.source.clone();
         record
             .evidence
             .make_mut()
             .resolutions
             .push(crate::cache::ResolutionEvidence {
                 qualifier: crate::cache::ImportQualifier::Unqualified,
-                module: record.module.clone(),
+                module,
                 boot: false,
-                selected: Some(record.source.clone()),
-                candidates: vec![shadow.clone(), record.source.clone()],
+                selected: Some(source.clone()),
+                candidates: vec![shadow.clone(), source],
             });
         let mut acquisition = ValidationStage::acquisition();
         acquisition
