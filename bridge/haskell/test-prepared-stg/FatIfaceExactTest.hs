@@ -118,8 +118,10 @@ scenario = do
       forward <- liftIO (lookupFatIfaceBodies hsc cache privateOwner [privateCallerName, fatIdentityName])
       reverseRoots <- liftIO (lookupFatIfaceBodies hsc cache privateOwner
         [fatIdentityName, privateCallerName, privateCallerName])
-      liftIO $ assert (foundNames forward == foundNames reverseRoots)
-        "root permutation/duplication changed original group membership or defining order"
+      liftIO $ case (forward, reverseRoots) of
+        (FatIfaceFound{}, FatIfaceFound{}) -> assert (foundNames forward == foundNames reverseRoots)
+          "root permutation/duplication changed original group membership or defining order"
+        _ -> fail "aggregate private-scope roots lost their defining bodies"
       recAResult <- liftIO (lookupFatIfaceExact hsc cache recAName)
       recBResult <- liftIO (lookupFatIfaceExact hsc cache recBName)
       liftIO (assertRecGroup ["recA", "recB"] recAResult)
