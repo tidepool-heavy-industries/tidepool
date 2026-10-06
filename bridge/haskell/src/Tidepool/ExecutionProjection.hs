@@ -281,18 +281,21 @@ data OriginalGroupOmission = OriginalGroupOmission
   , omittedOriginalReason :: OriginalGroupOmissionReason
   } deriving stock (Eq, Show)
 
-data PreparedModuleProducts = PreparedModuleProducts
-  [(Module, Either ProjectionError [ProjectedGroup], [OriginalGroupOmission])]
-  (Map (Module, Word32) [DataCon])
+-- The wire arena and its compiler provenance are one lowering result. Neither
+-- caching nor dependency settlement can retain one without the other.
+data ProjectedGroupEvidence = ProjectedGroupEvidence
+  { projectedGroupWire :: ProjectedGroup
+  , projectedGroupConstructors :: [DataCon]
+  }
+
+newtype PreparedModuleProducts = PreparedModuleProducts
+  [(Module, Either ProjectionError [ProjectedGroupEvidence], [OriginalGroupOmission])]
 
 projectPreparedModuleProducts :: ProjectionContext -> [PreparedModule] -> PreparedModuleProducts
-projectPreparedModuleProducts context modules = PreparedModuleProducts outcomes provenance
- where
-  rows = [(pmModule prepared,
-    projectPreparedModuleGroupResultsFor ExecutableTarget context prepared Nothing) | prepared <- modules]
-  outcomes = [(owner, traverse (\(_,_,result) -> fst <$> result) groups, []) | (owner,groups) <- rows]
-  provenance = Map.fromList [((owner,ordinal),cons) | (owner,groups) <- rows
-    , (ordinal,_,Right (_,cons)) <- groups]
+projectPreparedModuleProducts context modules = PreparedModuleProducts
+  [(pmModule prepared, traverse (\(_,_,result) -> result)
+      (projectPreparedModuleGroupResultsFor ExecutableTarget context prepared Nothing), [])
+    | prepared <- modules]
 
 -- The compiler's actual home unit, complete source coverage and current module
 -- own original issuance. Package globals are sealed later against their exact
@@ -316,12 +319,9 @@ projectOriginalHomeModuleProductDemand env interfaces context externalBinders mo
 -- Missing owners remain demands until the compiler worklist has settled.
 data RawModuleProducts = RawModuleProducts
   { rawOriginalProductOwner :: Module
-  , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
-  , rawExecutableProduct :: Either ProjectionError [ProjectedGroup]
+  , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
+  , rawExecutableProduct :: Either ProjectionError [ProjectedGroupEvidence]
   , rawOriginalGroupEncodings :: Map Word32 ProjectedGroupEncoding
-  -- Paired with the exact lowering and cache entry, never reconstructed from
-  -- rendered names or a later compiler environment.
-  , rawGroupConstructors :: Map Word32 [DataCon]
   }
 
 -- Raw facts retain exact prepared compiler objects and projection authority.
@@ -413,38 +413,47 @@ projectCachedOriginalHomeModuleProducts cache@(OriginalProjectionCache entries) 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts
 projectRawOriginalHomeModuleProducts env interfaces context prepared =
-  RawModuleProducts owner original executable encodings provenance
+  RawModuleProducts owner original executable encodings
   where
     owner = pmModule prepared
     isHome modul = toUnitId (moduleUnit modul) `Set.member` hsc_all_home_unit_ids env
-    originalResults = case Map.lookup (moduleName owner) interfaces of
+    original = case Map.lookup (moduleName owner) interfaces of
       Just interface | pmCoverage prepared == CompleteSourceModule && isHome owner
         && mi_module interface == owner -> Just
           (projectPreparedModuleGroupResultsFor (OriginalHomeProduct isHome) context prepared Nothing)
       _ -> Nothing
-    stripConstructors (ordinal,symbols,result) = (ordinal,symbols,fst <$> result)
-    original = map stripConstructors <$> originalResults
-    executableResults = projectPreparedModuleGroupResultsFor ExecutableTarget context prepared Nothing
-    executable = traverse (\(_,_,result) -> fst <$> result) executableResults
-    selectedResults = fromMaybe executableResults originalResults
-    provenance = Map.fromList [(ordinal,cons) | (ordinal,_,Right (_,cons)) <- selectedResults]
-    encodings = Map.fromList [(ordinal,prepareProjectedGroupEncoding group)
+    executable = traverse (\(_,_,result) -> result)
+      (projectPreparedModuleGroupResultsFor ExecutableTarget context prepared Nothing)
+    encodings = Map.fromList [(ordinal,prepareProjectedGroupEncoding (projectedGroupWire group))
       | outcomes <- maybe [] pure original, (ordinal,_,Right group) <- outcomes]
 
 -- Force the local lowering on its executor worker, before incorporation.
 -- Failed groups remain values; only infrastructure exceptions abort the batch.
 forceRawModuleProducts :: RawModuleProducts -> IO RawModuleProducts
 forceRawModuleProducts raw = do
-  case rawOriginalProductGroups raw of
-    Just _ -> do
+  selected <- case rawOriginalProductGroups raw of
+    Just outcomes -> do
       _ <- evaluate (Set.size (rawOriginalProductDemands raw)
         + Set.size (rawOriginalProductBinders raw)
         + sum (map (BS.length . projectedGroupEncodingBytes)
             (Map.elems (rawOriginalGroupEncodings raw))))
-      pure ()
+      pure [group | (_,_,Right group) <- outcomes]
     Nothing -> do
-      _ <- evaluate (rawExecutableProduct raw)
-      pure ()
+      outcome <- evaluate (rawExecutableProduct raw)
+      case outcome of
+        Left _ -> pure []
+        Right groups -> pure groups
+  -- Consume the census spine and exact compiler identities on the worker,
+  -- releasing the lazy traversal of the completed projection state. DataCons
+  -- themselves remain paired with their original compiler environment lifetime.
+  forM_ selected $ \group -> forM_ (projectedGroupConstructors group) $ \con -> do
+    let identity = nameSymbol "constructor" (dataConName con)
+    _ <- evaluate (varId (dataConWorkId con))
+    _ <- evaluate (dataConTag con)
+    _ <- evaluate (Text.length (symbolUnit identity) + Text.length (symbolModule identity)
+      + Text.length (symbolNamespace identity) + Text.length (symbolOccurrence identity)
+      + maybe 0 Text.length (symbolRecordParent identity))
+    pure ()
   pure raw
 
 rawOriginalProductBinders :: RawModuleProducts -> Set SymbolIdentity
@@ -455,8 +464,8 @@ rawOriginalProductBinders raw = Set.fromList
 rawOriginalProductDemands :: RawModuleProducts -> Set SymbolIdentity
 rawOriginalProductDemands raw = Set.fromList
   [globalIdentity global | outcomes <- maybe [] pure (rawOriginalProductGroups raw)
-    , (_, _, Right projected) <- outcomes
-    , global <- projectedGlobals (projectedBody projected)
+    , (_, _, Right evidence) <- outcomes
+    , global <- projectedGlobals (projectedBody (projectedGroupWire evidence))
     , globalRequiredGeneration global == Nothing]
 
 -- Settlement runs only after queued/running work and completion-driven demand
@@ -487,7 +496,8 @@ settleOriginalHomeModuleProductsWithoutOwners env externalBinders withdrawn rows
         [((owner, projectedOriginalOrdinal projected), Set.fromList
             [globalIdentity global | global <- projectedGlobals (projectedBody projected)
               , globalRequiredGeneration global == Nothing])
-          | (owner, outcomes) <- originalRows, (_, _, Right projected) <- outcomes]
+          | (owner, outcomes) <- originalRows, (_, _, Right evidence) <- outcomes
+          , let projected = projectedGroupWire evidence]
       unavailableHomeReferences = Set.filter
         (\identity -> isHome (symbolOwner identity) && identity `Set.notMember` knownBinders)
         (Set.unions [rawOriginalProductDemands raw | raw <- rows
@@ -521,16 +531,10 @@ settleOriginalHomeModuleProductsWithoutOwners env externalBinders withdrawn rows
                       (Map.lookup (globalIdentity global) groupOwners)]
               dependent = [OriginalGroupOmission ordinal (projectedBinders projected)
                     (DependsOnUnavailable (Set.toAscList (unavailableDependencies projected)))
-                | (ordinal, _, Right projected) <- outcomes, (owner, ordinal) `Set.member` blocked]
+                | (ordinal, _, Right evidence) <- outcomes, (owner, ordinal) `Set.member` blocked
+                , let projected = projectedGroupWire evidence]
           in (owner, Right retained, failed ++ dependent)
-      finished = map finish rows
-      finishedByOwner = Map.fromList [(owner,outcome) | (owner,outcome,_) <- finished]
-      provenance = Map.fromList [((owner,ordinal),cons)
-        | raw <- rows, let owner = rawOriginalProductOwner raw
-        , Just (Right groups) <- [Map.lookup owner finishedByOwner]
-        , group <- groups, let ordinal = projectedOriginalOrdinal group
-        , Just cons <- [Map.lookup ordinal (rawGroupConstructors raw)]]
-  in (PreparedModuleProducts finished provenance, unavailableHomeReferences)
+  in (PreparedModuleProducts (map finish rows), unavailableHomeReferences)
 
 symbolOwner :: SymbolIdentity -> Module
 symbolOwner identity = mkModule
@@ -539,25 +543,25 @@ symbolOwner identity = mkModule
 
 preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
-preparedModuleProductOutcomes (PreparedModuleProducts outcomes _) =
-  [(owner, outcome) | (owner, outcome, _) <- outcomes]
+preparedModuleProductOutcomes (PreparedModuleProducts outcomes) =
+  [(owner, map projectedGroupWire <$> outcome) | (owner, outcome, _) <- outcomes]
 
 preparedModuleProductOmissions :: PreparedModuleProducts
   -> [(Module, [OriginalGroupOmission])]
-preparedModuleProductOmissions (PreparedModuleProducts outcomes _) =
+preparedModuleProductOmissions (PreparedModuleProducts outcomes) =
   [(owner, omissions) | (owner, _, omissions) <- outcomes]
 
 -- | Successful published groups retain the compiler constructors from their
--- own lowering. A missing or mismatched pair is an admission failure, including
+-- own lowering. Mismatched compiler evidence is an admission failure, including
 -- on a warm original-projection hit. Unavailable groups contribute no metadata.
 preparedModuleProductConstructors :: PreparedModuleProducts -> Either ProjectionError [DataCon]
-preparedModuleProductConstructors (PreparedModuleProducts outcomes provenance) = do
-  selected <- fmap concat $ forM outcomes $ \(owner,outcome,_) -> case outcome of
+preparedModuleProductConstructors (PreparedModuleProducts outcomes) = do
+  selected <- fmap concat $ forM outcomes $ \(_,outcome,_) -> case outcome of
     Left _ -> pure []
-    Right groups -> fmap concat $ forM groups $ \group -> do
-      cons <- maybe (Left (InvalidPreparedIdentity "published original group lacks constructor provenance")) Right
-        (Map.lookup (owner,projectedOriginalOrdinal group) provenance)
-      let declarations = projectedConstructors (projectedBody group)
+    Right groups -> fmap concat $ forM groups $ \evidence -> do
+      let group = projectedGroupWire evidence
+          cons = projectedGroupConstructors evidence
+          declarations = projectedConstructors (projectedBody group)
       unless (length declarations == length cons && and (zipWith agrees declarations cons)) $
         Left (InvalidPreparedIdentity "published original constructor differs from its compiler provenance")
       pure cons
@@ -636,11 +640,11 @@ projectPreparedModuleGroupsFor purpose context prepared selection =
 projectPreparedModuleGroupOutcomesFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
 projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
-  [(ordinal,symbols,fst <$> result)
+  [(ordinal,symbols,projectedGroupWire <$> result)
   | (ordinal,symbols,result) <- projectPreparedModuleGroupResultsFor purpose context prepared selection]
 
 projectPreparedModuleGroupResultsFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
-  -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError (ProjectedGroup, [DataCon]))]
+  -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
 projectPreparedModuleGroupResultsFor purpose context prepared selection =
   [(ordinal, groupBinderSymbols item, projectOne ordinal item onlyGroup)
   | (ordinal, item, onlyGroup) <- surviving]
@@ -690,7 +694,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
             jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
-      pure (ProjectedGroup
+      pure (ProjectedGroupEvidence (ProjectedGroup
         { projectedOriginalOrdinal = ordinal
         , projectedBinders = binders
         , projectedBody = ProjectedGroupBody
@@ -707,7 +711,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             , projectedConstructorReplies = verbSites
             , projectedJsonLayout = jsonLayout
             }
-        }, map fst (toList (constructors final)))
+        }) (map fst (toList (constructors final))))
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.
