@@ -111,11 +111,9 @@ censusPreparedIntrinsics tycons bindings = IntrinsicCensus dependent names surfa
       || any hasCarrier types
     hasCarrier = any carrier . nonDetEltsUniqSet . tyConsOfType
     carrier tycon = defining (tyConName tycon) "Tidepool.Internal.RequestSite" "RequestSite"
-    protected identifier = any (uncurry (defining (idName identifier)))
-      [("Tidepool.Agent.Reply.Internal", "PublishProgressWith"),
-       ("Tidepool.Agent.Reply.Internal", "ObserveProgressWith"),
-       ("Tidepool.Agent.Watch.Internal", "ObserveWatchProgressWith"),
-       ("Tidepool.Actor.Source", "installSource"),
+    protected identifier = mayBeProtectedName (idName identifier)
+      || any (uncurry (defining (idName identifier)))
+      [("Tidepool.Actor.Source", "installSource"),
        ("Tidepool.Actor.Source", "attachSource")]
     defining name owner occurrence =
       occNameString (nameOccName name) == occurrence
@@ -342,6 +340,21 @@ authorityDeclaration role = case role of
     nominal owner occurrence = (owner, mkTcOcc occurrence, True)
     value owner occurrence = (owner, mkVarOcc occurrence, False)
 
+-- This is the closed domain of the resolver's protected-membership query.
+-- Both the intrinsic census and elaboration use it, including constructor
+-- wrappers and references to already-sited helpers with no surface verb.
+mayBeProtectedName :: Name -> Bool
+mayBeProtectedName name = case nameModule_maybe name of
+  Nothing -> False
+  Just owner ->
+    let spelling = moduleNameString (moduleName owner)
+        occurrence = occNameString (nameOccName name)
+        raw = rawProgressOccurrences ++ map ("$W" ++) rawProgressOccurrences
+    in (spelling `elem` ["Tidepool.Agent.Reply.Internal", "Tidepool.Agent.Watch.Internal"]
+          && occurrence `elem` raw)
+       || any (\progress -> let (provider, sibling, _) = authorityDeclaration (ProgressHelper progress)
+              in spelling == provider && occurrence == occNameString sibling) progressAuthorities
+
 resolveDeclaration :: HscEnv -> String -> OccName -> Bool
   -> IO (Maybe TyThing, DependencyFact)
 resolveDeclaration env spelling occurrence nominal = do
@@ -542,16 +555,6 @@ elaboratePreparedSitesTracked env authority siblings bindings = do
       ResponseResultEvidence -> recordQuery (NominalQuery ResponseWrapper)
       ProgressStateEvidence -> recordQuery (NominalQuery ProgressWrapper)
       _ -> pure ()
-    mayBeProtected name = case nameModule_maybe name of
-      Nothing -> False
-      Just owner ->
-        let spelling = moduleNameString (moduleName owner)
-            occurrence = occNameString (nameOccName name)
-            raw = rawProgressOccurrences ++ map ("$W" ++) rawProgressOccurrences
-        in (spelling `elem` ["Tidepool.Agent.Reply.Internal", "Tidepool.Agent.Watch.Internal"]
-              && occurrence `elem` raw)
-           || any (\progress -> let (provider, sibling, _) = authorityDeclaration (ProgressHelper progress)
-                  in spelling == provider && occurrence == occNameString sibling) progressAuthorities
     rewriteBind (NonRec binder rhs) =
       NonRec binder <$> rewriteExpr (binder, binderQualName binder) rhs
     rewriteBind (Rec pairs) = Rec <$> traverse (\(binder, rhs) ->
@@ -560,7 +563,7 @@ elaboratePreparedSitesTracked env authority siblings bindings = do
     rewriteExpr origin expression = case expression of
       Var surface | Just _ <- lookupPreparedVerb surface -> rewriteApplication origin expression
       Var identifier -> do
-        when (mayBeProtected (idName identifier)) (recordQuery (ProtectedQuery (idName identifier)))
+        when (mayBeProtectedName (idName identifier)) (recordQuery (ProtectedQuery (idName identifier)))
         when (getKey (nameUnique (idName identifier)) `Set.member` protectedProgressIds authority) $ do
           recordQuery (TrustedQuery (idName (fst origin)))
           unless (getKey (nameUnique (idName (fst origin))) `Set.member` trustedProgressOwners authority) $
