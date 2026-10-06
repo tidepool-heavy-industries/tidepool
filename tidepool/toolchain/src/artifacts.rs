@@ -6033,10 +6033,8 @@ mod completed_response_tests {
 
     const DEPENDENCY: &str =
         include_str!("../tests/fixtures/completed-response/ResponseDependency.hs");
-    const CONSUMER: &str =
-        include_str!("../tests/fixtures/completed-response/ResponseConsumer.hs");
-    const REJECTED: &str =
-        include_str!("../tests/fixtures/completed-response/RejectedConsumer.hs");
+    const CONSUMER: &str = include_str!("../tests/fixtures/completed-response/ResponseConsumer.hs");
+    const REJECTED: &str = include_str!("../tests/fixtures/completed-response/RejectedConsumer.hs");
 
     struct CandidateFixture {
         _directory: TempDir,
@@ -6131,7 +6129,10 @@ mod completed_response_tests {
             output_read,
             "the failure must follow completed output reading"
         );
-        assert_eq!(completed_requests, 1, "product refusal cannot replay source");
+        assert_eq!(
+            completed_requests, 1,
+            "product refusal cannot replay source"
+        );
         let Err(CompileError::ExtractFailed(message)) = result else {
             panic!("expected the original product admission failure");
         };
