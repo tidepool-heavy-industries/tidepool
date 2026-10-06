@@ -141,6 +141,9 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
                     .await.unwrap().expect("the actual admitted child requests its provider"),
             };
             let origin = round.origin();
+            if origin.actor() == &root {
+                round.assert_committed("prepared-children");
+            }
             assert_ne!(origin.actor(), &root, "parent waits for this actual child reply");
             let nodes = host.context.forest.inspect_host_graph();
             let matching = nodes.iter().filter(|node| node.label == label).collect::<Vec<_>>();
