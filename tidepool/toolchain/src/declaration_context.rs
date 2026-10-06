@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::artifact_inventory::{
-    admission_failure, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
+    admission_failure, ArtifactEntry, ArtifactId, ArtifactInventory, ArtifactInventoryFailure,
     ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView, JoinedInterfaceRole,
 };
 use crate::certified_products::{
@@ -299,6 +299,14 @@ fn execution_scope_value(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
 ) -> Result<Option<Value>, CompileError> {
+    execution_scope_value_with_graph_paths(entries, root, &mut BTreeMap::new())
+}
+
+fn execution_scope_value_with_graph_paths(
+    entries: &[Arc<ArtifactEntry>],
+    root: &Path,
+    graph_paths: &mut BTreeMap<[u8; 32], PathBuf>,
+) -> Result<Option<Value>, CompileError> {
     let originals = entries
         .iter()
         .filter_map(|entry| match &entry.payload {
@@ -383,14 +391,18 @@ fn execution_scope_value(
                 .into_iter()
                 .filter(|(digest, _)| admitted_graphs.contains(digest))
                 .map(|(digest, graph)| {
-                    let path = root.join(format!("execution-{}.cbor", hex(&digest)));
-                    // The request owner captures each distinct graph once. Its digest
-                    // and exact original references are sealed by the scope manifest.
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)?;
-                    file.write_all(graph.bytes())?;
+                    let path = if let Some(path) = graph_paths.get(&digest) {
+                        path.clone()
+                    } else {
+                        let path = root.join(format!("execution-{}.cbor", hex(&digest)));
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)?;
+                        file.write_all(graph.bytes())?;
+                        graph_paths.insert(digest, path.clone());
+                        path
+                    };
                     Ok(Value::Array(vec![text(hex(&digest)), path_value(&path)?]))
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?,
@@ -738,6 +750,23 @@ pub struct MaterializedExactDeclarationContext {
     pub lexical: Vec<ExactLexicalNode>,
 }
 
+/// One completed private file owner for an immutable selected artifact graph.
+/// Parents keep borrowed paths alive; request scratch owns only its manifest.
+pub(crate) struct RetainedArtifactMaterialization {
+    _directory: tempfile::TempDir,
+    _parents: Vec<Arc<Self>>,
+    rows: BTreeMap<ArtifactId, RetainedArtifactRow>,
+    groups: Arc<[PendingCertifiedGroup]>,
+    execution_scope: Option<Value>,
+    graph_paths: BTreeMap<[u8; 32], PathBuf>,
+}
+
+#[derive(Clone)]
+struct RetainedArtifactRow {
+    artifact: DeclarationArtifact,
+    interface_evidence: Value,
+}
+
 #[derive(Clone)]
 pub(crate) struct ExactCompilationRequest {
     pub(crate) context: Arc<ExactDeclarationContext>,
@@ -747,6 +776,7 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
     pub(crate) groups: Arc<[PendingCertifiedGroup]>,
+    materialization: Option<Arc<RetainedArtifactMaterialization>>,
     // Only current-program source-selected support can add these roots.
     program_support: Option<ArtifactView>,
     program_source_lexical: Vec<ExactLexicalNode>,
@@ -1520,6 +1550,7 @@ impl ExactCompilationRequest {
             producer_sha256: self.producer_sha256,
             artifacts: materialized.artifacts,
             groups: groups.into(),
+            materialization: self.materialization.clone(),
             program_support: self.program_support.clone(),
             program_source_lexical: self.program_source_lexical.clone(),
             source_selected_support: self.source_selected_support.clone(),
@@ -3190,6 +3221,21 @@ impl ExactDeclarationContext {
         artifacts: &[DeclarationArtifact],
         metadata: &ArtifactMetadataSnapshot,
     ) -> Result<(), CompileError> {
+        let retained = self.inventory.retained_materialization();
+        let empty = BTreeMap::new();
+        self.validate_artifacts_with_owned_rows(
+            artifacts,
+            metadata,
+            retained.as_ref().map_or(&empty, |retained| &retained.rows),
+        )
+    }
+
+    fn validate_artifacts_with_owned_rows(
+        &self,
+        artifacts: &[DeclarationArtifact],
+        metadata: &ArtifactMetadataSnapshot,
+        owned: &BTreeMap<ArtifactId, RetainedArtifactRow>,
+    ) -> Result<(), CompileError> {
         metadata.validate_native_selection()?;
         let mut seen = BTreeSet::new();
         for artifact in artifacts {
@@ -3213,6 +3259,12 @@ impl ExactDeclarationContext {
             }
             if entry.descriptor.kind != entry.payload.artifact_kind() {
                 return Err(failure("interface evidence kind differs from payload"));
+            }
+            if owned
+                .get(&entry.descriptor.id)
+                .is_some_and(|row| row.artifact == *artifact)
+            {
+                continue;
             }
             let (iface, packages) = match &entry.payload {
                 ArtifactPayload::Original(product) => {
@@ -3528,6 +3580,142 @@ impl ExactDeclarationContext {
         )
     }
 
+    fn materialize_retained_artifacts(
+        &self,
+        metadata: &ArtifactMetadataSnapshot,
+        parents: Vec<Arc<RetainedArtifactMaterialization>>,
+    ) -> Result<RetainedArtifactMaterialization, CompileError> {
+        let directory = tempfile::Builder::new()
+            .prefix("tidepool-exact-artifacts-")
+            .tempdir()?;
+        let root = directory.path();
+        let mut rows = BTreeMap::new();
+        let selected_ids = metadata
+            .entries
+            .values()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        for parent in &parents {
+            for (id, row) in &parent.rows {
+                if selected_ids.contains(id) {
+                    rows.entry(*id).or_insert_with(|| row.clone());
+                }
+            }
+        }
+        let inherited_rows = rows.clone();
+        let entries = metadata.entries.values().cloned().collect::<Vec<_>>();
+        let new_entries = entries
+            .iter()
+            .filter(|entry| !rows.contains_key(&entry.descriptor.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut validation = PackageInterfaceValidation::default();
+        let context_bytes = materialization_bytes(&new_entries);
+        let start = std::time::Instant::now();
+        let (materialized, _) = self.materialize_entries_with_validation(
+            root,
+            &new_entries,
+            &mut validation,
+            MaterializationMode::Scratch,
+        )?;
+        for artifact in materialized.artifacts {
+            let entry =
+                &metadata.entries[&identity(&artifact.interface.unit, &artifact.interface.module)];
+            let interface_evidence = scope_interface_evidence(entry, root, &mut validation)?;
+            rows.insert(
+                entry.descriptor.id,
+                RetainedArtifactRow {
+                    artifact,
+                    interface_evidence,
+                },
+            );
+        }
+        crate::timing::record_stage(
+            crate::timing::NO_NODE,
+            crate::timing::NO_ROUND,
+            "exact.context_materialize",
+            start.elapsed(),
+            context_bytes,
+        );
+        let artifacts = entries
+            .iter()
+            .map(|entry| rows[&entry.descriptor.id].artifact.clone())
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        self.validate_artifacts_with_owned_rows(&artifacts, metadata, &inherited_rows)?;
+        crate::timing::record_stage(
+            crate::timing::NO_NODE,
+            crate::timing::NO_ROUND,
+            "exact.context_validate",
+            start.elapsed(),
+            context_bytes,
+        );
+        let available = original_products(&entries);
+        let available_owners = available
+            .iter()
+            .map(|product| {
+                (
+                    (
+                        product.owner().unit.as_str(),
+                        product.owner().module.as_str(),
+                    ),
+                    product.owner(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut inherited_groups = Vec::new();
+        let mut seen_groups = BTreeSet::new();
+        for parent in &parents {
+            for group in parent.groups.iter() {
+                if available_owners
+                    .get(&(group.owner().unit.as_str(), group.owner().module.as_str()))
+                    .is_some_and(|owner| **owner == *group.owner())
+                    && seen_groups.insert((
+                        group.owner().unit.clone(),
+                        group.owner().module.clone(),
+                        group.owner().module_version.0,
+                        group.group().original_ordinal(),
+                    ))
+                {
+                    inherited_groups.push(group.clone());
+                }
+            }
+        }
+        let new_products = original_products(&new_entries);
+        let start = std::time::Instant::now();
+        inherited_groups.extend(
+            certify_owned_products_in_context_with_validation(
+                &new_products,
+                &inherited_groups,
+                &available,
+                &mut validation,
+            )
+            .map_err(failure)?,
+        );
+        crate::timing::record_stage(
+            crate::timing::NO_NODE,
+            crate::timing::NO_ROUND,
+            "exact.inherited_groups",
+            start.elapsed(),
+            context_bytes,
+        );
+        let mut graph_paths = parents
+            .iter()
+            .flat_map(|parent| parent.graph_paths.iter())
+            .map(|(digest, path)| (*digest, path.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let execution_scope =
+            execution_scope_value_with_graph_paths(&entries, root, &mut graph_paths)?;
+        Ok(RetainedArtifactMaterialization {
+            _directory: directory,
+            _parents: parents,
+            rows,
+            groups: inherited_groups.into(),
+            execution_scope,
+            graph_paths,
+        })
+    }
+
     fn prepare_compilation_from_metadata(
         self: &Arc<Self>,
         root: &Path,
@@ -3550,52 +3738,16 @@ impl ExactDeclarationContext {
             ));
         }
         std::fs::create_dir_all(root)?;
-        // Package reads share one synchronous preparation snapshot. It does not
-        // escape this stage; post-worker verification opens a fresh snapshot.
-        let mut validation = PackageInterfaceValidation::default();
-        let entries = metadata.entries.values().cloned().collect::<Vec<_>>();
-        let context_bytes = materialization_bytes(&entries);
-        let materialize_start = std::time::Instant::now();
-        let (materialized, _) = self.materialize_entries_with_validation(
-            root,
-            &entries,
-            &mut validation,
-            MaterializationMode::Scratch,
-        )?;
-        crate::timing::record_stage(
-            crate::timing::NO_NODE,
-            crate::timing::NO_ROUND,
-            "exact.context_materialize",
-            materialize_start.elapsed(),
-            context_bytes,
-        );
-        let context_validate_start = std::time::Instant::now();
-        self.validate_artifacts_from_metadata(&materialized.artifacts, metadata)?;
-        crate::timing::record_stage(
-            crate::timing::NO_NODE,
-            crate::timing::NO_ROUND,
-            "exact.context_validate",
-            context_validate_start.elapsed(),
-            0,
-        );
-        let groups_start = std::time::Instant::now();
-        let products = original_products(&entries);
-        let groups = certify_owned_products_in_context_with_validation(
-            &products,
-            &[],
-            &products,
-            &mut validation,
-        )
-        .map_err(failure)?;
-        crate::timing::record_stage(
-            crate::timing::NO_NODE,
-            crate::timing::NO_ROUND,
-            "exact.inherited_groups",
-            groups_start.elapsed(),
-            0,
-        );
-        let artifacts_by_owner = materialized
-            .artifacts
+        let retained = self.inventory.retain_materialization(|parents| {
+            self.materialize_retained_artifacts(metadata, parents)
+        })?;
+        let artifacts = metadata
+            .entries
+            .values()
+            .map(|entry| retained.rows[&entry.descriptor.id].artifact.clone())
+            .collect::<Vec<_>>();
+        let groups = Arc::clone(&retained.groups);
+        let artifacts_by_owner = artifacts
             .iter()
             .map(|artifact| {
                 (
@@ -3607,7 +3759,7 @@ impl ExactDeclarationContext {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let execution_scope = execution_scope_value(&entries, root)?;
+        let execution_scope = retained.execution_scope.clone();
         let fields = vec![
             text("TPEXACTSCOPE"),
             text("2"),
@@ -3617,8 +3769,7 @@ impl ExactDeclarationContext {
                     .hex(),
             ),
             Value::Array(
-                materialized
-                    .artifacts
+                artifacts
                     .iter()
                     .map(|artifact| {
                         let iface = &artifact.interface;
@@ -3638,24 +3789,21 @@ impl ExactDeclarationContext {
                                     .collect(),
                             ),
                             path_value(&packages)?,
-                            text(sha256(&std::fs::read(packages)?)),
-                            scope_interface_evidence(
-                                metadata
-                                    .entries
-                                    .get(&identity(&iface.unit, &iface.module))
-                                    .ok_or_else(|| {
-                                        failure("interface evidence owner is missing")
-                                    })?,
-                                root,
-                                &mut validation,
-                            )?,
+                            text(hex(&metadata.entries
+                                [&identity(&iface.unit, &iface.module)]
+                                .descriptor
+                                .package_imports_sha256)),
+                            retained.rows[&metadata.entries[&identity(&iface.unit, &iface.module)]
+                                .descriptor
+                                .id]
+                                .interface_evidence
+                                .clone(),
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
             Value::Array(
-                materialized
-                    .lexical
+                self.lexical
                     .iter()
                     .map(|node| {
                         Value::Array(vec![
@@ -3743,8 +3891,9 @@ impl ExactDeclarationContext {
             producer_sha256:
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                     .sha256(),
-            artifacts: materialized.artifacts,
-            groups: groups.into(),
+            artifacts,
+            groups,
+            materialization: Some(retained),
             program_support: None,
             program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
@@ -4547,11 +4696,126 @@ mod tests {
         let fields = row(&value, 9).unwrap();
         assert_eq!(string(&fields[2]).unwrap(), hex(&expected));
         assert_eq!(row(&fields[8], 2).unwrap()[1], text(hex(&expected)));
-        std::fs::write(&request.artifacts[0].interface.path, b"late corruption").unwrap();
-        assert!(request
-            .context
-            .validate_artifacts(&request.artifacts)
-            .is_err());
+        let mut foreign = request.artifacts.clone();
+        foreign[0].interface.sha256 = sha256(b"different claimed owner");
+        assert!(request.context.validate_artifacts(&foreign).is_err());
+    }
+
+    #[test]
+    fn retained_materialization_survives_request_scratch_and_releases_with_owner() {
+        let (context, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let first = context
+            .prepare_compilation(&scratch.path().join("first"), &producer)
+            .unwrap();
+        let paths = first.artifacts.clone();
+        let groups = Arc::clone(&first.groups);
+        let retained = first.materialization.as_ref().unwrap();
+        let owned_root = retained._directory.path().to_path_buf();
+        let weak = Arc::downgrade(retained);
+        let semantic = first.semantic_sha256;
+        drop(first);
+        std::fs::remove_dir_all(scratch.path().join("first")).unwrap();
+        assert!(paths
+            .iter()
+            .all(|artifact| artifact.interface.path.is_file()));
+        let second = context
+            .prepare_compilation(&scratch.path().join("second"), &producer)
+            .unwrap();
+        assert_eq!(second.artifacts, paths);
+        assert_eq!(second.semantic_sha256, semantic);
+        assert!(Arc::ptr_eq(&groups, &second.groups));
+        assert!(Arc::ptr_eq(
+            &weak.upgrade().unwrap(),
+            second.materialization.as_ref().unwrap()
+        ));
+        let manifest: Value =
+            ciborium::de::from_reader(std::fs::read(&second.manifest).unwrap().as_slice()).unwrap();
+        for (artifact, row) in paths
+            .iter()
+            .zip(manifest.as_array().unwrap()[4].as_array().unwrap())
+        {
+            assert_eq!(
+                row.as_array().unwrap()[2],
+                path_value(&artifact.interface.path).unwrap()
+            );
+        }
+        drop(context);
+        assert!(
+            owned_root.is_dir(),
+            "the current request retains the private owner"
+        );
+        drop(second);
+        assert!(weak.upgrade().is_none());
+        assert!(
+            !owned_root.exists(),
+            "last owner release removes private materialization"
+        );
+    }
+
+    #[test]
+    fn retained_materialization_prefix_a_b_a_borrows_only_unchanged_entries() {
+        let (a, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let first = a
+            .prepare_compilation(&scratch.path().join("a1"), &producer)
+            .unwrap();
+        let gamma = crate::certified_products::fixture_finalized_product(
+            support_product("Gamma"),
+            a.producer,
+        );
+        let b = Arc::new(
+            a.as_ref()
+                .clone()
+                .extend_checked_original_products(a.producer, &[gamma])
+                .unwrap(),
+        );
+        let second = b
+            .prepare_compilation(&scratch.path().join("b"), &producer)
+            .unwrap();
+        for artifact in &first.artifacts {
+            assert!(
+                second.artifacts.contains(artifact),
+                "B references A's unchanged private paths"
+            );
+        }
+        assert_eq!(second.artifacts.len(), first.artifacts.len() + 1);
+        let b_owner = second.materialization.as_ref().unwrap();
+        assert_eq!(b_owner._parents.len(), 1);
+        assert!(Arc::ptr_eq(
+            &b_owner._parents[0],
+            first.materialization.as_ref().unwrap()
+        ));
+        let gamma = second
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "Gamma")
+            .unwrap();
+        assert!(gamma.interface.path.starts_with(b_owner._directory.path()));
+        let third = a
+            .prepare_compilation(&scratch.path().join("a2"), &producer)
+            .unwrap();
+        assert_eq!(third.artifacts, first.artifacts);
+        assert_eq!(third.semantic_sha256, first.semantic_sha256);
+        assert_ne!(third.semantic_sha256, second.semantic_sha256);
+        assert!(Arc::ptr_eq(
+            third.materialization.as_ref().unwrap(),
+            first.materialization.as_ref().unwrap()
+        ));
+        let root_a = first
+            .materialization
+            .as_ref()
+            .unwrap()
+            ._directory
+            .path()
+            .to_path_buf();
+        drop(first);
+        drop(third);
+        drop(a);
+        assert!(root_a.exists(), "B retains borrowed A paths");
+        drop(second);
+        drop(b);
+        assert!(!root_a.exists());
     }
 
     #[test]
@@ -4618,6 +4882,7 @@ mod tests {
             producer_sha256: [2; 32],
             artifacts: vec![],
             groups: Arc::from([]),
+            materialization: None,
             program_support: None,
             program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
@@ -6238,6 +6503,7 @@ mod tests {
             producer_sha256: [2; 32],
             artifacts: vec![],
             groups: Arc::from([]),
+            materialization: None,
             program_support: None,
             program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
@@ -6298,6 +6564,7 @@ mod tests {
             semantic_sha256: [1; 32],
             producer_sha256: [2; 32],
             groups: Arc::from([]),
+            materialization: None,
             program_support: None,
             program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
@@ -6438,6 +6705,7 @@ mod tests {
             producer_sha256: [2; 32],
             artifacts,
             groups: Arc::from([]),
+            materialization: None,
             program_support: None,
             program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
@@ -7574,7 +7842,8 @@ mod tests {
         std::fs::create_dir_all(&collision).unwrap();
         let collision_graph = collision.join(format!("execution-{}.cbor", hex(&graph.digest())));
         std::fs::write(&collision_graph, b"prior immutable capture").unwrap();
-        assert!(context.prepare_compilation(&collision, producer).is_err());
+        let collision_request = context.prepare_compilation(&collision, producer).unwrap();
+        assert!(collision_request.materialization.is_some());
         assert_eq!(
             std::fs::read(&collision_graph).unwrap(),
             b"prior immutable capture",

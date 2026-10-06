@@ -876,6 +876,7 @@ impl ArtifactInventory {
             inventory: self.clone(),
             roots,
             parents,
+            materialization: Mutex::new(None),
         }))
     }
     pub(crate) fn admit(
@@ -990,6 +991,7 @@ impl ArtifactInventory {
             inventory: self.clone(),
             roots,
             parents: vec![parent.clone()],
+            materialization: Mutex::new(None),
         })))
     }
     pub fn metrics(&self) -> ArtifactInventoryMetrics {
@@ -1016,6 +1018,8 @@ struct ViewLease {
     inventory: ArtifactInventory,
     roots: Vec<ArtifactId>,
     parents: Vec<ArtifactView>,
+    materialization:
+        Mutex<Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
 }
 impl Drop for ViewLease {
     fn drop(&mut self) {
@@ -1129,6 +1133,66 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
+    /// Private materialization belongs to this immutable graph view. Failed
+    /// preparation leaves no retained entry; descendants borrow completed owners.
+    pub(crate) fn retain_materialization(
+        &self,
+        prepare: impl FnOnce(
+            Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        ) -> Result<
+            crate::declaration_context::RetainedArtifactMaterialization,
+            CompileError,
+        >,
+    ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
+    {
+        let mut retained = self.0.materialization.lock().expect("materialization lock");
+        if let Some(materialization) = retained.as_ref() {
+            return Ok(Arc::clone(materialization));
+        }
+        let mut parents = Vec::new();
+        let mut visited = BTreeSet::new();
+        for parent in &self.0.parents {
+            parent.collect_materializations(&mut parents, &mut visited);
+        }
+        let materialization = Arc::new(prepare(parents)?);
+        *retained = Some(Arc::clone(&materialization));
+        Ok(materialization)
+    }
+
+    fn collect_materializations(
+        &self,
+        materializations: &mut Vec<
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+        visited: &mut BTreeSet<usize>,
+    ) {
+        if !visited.insert(Arc::as_ptr(&self.0) as usize) {
+            return;
+        }
+        if let Some(materialization) = self.retained_materialization() {
+            if !materializations
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &materialization))
+            {
+                materializations.push(materialization);
+            }
+        } else {
+            for parent in &self.0.parents {
+                parent.collect_materializations(materializations, visited);
+            }
+        }
+    }
+
+    pub(crate) fn retained_materialization(
+        &self,
+    ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
+        self.0
+            .materialization
+            .lock()
+            .expect("materialization lock")
+            .clone()
+    }
+
     pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
@@ -1365,6 +1429,7 @@ impl ArtifactView {
                 inventory: self.0.inventory.clone(),
                 roots: Vec::new(),
                 parents: vec![self.clone(), other.clone()],
+                materialization: Mutex::new(None),
             })))
         } else {
             let mut roots = self.roots();
