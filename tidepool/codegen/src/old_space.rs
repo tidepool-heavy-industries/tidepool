@@ -54,13 +54,18 @@ enum RootRegistration {
 /// The sole owner of one stable cell and its collector registration.
 /// Boxes never move; UnsafeCell permits collector updates through the registered
 /// address while immutable views of this owner exist. This owner never escapes
-/// the machine's ledger/frame or a non-collecting issuance/transfer span.
+/// the machine's ledger/frame or a span that cannot execute native code,
+/// callbacks or retire program owners. Physical promotion may run in that
+/// span with every cell registered and the original code owners admitted.
 #[derive(Debug)]
 pub(crate) struct OwnedRootCell {
     cell: Box<std::cell::UnsafeCell<*mut u8>>,
     machine: std::rc::Weak<crate::machine_state::MachineState>,
     registration: RootRegistration,
 }
+
+static_assertions::assert_not_impl_any!(OwnedRootCell: Clone, Copy, Send, Sync);
+static_assertions::assert_not_impl_any!(RootRef<'static>: Send, Sync);
 
 impl OwnedRootCell {
     pub(crate) fn new(

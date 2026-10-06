@@ -4527,46 +4527,6 @@ mod tests {
     }
 
     #[test]
-    fn root_views_are_reborrowed_after_quiescent_machine_thread_transfer() {
-        let (mut machine, program) = self::machine();
-        let handle = machine.retain_top(program, ValueId(0)).unwrap();
-        let address = machine.handle_root(handle).unwrap().addr() as usize;
-        machine.quiesce().unwrap();
-        let mut machine = std::thread::spawn(move || {
-            assert_eq!(
-                machine.handle_root(handle).unwrap().addr() as usize,
-                address
-            );
-            machine.collect_major(machine.quiesce().unwrap()).unwrap();
-            assert_eq!(
-                machine.handle_root(handle).unwrap().addr() as usize,
-                address
-            );
-            let result = machine
-                .run_entry(
-                    program,
-                    ValueId(0),
-                    &[],
-                    PreparedCallOptions {
-                        observation_budget: 100,
-                        collect_before_observation: true,
-                    },
-                    RealmId::ROOT,
-                )
-                .unwrap();
-            assert!(!result.values.is_empty());
-            assert!(machine.release(handle));
-            assert!(machine.handle_root(handle).is_none());
-            machine.quiesce().unwrap();
-            machine
-        })
-        .join()
-        .unwrap();
-        assert_eq!(machine.residency().root_cells, 0);
-        assert!(!machine.release(handle));
-    }
-
-    #[test]
     fn retained_handle_custody_preserves_identity_and_allocation_rollback() {
         let (mut machine, program) = machine();
         machine.pin(program).unwrap();

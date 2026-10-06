@@ -8695,6 +8695,69 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn root_views_are_reborrowed_after_quiescent_engine_thread_transfer() {
+        let prepared = producer_program();
+        let top = prepared.entry();
+        let (mut engine, program) = PreparedEngine::bootstrap(prepared).unwrap();
+        let handle = engine.machine.retain_top(program, top).unwrap();
+        let address = engine.handle_slot(handle.raw()).unwrap().addr() as usize;
+        engine.machine.quiesce().unwrap();
+        // PreparedEngine owns the production quiescent transfer boundary;
+        // no readable RootRef or separate MachineState owner crosses it.
+        let mut engine = std::thread::spawn(move || {
+            assert_eq!(
+                engine.handle_slot(handle.raw()).unwrap().addr() as usize,
+                address
+            );
+            engine.quiesce_and_collect_now().unwrap();
+            assert_eq!(
+                engine.handle_slot(handle.raw()).unwrap().addr() as usize,
+                address
+            );
+            let result = engine
+                .machine
+                .run_entry_retained(
+                    program,
+                    top,
+                    &[],
+                    PreparedCallOptions {
+                        observation_budget: 100,
+                        collect_before_observation: true,
+                    },
+                    RealmId::ROOT,
+                )
+                .unwrap();
+            let [PreparedResult::Managed(returned)] = result.values.as_slice() else {
+                panic!("native producer returns one managed Field value")
+            };
+            assert_eq!(
+                engine.handle_slot(handle.raw()).unwrap().addr() as usize,
+                address
+            );
+            let CodegenPreparedOuter::Constructor { identity, fields } = engine
+                .machine
+                .inspect_outer(*returned, RealmId::ROOT)
+                .unwrap()
+            else {
+                panic!("native Field constructor")
+            };
+            assert_eq!(identity, tidepool_repr::DataConId(980));
+            assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
+            assert!(engine.release(*returned));
+            assert!(engine.release(handle));
+            assert!(engine.handle_slot(handle.raw()).is_none());
+            engine.machine.quiesce().unwrap();
+            engine
+        })
+        .join()
+        .unwrap();
+        assert_eq!(engine.residency().root_cells, 0);
+        assert!(engine.handle_slot(handle.raw()).is_none());
+        assert!(!engine.release(handle));
+        engine.quiesce_and_collect_now().unwrap();
+    }
+
+    #[test]
     fn exact_handle_alias_custody_survives_capture_and_distinct_handle_retirement() {
         use tidepool_repr::{BindingName, Generation, SessionModule};
 
