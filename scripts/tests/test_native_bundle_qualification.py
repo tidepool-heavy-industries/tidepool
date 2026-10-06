@@ -94,16 +94,19 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertTrue(report['tests'][0]['passed'])
 
     def test_runtime_tool_owner_checks_declared_executable_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            tools = runtime_tools_fixture(root)
-            with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)):
-                self.assertEqual(qualification.native_runtime_tools(tools), tools)
-                required = tools / 'bin/nix-store'
-                required.unlink()
-                required.mkdir()
-                with self.assertRaisesRegex(ValueError, 'lack executable nix-store'):
-                    qualification.native_runtime_tools(tools)
+        for name in ('nix-store', 'rg', 'find'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tools = runtime_tools_fixture(root)
+                with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)):
+                    self.assertEqual(qualification.native_runtime_tools(tools), tools)
+                    required = tools / 'bin' / name
+                    required.unlink()
+                    with self.assertRaisesRegex(ValueError, f'lack executable {name}'):
+                        qualification.native_runtime_tools(tools)
+                    required.mkdir()
+                    with self.assertRaisesRegex(ValueError, f'lack executable {name}'):
+                        qualification.native_runtime_tools(tools)
 
     def test_missing_or_nonexecutable_python_refuses_assembly_freeze_and_environment_before_work(self):
         for stage in ('assemble', 'freeze', 'environment'):

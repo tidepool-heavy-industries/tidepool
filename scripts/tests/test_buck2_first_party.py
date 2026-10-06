@@ -562,6 +562,28 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(group["resource_env"]["EXOMONAD_NIX_BIN"],
                          "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
 
+    def test_actor_skill_discovery_consumes_the_recorded_workspace_bundle(self):
+        actor = self.package('exomonad-actor', 'exomonad/actor', [
+            ('exomonad_actor', 'lib', 'src/lib.rs'),
+        ])
+        metadata = json.loads(self.metadata.read_text())
+        metadata['packages'].append(actor)
+        metadata['workspace_members'].append(actor['id'])
+        metadata['resolve']['nodes'].append({'id': actor['id'], 'deps': []})
+        self.metadata.write_text(json.dumps(metadata))
+        self.write('exomonad/actor/Cargo.toml', "[package]\nname = 'exomonad-actor'\n")
+        self.write('exomonad/actor/src/lib.rs', '#[test] fn discovery() {}\n')
+        result = self.generate('--package', 'exomonad-actor')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        group = self.rule('exomonad/actor', 'exomonad_actor_unit_tests_all', 'tidepool_rust_test_cases')
+        self.assertEqual(group['resource_env']['EXOMONAD_WORKSPACE_GITLINK'],
+                         '$(location //build/rust:workspace_gitlink)')
+        self.assertEqual(group['resource_env']['EXOMONAD_WORKSPACE_GIT_BUNDLE'],
+                         '$(location //build/rust:workspace_git_bundle)')
+        self.assertEqual(group['resource_env']['TIDEPOOL_WORKSPACE_TEST_GIT'],
+                         '$(location toolchains//:exomonad_runtime_tools)/bin/git')
+        self.assertNotIn('//exomonad/examples/workspace:shipped_skills', group['resources'])
+
     def test_facade_recipe_sources_are_declared_in_focused_and_aggregate_execution(self):
         result = self.generate("--package", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)

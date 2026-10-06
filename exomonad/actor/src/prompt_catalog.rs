@@ -234,9 +234,64 @@ mod tests {
 
     #[test]
     fn discovery_names_only_existing_shipped_skills() {
-        let root = std::path::PathBuf::from(
-            std::env::var_os("TIDEPOOL_SHIPPED_SKILLS")
-                .expect("native test runner supplies shipped skill resources"),
+        let bundle = std::env::var_os("EXOMONAD_WORKSPACE_GIT_BUNDLE")
+            .expect("native test runner supplies the shipped workspace bundle");
+        let record = std::env::var_os("EXOMONAD_WORKSPACE_GITLINK")
+            .expect("native test runner supplies the exact workspace gitlink");
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(record).unwrap()).unwrap();
+        let revision = record["revision"]
+            .as_str()
+            .expect("recorded workspace commit");
+        let git = std::path::PathBuf::from(
+            std::env::var_os("TIDEPOOL_WORKSPACE_TEST_GIT")
+                .expect("native test runner supplies declared Git"),
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        let run = |arguments: &[&std::ffi::OsStr]| {
+            let result = std::process::Command::new(&git)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(arguments)
+                .output()
+                .expect("run declared Git on the shipped bundle");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        run(&[
+            "-c".as_ref(),
+            "protocol.file.allow=always".as_ref(),
+            "clone".as_ref(),
+            "--quiet".as_ref(),
+            "--no-checkout".as_ref(),
+            bundle.as_ref(),
+            workspace.as_os_str(),
+        ]);
+        run(&[
+            "-C".as_ref(),
+            workspace.as_os_str(),
+            "checkout".as_ref(),
+            "--quiet".as_ref(),
+            "--detach".as_ref(),
+            revision.as_ref(),
+        ]);
+        let root = workspace.join("skills");
+        let mut installed = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                installed.insert(entry.file_name().into_string().unwrap());
+            }
+        }
+        assert_eq!(
+            installed,
+            SHIPPED_SKILLS.into_iter().map(str::to_owned).collect(),
+            "discovery must describe the skills in the actual pinned bundle",
         );
         for skill in SHIPPED_SKILLS {
             assert!(

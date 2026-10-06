@@ -27,8 +27,9 @@ use crate::error::{GitFailureReceipt, InProgressKind, WorktreeError};
 use crate::id::GitOid;
 
 /// The repository-local exclusions Exomonad installs, in the order written. Only
-/// the runtime state directories are excluded: a project's `.exomonad/Project`
-/// modules, skills, and configuration are authored source and stay tracked.
+/// the runtime state directories and generated preparation pointer are excluded:
+/// a project's `.exomonad/Project` modules, skills, and configuration are authored
+/// source and stay tracked.
 /// This is the single list; [`GitCli::ensure_exomonad_local_exclude`] is the
 /// single writer.
 pub const EXOMONAD_LOCAL_EXCLUDES: &[&str] = &[
@@ -36,6 +37,7 @@ pub const EXOMONAD_LOCAL_EXCLUDES: &[&str] = &[
     "/.exomonad/sessions/",
     "/.exomonad/runtime/",
     "/.exomonad/build/",
+    "/.exomonad/prepared.json",
 ];
 
 /// One `info/exclude` line without the carriage return of a CRLF file.

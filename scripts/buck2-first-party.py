@@ -628,8 +628,10 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         env["EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY"] = "$(location :inbox_directory_fault_shared)"
         resources.append(":inbox_directory_fault_shared")
     if package_name == "exomonad-actor" and unit:
-        env["TIDEPOOL_SHIPPED_SKILLS"] = "$(location //exomonad/examples/workspace:shipped_skills)/.exomonad/skills"
-        resources.append("//exomonad/examples/workspace:shipped_skills")
+        env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
+        env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
+        env["TIDEPOOL_WORKSPACE_TEST_GIT"] = "$(location toolchains//:exomonad_runtime_tools)/bin/git"
+        resources.extend(["//build/rust:workspace_gitlink", "//build/rust:workspace_git_bundle", "toolchains//:exomonad_runtime_tools"])
     if package_name == "exomonad-worktree" and not unit and target_name == "worktree":
         for variable, name in (
             ("EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY", "binding_directory_fault"),
@@ -683,7 +685,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_PROTOCOL_HASKELL_ROOT",
     "TIDEPOOL_RECIPE_WORKSPACE",
     "TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR",
-    "TIDEPOOL_SHIPPED_SKILLS",
+    "TIDEPOOL_WORKSPACE_TEST_GIT",
     "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
 )
 

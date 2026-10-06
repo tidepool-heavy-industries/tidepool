@@ -400,6 +400,8 @@
             pkgs.bash
             pkgs.coreutils
             pkgs.git
+            pkgs.ripgrep
+            pkgs.findutils
             pkgs.bubblewrap
             pkgs.tmux
             pkgs.nix
@@ -424,6 +426,16 @@
         formatter = pkgs.nixfmt;
 
         checks = {
+          exomonad-runtime-search-tools = pkgs.runCommand "exomonad-runtime-search-tools-check" { } ''
+            export PATH=${self.packages.${system}.buck-exomonad-runtime-tools}/bin
+            mkdir -p fixture/nested
+            printf 'packaged-search-witness\n' > fixture/nested/input.txt
+            test "$(rg --files fixture)" = fixture/nested/input.txt
+            test "$(rg --fixed-strings --line-number packaged-search-witness fixture)" = fixture/nested/input.txt:1:packaged-search-witness
+            test "$(find fixture -type f -name input.txt)" = fixture/nested/input.txt
+            touch "$out"
+          '';
+
           # Hadrian validates package keys against its own package registry.
           # This check exercises only argv transport; preConfigure applies the
           # same guard to the actual inherited array before Hadrian starts.

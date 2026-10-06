@@ -1076,6 +1076,7 @@ pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::
         frozen.seal_preparation(&directory)?;
     }
     let pointer = workspace::PreparedWorkspacePointer::for_directory(directory.path())?;
+    exomonad_worktree::GitCli::new().ensure_exomonad_local_exclude(&workspace)?;
     tidepool_atomic_write::write_durable(
         &workspace.join(".exomonad/prepared.json"),
         &serde_json::to_vec_pretty(&pointer)?,
@@ -2949,6 +2950,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pinned.trimmed(), scaffold::DEFAULT_WORKSPACE_REV);
+        let project_work = workspace.join(".agents/skills/exomonad-project-work/SKILL.md");
+        assert!(
+            project_work.is_file(),
+            "advertised project-work skill must be readable through its installed client link"
+        );
+        assert_eq!(
+            std::fs::read(project_work).unwrap(),
+            std::fs::read(
+                workspace.join(".exomonad/workspace/skills/exomonad-project-work/SKILL.md")
+            )
+            .unwrap(),
+        );
         assert_eq!(
             pinned.trimmed(),
             git_stdout(example_skills().parent().unwrap(), &["rev-parse", "HEAD"])

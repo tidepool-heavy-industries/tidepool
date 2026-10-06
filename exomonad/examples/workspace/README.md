@@ -6,6 +6,18 @@ workspace checks. `exomonad check --workspace <path>` validates the selected
 configuration and Haskell modules; add `--recipes` to run its configured
 checks.
 
+The project files (agent spec, prompts and workbench guide) come from this
+template. Generic Haskell modules and skills come from the committed
+`.exomonad/workspace` Gitlink, retained in the release's original Git bundle.
+To ship a generic skill change, commit it in `exomonad-default-workspace`, then
+update this repository's Gitlink and `DEFAULT_WORKSPACE_REV` in
+`bridge/facade/src/exomonad/scaffold.rs`. Regenerate the native graph with
+`scripts/buck2-first-party.py` to record that Gitlink in
+`build/native-workspace-gitlink.json`. Publish the workspace commit before
+publishing its parent pin. The native skill-discovery and scaffold controls read
+the actual declared bundle; edits to this example's skill tree alone do not
+change newly installed workspaces.
+
 ## Typed tools
 
 [`AgentSpec.hs`](.exomonad/AgentSpec.hs) composes the records in

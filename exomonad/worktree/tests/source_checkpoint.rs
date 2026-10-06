@@ -5,7 +5,79 @@ use tidepool_atomic_write::DirectoryAnchor;
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
     GitCli, WorktreeError, WorktreeManager, WorktreeRecordStatus, WorktreeRegistry, WorktreeSource,
+    WorktreeSpec,
 };
+
+#[test]
+fn generated_preparation_pointer_keeps_current_checkout_clean_but_authored_inputs_do_not() {
+    let repo = TestRepo::init().unwrap();
+    let git = repo.git();
+    for (path, body) in [
+        (".exomonad/config.toml", "project configuration\n"),
+        (".exomonad/Project/Input.hs", "authored module\n"),
+    ] {
+        repo.writer()
+            .commit_file(path, body, "authored input")
+            .unwrap();
+    }
+    git.ensure_exomonad_local_exclude(repo.path()).unwrap();
+    let pointer = repo.path().join(".exomonad/prepared.json");
+    // Git admission does not decode this pointer or confer preparation authority.
+    fs::write(&pointer, "generated local deployment pointer\n").unwrap();
+    assert_eq!(
+        git.try_read(repo.path(), &["check-ignore", ".exomonad/prepared.json"])
+            .unwrap()
+            .trimmed(),
+        ".exomonad/prepared.json"
+    );
+    assert!(git
+        .try_read(repo.path(), &["status", "--porcelain"])
+        .unwrap()
+        .stdout
+        .is_empty());
+    let storage = tempfile::tempdir().unwrap();
+    let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+    let manager = WorktreeManager::new(
+        GitCli::new(),
+        WorktreeRegistry::open(&anchor, "registry").unwrap(),
+        storage.path().join("worktrees"),
+        repo.path(),
+    );
+    let child = manager
+        .create(&WorktreeSpec::from_current_repository("prepared-child"))
+        .unwrap();
+    assert!(child.cwd().join(".exomonad/config.toml").is_file());
+    assert!(child.cwd().join(".exomonad/Project/Input.hs").is_file());
+    assert!(!child.cwd().join(".exomonad/prepared.json").exists());
+    for path in [".exomonad/config.toml", ".exomonad/Project/Input.hs"] {
+        assert_eq!(
+            git.try_read(repo.path(), &["ls-files", "--", path])
+                .unwrap()
+                .trimmed(),
+            path
+        );
+        let original = fs::read(repo.path().join(path)).unwrap();
+        fs::write(repo.path().join(path), "changed authored input\n").unwrap();
+        assert!(matches!(
+            manager.create(&WorktreeSpec::from_current_repository("dirty-child")),
+            Err(WorktreeError::SourceDirty(_))
+        ));
+        fs::write(repo.path().join(path), original).unwrap();
+    }
+    fs::write(
+        repo.path().join(".exomonad/new-input.toml"),
+        "new authored input\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        manager.create(&WorktreeSpec::from_current_repository("untracked-child")),
+        Err(WorktreeError::SourceDirty(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(pointer).unwrap(),
+        "generated local deployment pointer\n"
+    );
+}
 
 #[test]
 fn checkpoint_commits_partial_staging_deletions_and_new_files_on_same_branch() {
