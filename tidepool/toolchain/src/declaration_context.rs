@@ -3191,6 +3191,15 @@ impl ExactDeclarationContext {
                 .iter()
                 .map(|entry| entry.descriptor.id)
                 .chain(entries.values().map(|entry| entry.descriptor.id))
+                // Original executable availability is retained independently
+                // of the lexical surface above. Type-only projection remains
+                // an explicit operation that removes native authority.
+                .chain(self.artifact_view().entries().iter().filter_map(|entry| {
+                    matches!(entry.payload, ArtifactPayload::Original(_))
+                        .then_some(entry.descriptor.id)
+                }))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect(),
         )?;
         Ok((view, lexical))
@@ -5178,6 +5187,116 @@ mod tests {
     }
 
     #[test]
+    fn retained_value_keeps_nonlexical_originals_and_projected_file_custody() {
+        let (initial, producer) = metadata_fixture();
+        let native = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_witness_fixture(
+                "HiddenNative",
+                Some(crate::certified_products::PendingImportOwner::Retained {
+                    identity: tidepool_repr::execution_schema::testing::identity("Value", "live"),
+                    generation: 11,
+                }),
+                7,
+                &BTreeMap::new(),
+            ),
+            initial.producer,
+        );
+        let context = Arc::new(
+            initial
+                .as_ref()
+                .clone()
+                .extend_checked_original_products(initial.producer, &[native])
+                .unwrap(),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let original = context
+            .prepare_compilation(&scratch.path().join("original"), &producer)
+            .unwrap();
+        let private_owner = original.materialization.as_ref().unwrap();
+        let private_root = private_owner._directory.path().to_path_buf();
+        let weak = Arc::downgrade(private_owner);
+        let value_entry = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "Value")))
+            .unwrap();
+        let value = context
+            .artifact_view()
+            .select_roots(vec![
+                value_entry[&identity("fixture", "Value")].descriptor.id,
+            ])
+            .unwrap();
+        let (retained, lexical) = context.retain_value_source_surface(&value, &[]).unwrap();
+        assert!(lexical
+            .iter()
+            .all(|node| node.owner.module != "HiddenNative"));
+        assert!(retained
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.kind
+                == crate::artifact_inventory::ArtifactKind::OriginalModule
+                && descriptor.owner.module == "HiddenNative"));
+        let interfaces = retained
+            .interface_projection(
+                &retained
+                    .interface_owners()
+                    .into_iter()
+                    .map(|owner| owner.owner)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert!(interfaces
+            .descriptors()
+            .iter()
+            .all(|descriptor| descriptor.kind
+                != crate::artifact_inventory::ArtifactKind::OriginalModule));
+        let mut next = context.as_ref().clone();
+        next.inventory = retained;
+        next.lexical = lexical;
+        next.normalize().unwrap();
+        let next = Arc::new(next);
+        let request = next
+            .prepare_compilation(&scratch.path().join("projected"), &producer)
+            .unwrap();
+        let projected_owner = request.materialization.as_ref().unwrap();
+        assert!(projected_owner.rows.is_empty());
+        assert_eq!(projected_owner.payload_work.written_bytes, 0);
+        assert_eq!(request.groups.len(), 1);
+        assert!(std::ptr::eq(
+            request.groups[0].group(),
+            original.groups[0].group()
+        ));
+        for artifact in &request.artifacts {
+            assert!(original.artifacts.contains(artifact));
+        }
+        let blocked = program_request(scratch.path(), Arc::clone(&next));
+        assert!(
+            blocked
+                .validate_receipt(
+                    &import_receipt(scratch.path(), &blocked, "HiddenNative"),
+                    None,
+                    &next,
+                )
+                .is_err(),
+            "retained executable availability grants no authored lexical import"
+        );
+        drop(original);
+        drop(context);
+        drop(value);
+        drop(value_entry);
+        drop(initial);
+        assert!(
+            private_root.is_dir(),
+            "projected custody retains original private files"
+        );
+        drop(interfaces);
+        drop(blocked);
+        drop(request);
+        drop(next);
+        assert!(weak.upgrade().is_none());
+        assert!(!private_root.exists());
+    }
+
+    #[test]
     fn retained_materialization_many_descendants_measure_metadata_and_payload_work() {
         for descendants in [24, 100] {
             let (mut context, producer) = metadata_fixture();
@@ -6439,7 +6558,15 @@ mod tests {
         let (retained, lexical) = context
             .retain_value_source_surface(request.program_support.as_ref().unwrap(), &[])
             .unwrap();
-        assert_eq!(retained.artifact_ids(), support.artifact_ids());
+        assert!(support
+            .artifact_ids()
+            .iter()
+            .all(|id| retained.artifact_ids().contains(id)));
+        assert!(retained
+            .descriptors()
+            .iter()
+            .any(|entry| entry.owner == identity("fixture", "Hidden")
+                && entry.kind == ArtifactKind::OriginalModule));
         assert!(lexical.is_empty());
     }
 
@@ -6517,8 +6644,16 @@ mod tests {
         let (earlier_view, earlier_lexical) = later
             .retain_value_source_surface(&value, &later_support)
             .unwrap();
-        assert_eq!(typed_owners(&earlier_view), expected_owners);
-        assert_eq!(earlier_view.artifact_ids(), view.artifact_ids());
+        assert!(earlier_view
+            .descriptors()
+            .iter()
+            .any(|entry| entry.owner == identity("fixture", "LaterSupport")
+                && entry.kind == ArtifactKind::OriginalModule));
+        assert_eq!(
+            typed_owners(&view),
+            expected_owners,
+            "the already captured view remains immutable"
+        );
         assert_eq!(earlier_lexical, lexical);
         assert_eq!(
             lexical,

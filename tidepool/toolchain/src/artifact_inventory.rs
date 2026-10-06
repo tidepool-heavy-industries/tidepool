@@ -864,9 +864,16 @@ impl std::fmt::Debug for ArtifactInventory {
 }
 impl ArtifactInventory {
     pub fn empty_view(&self) -> ArtifactView {
-        self.retain(Vec::new(), Vec::new())
+        self.retain(Vec::new(), Vec::new(), Vec::new())
     }
-    fn retain(&self, roots: Vec<ArtifactId>, parents: Vec<ArtifactView>) -> ArtifactView {
+    fn retain(
+        &self,
+        roots: Vec<ArtifactId>,
+        parents: Vec<ArtifactView>,
+        materialization_parents: Vec<
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+    ) -> ArtifactView {
         let mut state = self.0.lock().expect("inventory lock");
         for id in &roots {
             *state.roots.entry(*id).or_default() += 1;
@@ -876,6 +883,7 @@ impl ArtifactInventory {
             inventory: self.clone(),
             roots,
             parents,
+            materialization_parents,
             materialization: Mutex::new(None),
         }))
     }
@@ -991,6 +999,7 @@ impl ArtifactInventory {
             inventory: self.clone(),
             roots,
             parents: vec![parent.clone()],
+            materialization_parents: Vec::new(),
             materialization: Mutex::new(None),
         })))
     }
@@ -1018,6 +1027,9 @@ struct ViewLease {
     inventory: ArtifactInventory,
     roots: Vec<ArtifactId>,
     parents: Vec<ArtifactView>,
+    // Projected selection must retain issued files without importing its
+    // source view's selection roots or executable authority.
+    materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     materialization:
         Mutex<Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
 }
@@ -1149,7 +1161,7 @@ impl ArtifactView {
         if let Some(materialization) = retained.as_ref() {
             return Ok(Arc::clone(materialization));
         }
-        let mut parents = Vec::new();
+        let mut parents = self.0.materialization_parents.clone();
         let mut visited = BTreeSet::new();
         for parent in &self.0.parents {
             parent.collect_materializations(&mut parents, &mut visited);
@@ -1166,19 +1178,28 @@ impl ArtifactView {
         >,
         visited: &mut BTreeSet<usize>,
     ) {
-        if !visited.insert(Arc::as_ptr(&self.0) as usize) {
-            return;
-        }
-        if let Some(materialization) = self.retained_materialization() {
-            if !materializations
-                .iter()
-                .any(|existing| Arc::ptr_eq(existing, &materialization))
-            {
-                materializations.push(materialization);
+        let mut pending = vec![self];
+        while let Some(view) = pending.pop() {
+            if !visited.insert(Arc::as_ptr(&view.0) as usize) {
+                continue;
             }
-        } else {
-            for parent in &self.0.parents {
-                parent.collect_materializations(materializations, visited);
+            if let Some(materialization) = view.retained_materialization() {
+                if !materializations
+                    .iter()
+                    .any(|existing| Arc::ptr_eq(existing, &materialization))
+                {
+                    materializations.push(materialization);
+                }
+            } else {
+                for materialization in &view.0.materialization_parents {
+                    if !materializations
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, materialization))
+                    {
+                        materializations.push(Arc::clone(materialization));
+                    }
+                }
+                pending.extend(view.0.parents.iter().rev());
             }
         }
     }
@@ -1402,7 +1423,11 @@ impl ArtifactView {
             return Err(failure("selected artifact is outside retained view"));
         }
         drop(state);
-        Ok(self.0.inventory.retain(roots, Vec::new()))
+        let mut materializations = Vec::new();
+        if !roots.is_empty() {
+            self.collect_materializations(&mut materializations, &mut BTreeSet::new());
+        }
+        Ok(self.0.inventory.retain(roots, Vec::new(), materializations))
     }
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         if Arc::ptr_eq(&self.0, &other.0) || other.is_empty() {
@@ -1429,6 +1454,7 @@ impl ArtifactView {
                 inventory: self.0.inventory.clone(),
                 roots: Vec::new(),
                 parents: vec![self.clone(), other.clone()],
+                materialization_parents: Vec::new(),
                 materialization: Mutex::new(None),
             })))
         } else {
