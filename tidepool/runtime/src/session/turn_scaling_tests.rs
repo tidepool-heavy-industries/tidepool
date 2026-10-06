@@ -2348,12 +2348,15 @@ fn same_cell_private_support_survives_late_type_error_retry() {
         AuthorityChecks::Configured,
         &imports,
     );
-    assert!(matches!(
-        refused,
-        Err(ResidentError::Session(
-            crate::session::SessionError::Compile(_)
-        ))
-    ));
+    assert!(
+        matches!(
+            &refused,
+            Err(ResidentError::Session(
+                crate::session::SessionError::Compile(crate::CompileError::Diagnostics(diagnostics))
+            )) if !diagnostics.is_empty()
+        ),
+        "the deliberate True :: Int must reach GHC diagnostics: {refused:?}"
+    );
     assert_eq!(resident.binding_names_in(public), before);
     try_execute_cell_with_template_imports(
         &mut resident, public, &effects, &images, (0, 0), "private_support_successful_retry",
