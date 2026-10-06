@@ -8,6 +8,7 @@
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  , FatIfaceModule(..), lookupModuleOutcomeWith
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
@@ -37,9 +38,9 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 
 import Control.Concurrent.MVar
-  (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+  (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Exception
-  ( displayException )
+  ( SomeException, displayException, mask, throwIO, try, uninterruptibleMask_ )
 import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
@@ -108,11 +109,21 @@ lookupFatIfaceBodies hscEnv cache owner requested = do
     FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
     FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
 
--- | Cache of deserialized fat interface Core, keyed by Module.
--- Each module's extra-decls are deserialized at most once.
+-- | Cache of deserialized fat interface Core, keyed by Module. The map lock
+-- protects only entry selection and publication; independent module loads can
+-- proceed concurrently.
 -- Exact Names index original group ordinals. This preserves both Rec group
 -- identity and the defining order of private top scope.
-newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceModule))
+data FatIfaceEntry
+  = FatIfaceCached FatIfaceModule
+  | FatIfaceLoading (MVar (Maybe FatIfaceModule))
+
+data FatIfaceSelection
+  = UseCached FatIfaceModule
+  | AwaitLoad (MVar (Maybe FatIfaceModule))
+  | StartLoad (MVar (Maybe FatIfaceModule))
+
+newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceEntry))
 
 -- | Create an empty cache.
 newFatIfaceCache :: IO FatIfaceCache
@@ -128,15 +139,49 @@ evictFatIfaceMatching (FatIfaceCache cacheRef) stale =
   modifyMVar_ cacheRef (pure . Map.filterWithKey (\modl _ -> not (stale modl)))
 
 -- | Load one module once and retain whether it loaded, lacked extra
--- declarations, or failed.  Holding the MVar across the miss path also keeps
--- the "at most once" cache invariant true when resolution is concurrent.
+-- declarations, or failed. Concurrent requests for a module share its load;
+-- requests for other modules do not wait for that load. A canceled winner
+-- removes only its own generation and wakes its waiters to retry.
 lookupModuleOutcome :: HscEnv -> FatIfaceCache -> Module -> IO FatIfaceModule
-lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl =
-  modifyMVar cacheRef $ \cache -> case Map.lookup modl cache of
-    Just outcome -> pure (cache, outcome)
+lookupModuleOutcome hscEnv cache modl =
+  lookupModuleOutcomeWith cache modl (loadModuleExtraDecls hscEnv modl)
+
+-- | The coalescing primitive is shared by the real interface loader and its
+-- controlled concurrency tests. The supplied action runs only for a winning
+-- generation.
+lookupModuleOutcomeWith :: FatIfaceCache -> Module -> IO FatIfaceModule -> IO FatIfaceModule
+lookupModuleOutcomeWith cache@(FatIfaceCache cacheRef) modl load = mask $ \restore -> do
+  selected <- modifyMVar cacheRef $ \entries -> case Map.lookup modl entries of
+    Just (FatIfaceCached outcome) -> pure (entries, UseCached outcome)
+    Just (FatIfaceLoading completion) -> pure (entries, AwaitLoad completion)
     Nothing -> do
-      outcome <- loadModuleExtraDecls hscEnv modl
-      pure (Map.insert modl outcome cache, outcome)
+      completion <- newEmptyMVar
+      pure (Map.insert modl (FatIfaceLoading completion) entries, StartLoad completion)
+  case selected of
+    UseCached outcome -> pure outcome
+    AwaitLoad completion -> do
+      settled <- restore (readMVar completion)
+      maybe (restore (lookupModuleOutcomeWith cache modl load)) pure settled
+    StartLoad completion -> do
+      loaded <- try (restore load)
+      case loaded of
+        Left exception -> do
+          uninterruptibleMask_ $ do
+            modifyMVar_ cacheRef $ \entries ->
+              pure $ case Map.lookup modl entries of
+                Just (FatIfaceLoading current) | current == completion -> Map.delete modl entries
+                _ -> entries
+            putMVar completion Nothing
+          throwIO (exception :: SomeException)
+        Right outcome -> do
+          uninterruptibleMask_ $ do
+            modifyMVar_ cacheRef $ \entries ->
+              pure $ case Map.lookup modl entries of
+                Just (FatIfaceLoading current) | current == completion ->
+                  Map.insert modl (FatIfaceCached outcome) entries
+                _ -> entries
+            putMVar completion (Just outcome)
+          pure outcome
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
 -- exact outcome for all selected-body callers.
