@@ -65,6 +65,7 @@
                 enableNativeBignum = true;
               }).overrideAttrs
                 (old: {
+                  patches = (old.patches or [ ]) ++ [ ./nix/ghc-make-cache-filter.patch ];
                   postPatch = (old.postPatch or "") + ''
                     TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
 

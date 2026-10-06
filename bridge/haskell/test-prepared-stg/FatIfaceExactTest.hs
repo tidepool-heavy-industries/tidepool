@@ -2,9 +2,13 @@ module Main (main, tests) where
 
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
-import Control.Exception (finally)
+import Control.Concurrent (ThreadId, forkFinally, killThread, yield)
+import Control.Concurrent.MVar
+  ( MVar, newEmptyMVar, putMVar, readMVar, takeMVar )
+import Control.Exception (SomeException, bracket, finally, throwIO)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
 import GHC.Driver.Env (HscEnv)
@@ -25,13 +29,18 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (callProcess, readProcess)
+import System.Timeout (timeout)
 import Tidepool.FatIface
   ( FatIfaceLookup(..)
   , FatIfaceMissing(..)
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , newFatIfaceCache
-  , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface
+  , OwnerInterfaceContext(..), newOwnerInterfaceCache, copyOwnerInterfaceCache
+  , lookupOwnerInterface, evictOwnerInterfaceMatching
   )
+import Tidepool.FatIface.Internal
+  (newLoadCache, lookupLoadCache, copyLoadCache, evictLoadCache)
+import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies, pmBindings)
 import Tidepool.ExecutionProjection (topBinders)
@@ -95,6 +104,7 @@ scenario = do
         Just (AnId identifier) -> pure identifier
         _ -> fail "missing-interface identity has no genuine exported Id"
       cache <- liftIO newFatIfaceCache
+      liftIO verifyCacheConcurrency
       localResult <- liftIO (lookupFatIfaceExact hsc cache
         (mkSystemName (mkUnique 'v' 983450) (mkVarOcc "localOnly")))
       liftIO (assert (isNameWithoutModule localResult)
@@ -112,6 +122,14 @@ scenario = do
       privateBodies <- liftIO newPreparedBodyCache
       privatePrepared <- liftIO $ prepareRecoveredBodies hsc privateOwners privateBodies
         privateOwner privateGroups >>= either (fail . show) pure
+      privateOwnerClone <- liftIO (copyOwnerInterfaceCache privateOwners)
+      privateOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
+      liftIO (assert (maybe False (const True) privateOwnerContext)
+        "owner cache copy omitted a completed interface context")
+      liftIO (evictOwnerInterfaceMatching privateOwners (== privateOwner))
+      clonedOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
+      liftIO (assert (maybe False (const True) clonedOwnerContext)
+        "evicting the source owner cache changed its independent copy")
       liftIO $ assert (any ((== "privateHelper") . occNameString . nameOccName . varName)
         (concatMap (topBinders . fst) (pmBindings privatePrepared)))
         "native preparation omitted the defining private helper"
@@ -160,7 +178,134 @@ scenario = do
             "read failure changed the exact defining owner"
           assert (not (null reason)) "read failure lost its reason"
         _ -> fail "optimizer unfolding bypassed an unreadable defining interface"
-      pure ()
+  pure ()
+
+-- Generic outcomes exercise loading mechanics without constructing executable
+-- Core or allowing tests to insert invented interface facts into FatIfaceCache.
+data TestOutcome = NoExtra | LoadFailure String deriving (Eq, Show)
+
+guardTime :: IO a -> IO a
+guardTime action = timeout 5000000 action >>= maybe (fail "interface cache test timed out") pure
+
+withLoad :: IO value -> ((ThreadId, MVar (Either SomeException value)) -> IO a) -> IO a
+withLoad action = bracket start stop
+  where
+    start = do
+      result <- newEmptyMVar
+      thread <- forkFinally action (putMVar result)
+      pure (thread, result)
+    stop (thread, result) = killThread thread >> guardTime (readMVar result) >> pure ()
+
+awaitLoad :: (ThreadId, MVar (Either SomeException value)) -> IO value
+awaitLoad (_, result) = guardTime (readMVar result) >>= either throwIO pure
+
+-- These controlled loaders have no other blocking point. Observing the waiter
+-- blocked with one loader entry proves it attached before cancellation/release.
+waitBlocked :: ThreadId -> IO ()
+waitBlocked thread = guardTime go
+  where
+    go = threadStatus thread >>= \status -> case status of
+      ThreadBlocked BlockedOnMVar -> pure ()
+      ThreadFinished -> fail "cache waiter finished before attaching"
+      ThreadDied -> fail "cache waiter died before attaching"
+      _ -> yield >> go
+
+verifyCacheConcurrency :: IO ()
+verifyCacheConcurrency = guardTime $ do
+  let owner = 0 :: Int
+      other = 1 :: Int
+  cache <- newLoadCache
+  entered <- newEmptyMVar
+  release <- newEmptyMVar
+  loads <- newIORef (0 :: Int)
+  let loader = do
+        atomicModifyIORef' loads (\count -> (count + 1, ()))
+        putMVar entered ()
+        readMVar release
+        pure NoExtra
+  withLoad (lookupLoadCache cache owner loader) $ \first -> do
+    takeMVar entered
+    withLoad (lookupLoadCache cache owner (atomicModifyIORef' loads (\count -> (count + 1, ()))
+        >> readMVar release >> pure NoExtra)) $ \second -> do
+      waitBlocked (fst second)
+      loadCount <- readIORef loads
+      assert (loadCount == 1) "same-key callers ran more than one loader"
+      independent <- guardTime (lookupLoadCache cache other (pure NoExtra))
+      assert (independent == NoExtra) "a blocked owner prevented another key from loading"
+      putMVar release ()
+      firstResult <- awaitLoad first
+      secondResult <- awaitLoad second
+      assert (firstResult == NoExtra && secondResult == NoExtra) "same-key completion was not shared"
+  clone <- copyLoadCache cache
+  cloned <- lookupLoadCache clone owner (fail "completed entry was lost")
+  assert (cloned == NoExtra) "cache copy lost its completed entry"
+  evictLoadCache cache (== owner)
+  independentClone <- lookupLoadCache clone owner (fail "source eviction changed clone")
+  assert (independentClone == NoExtra) "source eviction changed the copied cache"
+
+  source <- newLoadCache
+  sourceEntered <- newEmptyMVar
+  sourceRelease <- newEmptyMVar
+  withLoad (lookupLoadCache source owner
+      (putMVar sourceEntered () >> readMVar sourceRelease >> pure (LoadFailure "old"))) $ \original -> do
+    takeMVar sourceEntered
+    inFlightClone <- copyLoadCache source
+    copied <- guardTime (lookupLoadCache inFlightClone owner (pure NoExtra))
+    assert (copied == NoExtra) "copy inherited an in-flight generation"
+    putMVar sourceRelease ()
+    outcome <- awaitLoad original
+    assert (outcome == LoadFailure "old") "copy prevented the original generation from settling"
+
+  failures <- newLoadCache
+  failureLoads <- newIORef (0 :: Int)
+  let failing = atomicModifyIORef' failureLoads (\count -> (count + 1, ())) >> pure (LoadFailure "read failed")
+  firstFailure <- lookupLoadCache failures owner failing
+  nextFailure <- lookupLoadCache failures owner failing
+  failureClone <- copyLoadCache failures
+  copiedFailure <- lookupLoadCache failureClone owner failing
+  count <- readIORef failureLoads
+  assert (count == 1 && all (== LoadFailure "read failed") [firstFailure, nextFailure, copiedFailure])
+    "cache lost its completed failure outcome"
+
+  cancelled <- newLoadCache
+  cancelEntered <- newEmptyMVar
+  cancelBlock <- newEmptyMVar
+  cancelLoads <- newIORef (0 :: Int)
+  withLoad (lookupLoadCache cancelled owner
+      (atomicModifyIORef' cancelLoads (\count' -> (count' + 1, ()))
+        >> putMVar cancelEntered () >> readMVar cancelBlock >> pure NoExtra)) $ \winner -> do
+    takeMVar cancelEntered
+    withLoad (lookupLoadCache cancelled owner
+        (atomicModifyIORef' cancelLoads (\count' -> (count' + 1, ())) >> pure NoExtra)) $ \waiter -> do
+      waitBlocked (fst waiter)
+      attached <- readIORef cancelLoads
+      assert (attached == 1) "cancellation waiter did not attach to the winning load"
+      killThread (fst winner)
+      retried <- awaitLoad waiter
+      retriedCount <- readIORef cancelLoads
+      assert (retried == NoExtra && retriedCount == 2) "winner cancellation did not wake one retry"
+
+  evicted <- newLoadCache
+  oldEntered <- newEmptyMVar
+  oldRelease <- newEmptyMVar
+  newEntered <- newEmptyMVar
+  newRelease <- newEmptyMVar
+  withLoad (lookupLoadCache evicted owner
+      (putMVar oldEntered () >> readMVar oldRelease >> pure (LoadFailure "evicted"))) $ \old -> do
+    takeMVar oldEntered
+    evictLoadCache evicted (== owner)
+    withLoad (lookupLoadCache evicted owner
+        (putMVar newEntered () >> readMVar newRelease >> pure NoExtra)) $ \new -> do
+      takeMVar newEntered
+      putMVar oldRelease ()
+      oldResult <- awaitLoad old
+      assert (oldResult == LoadFailure "evicted") "evicted winner did not settle its original caller"
+      withLoad (lookupLoadCache evicted owner (fail "late old generation replaced newer load")) $ \current -> do
+        waitBlocked (fst current)
+        putMVar newRelease ()
+        newResult <- awaitLoad new
+        currentResult <- awaitLoad current
+        assert (newResult == NoExtra && currentResult == NoExtra) "late completion replaced a newer generation"
 
 -- Use the production defining-interface loader rather than a use-site Id
 -- whose optimization metadata the frontend may have omitted.

@@ -7,10 +7,11 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
+  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
+  , copyOwnerInterfaceCache, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
@@ -37,9 +38,10 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 
 import Control.Concurrent.MVar
-  (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+  (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
   ( displayException )
+import Tidepool.FatIface.Internal qualified as Shared
 import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
@@ -108,35 +110,24 @@ lookupFatIfaceBodies hscEnv cache owner requested = do
     FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
     FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
 
--- | Cache of deserialized fat interface Core, keyed by Module.
--- Each module's extra-decls are deserialized at most once.
--- Exact Names index original group ordinals. This preserves both Rec group
--- identity and the defining order of private top scope.
-newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceModule))
+-- | Each stable resolution context owns its decoded Core cache. Sharing
+-- completion is an internal loading mechanism; callers cannot supply bodies.
+newtype FatIfaceCache = FatIfaceCache (Shared.LoadCache Module FatIfaceModule)
 
--- | Create an empty cache.
 newFatIfaceCache :: IO FatIfaceCache
-newFatIfaceCache = FatIfaceCache <$> newMVar Map.empty
+newFatIfaceCache = FatIfaceCache <$> Shared.newLoadCache
 
--- | Drop every cached module outcome whose 'Module' key matches the given
--- predicate. Used by the resident daemon to invalidate a request's own
--- target module and every @Tidepool.Session.*@ module between requests,
--- whose @.hi@ files can change underneath an otherwise daemon-lifetime
--- cache; library modules are stable while the daemon lives.
+copyFatIfaceCache :: FatIfaceCache -> IO FatIfaceCache
+copyFatIfaceCache (FatIfaceCache cache) = FatIfaceCache <$> Shared.copyLoadCache cache
+
+-- | Request-owned targets and changed private contexts can evict acceleration
+-- without replacing another in-flight generation's eventual publication.
 evictFatIfaceMatching :: FatIfaceCache -> (Module -> Bool) -> IO ()
-evictFatIfaceMatching (FatIfaceCache cacheRef) stale =
-  modifyMVar_ cacheRef (pure . Map.filterWithKey (\modl _ -> not (stale modl)))
+evictFatIfaceMatching (FatIfaceCache cache) = Shared.evictLoadCache cache
 
--- | Load one module once and retain whether it loaded, lacked extra
--- declarations, or failed.  Holding the MVar across the miss path also keeps
--- the "at most once" cache invariant true when resolution is concurrent.
 lookupModuleOutcome :: HscEnv -> FatIfaceCache -> Module -> IO FatIfaceModule
-lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl =
-  modifyMVar cacheRef $ \cache -> case Map.lookup modl cache of
-    Just outcome -> pure (cache, outcome)
-    Nothing -> do
-      outcome <- loadModuleExtraDecls hscEnv modl
-      pure (Map.insert modl outcome cache, outcome)
+lookupModuleOutcome env (FatIfaceCache cache) owner =
+  Shared.lookupLoadCache cache owner (loadModuleExtraDecls env owner)
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
 -- exact outcome for all selected-body callers.
@@ -274,6 +265,11 @@ newtype OwnerInterfaceCache =
 
 newOwnerInterfaceCache :: IO OwnerInterfaceCache
 newOwnerInterfaceCache = OwnerInterfaceCache <$> newMVar Map.empty
+
+-- | Copy the already-read owner contexts into an independent cache.
+copyOwnerInterfaceCache :: OwnerInterfaceCache -> IO OwnerInterfaceCache
+copyOwnerInterfaceCache (OwnerInterfaceCache cacheRef) =
+  OwnerInterfaceCache <$> (readMVar cacheRef >>= newMVar)
 
 lookupOwnerInterface :: OwnerInterfaceCache -> Module
   -> IO (Maybe OwnerInterfaceContext)

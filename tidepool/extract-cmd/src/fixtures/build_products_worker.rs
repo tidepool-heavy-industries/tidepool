@@ -17,7 +17,7 @@ fn request(payload: &[u8]) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
         .collect();
-    let mut r = &bytes[8..];
+    let mut r = &bytes[17..];
     let mut input = None;
     let mut root = None;
     for _ in 0..u32(&mut r) {
@@ -49,10 +49,10 @@ fn request(payload: &[u8]) -> Vec<u8> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--print-worker-request-flag") {
-        println!("--worker-request-v17");
+        println!("--worker-request-v18");
         return;
     }
-    if args.get(1).map(String::as_str) == Some("--worker-request-v17") {
+    if args.get(1).map(String::as_str) == Some("--worker-request-v18") {
         std::io::stdout()
             .write_all(&request(args[2].as_bytes()))
             .unwrap();

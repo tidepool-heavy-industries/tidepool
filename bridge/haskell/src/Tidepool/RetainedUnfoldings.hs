@@ -76,8 +76,6 @@ module Tidepool.RetainedUnfoldings
   , withholdRetainedUnfoldings
   ) where
 
-import Control.Monad.IO.Class (liftIO)
-import Data.IORef (IORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -113,12 +111,9 @@ import Tidepool.ExecutionSchema (SymbolIdentity(..))
 -- 'withholdRetainedUnfoldings' this pass wraps): the pass reads the given
 -- 'IORef' at RUN time, once per module, so the same installed pass serves
 -- every later retained set a caller writes into the cell -- including a
--- 'Set.null' one, which stays a true no-op on the compiled bytes. This lets
--- a long-lived 'HscEnv' (the resident daemon's session) install the pass
--- exactly ONCE and vary the retained set per request by writing the cell,
--- instead of installing one pass per request and accumulating them. A
--- one-shot caller that only ever compiles once may still pass a fresh
--- 'IORef' seeded with its one request's set.
+-- 'Set.null' one, which stays a true no-op on the compiled bytes. Each
+-- retained resolution context installs one pass with immutable inputs. Lazy
+-- computations captured by an earlier HscEnv never observe another policy.
 data RetainedContext = RetainedContext
   { contextAll :: !(Set SymbolIdentity)
   , contextByModule :: !(Map (Text.Text, Text.Text) (Set SymbolIdentity, Fingerprint))
@@ -139,14 +134,14 @@ scopeFingerprint :: Set SymbolIdentity -> Fingerprint
 scopeFingerprint identities = fingerprintString
   ("tidepool-retained-unfoldings-v3:" ++ show (Set.toAscList identities))
 
-installRetainedUnfoldingsPlugin :: IORef RetainedContext -> HscEnv -> HscEnv
-installRetainedUnfoldingsPlugin retainedRef hscEnv =
+installRetainedUnfoldingsPlugin :: RetainedContext -> HscEnv -> HscEnv
+installRetainedUnfoldingsPlugin context hscEnv =
   hscEnv { hsc_plugins = plugins { staticPlugins = staticPlugin : staticPlugins plugins } }
   where
     plugins = hsc_plugins hscEnv
     staticPlugin = StaticPlugin
       { spPlugin = PluginWithArgs
-          { paPlugin = withholdingPlugin retainedRef
+          { paPlugin = withholdingPlugin context
           , paArguments = [pluginMarker]
           }
       -- Uninitialised so that every 'initializePlugins' call, including the
@@ -212,13 +207,12 @@ scopeToModule env = env { hsc_plugins = plugins { staticPlugins = map rescope (s
           }
       | otherwise = sp
 
-withholdingPlugin :: IORef RetainedContext -> Plugin
-withholdingPlugin retainedRef = defaultPlugin
+withholdingPlugin :: RetainedContext -> Plugin
+withholdingPlugin context = defaultPlugin
   { installCoreToDos = \_args todos ->
       pure (CoreDoPluginPass "WithholdRetainedUnfoldings" pass : todos)
   , driverPlugin = \_args env -> pure (scopeToModule env)
   , pluginRecompile = \args -> do
-      context <- readIORef retainedRef
       pure $ case args of
         [_, recorded] | Just key <- readMaybe recorded ->
           MaybeRecompile (maybe (contextEmptyFingerprint context) snd
@@ -227,7 +221,6 @@ withholdingPlugin retainedRef = defaultPlugin
   }
   where
     pass = bindsOnlyPass $ \binds -> do
-      context <- liftIO (readIORef retainedRef)
       pure (withholdRetainedUnfoldings (contextAll context) binds)
 
 -- | The pure Core-to-Core rewrite: every top-level binder whose

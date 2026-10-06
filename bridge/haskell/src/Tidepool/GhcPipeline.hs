@@ -26,6 +26,9 @@ module Tidepool.GhcPipeline
   , CompilerTransactionFailure(..)
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
+  , CompilerScope(..), CompilerScopeRunner, withResidentCompilerScopes
+  , CompilerRecoveryCaches(..)
+  , withScopedExactInterfaceTransaction
   , withExactInterfaceTransaction
   ) where
 
@@ -42,7 +45,7 @@ import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, run
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp, hsc_type_env_vars))
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, emptyHomePackageTable, justBytecode, addToHpt, lookupHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, emptyHomePackageTable, justBytecode, addToHpt, lookupHpt, eltsHpt, filterHpt)
 import GHC.Unit.Module.ModDetails (ModDetails, md_types)
 import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
@@ -50,8 +53,13 @@ import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Iface.Load (loadInterface, WhereFrom(..))
 import GHC.Rename.Names (renameRawPkgQual)
-import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
+import GHC.Driver.Make (load', ModIfaceCache(..), newIfaceCache, filterModIfaceCache)
 import qualified GHC.Linker.Loader as Linker
+import GHC.Linker.Types (Linkable(..), linkableObjs, linkableLibs)
+import GHC.Unit.Module.Env (moduleEnvElts)
+import GHC.Runtime.Interpreter (stopInterp, purgeLookupSymbolCache)
+import GHC.Runtime.Interpreter.Types (Interp(..))
+import Control.Concurrent.MVar (modifyMVar_)
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
@@ -64,7 +72,7 @@ import GHC.Types.Error (MessageClass(..), mkLocMessage, getMessages, errMsgDiagn
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
-import GHC.Utils.Logger (LogAction)
+import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -155,7 +163,7 @@ import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getCurre
 import System.Posix.Temp (mkdtemp)
 import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (forM, forM_, when, unless, filterM, foldM)
+import Control.Monad (forM, forM_, when, unless, filterM, foldM, (>=>))
 import Data.Data (Data, cast, gmapQ)
 import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
@@ -194,7 +202,11 @@ import Tidepool.Timing
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
   , newTimingRequestIdentity
   , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
-import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, acquirePreparedModule, runPreparedModuleTask)
+import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, acquirePreparedModule, runPreparedModuleTask
+  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, evictPreparedBodyMatching)
+import Tidepool.FatIface
+  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, evictFatIfaceMatching
+  , OwnerInterfaceCache, newOwnerInterfaceCache, copyOwnerInterfaceCache, evictOwnerInterfaceMatching)
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
   , CompilerExecutor, withCompilerExecutor, runCompilerTasks, dependencyClosedReuse )
@@ -202,7 +214,7 @@ import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.RetainedUnfoldings
-  ( RetainedContext, retainedContext, emptyRetainedContext
+  ( RetainedContext, retainedContext
   , installRetainedUnfoldingsPlugin, retainedDefinedBy
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
 import Tidepool.TurnSource (extractModuleName)
@@ -211,7 +223,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint, selectedFreshHomeRequirements )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( ExactIfaceArtifact(..), freshExactState, freshExactContext, forkExactContext, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
@@ -240,6 +252,7 @@ import Tidepool.PackageWitness
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
+  , CandidateContextIdentity, candidateContextIdentity
   , readCapturedModuleCandidatesWithGraphs, readModuleCandidatesWithGraphs
   , candidateExecutionSources, candidateOriginalIdentity )
 import Tidepool.OriginalProductRoots (candidateOriginalGlobalDemand)
@@ -1012,55 +1025,87 @@ instance Exception CompilerTransactionFailure
 data CompilerPhase = CompilerReady | CompilerRunning | CompilerFailed | CompilerClosed
   deriving (Eq)
 
--- The admitted scope can be extended in memory without changing its original
--- manifest digest. Compare its complete value, including those extensions.
--- The envelope location is only used for revalidation, never for visibility.
-data ExactEnvironmentIdentity = ExactEnvironmentIdentity
-  { environmentScope :: ExactScope
-  , environmentProducer :: Maybe CompilerProducerIdentity
-  , environmentIncarnation :: Maybe String
-  , environmentSearchPaths :: [FilePath]
-  , environmentWorkingDirectory :: FilePath
-  , environmentCandidates :: CandidateOfferIdentity
-  , environmentRetained :: Set.Set SymbolIdentity
-  , environmentImportIntents :: [ImportIntent]
-  , environmentValueInputs :: [ModuleName]
+-- Resolution contexts retain immutable compiler facts. Request admissions,
+-- lexical activation, source import intents and site authority stay cycle-local.
+data CompilerContextIdentity = CompilerContextIdentity
+  { contextScope :: Maybe ExactScope
+  , contextProducer :: Maybe CompilerProducerIdentity
+  , contextSearchPaths :: [FilePath]
+  , contextWorkingDirectory :: FilePath
+  , contextCandidates :: Maybe CandidateContextIdentity
+  , contextRetained :: Set.Set SymbolIdentity
+  , contextCheckedValues :: [ExactIfaceArtifact]
   } deriving (Eq)
 
--- Legacy session interfaces are read from mutable ssRoot paths outside the
--- exact scope. Only the checked injection branch consumes verified scope bytes.
-data ExactReuseAdmission
-  = ScopeAuthenticatedValueInputs [ModuleName]
-  | UnsealedSessionValueInputs
+-- Legacy value injection is mutable and cannot select a completed exact view.
+data ExactReuseAdmission = ScopeAuthenticatedValueInputs | UnsealedSessionValueInputs
 
 exactReuseAdmission :: ExactScope -> Maybe SessionScope -> ExactReuseAdmission
 exactReuseAdmission scope session
-  | null requested = ScopeAuthenticatedValueInputs []
+  | null requested = ScopeAuthenticatedValueInputs
   | scopePurpose scope == NoCheckedPurpose = UnsealedSessionValueInputs
-  | all ((`Set.member` admitted) . moduleNameString) requested =
-      ScopeAuthenticatedValueInputs requested
+  | all ((`Set.member` admitted) . moduleNameString) requested = ScopeAuthenticatedValueInputs
   | otherwise = UnsealedSessionValueInputs
   where
     requested = maybe [] (map renderSessionModule . ssValIfaces) session
     admitted = Set.fromList (map exactModule (scopeValueInterfaces scope))
 
-data CandidateOfferIdentity
-  = NoCandidateOffer
-  | CapturedCandidateOffer FilePath BS.ByteString
-  deriving (Eq)
+-- Paths acquire bytes on each request; immutable seals select their resident
+-- resolution context. No request ID or checked-purpose envelope is a product key.
+resolutionScope :: ExactScope -> ExactScope
+resolutionScope scope = scope
+  { scopeManifestPath="", scopeRequestSha256="", scopeSemanticSha256=""
+  , scopeInterfaces=[(artifact {exactPath=""},"",packages)
+      | (artifact,_,packages) <- scopeInterfaces scope]
+  , scopeInterfaceEvidence=Map.map normalizeEvidence (scopeInterfaceEvidence scope)
+  , scopeProducts=[], scopeExecutionGraphs=[], scopeExecutionOwners=[]
+  , scopePurpose=NoCheckedPurpose, scopeRequestTypes=Nothing
+  , scopeSourceSelectedOwners=Set.empty
+  }
+  where
+    normalizeEvidence (ModuleInterfaceEvidence proof) = ModuleInterfaceEvidence (proof
+      { canonicalCertificatePath=""
+      , canonicalCoreArtifact=(\core -> core {canonicalCorePath=""}) <$> canonicalCoreArtifact proof })
+    normalizeEvidence evidence = evidence
 
-data ResidentStateOrigin
-  = OrdinarySourceState
-  | LegacySourceFreeState
-  | ExactState ExactEnvironmentIdentity Module
-  | IsolatedExactState
-  deriving (Eq)
+data CompilerRecoveryCaches = CompilerRecoveryCaches
+  { compilerFatIface :: FatIfaceCache
+  , compilerOwnerIface :: OwnerInterfaceCache
+  , compilerPreparedBodies :: PreparedBodyCache
+  }
+
+freshCompilerRecoveryCaches :: IO CompilerRecoveryCaches
+freshCompilerRecoveryCaches = CompilerRecoveryCaches
+  <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
+
+copyCompilerRecoveryCaches :: CompilerRecoveryCaches -> IO CompilerRecoveryCaches
+copyCompilerRecoveryCaches caches = CompilerRecoveryCaches
+  <$> copyFatIfaceCache (compilerFatIface caches)
+  <*> copyOwnerInterfaceCache (compilerOwnerIface caches)
+  <*> copyPreparedBodyCache (compilerPreparedBodies caches)
+
+evictCompilerRecovery :: CompilerRecoveryCaches -> (Module -> Bool) -> IO ()
+evictCompilerRecovery caches stale = do
+  evictFatIfaceMatching (compilerFatIface caches) stale
+  evictOwnerInterfaceMatching (compilerOwnerIface caches) stale
+  evictPreparedBodyMatching (compilerPreparedBodies caches) stale
+
+-- Every completed version remains physically retained. New attempts copy its
+-- mutable cells; deferred computations continue to own their original HscEnv.
+data CompletedCompilerContext = CompletedCompilerContext
+  { completedIdentity :: CompilerContextIdentity
+  , completedEnvironment :: HscEnv
+  , completedMemo :: IORef GutsMemo
+  , completedIfaceCache :: ModIfaceCache
+  , completedRecovery :: CompilerRecoveryCaches
+  , completedTarget :: Module
+  }
 
 -- The transaction owner admits this state only after installing a fresh or
 -- identically admitted environment. A standalone cycle keeps its own reset.
 data CycleState
   = StandaloneCycle
-  | TransactionCycle ModIfaceCache (IORef GutsMemo) (Maybe (Either String CapturedCandidateManifest))
+  | TransactionCycle ModIfaceCache (IORef GutsMemo) (Maybe (Either String CapturedCandidateManifest)) [(GutsMemo,HscEnv)]
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
@@ -1324,9 +1369,8 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- empty retained set costs nothing on the compiled bytes (see
     -- 'withholdRetainedUnfoldings').
     let context = retainedContext retained
-    retainedRef <- liftIO (newIORef context)
     hscForRetained <- getSession
-    setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
+    setSession (installRetainedUnfoldingsPlugin context hscForRetained)
     -- One cycle, no cache, no memo — 'sessionT0' is captured BEFORE this
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
@@ -1756,13 +1800,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         exactCycle = exactCompileCycle selection variant
         mCache = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle cache _ _ -> Just cache
+          TransactionCycle cache _ _ _ -> Just cache
         mMemoRef = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ memo _ -> Just memo
+          TransactionCycle _ memo _ _ -> Just memo
         capturedCandidates = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ _ captured -> captured
+          TransactionCycle _ _ captured _ -> captured
     when (exactCycle && case cycleState of StandaloneCycle -> True; _ -> False) $ do
       current <- getSession
       fresh <- liftIO (freshExactState current)
@@ -1785,12 +1829,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               ++ " owner_truncated=" ++ show (length unit > 128 || length name > 128))
             delegate request expression
       setSession current {hsc_hooks=(hsc_hooks current) {runMetaHook=Just observe}}
-    when (case cycleState of TransactionCycle {} -> True; _ -> not exactCycle) $ do
-      current <- getSession
-      -- Make unloads home executables only for LinkInMemory. Extraction uses
-      -- NoLink, so this request boundary owns the same loader transition.
-      -- Immutable cached interfaces and bytecode remain available for reuse.
-      liftIO $ forM_ (hsc_interp current) $ \interp -> Linker.unload interp current []
     forM_ (pvExactScope variant) $ \scope -> do
       env <- getSession
       verified <- liftIO (revalidateExactScope env scope)
@@ -1935,6 +1973,24 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- definitions; retained identities defined elsewhere reach it through
     -- a dependency, whose invalidity is already covered by 'depsValidSoFar'.
     let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
+    case cycleState of
+      TransactionCycle _ memo _ histories -> liftIO $ do
+        current <- readIORef memo
+        let matching summary entry =
+              let validity = gmeValidity entry
+              in payloadOwner (gmePayload entry) == ms_mod summary
+                && memoSourceHash validity == ms_hs_hash summary
+                && memoRetained validity == retainedFor summary
+                && memoHomeDependencies validity == homeDependencyWitnesses summary
+                && (not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
+                  || (isJust incarnation && memoIncarnation validity == incarnation))
+            select summary = find (matching summary)
+              (catMaybes [Map.lookup (ms_mod_name summary) snapshot | snapshot <- current:map fst histories])
+            selected = Map.fromList [(ms_mod_name summary,entry)
+              | summary <- Map.elems summaryByDependency, ms_mod summary /= targetOwner
+              , Just entry <- [select summary]]
+        writeIORef memo (Map.union selected current)
+      StandaloneCycle -> pure ()
     let depsValidSoFar modSum = liftIO $ do
           validMap <- readIORef validThisCycleRef
           pure (all (\d -> Map.findWithDefault False d validMap)
@@ -2147,7 +2203,15 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               | summary <- sourceOrder
               , let owner = ms_mod summary
               , Just entry <- [Map.lookup owner validEntries]
-              , Just hmi <- [Map.lookup owner previousSourceHomes]
+              , let historicalHomes = case cycleState of
+                      TransactionCycle _ _ _ snapshots -> catMaybes
+                        [lookupHpt (hsc_HPT historical) (ms_mod_name summary) | (_,historical) <- snapshots]
+                      StandaloneCycle -> []
+              , Just hmi <- [find (\home -> mi_module (hm_iface home) == owner
+                    && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash
+                      (mi_final_exts (hm_iface (finalizedHomeModInfo (loadedFinalized
+                        (payloadLoaded summary (gmePayload entry)))))))
+                  (maybe [] (:[]) (Map.lookup owner previousSourceHomes) ++ historicalHomes)]
               , isNothing (lookupHpt (hsc_HPT current) (ms_mod_name summary))
               , let finalized = hm_iface (finalizedHomeModInfo (loadedFinalized
                       (payloadLoaded summary (gmePayload entry))))
@@ -2430,6 +2494,19 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     when (isJust (hscFrontendHook (hsc_hooks beforeLoad))) (liftIO (throwIO CustomLoadFrontendHook))
     loadT0 <- monotonicTime
     loadResources <- beginResourceTiming timing
+    getSession >>= liftIO . activateCompilerInterpreter
+    -- Make prefers its cached interface over the current summary's staged
+    -- interface. An admitted original owns that choice now; remove its prior
+    -- interface and linkable together while preserving every other cache entry.
+    let candidateOwners = Set.fromList
+          [ms_mod (admittedCandidateView candidate) | candidate <- Map.elems acceptedCandidates]
+        currentMemoInterfaces = Map.map (hm_iface . finalizedHomeModInfo .
+          loadedFinalized . (\entry -> payloadLoaded (sourceSummaries Map.! payloadOwner (gmePayload entry)) (gmePayload entry))) validatedMemo
+        sourceSummaries = Map.fromList [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
+        keepCurrent iface = mi_module iface `Set.notMember` candidateOwners && case Map.lookup (mi_module iface) currentMemoInterfaces of
+          Nothing -> True
+          Just original -> mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
+        loadCache = fmap (filterModIfaceCache keepCurrent) mCache
     loadFlag <- reifyGhc $ \session -> bracket
       (reflectGhc (getSession >>= \env -> setSession env
         { hsc_hooks = (hsc_hooks env)
@@ -2440,7 +2517,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         { hsc_hooks = hsc_hooks beforeLoad
         , hsc_dflags = (hsc_dflags env)
             { parMakeCount = parMakeCount (hsc_dflags beforeLoad) } }) session))
-      (const (reflectGhc (load' mCache loadHowMuch
+      (const (reflectGhc (load' loadCache loadHowMuch
         dependencyDiagnostic (Just batchMsg)
         (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))) session))
     loadT1 <- monotonicTime
@@ -2521,6 +2598,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     when (null summaries) $
       liftIO $ ioError (userError (pvLabel variant ++ ": empty module graph"))
     let compileExecutable = do
+          -- One shared outer logger lock protects the request's diagnostic
+          -- hooks for every acquired lowering/recovery task. Per-task logger
+          -- locks would still race the same underlying collector.
+          currentLogger <- hsc_logger <$> getSession
+          loweringLogger <- liftIO (makeThreadSafe currentLogger)
           -- These summed phases cover deferred finalization only. Canonical
           -- frontend work performed by the load hooks belongs to 'ghc_load'.
           tcMsRef <- liftIO (newIORef (0 :: Integer))
@@ -2651,7 +2733,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               acquireFinalized loaded = do
                 current <- getSession
                 let summary = canonicalSummary (loadedSummary loaded)
-                    env = scopeRetainedSummaryHscEnv summary current
+                    env = (scopeRetainedSummaryHscEnv summary current)
+                      { hsc_logger = loweringLogger }
                     cgGuts = finalizedTidyGuts (loadedFinalized loaded)
                     ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
                     importedSiblings = resolvePreparedInterfaceSiblings env
@@ -2699,8 +2782,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 Just factory -> do
                   env <- getSession
                   interfaces <- liftIO (readIORef productInterfacesRef)
-                  liftIO (factory env interfaces targetOwner (pvExactScope variant))
-              lowerTasks observer tasks = liftIO $ do
+                  liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
+                    targetOwner (pvExactScope variant))
+              lowerTasks observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
                 let lower input = do
                       prepared <- either runPreparedModuleTask pure (snd input)
                       observePreparedModule observer prepared
@@ -3069,7 +3153,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
-                , prHscEnv = cpFinalEnv plan hscFinal
+                , prHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
                 , prCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
                     (pvExactScope variant)
                 , prCapturedType = capturedType
@@ -3845,258 +3929,263 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
 
 
 -- ---------------------------------------------------------------------------
--- Resident session: one 'runGhc' boot serving compile requests one at a time.
--- Transport-blind: this module
--- knows nothing about sockets or frames (the worker transport owns that) —
--- it hands the caller a plain IO closure shaped exactly like
--- 'runPipelineSessionSelected', so app/Main.hs's existing dispatch can substitute it
--- in with no other change to its own call sites.
+-- Resident compiler owner: completed contexts outlive request capabilities.
 -- ---------------------------------------------------------------------------
 
--- | Resident compiler with an explicit representation selection per request.
--- Prepared outputs share the same validity checks and request-scope cleanup as
--- the optimized guts from which they were produced.
---
--- The compiler closure's shape matches 'runPipelineSessionSelected''s own
--- (a leading 'PipelineSelection' and a retained-generation 'Set.Set') so
--- 'app/Main.hs' can hold either behind one @Compiler@ alias. This entry
--- point boots exactly one 'HscEnv' in 'runGhc' below and reuses it across
--- every subsequent request; the withholding plugin is installed on it
--- exactly ONCE, at boot, via 'installRetainedUnfoldingsPlugin''s 'IORef'
--- seam ('Tidepool.RetainedUnfoldings') rather than once per request, so
--- passes never accumulate. Each request writes its own retained set into
--- that cell before 'residentCompileOne' runs and resets it to 'Set.empty'
--- afterwards (also on an exception), so the one installed pass reflects
--- only the current request.
-withResidentPipelineSelected
-  :: [FilePath]
-  -> (ResidentCompiler -> IO a)
-  -> IO a
+withResidentPipelineSelected :: [FilePath] -> (ResidentCompiler -> IO a) -> IO a
 withResidentPipelineSelected baseIncludes useCompiler =
   withResidentPipelineSelectedRequests baseIncludes $ \runRequest ->
     runRequest (pure ()) useCompiler
 
--- | Keep transaction-scoped compiler state across every compile needed to
--- prepare one cell, then remove it before admitting the next transaction.
--- A cell check can compile repeatedly while rejecting generated instances;
--- treating each retry as a request boundary discards the memo entries the
--- next retry was meant to reuse. The scoped runner owns cleanup so a caller
--- cannot admit another request without first sanitizing this one's state.
-withResidentPipelineSelectedRequests
-  :: [FilePath]
-  -> (RequestRunner -> IO a)
-  -> IO a
-withResidentPipelineSelectedRequests baseIncludes useRequests = do
+withResidentPipelineSelectedRequests :: [FilePath] -> (RequestRunner -> IO a) -> IO a
+withResidentPipelineSelectedRequests baseIncludes useRequests =
+  withResidentCompilerScopes baseIncludes $ \runScope ->
+    useRequests $ \clearRecovery action -> runScope clearRecovery (action . scopedCompile)
+
+-- | Transaction-issued operations share one thread/phase guard. A released
+-- capability cannot access contexts retained by the worker for later requests.
+data CompilerScope = CompilerScope
+  { scopedCompile :: ResidentCompiler
+  , scopedRunGhc :: forall result. Ghc result -> IO result
+  , scopedParserFlags :: DynFlags
+  , scopedRecoveryCaches :: IO CompilerRecoveryCaches
+  , scopedExecutor :: Maybe CompilerExecutor
+  }
+
+type ResidentCompiler = forall result.
+  PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
+  -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
+
+type RequestRunner = forall requestResult.
+  IO () -> (ResidentCompiler -> IO requestResult) -> IO requestResult
+
+type CompilerScopeRunner = forall requestResult.
+  IO () -> (CompilerScope -> IO requestResult) -> IO requestResult
+
+withResidentCompilerScopes :: [FilePath] -> (CompilerScopeRunner -> IO a) -> IO a
+withResidentCompilerScopes baseIncludes useRequests = do
   producer <- captureCompilerProducerIdentity
   timing <- readTimingEnabled
-  (libdir, startupMs) <- timeSection getLibdir
+  (libdir,startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
+  -- Internal interpreters cannot retire a dynamic object epoch. The selected
+  -- pinned GHC closure owns this executable alongside its libraries.
+  let iserv = libdir </> ".." </> "bin" </> "ghc-iserv"
+  available <- doesFileExist iserv
+  unless available (fail "resident compiler GHC closure lacks ghc-iserv")
   runGhc (Just libdir) $ do
-    dflags <- getSessionDynFlags
-    let dflags' = extractionDynFlags dflags baseIncludes
-    _ <- setSessionDynFlags dflags'
-    retainedRef <- liftIO (newIORef emptyRetainedContext)
-    hscForRetained <- getSession
-    setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
+    parserFlags <- getSessionDynFlags
+    let baseFlags = gopt_set (extractionDynFlags parserFlags baseIncludes) Opt_ExternalInterpreter
+    _ <- setSessionDynFlags baseFlags
+    baseEnv <- getSession
+    completed <- liftIO (newIORef [])
+    active <- liftIO (newIORef Nothing)
+    auxiliaryRecovery <- liftIO freshCompilerRecoveryCaches
     availability <- liftIO (newIORef ResidentAvailable)
     ownerThread <- liftIO myThreadId
-    let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      let resetSession = reflectGhc
-            (getSession >>= liftIO . freshExactState >>= setSession) session
-          runRequest :: RequestRunner
+      let restoreBase = reflectGhc (setSession baseEnv) session
+          runRequest :: CompilerScopeRunner
           runRequest clearRecovery action = bracket acquire release $ \() -> do
-            -- These caches contain GHC values tied to this environment, not
-            -- portable products. No cache entry survives its owning bracket.
-            cacheRef <- newIfaceCache >>= newIORef
-            memoRef <- newIORef Map.empty
-            stateOriginRef <- newIORef OrdinarySourceState
             phase <- newIORef CompilerReady
+            interrupted <- newIORef False
             requestIdentity <- newTimingRequestIdentity
-            let compile :: ResidentCompiler
-                compile selection retained purpose mscope path extraIncludes buildProductsDir = mask $ \restore -> do
+            let runGuarded :: forall result. IO result -> IO result
+                runGuarded operation = mask $ \restore -> do
                   caller <- myThreadId
                   unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
                   previous <- atomicModifyIORef' phase $ \state ->
-                    (if state == CompilerReady then CompilerRunning else state, state)
+                    (if state == CompilerReady then CompilerRunning else state,state)
                   case previous of
                     CompilerReady -> pure ()
                     CompilerRunning -> throwIO CompilerTransactionBusy
                     CompilerFailed -> throwIO CompilerTransactionFailed
                     CompilerClosed -> throwIO CompilerTransactionReleased
-                  result <- restore (do
-                    (writeIORef retainedRef (retainedContext retained) >>
-                      reflectGhc
-                        (residentCompileOne producer selection cacheRef memoRef retainedRef retained stateOriginRef dflags' baseImportPaths
-                          timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
-                        session)
-                      `finally` writeIORef retainedRef emptyRetainedContext)
-                    `catch` \(failure :: SomeException) -> do
-                      writeIORef phase CompilerFailed
-                      case fromException failure :: Maybe SomeAsyncException of
-                        Just _ -> throwIO failure
-                        Nothing -> do
-                          -- A caller may retry a rejected generated instance.
-                          -- No partial compiler or recovery graph is reusable.
-                          clearRecovery
-                          writeIORef memoRef Map.empty
-                          newIfaceCache >>= writeIORef cacheRef
-                          resetSession
-                          writeIORef stateOriginRef OrdinarySourceState
-                          writeIORef phase CompilerReady
-                          throwIO failure
+                  result <- restore operation `catch` \(failure :: SomeException) -> do
+                    writeIORef phase CompilerFailed
+                    writeIORef availability ResidentPoisoned
+                    case fromException failure :: Maybe SomeAsyncException of
+                      Just _ -> writeIORef interrupted True >> throwIO failure
+                      Nothing -> do
+                        -- The failed attempt owns cloned EPS, finder, HPT and
+                        -- memo cells. No completed context is reset or rebound.
+                        clearRecovery
+                        writeIORef active Nothing
+                        recoverCompilerInterpreter baseEnv False
+                        restoreBase
+                        writeIORef phase CompilerReady
+                        writeIORef availability ResidentBusy
+                        throwIO failure
                   writeIORef phase CompilerReady
                   pure result
+                compile :: ResidentCompiler
+                compile selection retained purpose mscope path includes products = runGuarded $
+                  reflectGhc
+                    (residentCompileOne producer selection retained completed active baseEnv baseFlags
+                      timing requestIdentity purpose mscope path includes products) session
+                runOperation :: forall result. Ghc result -> IO result
+                runOperation operation = runGuarded $ bracket
+                  (reflectGhc getSession session)
+                  (\original -> reflectGhc (setSession original) session)
+                  (\original -> do
+                    borrowed <- forkExactContext original
+                    reflectGhc (setSession borrowed >> operation) session)
+                recovery = do
+                  caller <- myThreadId
+                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+                  state <- readIORef phase
+                  unless (state == CompilerReady) (throwIO CompilerTransactionReleased)
+                  current <- readIORef active
+                  pure (maybe auxiliaryRecovery completedRecovery current)
                 finish = do
                   writeIORef phase CompilerClosed
-                  writeIORef memoRef Map.empty
-                  newIfaceCache >>= writeIORef cacheRef
-                  writeIORef stateOriginRef OrdinarySourceState
-                  clearRecovery
-            action compile `finally` finish
+                  cancelled <- readIORef interrupted
+                  when cancelled $ do
+                    recoverCompilerInterpreter baseEnv True
+                    writeIORef availability ResidentBusy
+                  writeIORef active Nothing
+                  restoreBase
+            action (CompilerScope compile runOperation parserFlags recovery Nothing) `finally` finish
           acquire = do
             caller <- myThreadId
             unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
             previous <- atomicModifyIORef' availability $ \state ->
-              (if state == ResidentAvailable then ResidentBusy else state, state)
+              (if state == ResidentAvailable then ResidentBusy else state,state)
             case previous of
               ResidentAvailable -> pure ()
               ResidentBusy -> throwIO CompilerTransactionBusy
               ResidentPoisoned -> throwIO CompilerTransactionPoisoned
               ResidentClosed -> throwIO CompilerTransactionReleased
           release () = do
-            writeIORef availability ResidentPoisoned
-            writeIORef retainedRef emptyRetainedContext
-            resetSession
-            writeIORef availability ResidentAvailable
+            state <- readIORef availability
+            when (state == ResidentBusy) $ do
+              writeIORef availability ResidentPoisoned
+              restoreBase
+              writeIORef availability ResidentAvailable
       in useRequests runRequest `finally` writeIORef availability ResidentClosed
 
-type ResidentCompiler = forall result.
-  PipelineSelection result
-  -> Set.Set SymbolIdentity
-  -> CompilePurpose
-  -> Maybe SessionScope
-  -> FilePath
-  -> [FilePath]
-  -> Maybe FilePath
-  -> IO result
+-- | Auxiliary exact-interface operations borrow the same resident owner. Home
+-- visibility starts empty; installed-package facts retain their matched closure.
+withScopedExactInterfaceTransaction :: CompilerScope -> [FilePath] -> (HscEnv -> IO a) -> IO a
+withScopedExactInterfaceTransaction compiler includes use = scopedRunGhc compiler $ do
+  current <- getSession
+  let env = hscUpdateHPT (const emptyHomePackageTable) current
+        { hsc_mod_graph=mkModuleGraph [], hsc_targets=[], hsc_type_env_vars=emptyKnotVars }
+  setSession (hscUpdateFlags (\flags -> flags {importPaths=includes}) env)
+  getSession >>= liftIO . use
 
--- The caller's recovery graphs share the compiler transaction's lifetime.
--- Invalidation also runs before any synchronous failed-attempt retry.
-type RequestRunner = forall requestResult.
-  IO () -> (ResidentCompiler -> IO requestResult) -> IO requestResult
+-- ModIfaceCache's opaque entries include interface and linkable together.
+-- Copy a completed cache under the owner guard before GHC drains the attempt.
+copyCompilerIfaceCaches :: [ModIfaceCache] -> IO ModIfaceCache
+copyCompilerIfaceCaches originals = mask $ \_ -> do
+  copied <- newIfaceCache
+  forM_ originals $ \original -> do
+    entries <- iface_clearCache original
+    forM_ (reverse entries) $ \entry -> do
+      iface_addToCache original entry
+      iface_addToCache copied entry
+  pure copied
 
--- | One resident-session compile cycle, against the ALREADY-OPEN session
--- 'withResidentPipelineSelected' booted. Patches @importPaths@ for THIS cycle only
--- (see 'withResidentPipelineSelected'), compiles with the shared 'ModIfaceCache' +
--- 'GutsMemo'. The transaction boundary established by
--- 'withResidentPipelineSelectedRequests' releases its GHC-valued memo after
--- both successful and exceptional transactions.
--- Captures a fresh start time so every request gets its own compile summary.
---
--- The resident and direct paths select the same pipeline variant. This is an
--- output contract: optimization tier affects validation-only dependency Core
--- and therefore can affect merged metadata.
---
--- Reads the context that the request runner wrote into the plugin's cell
--- once at cycle start, then shares that value with memo validation.
+contextFor :: Maybe CompilerProducerIdentity -> Set.Set SymbolIdentity -> PipelineVariant
+  -> Maybe SessionScope -> [FilePath] -> Maybe (Either String CapturedCandidateManifest)
+  -> IO (Maybe CompilerContextIdentity)
+contextFor producer retained variant session paths captured = do
+  directory <- getCurrentDirectory
+  let candidates = case captured of
+        Nothing -> Right Nothing
+        Just (Left reason) -> Left reason
+        Just (Right manifest) -> Just <$> candidateContextIdentity manifest
+      eligible = case pvExactScope variant of
+        Just scope -> case exactReuseAdmission scope session of
+          ScopeAuthenticatedValueInputs -> True
+          UnsealedSessionValueInputs -> False
+        Nothing -> null (pvDownsweepExcludes variant)
+  pure $ if not eligible then Nothing else case candidates of
+    Left _ -> Nothing
+    Right identity -> Just (CompilerContextIdentity
+      (resolutionScope <$> pvExactScope variant) producer paths directory identity retained
+      (map (\artifact -> artifact {exactPath=""}) (maybe [] scopeValueInterfaces (pvExactScope variant))))
+
 residentCompileOne
-  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> IORef ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> Set.Set SymbolIdentity -> IORef ResidentStateOrigin -> DynFlags -> [FilePath]
-  -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
-  -> Ghc result
-residentCompileOne producer selection cacheRef memoRef retainedRef retainedSymbols stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
+  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity
+  -> IORef [CompletedCompilerContext] -> IORef (Maybe CompletedCompilerContext)
+  -> HscEnv -> DynFlags -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope
+  -> FilePath -> [FilePath] -> Maybe FilePath -> Ghc result
+residentCompileOne producer selection retained completed active baseEnv baseFlags timing requestIdentity purpose mscope path includes products = do
   sessionT0 <- monotonicTime
-  setupResources <- beginResourceTiming timing
-  retained <- liftIO (readIORef retainedRef)
-  selectedVariant <- liftIO $ case mscope of
+  resources <- beginResourceTiming timing
+  selected <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
-    _                                        -> normalVariant purpose path
-  let variant = selectedVariant {pvCompilerProducer = producer}
-  requestImportPaths <- liftIO (compileSearchPaths variant extraIncludes baseImportPaths)
+    _ -> normalVariant purpose path
+  let variant = selected {pvCompilerProducer=producer}
+      policy = retainedContext retained
+  paths <- liftIO (compileSearchPaths variant includes (importPaths baseFlags))
+  candidates <- liftIO $ traverse captureCandidateManifest (candidateManifestFor selection)
+  identity <- liftIO (contextFor producer retained variant mscope paths candidates)
+  contexts <- liftIO (readIORef completed)
+  let matching = [context | context <- contexts, Just (completedIdentity context) == identity]
+      previous = case matching of context:_ -> Just context; [] -> Nothing
+  env <- liftIO $ case previous of
+    Nothing -> installRetainedUnfoldingsPlugin policy <$> freshExactContext baseEnv
+    Just context -> forkExactContext (completedEnvironment context)
+  memo <- liftIO $ maybe (newIORef Map.empty) (readIORef . completedMemo >=> newIORef) previous
+  cache <- liftIO (copyCompilerIfaceCaches (map completedIfaceCache matching))
+  recovery <- liftIO $ maybe freshCompilerRecoveryCaches (copyCompilerRecoveryCaches . completedRecovery) previous
+  histories <- liftIO (forM matching (\context -> do
+    snapshot <- readIORef (completedMemo context)
+    pure (snapshot,completedEnvironment context)))
   targetName <- liftIO (targetModuleNameFor path)
-  initial <- getSession
-  let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit initial)) targetName
-  -- Target source can be transformed differently by each purpose, even when
-  -- its bytes have not changed. A same-named foreign owner is not this target.
-  liftIO (evictTargetMemo targetOwner memoRef)
-  capturedCandidates <- liftIO $ traverse captureCandidateManifest (candidateManifestFor selection)
-  currentOrigin <- case pvExactScope variant of
-    Just scope -> do
-      workingDirectory <- liftIO getCurrentDirectory
-      pure $ case (exactReuseAdmission scope mscope,
-          candidateOfferIdentity (candidateManifestFor selection) capturedCandidates) of
-        (ScopeAuthenticatedValueInputs values,Just captured) -> ExactState (ExactEnvironmentIdentity
-          { environmentScope=scope {scopeManifestPath=""}
-          , environmentProducer=producer
-          , environmentIncarnation=mscope >>= ssIncarnation
-          , environmentSearchPaths=requestImportPaths
-          , environmentWorkingDirectory=workingDirectory
-          , environmentCandidates=captured
-          , environmentRetained=retainedSymbols
-          , environmentImportIntents=pvSourceImportIntents variant
-          , environmentValueInputs=values
-          }) targetOwner
-        _ -> IsolatedExactState
-    Nothing
-      | exactCompileCycle selection variant -> pure IsolatedExactState
-      | not (null (pvDownsweepExcludes variant)) -> pure LegacySourceFreeState
-      | otherwise -> pure OrdinarySourceState
-  previousOrigin <- liftIO (readIORef stateOriginRef)
-  let sameExactEnvironment = case (previousOrigin,currentOrigin) of
-        (ExactState previous _,ExactState current _) -> previous == current
-        _ -> False
-      reset = case (previousOrigin,currentOrigin) of
-        (ExactState {},_) -> not sameExactEnvironment
-        (IsolatedExactState,_) -> True
-        (_,ExactState {}) -> True
-        (_,IsolatedExactState) -> True
-        (LegacySourceFreeState,OrdinarySourceState) -> True
-        _ -> False
-  when reset $ do
-      -- Exact owners and executable symbols belong to one admitted environment.
-      -- Keep the old provenance until its replacement is fully installed.
-      getSession >>= liftIO . freshExactState >>= setSession
-      liftIO $ do
-        writeIORef memoRef Map.empty
-        newIfaceCache >>= writeIORef cacheRef
-  when sameExactEnvironment $ do
-    current <- getSession
-    finder <- liftIO initFinderCache
-    let previousTarget = case previousOrigin of
-          ExactState _ owner -> [owner]
-          _ -> []
-        targets = targetOwner : previousTarget
-        sourceEntries = [hmi | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph current)
-          , ms_mod summary `notElem` targets
-          , Just hmi <- [lookupHpt (hsc_HPT current) (ms_mod_name summary)]
-          , mi_module (hm_iface hmi) == ms_mod summary]
-    setSession (hscUpdateHPT (const (foldr
-      (\hmi table -> addToHpt table (moduleName (mi_module (hm_iface hmi))) hmi)
-      emptyHomePackageTable sourceEntries)) current
-        { hsc_FC=finder, hsc_targets=[], hsc_mod_graph=mkModuleGraph []
-        , hsc_type_env_vars=emptyKnotVars })
-    liftIO $ forM_ previousTarget (`evictTargetMemo` memoRef)
-  liftIO (writeIORef stateOriginRef currentOrigin)
-  hsc0 <- getSession
-  let sourceState
-        | importPaths (hsc_dflags hsc0) == requestImportPaths = hsc0
-        | otherwise = hsc0 { hsc_mod_graph = mkModuleGraph [] }
-      -- Downsweep can reuse a byte-identical source summary with the previous
-      -- request's import paths. Refresh summaries when the search path changes;
-      -- compiled interfaces and dependency-validated module products stay warm.
-  setSession (hscUpdateFlags
-    (configureBuildProducts baseDFlags buildProductsDir .
-      (\df -> df { importPaths = requestImportPaths }))
-    sourceState)
-  let incarnation = mscope >>= ssIncarnation
-  cache <- liftIO (readIORef cacheRef)
-  runCompileCycle selection (TransactionCycle cache memoRef capturedCandidates) retained incarnation timing requestIdentity sessionT0 setupResources variant path
+  let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit env)) targetName
+      targets = targetOwner : maybe [] ((:[]) . completedTarget) previous
+      attempt = hscUpdateHPT (filterHpt (\home -> mi_module (hm_iface home) `notElem` targets)) env
+      flags = configureBuildProducts baseFlags products . (\df -> df {importPaths=paths})
+      attemptCache = filterModIfaceCache (\iface -> mi_module iface `notElem` targets) cache
+  liftIO $ do
+    forM_ targets (`evictTargetMemo` memo)
+    evictCompilerRecovery recovery (`elem` targets)
+  setSession (hscUpdateFlags flags attempt {hsc_targets=[]})
+  result <- runCompileCycle selection (TransactionCycle attemptCache memo candidates histories)
+    policy (mscope >>= ssIncarnation) timing requestIdentity sessionT0 resources variant path
+  final <- getSession
+  -- Recovery by nominal owner is valid only inside this exact context. Remove
+  -- any source owner replaced by the attempt before publishing its cache view.
+  let changed = Set.fromList [mi_module (hm_iface home) | home <- eltsHpt (hsc_HPT final)
+        , Just old <- [lookupHpt (hsc_HPT env) (moduleName (mi_module (hm_iface home)))]
+        , mi_module (hm_iface old) /= mi_module (hm_iface home)
+          || mi_iface_hash (mi_final_exts (hm_iface old)) /= mi_iface_hash (mi_final_exts (hm_iface home))]
+  liftIO (evictCompilerRecovery recovery (`Set.member` changed))
+  let key = fromMaybe (CompilerContextIdentity Nothing producer paths "" Nothing retained []) identity
+      context = CompletedCompilerContext key final memo cache recovery targetOwner
+  liftIO $ do
+    writeIORef active (Just context)
+    when (isJust identity) (modifyIORef' completed (context:))
+  pure result
 
-candidateOfferIdentity :: Maybe FilePath -> Maybe (Either String CapturedCandidateManifest) -> Maybe CandidateOfferIdentity
-candidateOfferIdentity Nothing Nothing = Just NoCandidateOffer
-candidateOfferIdentity (Just path) (Just (Right captured)) =
-  Just (CapturedCandidateOffer (normalise path) (candidateManifestSha256 captured))
-candidateOfferIdentity _ _ = Nothing
+-- Keep compatible interpreted code and its complete foreign/object parts.
+-- GHC's dynamic loader cannot remove native objects, so replacement retires
+-- the shared external epoch. The descriptor stays stable for captured HscEnvs.
+activateCompilerInterpreter :: HscEnv -> IO ()
+activateCompilerInterpreter env = forM_ (hsc_interp env) $ \interp -> do
+  loaded <- Linker.getLoaderState interp
+  let wanted = concatMap (\home -> catMaybes
+        [homeMod_bytecode (hm_linkable home),homeMod_object (hm_linkable home)]) (eltsHpt (hsc_HPT env))
+      keep linkable = any (\candidate -> linkableModule candidate == linkableModule linkable
+        && linkableTime candidate == linkableTime linkable) wanted
+      native linkable = not (null (linkableObjs linkable) && null (linkableLibs linkable))
+      incompatible = maybe False (any (\linkable -> native linkable && not (keep linkable)) .
+        (\state -> moduleEnvElts (Linker.objs_loaded state) ++ moduleEnvElts (Linker.bcos_loaded state))) loaded
+  if incompatible then retireCompilerInterpreter interp else Linker.unload interp env wanted
+
+retireCompilerInterpreter :: Interp -> IO ()
+retireCompilerInterpreter interp = do
+  stopInterp interp
+  modifyMVar_ (Linker.loader_state (interpLoader interp)) (const (pure Nothing))
+  purgeLookupSymbolCache interp
+
+recoverCompilerInterpreter :: HscEnv -> Bool -> IO ()
+recoverCompilerInterpreter env unconfirmed =
+  if unconfirmed then forM_ (hsc_interp env) retireCompilerInterpreter
+  else activateCompilerInterpreter (hscUpdateHPT (const emptyHomePackageTable) env)
 
 -- Protected requests use their complete admitted search order. GHC's boot
 -- defaults (including the worker CWD) are not additional source authority.

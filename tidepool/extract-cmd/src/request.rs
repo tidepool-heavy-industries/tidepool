@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v17";
-const MAGIC: &[u8; 8] = b"TPREQ017";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v18";
+const MAGIC: &[u8; 8] = b"TPREQ018";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -11,6 +11,46 @@ const MAGIC: &[u8; 8] = b"TPREQ017";
 /// a resolved worker's before ever sending it a real request. Mirrored in
 /// `bridge/haskell/app/Main.hs`'s argument handling.
 pub(crate) const PRINT_WORKER_REQUEST_FLAG: &str = "--print-worker-request-flag";
+
+/// Admission class declared before a resident transaction is accepted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompileWorkload {
+    #[default]
+    Foreground,
+    Preparation,
+}
+
+impl CompileWorkload {
+    pub(crate) fn wire_tag(self) -> u8 {
+        match self {
+            Self::Foreground => 0,
+            Self::Preparation => 1,
+        }
+    }
+    pub(crate) fn from_wire(tag: u8) -> Result<Self, ProtocolError> {
+        match tag {
+            0 => Ok(Self::Foreground),
+            1 => Ok(Self::Preparation),
+            _ => Err(ProtocolError::InvalidExecutionGrant),
+        }
+    }
+}
+
+/// Positive compiler allowance issued by the process owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExecutionGrant {
+    pub jobs: u32,
+    pub capabilities: u32,
+}
+
+impl Default for ExecutionGrant {
+    fn default() -> Self {
+        Self {
+            jobs: 1,
+            capabilities: 1,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionScope {
@@ -115,6 +155,8 @@ enum Field {
 #[derive(Clone, Debug, Default)]
 pub struct ExtractRequest {
     fields: Vec<Field>,
+    workload: CompileWorkload,
+    execution_grant: ExecutionGrant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +189,20 @@ impl std::fmt::Display for RequestMode {
 }
 
 impl ExtractRequest {
+    pub fn set_workload(&mut self, workload: CompileWorkload) {
+        self.workload = workload;
+    }
+    pub fn workload(&self) -> CompileWorkload {
+        self.workload
+    }
+    #[cfg(test)]
+    pub(crate) fn execution_grant(&self) -> ExecutionGrant {
+        self.execution_grant
+    }
+    pub(crate) fn set_execution_grant(&mut self, grant: ExecutionGrant) {
+        self.execution_grant = grant;
+    }
+
     /// Diagnostic mode selected from typed fields, without reparsing rendered flags.
     pub(crate) fn mode(&self) -> RequestMode {
         let has = |predicate: fn(&Field) -> bool| self.fields.iter().any(predicate);
@@ -191,6 +247,17 @@ impl ExtractRequest {
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             match arg.to_str() {
+                Some("--workload") => {
+                    request.set_workload(match text_value(&mut args, "--workload")? {
+                        "foreground" => CompileWorkload::Foreground,
+                        "preparation" => CompileWorkload::Preparation,
+                        _ => {
+                            return Err(CliError::new(
+                                "--workload requires foreground or preparation",
+                            ))
+                        }
+                    });
+                }
                 Some("--output-dir") => request.output_dir(value(&mut args, "--output-dir")?),
                 Some("--target") => request.target(value(&mut args, "--target")?),
                 Some("--targets") => {
@@ -293,6 +360,14 @@ impl ExtractRequest {
     /// headers, truncated fields, unknown tags, and trailing bytes are errors.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let mut decoder = Decoder::new(bytes)?;
+        let workload = CompileWorkload::from_wire(decoder.byte()?)?;
+        let execution_grant = ExecutionGrant {
+            jobs: decoder.u32()?,
+            capabilities: decoder.u32()?,
+        };
+        if execution_grant.jobs == 0 || execution_grant.capabilities == 0 {
+            return Err(ProtocolError::InvalidExecutionGrant);
+        }
         let field_count = decoder.count(Decoder::MIN_FIELD_BYTES)?;
         // A field can be only its one-byte tag, while `Field` is much larger.
         // Do not amplify an untrusted count into a count-sized allocation
@@ -365,7 +440,11 @@ impl ExtractRequest {
             fields.push(field);
         }
         decoder.finish()?;
-        Ok(Self { fields })
+        Ok(Self {
+            fields,
+            workload,
+            execution_grant,
+        })
     }
 
     /// Decode the complete argv accepted by the compiler worker.
@@ -765,6 +844,9 @@ impl ExtractRequest {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
+        out.push(self.workload.wire_tag());
+        out.extend_from_slice(&self.execution_grant.jobs.to_le_bytes());
+        out.extend_from_slice(&self.execution_grant.capabilities.to_le_bytes());
         push_u32(&mut out, self.fields.len());
         for field in &self.fields {
             encode_field(&mut out, field);
@@ -898,6 +980,7 @@ impl<'a> Decoder<'a> {
 /// A malformed versioned worker request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolError {
+    InvalidExecutionGrant,
     InvalidWorkerArgv,
     NonUtf8Payload,
     InvalidHeader,
@@ -916,6 +999,9 @@ pub enum ProtocolError {
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidExecutionGrant => {
+                write!(f, "invalid compiler workload or execution grant")
+            }
             Self::InvalidWorkerArgv => {
                 write!(
                     f,
@@ -1191,15 +1277,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn execution_header_round_trips_and_refuses_nonpositive_grants() {
+        let mut request = ExtractRequest::default();
+        request.set_workload(CompileWorkload::Preparation);
+        request.set_execution_grant(ExecutionGrant {
+            jobs: 4,
+            capabilities: 2,
+        });
+        request.input("Source.hs");
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.workload(), CompileWorkload::Preparation);
+        assert_eq!(
+            decoded.execution_grant(),
+            ExecutionGrant {
+                jobs: 4,
+                capabilities: 2
+            }
+        );
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        for offset in [9, 13] {
+            let mut bytes = request.encode();
+            bytes[offset..offset + 4].fill(0);
+            assert_eq!(
+                ExtractRequest::decode(&bytes).unwrap_err(),
+                ProtocolError::InvalidExecutionGrant
+            );
+        }
+        let mut invalid_class = request.encode();
+        invalid_class[8] = 2;
+        assert_eq!(
+            ExtractRequest::decode(&invalid_class).unwrap_err(),
+            ProtocolError::InvalidExecutionGrant
+        );
+        assert_eq!(
+            ExtractRequest::from_cli(&["--workload".into(), "preparation".into()])
+                .unwrap()
+                .workload(),
+            CompileWorkload::Preparation
+        );
+    }
+
+    #[test]
     fn impossible_collection_counts_reject_before_allocating() {
-        let mut fields = MAGIC.to_vec();
+        let mut fields = ExtractRequest::default().encode()[..17].to_vec();
         fields.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             ExtractRequest::decode(&fields).unwrap_err(),
             ProtocolError::Truncated
         );
 
-        let mut targets = MAGIC.to_vec();
+        let mut targets = ExtractRequest::default().encode()[..17].to_vec();
         targets.extend_from_slice(&1u32.to_le_bytes());
         targets.push(4);
         targets.extend_from_slice(&u32::MAX.to_le_bytes());
@@ -1211,7 +1338,7 @@ mod tests {
 
     #[test]
     fn payload_free_tags_are_one_byte_fields() {
-        let mut request = MAGIC.to_vec();
+        let mut request = ExtractRequest::default().encode()[..17].to_vec();
         request.extend_from_slice(&2u32.to_le_bytes());
         request.extend_from_slice(&[7, 16]);
 
@@ -1229,10 +1356,10 @@ mod tests {
         request.bind_gen(0x0102_0304_0506_0708);
         let bytes = request.encode();
         assert_eq!(&bytes[..8], MAGIC);
-        assert_eq!(&bytes[8..12], &2u32.to_le_bytes());
-        assert_eq!(bytes[12], 1);
-        assert_eq!(bytes[24], 11);
-        assert_eq!(&bytes[25..33], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&bytes[17..21], &2u32.to_le_bytes());
+        assert_eq!(bytes[21], 1);
+        assert_eq!(bytes[33], 11);
+        assert_eq!(&bytes[34..42], &0x0102_0304_0506_0708u64.to_le_bytes());
     }
 
     #[test]
@@ -1502,6 +1629,7 @@ mod tests {
             b"TPREQ014",
             b"TPREQ015",
             b"TPREQ016",
+            b"TPREQ017",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
@@ -1603,7 +1731,7 @@ mod tests {
 
     #[test]
     fn typed_protocol_rejects_unknown_and_truncated_fields() {
-        let mut unknown = MAGIC.to_vec();
+        let mut unknown = ExtractRequest::default().encode()[..17].to_vec();
         unknown.extend_from_slice(&1u32.to_le_bytes());
         unknown.push(255);
         assert_eq!(
@@ -1623,7 +1751,7 @@ mod tests {
     #[test]
     fn typed_protocol_rejects_retired_fields_explicitly() {
         for tag in [6, 9, 10, 14, 34, 39, 45] {
-            let mut request = MAGIC.to_vec();
+            let mut request = ExtractRequest::default().encode()[..17].to_vec();
             request.extend_from_slice(&1u32.to_le_bytes());
             request.push(tag);
             assert_eq!(

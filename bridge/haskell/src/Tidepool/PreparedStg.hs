@@ -72,7 +72,7 @@ import Tidepool.PreparedSites
   , resolveRecoveredSiblings, resolveSiteAuthority, requestSiteAuthority )
 import Tidepool.PreparedStg.Internal
 import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
-import Tidepool.Timing (readTimingEnabled, timePhase)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
@@ -420,29 +420,33 @@ acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons op
       stgOptions = initStgPipelineOpts preparedFlags False
 
   corePrepConfig <- initCorePrepConfig (hscEnv { hsc_dflags = preparedFlags })
-  pure $ PreparedModuleTask $ timePhase timing "prepared_stg" $ do
-    displayLintResults logger False (text "Tidepool prepared-STG pre-CorePrep")
-      (text "optimized Core") coreLint
-    preppedCore <- corePrepPgm logger corePrepConfig
-      (initCorePrepPgmConfig preparedFlags interactiveVars)
-      thisModule location optimizedCore dataTyCons
-    -- CorePrep's configured end-pass performs the post-preparation Core lint.
-    let (initialStg, _, _) =
-          coreToStg (initCoreToStgOpts preparedFlags) thisModule location preppedCore
-    (stgBindings, tagSigs) <-
-      stg2stg logger interactiveVars stgOptions thisModule initialStg
-    pure PreparedModule
-      { preparedModule = thisModule
-      , preparedCoverage = coverage
-      , preparedBindings = stgBindings
-      , preparedTagSigs = tagSigs
-      , preparedSitedSiblings = siblings
-      , preparedYieldSites = yieldSites
-      , preparedPreparedSites = sites
-      , preparedTypeGraph = graph
-      , preparedSiteRejections = rejections
-      , preparedRequestSiteTyCon = carrierTyCon
-      , preparedAuthorityDependent = not (intrinsicFree census)
-      , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
-      , preparedExpectedEntries = Map.empty
-      }
+  let lower = do
+        displayLintResults logger False (text "Tidepool prepared-STG pre-CorePrep")
+          (text "optimized Core") coreLint
+        preppedCore <- corePrepPgm logger corePrepConfig
+          (initCorePrepPgmConfig preparedFlags interactiveVars)
+          thisModule location optimizedCore dataTyCons
+        -- CorePrep's configured end-pass performs the post-preparation Core lint.
+        let (initialStg, _, _) =
+              coreToStg (initCoreToStgOpts preparedFlags) thisModule location preppedCore
+        (stgBindings, tagSigs) <-
+          stg2stg logger interactiveVars stgOptions thisModule initialStg
+        pure PreparedModule
+          { preparedModule = thisModule
+          , preparedCoverage = coverage
+          , preparedBindings = stgBindings
+          , preparedTagSigs = tagSigs
+          , preparedSitedSiblings = siblings
+          , preparedYieldSites = yieldSites
+          , preparedPreparedSites = sites
+          , preparedTypeGraph = graph
+          , preparedSiteRejections = rejections
+          , preparedRequestSiteTyCon = carrierTyCon
+          , preparedAuthorityDependent = not (intrinsicFree census)
+          , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
+          , preparedExpectedEntries = Map.empty
+          }
+  pure $ PreparedModuleTask $ do
+    (prepared, serviceMs) <- timeSection lower
+    emitDetailPhase timing "prepared_graph" "prepared_stg_task_service" serviceMs
+    pure prepared

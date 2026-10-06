@@ -5,7 +5,7 @@ module Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts
   , originalInterfaceBytes, originalInterfaceSha256, serializeOriginalInterface
   , ExactIfaceArtifact(..)
-  , freshExactState
+  , freshExactState, freshExactContext, forkExactContext
   , readExactIfaceArtifacts
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
@@ -45,9 +45,10 @@ import GHC.Tc.Types (TcGblEnv(..), ImportAvails(..))
 import GHC.Tc.Utils.Monad (getTopEnv)
 import qualified GHC.Linker.Loader as Linker
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..))
-import GHC.Unit.External (initExternalUnitCache, ExternalPackageState(eps_PIT))
+import GHC.Unit.External (ExternalUnitCache(..), initExternalUnitCache, eucEPS, ExternalPackageState(eps_PIT))
 import GHC.Unit.Module.Env (lookupModuleEnv)
 import GHC.Unit.Finder (initFinderCache)
+import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Unit.Home.ModInfo
@@ -495,20 +496,23 @@ readCheckedValueImportAuthority env artifacts
       verified <- readVerifiedExactIfaceClosure env artifacts
       pure (verified >>= (`checkedValueImportAuthorityFromVerified` artifacts))
 
--- The resident GHC process survives requests, but its mutable package and
--- home interface tables must not carry visibility across lexical scopes.
+-- A legacy standalone reset also retires executable home symbols. Resident
+-- context selection keeps interpreter transition under its single owner.
 freshExactState :: HscEnv -> IO HscEnv
 freshExactState env = do
+  forM_ (hsc_interp env) $ \interp -> Linker.unload interp env []
+  freshExactContext env
+
+-- | Allocate resolution cells independently of every retained context.
+-- Name interning and the interpreter remain worker-owned.
+freshExactContext :: HscEnv -> IO HscEnv
+freshExactContext env = do
   timing <- readTimingEnabled
   timeDetailPhase timing "exact_scope" "fresh_state" $ do
-    -- Extraction uses NoLink, so GHC's make driver does not unload splice
-    -- executables. Reset those home symbols with the same loader protocol
-    -- before another lexical scope can supply the same module identity.
-    let cleared = discardIC (withoutPreviewOrphanPlugin env)
-    forM_ (hsc_interp cleared) $ \interp -> Linker.unload interp cleared []
     eps <- initExternalUnitCache
     finder <- initFinderCache
-    let units = hsc_unit_env env
+    let cleared = discardIC (withoutPreviewOrphanPlugin env)
+        units = hsc_unit_env cleared
         homes = fmap (\home -> home { homeUnitEnv_hpt = emptyHomePackageTable })
           (ue_home_unit_graph units)
     pure cleared
@@ -518,6 +522,30 @@ freshExactState env = do
       , hsc_type_env_vars = emptyKnotVars
       , hsc_unit_env = units { ue_eps = eps, ue_home_unit_graph = homes }
       }
+
+-- | An attempt shares completed immutable tables, never their mutable cells.
+-- Package finder facts have a fixed package closure. Home locations and file
+-- hashes must be observed freshly; they cannot inherit a cached source choice.
+forkExactContext :: HscEnv -> IO HscEnv
+forkExactContext env = do
+  eps <- ExternalUnitCache <$> (eucEPS (ue_eps (hsc_unit_env env)) >>= newIORef)
+  localFinder <- initFinderCache
+  let previousFinder = hsc_FC env
+      finder = localFinder
+        { lookupFinderCache = \key@(GWIB owner _) -> do
+            current <- lookupFinderCache localFinder key
+            case current of
+              Just _ -> pure current
+              Nothing | moduleUnit owner == homeUnitId (hsc_home_unit env) -> pure Nothing
+              Nothing -> do
+                previous <- lookupFinderCache previousFinder key
+                forM_ previous (addToFinderCache localFinder key)
+                pure previous
+        }
+  pure (discardIC (withoutPreviewOrphanPlugin env))
+    { hsc_FC = finder, hsc_targets = [], hsc_type_env_vars = emptyKnotVars
+    , hsc_unit_env = (hsc_unit_env env) { ue_eps = eps }
+    }
 
 -- Reading every interface before installing any of them prevents a corrupt
 -- member of an implementation SCC from partially mutating the HPT.
@@ -711,14 +739,19 @@ hydrateOriginalInterfaces env loaded = do
   timeDetailPhase timing "exact_scope" "hydrate" $ do
     details <- fixIO $ \recursiveDetails -> do
       let knotted = withDetails recursiveDetails
-      forM loaded $ \iface ->
+      forM pending $ \iface ->
         initIfaceCheck (text "tidepool exact hydration") knotted (typecheckIface iface)
     pure (withDetails details)
   where
+    pending = filter (not . alreadyHydrated) loaded
+    alreadyHydrated iface = case lookupHpt (hsc_HPT env) (moduleName (mi_module iface)) of
+      Just home -> mi_module (hm_iface home) == mi_module iface
+        && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash (mi_final_exts iface)
+      Nothing -> False
     withDetails details = hscUpdateHPT_lazy (\hpt -> foldr
       (\(iface, detail) table -> addToHpt table (moduleName (mi_module iface))
         (HomeModInfo iface detail emptyHomeModInfoLinkable))
-      hpt (zipDetails loaded details)) env
+      hpt (zipDetails pending details)) env
     -- The loaded interface spine is available before fixIO returns. Ordinary
     -- zip would demand the recursive detail spine while building the HPT;
     -- sharing a deferred head/tail split keeps the knot lazy and traversal linear.

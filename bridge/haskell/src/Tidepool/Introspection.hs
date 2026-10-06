@@ -17,7 +17,7 @@ module Tidepool.Introspection
     StructuredQueryError (..),
     normalizeLookupWildcards,
     searchTypeMatches,
-    runInspection,
+    runInspection, runInspectionGhc,
     encodeInspectionResults,
   )
 where
@@ -80,7 +80,9 @@ import Tidepool.ExtractRequest
   ( InspectionProvenance (..), InspectionRequest (..), StructuredInspection (..),
     StructuredNameNamespace (..), StructuredNameScope (..)
   )
-import Tidepool.ExtractUtil (getLibdir)
+import GHC.Driver.Monad (reflectGhc, Session(..))
+import Data.IORef (newIORef)
+import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.Session (parseSessionModule)
 
 data InfoEntry = InfoEntry
@@ -498,18 +500,23 @@ runInspection ::
   [InspectionRequest] ->
   IO [InspectionResult]
 runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
-  libdir <- getLibdir
-  runGhc (Just libdir) $ do
-    setSession hscEnv
-    effTyCon <- lookupEffTyCon
-    row <- case Map.lookup "__tidepool_lookup_row" inspectionProbes of
-      Just identifier -> Just <$> inspectionRow identifier
-      Nothing -> pure Nothing
-    case (row, effTyCon) of
-      (Just _, Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
-      _ -> pure ()
-    let context = AvailabilityContext hscEnv tcGblEnv effTyCon row
-    reverse . snd <$> foldM (inspect context) (0 :: Int, []) requests
+  session <- Session <$> newIORef hscEnv
+  reflectGhc (runInspectionGhc hscEnv tcGblEnv rdrEnv inspectionProbes requests) session
+
+runInspectionGhc :: HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
+  -> [InspectionRequest] -> Ghc [InspectionResult]
+runInspectionGhc hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
+  borrowed <- liftIO (forkExactContext hscEnv)
+  setSession borrowed
+  effTyCon <- lookupEffTyCon
+  row <- case Map.lookup "__tidepool_lookup_row" inspectionProbes of
+    Just identifier -> Just <$> inspectionRow identifier
+    Nothing -> pure Nothing
+  case (row,effTyCon) of
+    (Just _,Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
+    _ -> pure ()
+  let context = AvailabilityContext borrowed tcGblEnv effTyCon row
+  reverse . snd <$> foldM (inspect context) (0 :: Int,[]) requests
   where
     inspect context (typeIndex, results) request = case request of
       InspectTypeOf expression ->
