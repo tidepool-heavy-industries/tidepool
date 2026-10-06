@@ -895,7 +895,8 @@ recoveredFixtureInput name result = case
     [ms_location summary | ModuleNode _ summary <- mgModSummaries'
       (hsc_mod_graph (prHscEnv (pprPipelineResult result)))
     , ms_mod_name summary == mkModuleName name] of
-  [location] -> RecoveredModuleInput (cg_module guts) location (cg_tycons guts) (cg_binds guts) (bindersOfBinds (cg_binds guts))
+  [location] -> RecoveredModuleInput (cg_module guts) location (cg_tycons guts) (cg_binds guts)
+    (Map.fromList [(varName binder,binder) | binder <- bindersOfBinds (cg_binds guts)])
   _ -> error ("missing defining fixture location " ++ name)
   where guts = finalizedTidyGuts (finalizedFixtureOwner name result)
 
@@ -982,7 +983,8 @@ verifyTypedPreparationCacheLifetime dir = do
     let env = prHscEnv (pprPipelineResult cold)
         input name = recoveredFixtureInput name cold
     mapM_ (\name -> let recovered = input name in cacheOwnerInterface owners
-        (recoveredModule recovered) (OwnerInterfaceContext (recoveredLocation recovered) (recoveredTyCons recovered) (recoveredEntries recovered)))
+        (recoveredModule recovered) (OwnerInterfaceContext (recoveredLocation recovered) (recoveredTyCons recovered)
+          (recoveredEntries recovered)))
       ["TypedPreparationPlain", "TypedPreparationOwner"]
     request <- newPreparedBodyPreparer env owners bodies
     nextRequest <- newPreparedBodyPreparer env owners bodies

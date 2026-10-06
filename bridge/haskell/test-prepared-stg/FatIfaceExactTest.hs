@@ -570,7 +570,7 @@ declaringId env requested = do
   _ <- prepareRecoveredBodies env owners bodies owner [] >>= either (fail . show) pure
   context <- lookupOwnerInterface owners owner
   original <- case [identifier | Just defining <- [context]
-      , identifier <- ownerInterfaceEntries defining
+      , identifier <- Map.elems (ownerInterfaceEntries defining)
       , varName identifier == varName requested] of
     [identifier] -> pure identifier
     _ -> fail "INLINE fixture lost its genuine defining Id"

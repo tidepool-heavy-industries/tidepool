@@ -191,7 +191,7 @@ assertRecoveredExecutionStackBody = do
   _ <- prepareRecoveredBodies env owners bodies owner [] >>= either (fail . show) pure
   declaring <- lookupOwnerInterface owners owner
   worker <- case [identifier | Just defining <- [declaring]
-      , identifier <- ownerInterfaceEntries defining
+      , identifier <- Map.elems (ownerInterfaceEntries defining)
       , occurrence identifier == "$wshowLocation"] of
     [identifier] -> pure identifier
     _ -> fail "defining interface lost its real stack-location worker"
@@ -397,7 +397,7 @@ assertRecoveredEntryContracts = do
     recovered <- liftIO $ prepareRecoveredBodies env owners bodies owner body
       >>= either (fail . show) pure
     declaring <- liftIO $ lookupOwnerInterface owners owner
-    original <- case [identifier | Just context <- [declaring], identifier <- ownerInterfaceEntries context,
+    original <- case [identifier | Just context <- [declaring], identifier <- Map.elems (ownerInterfaceEntries context),
           varName identifier == varName requested] of
       [identifier] -> pure identifier
       _ -> fail "the production owner did not retain qApp's defining declaration"
@@ -431,7 +431,7 @@ assertRecoveredEntryContracts = do
       _ -> fail "expected one genuine function-result CAF"
     subset <- liftIO $ prepareRecoveredModule env
       (RecoveredModuleInput (cg_module guts) (ms_location summary) (cg_tycons guts)
-        (cg_binds guts) (bindersOfBinds (cg_binds guts)))
+        (cg_binds guts) (Map.fromList [(varName binder,binder) | binder <- bindersOfBinds (cg_binds guts)]))
     liftIO $ case (entryArity "functionResult" prepared, entryArity "functionResult" subset) of
       (Just (original, 0), Just (recoveredUpdate, 0)) -> assert
         (original /= Stg.ReEntrant && recoveredUpdate == original)

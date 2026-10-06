@@ -223,7 +223,7 @@ data RecoveredModuleInput = RecoveredModuleInput
   , recoveredLocation :: ModLocation
   , recoveredTyCons :: [TyCon]
   , recoveredBindings :: [CoreBind]
-  , recoveredEntries :: [Id]
+  , recoveredEntries :: Map Name Id
   }
 
 -- | Failures while acquiring the defining-module context for an exact group.
@@ -260,7 +260,7 @@ acquireRecoveredModuleUsingSiteEnvironment = acquireRecoveredModuleWithWorkers I
 acquireRecoveredModuleWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment
   -> HscEnv -> RecoveredModuleInput -> IO PreparedModuleTask
 acquireRecoveredModuleWithWorkers workers environment hscEnv input = do
-  let entries = Map.fromList [(varName identifier, identifier) | identifier <- recoveredEntries input]
+  let entries = recoveredEntries input
   bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
   task <- acquireTypedBindingsWithWorkers workers environment ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
@@ -782,7 +782,8 @@ acquireRecoveredContext hscEnv ownerCache owner = do
           case details of
             Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
             Right (tycons, entries) -> do
-              let hit = OwnerInterfaceContext location tycons entries
+              let hit = OwnerInterfaceContext location tycons
+                    (Map.fromList [(varName identifier,identifier) | identifier <- entries])
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   where

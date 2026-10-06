@@ -471,7 +471,7 @@ renderReadInterfaceError failure = case failure of
 data OwnerInterfaceContext = OwnerInterfaceContext
   { ownerInterfaceLocation :: ModLocation
   , ownerInterfaceTyCons :: [TyCon]
-  , ownerInterfaceEntries :: [Id]
+  , ownerInterfaceEntries :: Map.Map Name Id
   }
 
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
