@@ -1,3 +1,4 @@
+{-# NOINLINE privateIncrement #-}
 privateIncrement :: Int -> Int
 privateIncrement n = n + 41
 

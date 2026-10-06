@@ -2312,7 +2312,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         1,
     );
     assert_eq!(checked.checked.items.len(), 2);
-    checked.adopt_declaration(&mut resident);
+    let private_declaration = checked.adopt_declaration(&mut resident);
     let (bound, producer, reservation) = checked.compile_binding(&mut resident, 1);
     assert!(bound.is_empty());
     assert!(resident
@@ -2330,6 +2330,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .public_visibility_snapshot_in(producer_scope)
         .unwrap();
     assert_ne!(installed.source_instances, before.source_instances);
+    assert!(installed
+        .source_instances
+        .iter()
+        .any(|key| key.binder.binder.module == private_declaration));
     let (submission, activation) = fixture.deliver(&mut resident, reservation_hole, 1);
     let site = parked_site(&mut resident, &activation);
     let realm = resident.parked_realm(&activation).unwrap();
