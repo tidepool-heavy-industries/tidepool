@@ -57,6 +57,7 @@ tests = testGroup "source-boot"
   , testCase "checked value imports" $ checkedValueImports
   , testCase "loaded exact metadata" $ exactLoadedMetadata
   , testCase "exact transaction reuse" $ exactTransactionReuse
+  , testCase "exact transaction cancellation" $ exactTransactionCancellation
   , testCase "package finder history isolation" packageFinderHistoryIsolation
   , testCase "exact transaction candidate reuse" $ exactTransactionCandidateReuse
   , testCase "exact legacy value isolation" $ exactLegacyValueIsolation

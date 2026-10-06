@@ -3867,6 +3867,97 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       requireNoApplicability "new request native preparation" nextNativeDiagnostics
   putStrLn "exact transaction reuse: completed A survives refused B and request close; repeated B refuses, exact A identity and native42 passed"
 
+-- Cancellation retires the active interpreter transaction, while completed
+-- immutable source/Core/preparation owners survive in the resident universe.
+exactTransactionCancellation :: IO ()
+exactTransactionCancellation = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      helperName = mkModuleName "MetadataQuoteSupport"
+      helperPath = work </> "MetadataQuoteSupport.hs"
+      quoterPath = work </> "MetadataQuoter.hs"
+      quotedPath = work </> "MetadataQuotedTarget.hs"
+      marker = work </> "cancelled-history-marker"
+      restoreA = copyFile (fixture "MetadataQuoteSupport.hs") helperPath
+      helperFrontends diagnostics = length
+        [line | line <- lines diagnostics
+          , line == "tidepool-canonical-frontend module=MetadataQuoteSupport"
+            || line == "tidepool-checked module=MetadataQuoteSupport target=False"]
+      helperObjects prepared = do
+        finalized <- maybe (fail "completed helper omitted its finalized Core owner") pure
+          (Map.lookup helperName (pprFinalizedModules prepared))
+        body <- case [body | body <- pprModules prepared
+            , moduleName (pmModule body) == helperName] of
+          [body] -> pure body
+          _ -> fail "completed helper omitted its prepared original"
+        (,) <$> (evaluate finalized >>= makeStableName) <*> (evaluate body >>= makeStableName)
+      helperEvents stage diagnostics =
+        [line | line <- lines diagnostics, "tidepool-reuse {" `isPrefixOf` line
+          , ("\"stage\":\"" ++ stage ++ "\"") `isInfixOf` line
+          , "\"unit\":\"main\"" `isInfixOf` line
+          , "\"module\":\"MetadataQuoteSupport\"" `isInfixOf` line]
+      requireHelperHit stage diagnostics = do
+        let events = helperEvents stage diagnostics
+        unless (any (isInfixOf "\"decision\":\"hit\"") events
+            && not (any (isInfixOf "\"decision\":\"work\"") events)) $
+          fail ("restored helper did not retain its " ++ stage ++ " owner: " ++ diagnostics)
+  restoreA
+  forM_ ["MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath
+        ,ssIncarnation=Just "cancelled-history"}
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
+    originalObjects <- runRequest (pure ()) $ \compile -> do
+      original <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
+        (Just scope) quoterPath [work] Nothing
+      objects <- helperObjects original
+      quoted <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
+        (Just scope) quotedPath [work] Nothing
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult quoted))) $
+        fail "completed A did not execute its real quoter with original42"
+      pure objects
+    (_,cancelDiagnostics) <- captureDiagnostics $ runRequest (pure ()) $ \compile -> do
+      source <- readFile (fixture "CancelledMetadataQuoteSupport.hs")
+      writeFile helperPath (T.unpack (T.replace "\"CANCELLED_HISTORY_MARKER\""
+        (T.pack (show marker)) (T.pack source)))
+      caller <- myThreadId
+      let waitForSplice = do
+            started <- doesFileExist marker
+            unless started (threadDelay 10000 >> waitForSplice)
+          cancelAtSplice = do
+            started <- timeout 60000000 waitForSplice
+            case started of
+              Just () -> throwTo caller ThreadKilled
+              Nothing -> throwTo caller (userError "cancelled history did not reach its real helper splice")
+      interrupted <- bracket (forkIO cancelAtSplice) killThread $ \_ ->
+        try (void (compile (PreparedProducts Nothing) Set.empty GeneralCompile
+          (Just scope) quotedPath [work] Nothing)) :: IO (Either SomeException ())
+      started <- doesFileExist marker
+      unless (started && case interrupted of
+          Left failure -> fromException failure == Just ThreadKilled
+          Right () -> False) $
+        fail "B was not interrupted inside its changed helper's real splice"
+      requireFailedCompilerTransaction "cancelled history request" $
+        compile CheckedEnvironment Set.empty GeneralCompile (Just scope) quoterPath [work] Nothing
+    unless (any (\line -> "tidepool-reuse {" `isPrefixOf` line
+        && "\"stage\":\"native_image\"" `isInfixOf` line
+        && "\"decision\":\"epoch_rotated\"" `isInfixOf` line
+        && "\"reason\":\"recovery\"" `isInfixOf` line) (lines cancelDiagnostics)) $
+      fail "cancelled B did not confirm interpreter retirement at request close"
+    restoreA
+    runRequest (pure ()) $ \compile -> do
+      (restored,diagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) quoterPath [work] Nothing
+      restoredObjects <- helperObjects restored
+      unless (restoredObjects == originalObjects && helperFrontends diagnostics == 0) $
+        fail ("cancelled B discarded or rebound completed A's compiler objects: " ++ diagnostics)
+      mapM_ (`requireHelperHit` diagnostics) ["source_frontend","finalized_core","prepared_body"]
+      quoted <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
+        (Just scope) quotedPath [work] Nothing
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult quoted))) $
+        fail "next A used cancelled B's result or a retired executable instead of original42"
+  putStrLn "cancelled history: actual helper B interruption, poisoned request refusal, interpreter retirement, completed A identity/stage reuse and quoter42 passed"
+
 -- Current candidate admission is dependency evidence for fresh importers;
 -- yesterday's HPT entries cannot rescue a changed source or missing product.
 exactTransactionCandidateReuse :: IO ()
