@@ -3359,7 +3359,16 @@ fn compile_invocation_inner(
         "extract spawn"
     );
 
-    if inventory_export.is_some() || matches!(&output_owner, CompilationOutputOwner::Original(_)) {
+    if inventory_export.is_some()
+        || matches!(&output_owner, CompilationOutputOwner::Original(_))
+        || matches!(
+            &policy,
+            CompilationPolicy::BuildAction {
+                export: BuildActionExport::PreparedFixture { .. },
+                ..
+            }
+        )
+    {
         std::fs::write(
             output_owner.path().join("compiler.stdout"),
             &run.output.stdout,
@@ -3395,6 +3404,10 @@ fn compile_invocation_inner(
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
     let (meta_bytes, raw, product_bytes) = extracted.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
@@ -3691,6 +3704,10 @@ fn compile_invocation_inner(
         Ok(artifacts)
     })();
     let artifacts = assembled.map_err(|error| match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;

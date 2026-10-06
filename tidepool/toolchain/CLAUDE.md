@@ -83,6 +83,10 @@ contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for ever
 target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
 Test runners supply it as a runtime resource. Source-bound certificates remain
 at the original compilation paths and are discarded with action scratch.
+Failed fixture CLI actions retain their scratch and name it in stderr. The
+existing failure-artifact owner preserves the raw compiler report, stderr,
+status and request; the CLI prints every typed diagnostic and source span.
+These files are diagnostic observations and cannot hydrate fixture authority.
 
 ## Deployment catalog production
 

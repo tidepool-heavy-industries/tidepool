@@ -109,6 +109,10 @@ fn run() -> Result<(), String> {
             "TIDEPOOL_BUILD_PRODUCTS_DIR",
             scratch.path().join("build-products"),
         );
+        // Failed action evidence stays with this process's scratch owner.
+        // These observations grant no compiler or fixture authority.
+        std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
+        std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", scratch.path());
     }
     std::env::set_current_dir(scratch.path()).map_err(|error| error.to_string())?;
     let targets = args.targets.iter().map(String::as_str).collect::<Vec<_>>();
@@ -119,7 +123,21 @@ fn run() -> Result<(), String> {
         scratch.path(),
         &output,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| {
+        let diagnostics = match &error {
+            tidepool_toolchain::CompileError::InputRejected(diagnostics)
+            | tidepool_toolchain::CompileError::Diagnostics(diagnostics)
+            | tidepool_toolchain::CompileError::WorkerFailure(diagnostics) => {
+                format!("\n{diagnostics:#?}")
+            }
+            _ => String::new(),
+        };
+        let retained = scratch.keep();
+        format!(
+            "{error}{diagnostics}\nfixture action scratch retained at {}",
+            retained.display()
+        )
+    })
 }
 
 fn main() -> ExitCode {

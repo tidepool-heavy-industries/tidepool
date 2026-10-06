@@ -265,4 +265,35 @@ fn build_fixture_obeys_ordered_source_roots_and_refuses_partial_target_sets() {
         !refused_output.exists(),
         "refused action must export no partial target set"
     );
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    let retained = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("fixture action scratch retained at "))
+        .map(PathBuf::from)
+        .expect("failed CLI action names its retained diagnostic owner");
+    let failures = std::fs::read_dir(retained.join("compiler-failures"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1);
+    let failure = &failures[0];
+    let report = std::fs::read(failure.join("compiler.stdout")).unwrap();
+    let report = tidepool_toolchain::diag::parse_extract_report(&report, &[]).unwrap();
+    assert!(!report.diagnostics.is_empty());
+    for diagnostic in report.diagnostics {
+        // Debug formatting escapes newlines but retains every diagnostic byte.
+        assert!(
+            stderr.contains(&format!("{:?}", diagnostic.message)),
+            "CLI omitted a compiler diagnostic: {stderr}"
+        );
+    }
+    for artifact in [
+        "compiler.stderr",
+        "compiler-status.json",
+        "compiler-request.bin",
+    ] {
+        assert!(failure.join(artifact).is_file(), "missing {artifact}");
+    }
+    // The test owns this failed action and has observed the child exit.
+    std::fs::remove_dir_all(retained).unwrap();
 }
