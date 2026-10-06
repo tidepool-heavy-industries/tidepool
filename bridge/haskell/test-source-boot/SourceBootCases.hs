@@ -2312,14 +2312,24 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
         | (owner,Right groups) <- preparedModuleProductOutcomes products
         , owner == requestOwner, group <- groups, site <- projectedSites (projectedBody group)]
       nativeSites = [site | site <- coldSites, ysOrigin site `elem` map ysOrigin expectedSites]
-  unless (not (null expectedSites)
-      && Map.fromList [(ysSite site,site) | site <- nativeSites]
-         == Map.fromList [(ysSite site,site) | site <- expectedSites]
-      && coldSites == warmSites
-      && Set.fromList (wireSites coldProducts) == Set.fromList (map ysSite expectedSites)
-      && all (isJust . ysRequestTypeSignatures) expectedSites
-      && all (not . null . ysInputs) expectedSites) $
-    fail "effectful original lost its paired wire sites or native request metadata on cold/warm lowering"
+  forM_
+    [ ("actual original site census", not (null expectedSites))
+    , ("complete native original site metadata",
+        Map.fromList [(ysSite site,site) | site <- nativeSites]
+          == Map.fromList [(ysSite site,site) | site <- expectedSites])
+    , ("warm original site metadata", coldSites == warmSites)
+    , ("original wire site census",
+        Set.fromList (wireSites coldProducts) == Set.fromList (map ysSite expectedSites))
+    -- currentRequest delivers a host RequestScope. Native request-reply and
+    -- progress signatures belong to exit-cell child/request sites instead.
+    , ("host-answer signature role", all (isNothing . ysRequestTypeSignatures) expectedSites)
+    , ("host-answer native input witnesses", all (\site -> not (null (ysInputs site))
+        && length (ysInputTypeWitnesses site) == length (ysInputs site)
+        && all isJust (ysInputTypeWitnesses site)) expectedSites)
+    ] $ \(label, valid) -> unless valid $
+      fail ("effectful original lost " ++ label ++ ": expected="
+        ++ show (map ysSite expectedSites) ++ ", native=" ++ show (map ysSite nativeSites)
+        ++ ", wire=" ++ show (wireSites coldProducts))
   requestPrepared <- case filter ((== requestOwner) . pmModule) modules of
     [value] -> pure value
     _ -> fail "site closure control lacks its actual compiled original owner"
@@ -2364,8 +2374,8 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
   forM_ expectedSites $ \site ->
     forM_ [[site,site {ysOrdinal=ysOrdinal site + 1}],
            [site {ysOrdinal=ysOrdinal site + 1},site],
-           [site,site {ysRequestTypeSignatures=Nothing}],
-           [site {ysRequestTypeSignatures=Nothing},site]] $ \conflict ->
+           [site,site {ysInputTypeWitnesses=map (const Nothing) (ysInputTypeWitnesses site)}],
+           [site {ysInputTypeWitnesses=map (const Nothing) (ysInputTypeWitnesses site)},site]] $ \conflict ->
       unless (mergeYieldSites conflict == Left (ysSite site)) $
         fail "conflicting site metadata silently replaced the exact original"
   let textRows = [row | row <- coldRows, dcmQualName row == "Data.Text.Text"]
