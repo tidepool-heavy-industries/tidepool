@@ -29,15 +29,6 @@ use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 
 const RECEIPT_LIMIT: usize = 32 << 20;
-#[cfg(test)]
-const GROUP_LIMIT: usize = 8192;
-// Dictionary references retain full witnesses after decoding. Bound both the
-// number of references and their expanded canonical bytes independently of
-// the compact encoded receipt, so sharing cannot hide unbounded allocation.
-#[cfg(test)]
-const GLOBAL_REFERENCE_LIMIT: usize = 65536;
-#[cfg(test)]
-const EXPANDED_GLOBAL_BYTES_LIMIT: usize = 16 << 20;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
 const SOURCE_LIMIT: u64 = 32 << 20;
@@ -5328,7 +5319,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use tidepool_repr::execution_schema::testing;
-    use tidepool_repr::execution_schema::DecodeLimits;
+    use tidepool_repr::execution_schema::{DecodeLimits, InventoryDecodeLimits};
 
     fn recovery_native_fixture(
         root: &Path,
@@ -7228,7 +7219,17 @@ pub(crate) mod tests {
         let mut trailing = seal.clone();
         trailing.push(0);
         assert!(validate_home_certification(&trailing, &owner).is_err());
-        assert!(validate_home_certification(&vec![0; RECEIPT_LIMIT + 1], &owner).is_err());
+        let size_operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_module_bytes: seal.len() - 1,
+            ..InventoryDecodeLimits::default()
+        });
+        assert!(matches!(
+            decode_home_witness_with_operation(&seal, &size_operation),
+            Err(CertificationError::SizeLimit {
+                format: CertificationFormat::HomeOwners,
+                ..
+            })
+        ));
         let mut wrong_owner = owner.clone();
         wrong_owner.module_version = ModuleVersion([9; 32]);
         let wrong_seal = encode_home_certification(&wrong_owner, &[], &BTreeMap::new()).unwrap();
@@ -9070,25 +9071,45 @@ pub(crate) mod tests {
 
     #[test]
     fn certification_size_limits_identify_the_owning_format() {
-        let oversized = vec![0; RECEIPT_LIMIT + 1];
+        let receipt = receipt_bytes(&dictionary_receipt(&empty_legacy_receipt()));
+        let receipt_limit = receipt.len() - 1;
+        let receipt_operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_bytes: receipt_limit,
+            max_work: 1 << 20,
+            ..InventoryDecodeLimits::default()
+        });
         assert!(
-            matches!(decode_receipt(&oversized), Err(CertificationError::SizeLimit {
-            format: CertificationFormat::ProductReceipt, actual, limit: RECEIPT_LIMIT,
-        }) if actual == oversized.len())
+            matches!(decode_receipt_with_operation(&receipt, None, &receipt_operation), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::ProductReceipt, actual, limit: receipt_limit,
+        }) if actual == receipt.len())
         );
-        assert!(
-            matches!(decode_home_witness(&oversized), Err(CertificationError::SizeLimit {
-            format: CertificationFormat::HomeOwners, actual, limit: RECEIPT_LIMIT,
-        }) if actual == oversized.len())
-        );
+
         let owner = inherited_owner("Original");
         let encoded = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
-        let mut witness = decode_home_witness(&encoded).unwrap();
-        witness.owner.module = "large".repeat(RECEIPT_LIMIT / 5 + 1);
+        let home_limit = encoded.len() - 1;
+        let home_operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_module_bytes: home_limit,
+            max_work: 1 << 20,
+            ..InventoryDecodeLimits::default()
+        });
         assert!(
-            matches!(encode_home_witness(&witness), Err(CertificationError::SizeLimit {
-            format: CertificationFormat::HomeOwners, actual, limit: RECEIPT_LIMIT,
-        }) if actual > RECEIPT_LIMIT)
+            matches!(decode_home_witness_with_operation(&encoded, &home_operation), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::HomeOwners, actual, limit: home_limit,
+        }) if actual == encoded.len())
+        );
+
+        let mut witness = decode_home_witness(&encoded).unwrap();
+        witness.owner.module = "large".repeat(32);
+        let encode_limit = 128;
+        let encode_operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_module_bytes: encode_limit,
+            max_work: 1 << 20,
+            ..InventoryDecodeLimits::default()
+        });
+        assert!(
+            matches!(encode_home_witness_with_operation(&witness, &encode_operation), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::HomeOwners, actual, limit: encode_limit,
+        }) if actual > encode_limit)
         );
     }
 
@@ -9199,72 +9220,132 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn receipt_coordinates_bound_reconstructed_dictionary_bytes() {
-        let mut global = dictionary_test_global();
-        global.identity.occurrence = "large".repeat(32 * 1024);
-        global.owner = ReceiptImportOwner::Retained {
-            identity: global.identity.clone(),
-            generation: 7,
+    fn receipt_coordinates_share_dictionary_reconstruction_work_budget() {
+        let package_global = |module: &str| {
+            let mut global = dictionary_test_global();
+            global.identity.module = module.into();
+            global.identity.occurrence = format!("{module}-value");
+            global.owner = ReceiptImportOwner::Package {
+                unit: "library".into(),
+                module: module.into(),
+                interface_digest: sha(module.as_bytes()),
+                binder: global.identity.clone(),
+            };
+            global
         };
-        let globals = (0..16)
-            .map(|index| {
-                let mut witness = global.clone();
-                witness.required_evaluated = index % 2 == 0;
-                witness.owner = ReceiptImportOwner::Retained {
-                    identity: witness.identity.clone(),
-                    generation: index,
-                };
-                witness
-            })
-            .collect::<Vec<_>>();
-        let full = value_array([
-            value_text("TPCERT"),
-            Value::Integer(7.into()),
-            value_array([]),
-            value_array([]),
-            value_array([]),
-            value_array(globals.iter().map(value_global)),
-            Value::Null,
-            Value::Null,
-        ]);
-        let compact = compact_receipt_coordinates(&full);
-        let header = array(&compact).unwrap();
-        let mut coordinates = OwnerCoordinates::decode(&header[8]).unwrap();
-        assert!(receipt_bytes(&compact).len() < RECEIPT_LIMIT);
+        let first = package_global("First");
+        let second = package_global("Second");
+        let compact_dictionary = |globals: &[AcceptedGlobal]| {
+            let full = value_array([
+                value_text("TPCERT"),
+                Value::Integer(7.into()),
+                value_array([]),
+                value_array([]),
+                value_array([]),
+                value_array(globals.iter().map(value_global)),
+                Value::Null,
+                Value::Null,
+            ]);
+            let compact = compact_receipt_coordinates(&full);
+            let header = array(&compact).unwrap();
+            (header[5].clone(), header[8].clone())
+        };
+        let (first_rows, first_coordinates) = compact_dictionary(std::slice::from_ref(&first));
+        let (second_rows, second_coordinates) = compact_dictionary(std::slice::from_ref(&second));
+        let decode = |rows: &Value, coordinates: &Value, max_work| {
+            let mut coordinates = OwnerCoordinates::decode(coordinates).unwrap();
+            let operation = InventoryOperation::new(InventoryDecodeLimits {
+                max_work,
+                ..InventoryDecodeLimits::default()
+            });
+            GlobalDictionary::decode_with_operation(rows, &mut coordinates, &operation)
+        };
+
+        const SEARCH_CAP: usize = 1 << 20;
+        assert!(decode(&first_rows, &first_coordinates, SEARCH_CAP).is_ok());
+        let mut low = 0;
+        let mut high = SEARCH_CAP;
+        while low + 1 < high {
+            let middle = low + (high - low) / 2;
+            match decode(&first_rows, &first_coordinates, middle) {
+                Ok(_) => high = middle,
+                Err(CertificationError::Product(
+                    tidepool_repr::execution_schema::ParseError::LimitExceeded("work"),
+                )) => low = middle,
+                Err(error) => panic!("dictionary budget control failed: {error:?}"),
+            }
+        }
+        let operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: high,
+            ..InventoryDecodeLimits::default()
+        });
+        let mut first_coordinates = OwnerCoordinates::decode(&first_coordinates).unwrap();
+        assert_eq!(
+            GlobalDictionary::decode_with_operation(
+                &first_rows,
+                &mut first_coordinates,
+                &operation,
+            )
+            .unwrap()
+            .rows
+            .len(),
+            1
+        );
+        let mut decoded_second_coordinates = OwnerCoordinates::decode(&second_coordinates).unwrap();
         assert!(matches!(
-            GlobalDictionary::decode(&header[5], &mut coordinates),
-            Err(CertificationError::Receipt(
-                "expanded global dictionary bytes"
+            GlobalDictionary::decode_with_operation(
+                &second_rows,
+                &mut decoded_second_coordinates,
+                &operation,
+            ),
+            Err(CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
             ))
         ));
+        assert_eq!(
+            decode(&second_rows, &second_coordinates, high)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
     }
 
     #[test]
-    fn receipt_dictionary_bounds_expanded_witnesses() {
+    fn receipt_dictionary_references_share_expansion_work_budget() {
         let global = dictionary_test_global();
         let mut dictionary = test_dictionary(std::slice::from_ref(&global));
-        let indices = vec![Value::Integer(0.into()); GLOBAL_REFERENCE_LIMIT];
+        let row_bytes = dictionary.rows[0].1;
+        let one_reference_work = std::mem::size_of::<AcceptedGlobal>()
+            + row_bytes * 4
+            + std::mem::size_of::<(usize, usize, usize)>();
+        let operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: one_reference_work,
+            ..InventoryDecodeLimits::default()
+        });
+        let reference = [Value::Integer(0.into())];
         assert_eq!(
-            dictionary.resolve(&indices).unwrap().len(),
-            GLOBAL_REFERENCE_LIMIT
+            dictionary
+                .resolve_with_operation(&reference, &operation)
+                .unwrap(),
+            vec![global.clone()]
         );
         assert!(matches!(
-            dictionary.resolve(&[Value::Integer(0.into())]),
-            Err(CertificationError::Receipt("expanded global count"))
+            dictionary.resolve_with_operation(&reference, &operation),
+            Err(CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+            ))
         ));
-        let mut large = global;
-        large.identity.occurrence = "large".repeat(32 * 1024);
-        large.owner = ReceiptImportOwner::Retained {
-            identity: large.identity.clone(),
-            generation: 7,
-        };
-        let mut dictionary = test_dictionary(&[large]);
-        let row_bytes = dictionary.rows[0].1;
-        let indices = vec![Value::Integer(0.into()); EXPANDED_GLOBAL_BYTES_LIMIT / row_bytes + 1];
-        assert!(matches!(
-            dictionary.resolve(&indices),
-            Err(CertificationError::Receipt("expanded global bytes"))
-        ));
+        let fresh_operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: one_reference_work,
+            ..InventoryDecodeLimits::default()
+        });
+        assert_eq!(
+            dictionary
+                .resolve_with_operation(&reference, &fresh_operation)
+                .unwrap(),
+            vec![global]
+        );
     }
 
     #[test]
@@ -9660,11 +9741,6 @@ pub(crate) mod tests {
                 )]),
             }
         );
-        encoded.resize(RECEIPT_LIMIT + 1, 0);
-        assert!(matches!(
-            decode_receipt(&encoded),
-            Err(CertificationError::SizeLimit { format: CertificationFormat::ProductReceipt, actual, limit: RECEIPT_LIMIT }) if actual == RECEIPT_LIMIT + 1
-        ));
 
         let large_groups = |count: usize| {
             let mut receipt = value.clone();
@@ -9698,10 +9774,81 @@ pub(crate) mod tests {
                 .len(),
             5_930
         );
-        assert!(matches!(
-            decode_receipt(&large_groups(GROUP_LIMIT + 1)),
-            Err(CertificationError::Receipt("group count"))
-        ));
+        let historical_group_boundary = 8_193;
+        assert_eq!(
+            decode_receipt(&large_groups(historical_group_boundary))
+                .unwrap()
+                .modules[0]
+                .groups
+                .len(),
+            historical_group_boundary
+        );
+
+        for module_count in [127, 128, 129] {
+            let modules = (0..module_count)
+                .map(|index| {
+                    let unit = format!("home-{index}");
+                    let module = format!("Module{index}");
+                    let source = format!("module {module} where");
+                    let mut module_bytes: Value =
+                        ciborium::de::from_reader(sidecar().as_slice()).unwrap();
+                    let Value::Array(header) = &mut module_bytes else {
+                        unreachable!()
+                    };
+                    let Value::Array(rows) = &mut header[2] else {
+                        unreachable!()
+                    };
+                    let Value::Array(row) = &mut rows[0] else {
+                        unreachable!()
+                    };
+                    row[0] = value_text(&unit);
+                    row[1] = value_text(&module);
+                    let module_bytes = receipt_bytes(&module_bytes);
+                    let mut module_evidence = evidence(&source);
+                    module_evidence.modules[0].unit = unit.clone();
+                    module_evidence.modules[0].module = module.clone();
+                    let mut accepted = receipt(&module_bytes, &module_evidence, &source);
+                    accepted.unit = unit.clone();
+                    accepted.module = module.clone();
+                    Value::Array(vec![
+                        value_text("fresh"),
+                        value_text(&accepted.unit),
+                        value_text(&accepted.module),
+                        Value::Null,
+                        value_text(hex(&accepted.source_sha256)),
+                        value_text(hex(&accepted.skinny_iface_sha256)),
+                        value_text(hex(&accepted.product_sha256)),
+                        value_text(hex(&accepted.dependency_witness_sha256)),
+                        value_array([value_array([
+                            Value::Integer(0.into()),
+                            value_array([]),
+                        ])]),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let mut legacy = empty_legacy_receipt();
+            let Value::Array(header) = &mut legacy else {
+                unreachable!()
+            };
+            header[2] = value_array(modules);
+            let compact = dictionary_receipt(&legacy);
+            let bytes = receipt_bytes(&compact);
+            let operation = InventoryOperation::new(InventoryDecodeLimits {
+                max_bytes: bytes.len(),
+                max_work: 8 << 20,
+                ..InventoryDecodeLimits::default()
+            });
+            let decoded = decode_receipt_with_operation(&bytes, None, &operation).unwrap();
+            assert_eq!(decoded.modules.len(), module_count);
+            assert_eq!(decoded.finalization.modules.len(), module_count);
+            assert!(decoded.modules.iter().all(|module| {
+                module.groups.len() == 1
+                    && decoded.finalization.modules.contains_key(&(
+                        module.unit.clone(),
+                        module.module.clone(),
+                    ))
+            }));
+        }
     }
 
     #[test]

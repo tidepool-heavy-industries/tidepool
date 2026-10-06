@@ -70,7 +70,11 @@ fn module_framing_normalizes_outer_widths_and_preserves_opaque_group_bytes() {
         ciborium::ser::into_writer(value, &mut widened).unwrap();
     }
     let (products, frames) =
-        parse_module_products_with_framing(&widened, &requirements, DecodeLimits::default())
+        parse_module_products_with_framing(
+            &widened,
+            &requirements,
+            InventoryDecodeLimits::default(),
+        )
             .unwrap();
     assert_eq!(products[0].interface, [0x42, 0x00, 0xff]);
     assert_eq!(frames, [singleton.clone()]);
@@ -90,19 +94,27 @@ fn module_framing_normalizes_outer_widths_and_preserves_opaque_group_bytes() {
     let mut combined = Vec::new();
     ciborium::ser::into_writer(&("TPMOD", 1u64, [&row, &unrelated]), &mut combined).unwrap();
     let (_, frames) =
-        parse_module_products_with_framing(&combined, &requirements, DecodeLimits::default())
+        parse_module_products_with_framing(
+            &combined,
+            &requirements,
+            InventoryDecodeLimits::default(),
+        )
             .unwrap();
     assert_eq!(frames[0], singleton);
-    let mut limits = DecodeLimits::default();
+    let mut limits = InventoryDecodeLimits::default();
     limits.max_bytes = widened.len() - 1;
     assert!(matches!(
         parse_module_products_with_framing(&widened, &requirements, limits),
-        Err(ParseError::ByteLimit { .. })
+        Err(ParseError::InventoryByteLimit { .. })
     ));
     let mut trailing = widened;
     trailing.push(0);
     assert_eq!(
-        parse_module_products_with_framing(&trailing, &requirements, DecodeLimits::default()),
+        parse_module_products_with_framing(
+            &trailing,
+            &requirements,
+            InventoryDecodeLimits::default(),
+        ),
         Err(ParseError::TrailingBytes)
     );
 }
@@ -119,9 +131,9 @@ fn large_module_product_fits_default_work_ceiling_within_admitted_bytes() {
     ]);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&("TPMOD", 1u64, [&row]), &mut bytes).unwrap();
-    let limits = DecodeLimits {
-        max_bytes: 64 << 20,
-        ..DecodeLimits::default()
+    let limits = InventoryDecodeLimits {
+        max_module_bytes: 64 << 20,
+        ..InventoryDecodeLimits::default()
     };
     let (products, frames) =
         parse_module_products_with_framing(&bytes, &requirements, limits).unwrap();
@@ -135,12 +147,12 @@ fn large_module_product_fits_default_work_ceiling_within_admitted_bytes() {
         parse_module_products_with_framing(
             &bytes,
             &requirements,
-            DecodeLimits {
+            InventoryDecodeLimits {
                 max_bytes: bytes.len() - 1,
                 ..limits
             },
         ),
-        Err(ParseError::ByteLimit { .. }),
+        Err(ParseError::InventoryByteLimit { .. }),
     ));
 }
 
@@ -393,27 +405,38 @@ fn module_product_groups_share_one_operation_work_budget() {
     let second_bytes = encode(std::slice::from_ref(&second));
     let combined = encode(&[first, second]);
     let minimum = |bytes: &[u8]| {
+        const SEARCH_CAP: usize = 1 << 20;
+        let limits = |max_work| InventoryDecodeLimits {
+            max_work,
+            ..InventoryDecodeLimits::default()
+        };
+        assert!(
+            parse_module_products(bytes, &required, limits(SEARCH_CAP)).is_ok(),
+            "fixture should fit the bounded work search"
+        );
         let mut low = 0;
-        let mut high = DecodeLimits::default().max_work;
-        parse_module_products(bytes, &required, DecodeLimits::default()).unwrap();
-        while low < high {
+        let mut high = SEARCH_CAP;
+        while low + 1 < high {
             let middle = low + (high - low) / 2;
-            let limits = DecodeLimits {
-                max_work: middle,
-                ..DecodeLimits::default()
-            };
-            match parse_module_products(bytes, &required, limits) {
+            match parse_module_products(bytes, &required, limits(middle)) {
                 Ok(_) => high = middle,
-                Err(ParseError::LimitExceeded("work")) => low = middle + 1,
+                Err(ParseError::LimitExceeded("work")) => low = middle,
                 Err(error) => panic!("budget control failed for another reason: {error}"),
             }
         }
-        low
+        assert!(parse_module_products(bytes, &required, limits(high)).is_ok());
+        assert!(matches!(
+            parse_module_products(bytes, &required, limits(low)),
+            Err(ParseError::LimitExceeded("work"))
+        ));
+        high
     };
-    let limit = minimum(&first_bytes).max(minimum(&second_bytes));
-    let limits = DecodeLimits {
+    let first_limit = minimum(&first_bytes);
+    let second_limit = minimum(&second_bytes);
+    let limit = first_limit.max(second_limit);
+    let limits = InventoryDecodeLimits {
         max_work: limit,
-        ..DecodeLimits::default()
+        ..InventoryDecodeLimits::default()
     };
     parse_module_products(&first_bytes, &required, limits).unwrap();
     parse_module_products(&second_bytes, &required, limits).unwrap();
@@ -422,12 +445,13 @@ fn module_product_groups_share_one_operation_work_budget() {
         Err(ParseError::LimitExceeded("work"))
     );
     let combined_limit = minimum(&combined);
+    assert!(combined_limit > limit);
     let products = parse_module_products(
         &combined,
         &required,
-        DecodeLimits {
+        InventoryDecodeLimits {
             max_work: combined_limit,
-            ..DecodeLimits::default()
+            ..InventoryDecodeLimits::default()
         },
     )
     .unwrap();
@@ -435,15 +459,20 @@ fn module_product_groups_share_one_operation_work_budget() {
         parse_module_products_with_framing(
             &combined,
             &required,
-            DecodeLimits {
+            InventoryDecodeLimits {
                 max_work: combined_limit,
-                ..DecodeLimits::default()
+                ..InventoryDecodeLimits::default()
             }
         ),
         Err(ParseError::LimitExceeded("work")),
     );
     let (_, frames) =
-        parse_module_products_with_framing(&combined, &required, DecodeLimits::default()).unwrap();
+        parse_module_products_with_framing(
+            &combined,
+            &required,
+            InventoryDecodeLimits::default(),
+        )
+        .unwrap();
     assert_eq!(frames.len(), 2);
     assert_eq!(products.len(), 2);
     assert!(products.iter().all(|product| product.groups.len() == 1));
