@@ -15759,6 +15759,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         ));
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
         let workbench = ResidentActorWorkbench::new(machines, source, None);
         let ResidentWorkbenchStep::Running { fragment, outcome } = workbench
             .begin_tool(
@@ -15775,7 +15776,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentActorBoundary::Sleep {
             continuation,
             duration,
-        } = workbench
+        } = runner
             .capture_boundary(
                 context.clone(),
                 (*outcome).into(),
@@ -15787,7 +15788,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             panic!("effect-row order must preserve the actual nominal Sleep request");
         };
         assert_eq!(duration, Duration::from_millis(19));
-        let outcome = workbench
+        let outcome = runner
             .resume_unit(context.clone(), continuation)
             .await
             .unwrap();
