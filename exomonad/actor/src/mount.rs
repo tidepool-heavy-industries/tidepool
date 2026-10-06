@@ -294,6 +294,15 @@ impl ActorSourceImports {
 /// remains in the shared graph; a checkout's historical package is not
 /// included automatically.
 pub trait ActorSourceLayers: Send + Sync {
+    /// Freeze the published toolset source graph independently of notebook helpers.
+    /// The source owner must return direct immutable revision paths.
+    fn freeze_toolset_layer(
+        &self,
+        _actor: PrincipalId,
+    ) -> Result<CheckpointSourceLayer, String> {
+        Ok(CheckpointSourceLayer::default())
+    }
+
     /// Validate opaque source ownership at cell/checkpoint admission. A host
     /// that issues no source authority can admit only the empty default.
     fn validate_source_authority(&self, source: &CheckpointSourceLayer) -> Result<(), String> {

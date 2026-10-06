@@ -678,6 +678,65 @@ pub(crate) struct CertifiedTargetImage {
     source_plan: Option<super::persistent::ResolvedSourceDomainPlan>,
 }
 
+/// An immutable source-produced entry and the native images needed to install it.
+/// This owns no heap, lexical scope, dispatcher, or actor resource grants.
+pub struct PreparedSourceEntry {
+    compiled: Arc<super::turn::CompiledTurn>,
+    registry: Arc<ImageRegistry>,
+    _images: Vec<Arc<CompiledProgram>>,
+}
+
+impl PreparedSourceEntry {
+    /// Validate original compiler custody and prepare its entire executable closure.
+    /// Each consumer subsequently installs these definitions into fresh actor state.
+    pub fn prepare(
+        compiled: Arc<super::turn::CompiledTurn>,
+        registry: Arc<ImageRegistry>,
+    ) -> Result<Self, super::resident::ResidentError> {
+        let certification = compiled.certification.as_ref()
+            .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
+        let proof = certification.compile_input_identity.as_ref()
+            .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
+        if !matches!(certification.purpose(), super::turn::TurnPurpose::Ordinary)
+            || !proof.matches_bundle(
+                &compiled.prepared,
+                &certification.groups,
+                &certification.target_owners,
+                &certification.package_interfaces,
+                &compiled.table,
+                &compiled.asks,
+            )
+        {
+            return Err(super::resident::ResidentError::UnsealedStartupEntry);
+        }
+        // Resolution uses the existing source-group owner with an empty lexical
+        // environment. Any retained notebook dependency is therefore refused.
+        let state = super::persistent::PersistentSession::new(None, 0);
+        let resolved = state.resolve_certification_in(
+            tidepool_codegen::scope::ScopeId::ROOT,
+            &compiled.prepared,
+            certification,
+        )?;
+        let (target, demanded) = CertifiedTargetImage::compile_scoped(
+            compiled.prepared.as_ref().clone(),
+            &resolved,
+            &registry,
+        )?;
+        let mut images = Vec::with_capacity(demanded.len() + 1);
+        images.push(target.image);
+        images.extend(demanded.iter().map(|image| Arc::clone(image.image())));
+        Ok(Self { compiled, registry, _images: images })
+    }
+
+    pub fn compiled(&self) -> &Arc<super::turn::CompiledTurn> {
+        &self.compiled
+    }
+
+    pub fn image_registry(&self) -> &Arc<ImageRegistry> {
+        &self.registry
+    }
+}
+
 fn target_owners_match(prepared: &PreparedProgram, owners: &[ImportOwner]) -> bool {
     prepared.globals().len() == owners.len()
         && prepared

@@ -1661,6 +1661,32 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
 }
 
 impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
+    fn freeze_toolset_layer(
+        &self,
+        actor: PrincipalId,
+    ) -> std::result::Result<exomonad_actor::CheckpointSourceLayer, String> {
+        let _one_at_a_time = self.gate.lock();
+        if let ActorSourceScope::Checkpoint(layer) = self.scope(actor) {
+            self.validate_source_authority(&layer)?;
+            let identities = layer.identities().iter()
+                .filter(|identity| identity.starts_with("run:"))
+                .cloned().collect();
+            let include_paths = layer.include_paths().iter()
+                .filter(|path| path.starts_with(self.run_root.join("workspace/revisions")))
+                .cloned().collect();
+            return Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+                _root_owner: Arc::clone(&self.source_owner), identities, include_paths,
+            })));
+        }
+        self.layer.ensure_active(&self.frozen).map_err(|error| error.to_string())?;
+        let (identity, include_paths) = self.layer.checkpoint_revision("run")
+            .map_err(|error| error.to_string())?;
+        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+            _root_owner: Arc::clone(&self.source_owner),
+            identities: vec![identity], include_paths,
+        })))
+    }
+
     fn validate_source_authority(
         &self,
         source: &exomonad_actor::CheckpointSourceLayer,

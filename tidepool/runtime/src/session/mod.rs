@@ -77,7 +77,7 @@ pub use planned_cell::{
 };
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedFailureStage, PreparedRuntimeError,
-    PreparedSettlement, RealmId, RequestCompileAnnotations, RuntimeCompileInputs, SiteTypeEvidence,
+    PreparedSettlement, PreparedSourceEntry, RealmId, RequestCompileAnnotations, RuntimeCompileInputs, SiteTypeEvidence,
 };
 pub use publication::{
     PublicationCancellation, PublicationClaim, PublicationDecision, PublicationPhase,
