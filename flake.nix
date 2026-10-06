@@ -90,10 +90,18 @@
         nativeBootSettings = map (
           package: "*.${package}.ghc.hs.opts+=${builtins.concatStringsSep " " nativeBootOptions}"
         ) nativeBootPackages;
-        nativeBootPlan = builtins.toJSON {
-          packages = nativeBootPackages;
-          options = nativeBootOptions;
-        };
+        nativeBootArgvCheck = lib: ''
+          for expected in ${lib.escapeShellArgs nativeBootSettings}; do
+            count=0
+            for actual in "''${hadrianFlagsArray[@]}"; do
+              if [ "$actual" = "$expected" ]; then count=$((count + 1)); fi
+            done
+            if [ "$count" -ne 1 ]; then
+              echo "native boot setting must be one whole argument exactly once: $expected" >&2
+              exit 1
+            fi
+          done
+        '';
         ghcInternalOverlay =
           final: prev:
           let
@@ -111,10 +119,7 @@
                   # invocation. Source OPTIONS_GHC still supplies module-specific flags.
                   preConfigure = (old.preConfigure or "") + ''
                     hadrianFlagsArray+=( ${prev.lib.escapeShellArgs nativeBootSettings} )
-                    ${prev.python3}/bin/python3 ${./scripts/ghc_native_boot_settings.py} \
-                      --source "$PWD" --plan ${prev.lib.escapeShellArg nativeBootPlan} \
-                      -- "''${hadrianFlagsArray[@]}"
-                  '';
+                  '' + nativeBootArgvCheck prev.lib;
                 });
           in
           {
@@ -416,17 +421,27 @@
         formatter = pkgs.nixfmt;
 
         checks = {
-          # Check the same package-name/argv contract against pinned Hadrian
-          # source without realizing the compiler. preConfigure also checks the
-          # actual inherited array before the expensive build can start.
-          ghc-native-boot-settings = pkgs.runCommand "ghc-native-boot-settings-check" { } ''
-            ${pkgs.python3}/bin/python3 ${./scripts/ghc_native_boot_settings.py} --self-test
-            ${pkgs.python3}/bin/python3 ${./scripts/ghc_native_boot_settings.py} \
-              --source ${pkgs.haskell.compiler.ghc912.src} \
-              --plan ${pkgs.lib.escapeShellArg nativeBootPlan} \
-              -- ${pkgs.lib.escapeShellArgs nativeBootSettings}
+          # Hadrian validates package keys against its own package registry.
+          # This check exercises only argv transport; preConfigure applies the
+          # same guard to the actual inherited array before Hadrian starts.
+          ghc-native-boot-settings = pkgs.runCommand "ghc-native-boot-settings-check" { } (''
+            hadrianFlagsArray=( ${pkgs.lib.escapeShellArgs nativeBootSettings} )
+          '' + nativeBootArgvCheck pkgs.lib + ''
+            if (
+              hadrianFlagsArray=( ${pkgs.lib.escapeShellArgs (builtins.tail nativeBootSettings)} )
+              ${nativeBootArgvCheck pkgs.lib}
+            ); then echo "missing setting accepted" >&2; exit 1; fi
+            if (
+              hadrianFlagsArray+=( ${pkgs.lib.escapeShellArg (builtins.head nativeBootSettings)} )
+              ${nativeBootArgvCheck pkgs.lib}
+            ); then echo "duplicate setting accepted" >&2; exit 1; fi
+            if (
+              read -ra splitSetting <<< ${pkgs.lib.escapeShellArg (builtins.head nativeBootSettings)}
+              hadrianFlagsArray=( "''${splitSetting[@]}" ${pkgs.lib.escapeShellArgs (builtins.tail nativeBootSettings)} )
+              ${nativeBootArgvCheck pkgs.lib}
+            ); then echo "split setting accepted" >&2; exit 1; fi
             touch "$out"
-          '';
+          '');
 
           embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
             ${pkgs.python3}/bin/python3 ${./scripts/embedded_web_provenance.py} --self-test --check --root ${./.}
