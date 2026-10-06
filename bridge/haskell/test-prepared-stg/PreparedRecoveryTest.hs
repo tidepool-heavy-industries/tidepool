@@ -33,7 +33,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, varUnique)
-import GHC.Unit.Types (unitString, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, GenWithIsBoot(..), mkModule, stringToUnit)
 import GHC.Unit.Module.Location (ml_hi_file, ml_dyn_hi_file)
 import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
@@ -165,7 +165,8 @@ scenario = do
     liftIO $ growing_original_packages hsc context home hidden hiddenClosure closure
     queueOwner <- findModule (mkModuleName "Data.FTCQueue") Nothing
     liftIO $ constructor_component_recovery hsc context queueOwner root source
-    typeableOwner <- findModule (mkModuleName "GHC.Internal.Data.Typeable.Internal") Nothing
+    let typeableOwner = mkModule (stringToUnit "ghc-internal")
+          (mkModuleName "GHC.Internal.Data.Typeable.Internal")
     liftIO $ evaluated_constructor_component hsc context typeableOwner
     liftIO $ retainedProjectionBoundary hsc context modules
     liftIO $ putStrLn "prepared recovery closure: ok"
