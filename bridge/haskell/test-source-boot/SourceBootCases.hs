@@ -347,9 +347,12 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
       && shared `Set.member` ownerDemands "ScheduleRight") $
     fail "real lowered diamond did not retain both demands for its shared defining owner"
   referenceProgram <- either (fail . show) pure (projectPrepared context originals)
-  let exercise label width queue includeAll = do
+  let boundedSchedule label action = do
+        result <- timeout (60 * 1000000) action
+        maybe (fail (label ++ " timed out within its executor lifetime and cleanup")) pure result
+      exercise label width queue includeAll completeEveryOwner = do
         grant <- either fail pure (compilerExecutionGrant width)
-        withCompilerExecutor grant $ \executor -> do
+        boundedSchedule label $ withCompilerExecutor grant $ \executor -> do
           bodyCache <- newPreparedBodyCache
           rawCache <- newOriginalProjectionCollector
           completionOrder <- newIORef []
@@ -385,7 +388,8 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
             (\(owner,_) value -> do
               modifyIORef' completionOrder (++ [owner])
               when (width > 1 && owner == secondOwner) (putMVar releaseFirst ())
-              completedPreparedModule observer value) tasks
+              when (completeEveryOwner || owner /= firstOwner)
+                (completedPreparedModule observer value)) tasks
           order <- readIORef completionOrder
           threads <- readMVar workers
           unless (Set.fromList order == Set.fromList (map pmModule queue)
@@ -396,8 +400,24 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
             fail (label ++ " did not exercise its declared actual completion order and workers")
           hPutStrLn stderr ("native-graph-schedule label=" ++ label ++ " width=" ++ show width
             ++ " workers=" ++ show (Set.size threads) ++ " completed=" ++ show (map ownerName order))
-          (_,products) <- prepareOriginalProductsWithWorklist worklist env Nothing interfaces
-            context Set.empty prepared
+          ((_,products),settlementDiagnostics) <- captureDiagnostics $
+            prepareOriginalProductsWithWorklist worklist env Nothing interfaces context Set.empty prepared
+          let projected = counterValues "original_raw_projected_modules" settlementDiagnostics
+              hits = counterValues "original_raw_cache_hits" settlementDiagnostics
+              owners = fromIntegral (length queue)
+              adoptedWithoutFallback = projected == [owners] && hits == [0]
+          -- Each schedule begins with empty caches. The observer projects every
+          -- source once; an adopted completion-grown worklist retains that census.
+          -- A fallback instead replays those same inputs as raw cache hits.
+          if completeEveryOwner
+            then unless adoptedWithoutFallback $
+              fail (label ++ " settled through fallback instead of its completion-grown worklist: "
+                ++ settlementDiagnostics)
+            else unless (not adoptedWithoutFallback && projected == [0] && hits == [owners]) $
+              fail (label ++ " did not detect the deliberately omitted completion: " ++ settlementDiagnostics)
+          hPutStrLn stderr ("native-graph-settlement label=" ++ label
+            ++ " projected=" ++ show projected ++ " cache_hits=" ++ show hits
+            ++ " adopted=" ++ show adoptedWithoutFallback)
           unless (rawFacts prepared == rawFacts queue
               && preparedModuleProductOutcomes (preparedProductInventory products) == referenceOutcomes queue) $
             fail (label ++ " changed defining identities, group ordinals, native demands or settled products")
@@ -408,9 +428,10 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
             unless (program == referenceProgram) $
               fail (label ++ " changed the semantic execution wire program")
           pure products
-  _ <- exercise "serial" 1 originals True
-  _ <- exercise "reverse width 2" 2 (reverse originals) True
-  _ <- exercise "rotated width 4" 4 (drop 3 originals ++ take 3 originals) True
+  _ <- exercise "serial" 1 originals True True
+  _ <- exercise "reverse width 2" 2 (reverse originals) True True
+  _ <- exercise "rotated width 4" 4 (drop 3 originals ++ take 3 originals) True True
+  _ <- exercise "omitted completion width 2" 2 (reverse originals) True False
   let withoutShared = filter ((/= "ScheduleShared") . ownerName . pmModule) originals
       refused = referenceOutcomes withoutShared
       outcome name = lookup (mkModule (stringToUnit "main") (mkModuleName name)) refused
@@ -419,8 +440,8 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
        Just (Left (UnavailableOriginalHomeDependencies _)), Just (Right groups)) -> not (null groups)
       _ -> False) $
     fail "independent recomputation did not refuse both shared-owner consumers and preserve the unrelated owner"
-  _ <- exercise "missing shared width 2" 2 (reverse withoutShared) False
-  putStrLn "native graph scheduling: serial/reverse2/rotated4 exact semantic groups and demands; shared diamond, SOURCE cycle, GHC(42,True) and missing-owner isolation passed"
+  _ <- exercise "missing shared width 2" 2 (reverse withoutShared) False True
+  putStrLn "native graph scheduling: bounded serial/reverse2/rotated4 adopted exact groups and demands; omitted completion detected, shared diamond, SOURCE cycle, GHC(42,True) and missing-owner isolation passed"
 
 -- One GHC capture supplies a genuine graph larger than the metadata envelope.
 -- Candidate and scope delivery use their existing canonical Rust owners.
