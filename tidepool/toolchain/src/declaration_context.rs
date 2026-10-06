@@ -4575,19 +4575,34 @@ mod tests {
     #[test]
     fn recovery_capture_admits_embedded_canonical_and_refuses_corruption() {
         let producer = [2; 32];
+        let root = tempfile::tempdir().unwrap();
+        let package_path = root.path().join("External.hi");
+        let package_bytes = [0x43];
+        std::fs::write(&package_path, package_bytes).unwrap();
+        let package_sha256: [u8; 32] = Sha256::digest(package_bytes).into();
+        let mut binder = tidepool_repr::execution_schema::testing::identity("External", "entry");
+        binder.unit = "external".into();
+        let packages = BTreeMap::from([(
+            ("external".into(), "External".into()),
+            crate::certified_products::PackageInterfaceWitness {
+                selected_path: package_path,
+                sha256: package_sha256,
+            },
+        )]);
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_witness_fixture(
                 "Original",
-                Some(crate::certified_products::PendingImportOwner::Retained {
-                    identity: tidepool_repr::execution_schema::testing::identity("Value", "live"),
-                    generation: 11,
+                Some(crate::certified_products::PendingImportOwner::Package {
+                    unit: "external".into(),
+                    module: "External".into(),
+                    binder,
+                    interface_digest: package_sha256,
                 }),
                 7,
-                &BTreeMap::new(),
+                &packages,
             ),
             producer,
         );
-        let root = tempfile::tempdir().unwrap();
         let references = recovery_artifacts::materialize_certified_products(
             root.path(),
             producer,
@@ -4623,7 +4638,8 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert!(matches!(
             groups[0].imports()[0],
-            crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+            crate::certified_products::PendingImportOwner::Package { ref unit, ref module, .. }
+                if unit == "external" && module == "External"
         ));
 
         let mut missing = references.clone();
