@@ -28,6 +28,11 @@ pub(crate) enum CheckedCellManifestPurpose {
 }
 
 impl CheckedCellSpecification {
+    pub(crate) fn template_sources(&self) -> Vec<String> {
+        std::iter::once(self.template_source.clone())
+            .chain(self.turn_templates.iter().map(|(_, source)| source.clone()))
+            .collect()
+    }
     /// Actor admission binds the exact source and compiler recipe inputs.
     /// Runtime view/native identities enter the separate admission digest.
     pub fn specification_digest(&self) -> [u8; 32] {
@@ -753,6 +758,7 @@ pub struct CheckedValueArtifact {
     certified_interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     artifact_view: crate::artifact_inventory::ArtifactView,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
+    template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
     directory: Arc<ValueInterfaceDirectory>,
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
@@ -1176,6 +1182,7 @@ impl HostBindingInterfaceOffer {
             certified_interface: certificate,
             artifact_view,
             source_lexical: Vec::new(),
+            template_imports: None,
             directory: self.directory,
             original_interface_prototype: Some(self.prototype.clone()),
         });
@@ -1429,6 +1436,7 @@ impl CheckedValueInputs {
         cell: &ExactCheckedCell,
         context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        original_execution: &crate::declaration_context::ExactDeclarationContext,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
@@ -1444,6 +1452,15 @@ impl CheckedValueInputs {
             .select_roots(vec![certificate.artifact_id()])?;
         let (artifact_view, source_lexical) =
             context.retain_value_source_surface(&value_view, source_lexical)?;
+        let templates = cell.specification.template_sources();
+        let template_imports = crate::declaration_context::RetainedTemplateImports::capture(
+            original_execution,
+            &templates,
+        )?;
+        let artifact_view = match &template_imports {
+            Some(retained) => retained.retain_in(&artifact_view)?,
+            None => artifact_view,
+        };
         self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1459,6 +1476,7 @@ impl CheckedValueInputs {
             certified_interface: certificate,
             artifact_view,
             source_lexical,
+            template_imports,
             directory: self.directory.clone(),
             original_interface_prototype: None,
         }))
@@ -1480,6 +1498,11 @@ impl CheckedValueArtifact {
     }
     pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
         &self.source_lexical
+    }
+    pub(crate) fn template_imports(
+        &self,
+    ) -> Option<&Arc<crate::declaration_context::RetainedTemplateImports>> {
+        self.template_imports.as_ref()
     }
 }
 
@@ -2456,27 +2479,12 @@ impl ExactCheckedItem {
             .map(|(_, source)| source.clone())
             .collect()
     }
-    fn template_interface_authorization(&self) -> Result<Value, CompileError> {
-        Ok(Value::Array(
-            self.cell
-                .declaration_context
-                .template_interface_graph(&self.template_sources())?
-                .into_iter()
-                .map(|(owner, node)| {
-                    array([
-                        text(&owner.unit),
-                        text(&owner.module),
-                        text(hex(&node.interface_sha256)),
-                        Value::Array(
-                            node.imports
-                                .iter()
-                                .map(|owner| array([text(&owner.unit), text(&owner.module)]))
-                                .collect(),
-                        ),
-                    ])
-                })
-                .collect(),
-        ))
+    fn template_imports(
+        &self,
+    ) -> Result<crate::declaration_context::SelectedTemplateImports, CompileError> {
+        self.cell
+            .declaration_context
+            .selected_template_imports(&self.template_sources())
     }
 
     pub fn specification_digest(&self) -> [u8; 32] {
@@ -2667,7 +2675,7 @@ impl CheckedItemOffer {
             planned: self.prefix.planned_authorization(),
             settled: self.settled_values.authorization.clone(),
             value_interfaces: self.prefix.value_interface_authorization()?,
-            template_interfaces: self.item.template_interface_authorization()?,
+            template_imports: self.item.template_imports()?,
         }))
     }
 
@@ -2768,6 +2776,7 @@ impl CheckedItemOffer {
                 &self.item.cell,
                 artifact_context,
                 source_lexical,
+                &original_execution,
             )?)
         } else {
             None
@@ -4291,7 +4300,7 @@ pub(crate) struct ItemAuthorization<'a> {
     pub(crate) planned: Value,
     pub(crate) settled: Vec<Value>,
     pub(crate) value_interfaces: Value,
-    pub(crate) template_interfaces: Value,
+    pub(crate) template_imports: crate::declaration_context::SelectedTemplateImports,
 }
 pub(crate) fn encode_item_authorization(fields: ItemAuthorization<'_>) -> Value {
     array([
@@ -4331,7 +4340,7 @@ pub(crate) fn encode_item_authorization(fields: ItemAuthorization<'_>) -> Value 
         fields.planned,
         Value::Array(fields.settled),
         fields.value_interfaces,
-        fields.template_interfaces,
+        fields.template_imports.authorization_value(),
     ])
 }
 #[cfg(test)]

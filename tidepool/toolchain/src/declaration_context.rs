@@ -30,6 +30,7 @@ pub struct ExactDeclarationContext {
     producer: [u8; 32],
     inventory: ArtifactView,
     lexical: Vec<ExactLexicalNode>,
+    template_imports: Option<Arc<RetainedTemplateImports>>,
     original_instance_environment: OriginalInstanceEnvironment,
 }
 
@@ -502,6 +503,7 @@ impl RecoveredArtifactInventory {
         let mut context = ExactDeclarationContext {
             producer: [0; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
             inventory: ArtifactInventory::default().empty_view(),
             lexical: vec![],
         };
@@ -752,6 +754,7 @@ impl RecoveredArtifactInventory {
         let context = ExactDeclarationContext {
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
             inventory: inventory.admit_shared(&empty, entries)?,
             lexical,
         };
@@ -918,10 +921,224 @@ pub(crate) struct ExactCompilationRequest {
     generated_scaffold_imports: Vec<GeneratedScaffoldImportAuthority>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TemplateInterfaceNode {
     pub(crate) interface_sha256: [u8; 32],
     pub(crate) imports: Vec<ExactModuleIdentity>,
+}
+
+/// Only direct imports selected by an original checked template can become
+/// roots of a later protected template. Supporting graph nodes retain types
+/// and instances without acquiring an independent import capability.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectedTemplateImports {
+    roots: BTreeSet<ExactModuleIdentity>,
+    graph: BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>,
+}
+
+impl SelectedTemplateImports {
+    pub(crate) fn authorization_value(&self) -> Value {
+        Value::Array(vec![
+            Value::Array(self.roots.iter().map(module_value).collect()),
+            Value::Array(
+                self.graph
+                    .iter()
+                    .map(|(owner, node)| {
+                        Value::Array(vec![
+                            text(&owner.unit),
+                            text(&owner.module),
+                            text(hex(&node.interface_sha256)),
+                            Value::Array(node.imports.iter().map(module_value).collect()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RetainedTemplateNode {
+    canonical: ArtifactId,
+    interface: TemplateInterfaceNode,
+}
+
+/// Live checked-value custody, issued from the original compiler receipt.
+/// Neither a type projection nor recovered native availability can issue it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedTemplateImports {
+    producer: [u8; 32],
+    roots: BTreeSet<ExactModuleIdentity>,
+    graph: BTreeMap<ExactModuleIdentity, RetainedTemplateNode>,
+    artifacts: ArtifactView,
+}
+
+fn template_selects_owner(templates: &[String], owner: &ExactModuleIdentity) -> bool {
+    templates.iter().any(|template| {
+        template
+            .lines()
+            .any(|line| template_import_line(line, owner))
+    })
+}
+
+fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
+    let import = format!("import {}", owner.module);
+    line == import
+        || line
+            .strip_prefix(&format!("import qualified {} as ", owner.module))
+            .is_some_and(|alias| {
+                !alias.is_empty()
+                    && alias
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+            })
+}
+
+impl RetainedTemplateImports {
+    pub(crate) fn retain_in(&self, artifacts: &ArtifactView) -> Result<ArtifactView, CompileError> {
+        Ok(artifacts.merge(&self.artifacts)?)
+    }
+
+    pub(crate) fn capture(
+        original: &ExactDeclarationContext,
+        templates: &[String],
+    ) -> Result<Option<Arc<Self>>, CompileError> {
+        let entries = original.artifact_view().entries();
+        let canonical = entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Canonical(interface)
+                    if matches!(
+                        interface.origin(),
+                        crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
+                    ) =>
+                {
+                    Some((entry.descriptor.owner.clone(), entry.clone()))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let roots = original
+            .lexical_graph()
+            .iter()
+            .filter(|node| {
+                canonical.contains_key(&node.owner)
+                    && !node.owner.module.starts_with("Tidepool.Session.")
+                    && node.owner.module != "Tidepool.Internal.Resume"
+                    && template_selects_owner(templates, &node.owner)
+            })
+            .map(|node| node.owner.clone())
+            .collect::<BTreeSet<_>>();
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        if !matches!(
+            original.original_instance_environment,
+            OriginalInstanceEnvironment::Complete { .. }
+        ) {
+            return Err(failure(
+                "retained template imports require complete original compiler execution evidence",
+            ));
+        }
+        let graph = original
+            .interface_graph_for_roots(roots.iter().cloned().collect())?
+            .into_iter()
+            .map(|(owner, interface)| {
+                let entry = canonical.get(&owner).ok_or_else(|| {
+                    failure("original template graph lacks canonical source custody")
+                })?;
+                Ok((
+                    owner,
+                    RetainedTemplateNode {
+                        canonical: entry.descriptor.id,
+                        interface,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        let artifacts = original
+            .artifact_view()
+            .select_roots(graph.values().map(|node| node.canonical).collect())?;
+        let retained = Arc::new(Self {
+            producer: original.producer,
+            roots,
+            graph,
+            artifacts,
+        });
+        retained.validate(original.producer, original.artifact_view())?;
+        Ok(Some(retained))
+    }
+
+    fn validate(&self, producer: [u8; 32], artifacts: &ArtifactView) -> Result<(), CompileError> {
+        if producer != self.producer
+            || self.roots.is_empty()
+            || self.graph.len() > 4096
+            || self
+                .graph
+                .values()
+                .map(|node| node.interface.imports.len())
+                .sum::<usize>()
+                > 65536
+            || self.roots.iter().any(|root| !self.graph.contains_key(root))
+        {
+            return Err(failure("retained template roots or producer differ"));
+        }
+        let entries = artifacts.entries();
+        let mut reachable = BTreeSet::new();
+        let mut pending = self.roots.iter().cloned().collect::<Vec<_>>();
+        while let Some(owner) = pending.pop() {
+            if !reachable.insert(owner.clone()) {
+                continue;
+            }
+            let node = self
+                .graph
+                .get(&owner)
+                .ok_or_else(|| failure("retained template graph is not closed"))?;
+            if !entries.iter().any(|entry| entry.descriptor.id == node.canonical
+                && entry.descriptor.owner == owner
+                && entry.descriptor.producer_sha256 == producer
+                && entry.descriptor.interface_sha256 == node.interface.interface_sha256
+                && matches!(&entry.payload, ArtifactPayload::Canonical(interface)
+                    if matches!(interface.origin(), crate::certified_products::CanonicalOrigin::SourceOriginal { .. }))) {
+                return Err(failure("retained template canonical identity differs"));
+            }
+            let imports = node.interface.imports.iter().collect::<BTreeSet<_>>();
+            if imports.len() != node.interface.imports.len() {
+                return Err(failure("duplicate retained template edge"));
+            }
+            pending.extend(node.interface.imports.iter().cloned());
+        }
+        if reachable.len() != self.graph.len() {
+            return Err(failure("retained template graph has unselected owners"));
+        }
+        Ok(())
+    }
+
+    fn merge(left: &Arc<Self>, right: &Arc<Self>) -> Result<Arc<Self>, CompileError> {
+        if Arc::ptr_eq(left, right) {
+            return Ok(left.clone());
+        }
+        if left.producer != right.producer {
+            return Err(failure("template producers differ"));
+        }
+        let mut graph = left.graph.clone();
+        for (owner, node) in &right.graph {
+            if graph
+                .insert(owner.clone(), node.clone())
+                .is_some_and(|prior| prior != *node)
+            {
+                return Err(failure("retained templates select conflicting originals"));
+            }
+        }
+        let merged = Arc::new(Self {
+            producer: left.producer,
+            roots: left.roots.union(&right.roots).cloned().collect(),
+            graph,
+            artifacts: left.artifacts.merge(&right.artifacts)?,
+        });
+        merged.validate(merged.producer, &merged.artifacts)?;
+        Ok(merged)
+    }
 }
 
 /// The compiler-only import belongs to a hash-sealed checked template and one
@@ -937,6 +1154,7 @@ enum GeneratedScaffoldRole {
     Native(NativeScaffoldRole),
     InitialTemplateInterfaces {
         producer: [u8; 32],
+        roots: BTreeSet<ExactModuleIdentity>,
         graph: Arc<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>>,
     },
 }
@@ -987,31 +1205,40 @@ impl GeneratedScaffoldImportAuthority {
         qualifier: &str,
         boot: bool,
     ) -> bool {
-        let native =
-            match &self.role {
-                GeneratedScaffoldRole::Native(native) => native,
-                GeneratedScaffoldRole::InitialTemplateInterfaces { producer, graph } => {
-                    if target != module_source
-                        || boot
-                        || qualifier != "none"
-                        || *producer != context.producer
-                    {
-                        return false;
-                    }
-                    let key = identity(unit, module);
-                    let Some(node) = graph.get(&key) else {
-                        return false;
-                    };
-                    let import = format!("import {module}");
-                    return self.protected_templates.iter().any(|template| {
-                        template.lines().filter(|line| *line == import).count() == 1
-                    }) && source.lines().filter(|line| *line == import).count() == 1
-                        && context.artifact_view().entries().iter().any(|entry| {
-                            entry.descriptor.owner == key
-                                && entry.descriptor.interface_sha256 == node.interface_sha256
-                        });
+        let native = match &self.role {
+            GeneratedScaffoldRole::Native(native) => native,
+            GeneratedScaffoldRole::InitialTemplateInterfaces {
+                producer,
+                roots,
+                graph,
+            } => {
+                if target != module_source
+                    || boot
+                    || qualifier != "none"
+                    || *producer != context.producer
+                {
+                    return false;
                 }
-            };
+                let key = identity(unit, module);
+                if !roots.contains(&key) {
+                    return false;
+                }
+                let Some(node) = graph.get(&key) else {
+                    return false;
+                };
+                return self.protected_templates.iter().any(|template| {
+                    let imports = template
+                        .lines()
+                        .filter(|line| template_import_line(line, &key))
+                        .collect::<Vec<_>>();
+                    matches!(imports.as_slice(), [import]
+                            if source.lines().filter(|line| line == import).count() == 1)
+                }) && context.artifact_view().entries().iter().any(|entry| {
+                    entry.descriptor.owner == key
+                        && entry.descriptor.interface_sha256 == node.interface_sha256
+                });
+            }
+        };
         let owner = match native {
             NativeScaffoldRole::Resume(owner) => owner,
             NativeScaffoldRole::PlannedDeclaration(certificate) => certificate.product().owner(),
@@ -1505,15 +1732,15 @@ impl ExactCompilationRequest {
         initial: Arc<ExactDeclarationContext>,
         templates: &[String],
     ) -> Result<Self, CompileError> {
-        let selected = initial.template_interface_graph(templates)?;
-        if selected.is_empty() {
+        let selected = initial.selected_template_imports(templates)?;
+        if selected.roots.is_empty() {
             return Ok(self);
         }
         if initial.producer != self.producer_sha256 {
             return Err(failure("checked template interface producer differs"));
         }
         let entries = self.context.artifact_view().entries();
-        for (owner, node) in &selected {
+        for (owner, node) in &selected.graph {
             if !entries.iter().any(|entry| {
                 entry.descriptor.owner == *owner
                     && entry.descriptor.interface_sha256 == node.interface_sha256
@@ -1527,12 +1754,27 @@ impl ExactCompilationRequest {
                     "checked template interface differs from its initial selection",
                 ));
             }
+            if initial
+                .template_imports
+                .as_ref()
+                .and_then(|retained| retained.graph.get(owner))
+                .is_some_and(|retained| {
+                    !entries
+                        .iter()
+                        .any(|entry| entry.descriptor.id == retained.canonical)
+                })
+            {
+                return Err(failure(
+                    "checked template canonical original differs from its retained selection",
+                ));
+            }
         }
         self.generated_scaffold_imports
             .push(GeneratedScaffoldImportAuthority {
                 role: GeneratedScaffoldRole::InitialTemplateInterfaces {
                     producer: initial.producer,
-                    graph: Arc::new(selected),
+                    roots: selected.roots,
+                    graph: Arc::new(selected.graph),
                 },
                 protected_templates: templates.to_vec().into(),
             });
@@ -2710,6 +2952,7 @@ impl ExactDeclarationContext {
             inventory: ArtifactInventory::default().empty_view(),
             lexical: Vec::new(),
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
         }
         .extend(authored, joins, lexical)
     }
@@ -3052,35 +3295,53 @@ impl ExactDeclarationContext {
     /// Project only interfaces selected by the original checked template. The
     /// immutable context owns their seals; template text selects imports, never
     /// manufactures interface or native authority.
-    pub(crate) fn template_interface_graph(
+    #[cfg(test)]
+    fn template_interface_graph(
         &self,
         templates: &[String],
     ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
-        let roots = self
+        Ok(self.selected_template_imports(templates)?.graph)
+    }
+
+    pub(crate) fn selected_template_imports(
+        &self,
+        templates: &[String],
+    ) -> Result<SelectedTemplateImports, CompileError> {
+        let mut roots = self
             .lexical_graph()
             .iter()
-            .filter(|node| {
-                let import = format!("import {}", node.owner.module);
-                templates.iter().any(|template| {
-                    template.lines().any(|line| {
-                        line == import
-                            || line
-                                .strip_prefix(&format!(
-                                    "import qualified {} as ",
-                                    node.owner.module
-                                ))
-                                .is_some_and(|alias| {
-                                    !alias.is_empty()
-                                        && alias.chars().all(|c| {
-                                            c.is_ascii_alphanumeric() || c == '_' || c == '.'
-                                        })
-                                })
-                    })
-                })
-            })
+            .filter(|node| template_selects_owner(templates, &node.owner))
             .map(|node| node.owner.clone())
-            .collect::<Vec<_>>();
-        self.interface_graph_for_roots(roots)
+            .collect::<BTreeSet<_>>();
+        let mut graph = self.interface_graph_for_roots(roots.iter().cloned().collect())?;
+        if let Some(retained) = &self.template_imports {
+            retained.validate(self.producer, self.artifact_view())?;
+            let selected = retained
+                .roots
+                .iter()
+                .filter(|owner| template_selects_owner(templates, owner))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let mut pending = selected.iter().cloned().collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            while let Some(owner) = pending.pop() {
+                if !seen.insert(owner.clone()) {
+                    continue;
+                }
+                let node = &retained.graph[&owner].interface;
+                if graph
+                    .insert(owner.clone(), node.clone())
+                    .is_some_and(|old| old != *node)
+                {
+                    return Err(failure(
+                        "template and lexical closures select different interfaces",
+                    ));
+                }
+                pending.extend(node.imports.iter().cloned());
+            }
+            roots.extend(selected);
+        }
+        Ok(SelectedTemplateImports { roots, graph })
     }
 
     /// A pure preview observes every instance visible to the original request,
@@ -3300,6 +3561,13 @@ impl ExactDeclarationContext {
             self.admit_producer(interface.interface().toolchain_identity_sha256())?;
             self.inventory = self.inventory.merge(value.artifact_view())?;
             lexical.extend_from_slice(value.source_lexical());
+            if let Some(retained) = value.template_imports() {
+                self.inventory = self.inventory.merge(&retained.artifacts)?;
+                self.template_imports = Some(match &self.template_imports {
+                    Some(existing) => RetainedTemplateImports::merge(existing, retained)?,
+                    None => retained.clone(),
+                });
+            }
         }
         self.lexical = compose_lexical_nodes(&lexical)?;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
@@ -3496,6 +3764,28 @@ impl ExactDeclarationContext {
                 ]))
             }
         }
+        if let Some(retained) = &self.template_imports {
+            fields.push(Value::Array(vec![
+                text("retained-template-imports1"),
+                Value::Array(retained.roots.iter().map(module_value).collect()),
+                Value::Array(
+                    retained
+                        .graph
+                        .iter()
+                        .map(|(owner, node)| {
+                            Value::Array(vec![
+                                module_value(owner),
+                                text(hex(&node.canonical.0)),
+                                text(hex(&node.interface.interface_sha256)),
+                                Value::Array(
+                                    node.interface.imports.iter().map(module_value).collect(),
+                                ),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ]));
+        }
         let value = Value::Array(fields);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).expect("owned value encoding");
@@ -3613,6 +3903,9 @@ impl ExactDeclarationContext {
     }
 
     fn normalize(&self) -> Result<(), CompileError> {
+        if let Some(retained) = &self.template_imports {
+            retained.validate(self.producer, self.artifact_view())?;
+        }
         let interfaces = self.interface_owners();
         let owners = interfaces
             .iter()
@@ -5001,6 +5294,7 @@ mod tests {
         let context = ExactDeclarationContext {
             producer: producer_sha256,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
             inventory: view,
             lexical: vec![
                 ExactLexicalNode {
@@ -6284,6 +6578,7 @@ mod tests {
         let context = Arc::new(ExactDeclarationContext {
             producer: [7; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
             inventory: inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap(),
@@ -6643,6 +6938,7 @@ mod tests {
         let context = Arc::new(ExactDeclarationContext {
             producer: [7; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
             lexical: vec![],
             inventory: inventory
                 .admit_shared(
@@ -8409,6 +8705,7 @@ mod tests {
         let authority = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
                 producer: initial.producer,
+                roots: BTreeSet::from([identity("fixture", "Joined")]),
                 graph: Arc::new(graph.clone()),
             },
             protected_templates: Arc::from([template.to_owned()]),
@@ -8472,6 +8769,7 @@ mod tests {
             Arc::new(ExactDeclarationContext {
                 producer: [7; 32],
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
+                template_imports: None,
                 inventory: inventory
                     .admit(
                         &inventory.empty_view(),
@@ -8568,6 +8866,7 @@ mod tests {
         let authority = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
                 producer: initial.producer,
+                roots: BTreeSet::from([identity("main", "CapturedInterface")]),
                 graph: Arc::new(
                     initial
                         .template_interface_graph(&[source.to_owned()])
@@ -8607,6 +8906,7 @@ mod tests {
         let no_initial_selection = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
                 producer: current.producer,
+                roots: BTreeSet::new(),
                 graph: Arc::new(
                     current
                         .template_interface_graph(&[source.to_owned()])
@@ -8628,6 +8928,7 @@ mod tests {
         let no_protected_import = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {
                 producer: initial.producer,
+                roots: BTreeSet::new(),
                 graph: Arc::new(
                     initial
                         .template_interface_graph(&["module Expr where\n".to_owned()])
@@ -8675,6 +8976,7 @@ mod tests {
         let context = ExactDeclarationContext {
             producer: [7; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
             inventory: inventory
                 .admit_shared(
                     &inventory.empty_view(),

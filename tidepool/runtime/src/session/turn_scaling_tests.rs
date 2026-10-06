@@ -1044,8 +1044,9 @@ fn try_execute_cell_with_template_imports_expectation(
         scenario,
         &format!("{label}.compile_cell"),
         None,
-        |_| compile_cell().unwrap(),
-    );
+        |_| compile_cell(),
+    )
+    .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
     assert!(!checked.items.is_empty());
     eprintln!(
         "protected-scale {}",
@@ -2368,14 +2369,18 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
             .map(|context| context.lexical_graph()),
         view.reachable_values(),
     );
-    assert!(resident.current_binding_in(public, "retainedTask").is_some());
+    assert!(resident
+        .current_binding_in(public, "retainedTask")
+        .is_some());
     // A value-only publication may have no declaration tip. Its checked value
     // artifact supplies original support when the next compiler request is
     // admitted; that request's retained diagnostic inputs expose the inventory.
-    assert!(view.exact_declaration_context().is_none_or(|context| context
-        .lexical_graph()
-        .iter()
-        .all(|node| node.owner.module != "QuotedTemplateSupport")));
+    assert!(view
+        .exact_declaration_context()
+        .is_none_or(|context| context
+            .lexical_graph()
+            .iter()
+            .all(|node| node.owner.module != "QuotedTemplateSupport")));
     for (label, expression, expected) in [
         ("unrelated_cell_after_quoted_template", "smokeValue + 1", 43),
         ("retained_quoted_template_value", "retainedTask", 42),
@@ -2405,6 +2410,47 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         )
         .unwrap();
     }
+    let before_refusal = resident.binding_names_in(public);
+    let refused = try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "authored_import_still_demands_current_quoted_source",
+        "import QuotedTemplateSupport\nlet forbiddenTask = taskValue 0",
+        1,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::default(),
+    );
+    assert!(matches!(
+        refused,
+        Err(ResidentError::Session(
+            crate::session::SessionError::Compile(_)
+        ))
+    ));
+    assert_eq!(resident.binding_names_in(public), before_refusal);
+    std::fs::write(
+        &support,
+        include_str!("fixtures/quoted-template-support.hs").replace("[label|x|]", "[label|xx|]"),
+    )
+    .unwrap();
+    try_execute_cell_with_template_imports_expectation(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "changed_source_keeps_quoted_template_original",
+        &guarded_integer_capture_source("taskValue 41", 42),
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+        Some(42),
+    )
+    .unwrap();
     std::fs::remove_file(&support).unwrap();
     try_execute_cell_with_template_imports_expectation(
         &mut resident,

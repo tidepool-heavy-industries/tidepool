@@ -628,6 +628,7 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
                     reserved_declaration_modules: vec![],
                 },
                 Value::Array(vec![]),
+                &crate::declaration_context::SelectedTemplateImports::default(),
             )
             .unwrap()
         }
@@ -651,7 +652,7 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
                 planned: Value::Null,
                 settled: vec![],
                 value_interfaces: Value::Array(vec![]),
-                template_interfaces: Value::Array(vec![]),
+                template_imports: crate::declaration_context::SelectedTemplateImports::default(),
             })
         }
         PurposeCase::Inspection => {
@@ -722,7 +723,7 @@ fn expression_purpose(root: &Path, includes: &[PathBuf], plan: NativeBytes) {
         planned: Value::Null,
         settled: vec![],
         value_interfaces: Value::Array(vec![]),
-        template_interfaces: Value::Array(vec![]),
+        template_imports: crate::declaration_context::SelectedTemplateImports::default(),
     });
     let value = checked_search_authorization(body, includes).unwrap();
     let mut bytes = vec![];

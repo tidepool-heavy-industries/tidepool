@@ -557,10 +557,10 @@ impl CheckedPurpose {
     pub(crate) const fn wire_tag(self) -> &'static str {
         match self {
             Self::Inspection => "inspection1",
-            Self::Cell => "cell-check3",
-            Self::Item => "checked-item4",
+            Self::Cell => "cell-check4",
+            Self::Item => "checked-item5",
             Self::ActivationPreview => "host-activation-preview3",
-            Self::Program => "cell-program2",
+            Self::Program => "cell-program3",
         }
     }
 }
@@ -606,6 +606,7 @@ fn checked_cell_authorization(
     purpose: CheckedCellPurpose,
     specification: &crate::checked_cell::CheckedCellSpecification,
     values: &crate::checked_cell::CheckedValueInputs,
+    context: &crate::declaration_context::ExactDeclarationContext,
     include: &[PathBuf],
 ) -> Result<Value, CompileError> {
     checked_search_authorization(
@@ -617,6 +618,7 @@ fn checked_cell_authorization(
             },
             specification,
             values.baseline_authorization(),
+            &context.selected_template_imports(&specification.template_sources())?,
         )?,
         include,
     )
@@ -626,12 +628,14 @@ pub(crate) fn encode_cell_authorization(
     purpose: crate::checked_cell::CheckedCellManifestPurpose,
     specification: &crate::checked_cell::CheckedCellSpecification,
     baseline: Value,
+    templates: &crate::declaration_context::SelectedTemplateImports,
 ) -> Result<Value, CompileError> {
     let mut authorization = specification.manifest_value(purpose)?;
     let Value::Array(fields) = &mut authorization else {
         unreachable!("closed cell authorization")
     };
     fields.push(baseline);
+    fields.push(templates.authorization_value());
     Ok(authorization)
 }
 
@@ -1025,8 +1029,13 @@ impl ModuleCandidateOffer {
         let context = checked_value_context(Some(publication_context), &checked_values)?;
         let checked_projections =
             crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
-        let authorization =
-            checked_cell_authorization(purpose, &specification, &checked_values, include)?;
+        let authorization = checked_cell_authorization(
+            purpose,
+            &specification,
+            &checked_values,
+            &context,
+            include,
+        )?;
         Ok(Self {
             selected: immutable_candidates_in_context(
                 &context,
@@ -1046,6 +1055,10 @@ impl ModuleCandidateOffer {
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(checked_values.import_authority())
+                    .with_initial_template_interfaces(
+                        context.clone(),
+                        &specification.template_sources(),
+                    )?
                     .with_generated_scaffold_imports(
                         std::iter::once(specification.template_source.as_str()).chain(
                             specification
@@ -1109,6 +1122,11 @@ impl ModuleCandidateOffer {
             unreachable!("closed authorization")
         };
         fields.push(inputs.baseline_authorization());
+        fields.push(
+            context
+                .selected_template_imports(&specification.template_sources())?
+                .authorization_value(),
+        );
         fields.extend(extension);
         fields.push(Value::Array(
             include
@@ -1135,6 +1153,10 @@ impl ModuleCandidateOffer {
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority())
+                    .with_initial_template_interfaces(
+                        context.clone(),
+                        &specification.template_sources(),
+                    )?
                     .with_generated_scaffold_imports(
                         std::iter::once(specification.template_source.as_str()).chain(
                             specification
@@ -5098,7 +5120,10 @@ mod typed_site_tests {
         let Value::Array(fields) = encoded else {
             panic!("authorization must be an array")
         };
-        assert_eq!(fields[0], Value::Text("cell-check3".into()));
+        assert_eq!(
+            fields[0],
+            Value::Text(CheckedPurpose::Cell.wire_tag().into())
+        );
         assert_eq!(
             fields[1],
             Value::Array(vec![
@@ -6450,6 +6475,55 @@ mod module_product_tests {
                 let admission = compiled.exact_source_admission.as_ref().unwrap();
                 assert!(!admission.evidence.cache_safe && !admission.evidence.selection_complete);
                 assert!(admission.evidence.revalidate(source).is_ok());
+                let original = admission
+                    .original_execution_context(&compiled.artifact_view)
+                    .unwrap();
+                let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
+                assert!(
+                    crate::declaration_context::RetainedTemplateImports::capture(
+                        &original, &template,
+                    )
+                    .unwrap()
+                    .is_some(),
+                    "the real completed original issues template custody"
+                );
+                let missing = ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "MissingOriginalInstanceOwner".into(),
+                };
+                let mut incomplete_graph = original.lexical_graph().to_vec();
+                incomplete_graph
+                    .iter_mut()
+                    .find(|node| node.owner == quoted_owner)
+                    .unwrap()
+                    .imports
+                    .push(missing.clone());
+                let incomplete = ExactDeclarationContext::from_authenticated_execution(
+                    original.toolchain_identity_sha256(),
+                    original.artifact_view(),
+                    incomplete_graph,
+                    original.original_instance_target().unwrap().clone(),
+                    std::slice::from_ref(&missing),
+                )
+                .unwrap();
+                assert!(matches!(incomplete.original_instance_environment(),
+                    crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(owners)
+                    if owners.contains(&missing)));
+                assert!(
+                    incomplete
+                        .lexical_graph()
+                        .iter()
+                        .all(|node| !node.imports.contains(&missing)),
+                    "the negative exercises the owning constructor's pruned graph"
+                );
+                assert!(
+                    crate::declaration_context::RetainedTemplateImports::capture(
+                        &incomplete,
+                        &template,
+                    )
+                    .is_err(),
+                    "a pruned original graph cannot issue template custody"
+                );
                 // The native test owns this completed quotation output; it
                 // does not issue a replay recipe or a hermetic build artifact.
                 let consumer = root.path().join("QuotedConsumer.hs");
