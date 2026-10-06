@@ -215,7 +215,9 @@ impl CertifiedRecoveryProduct {
             &interface,
             &validation.inventory,
         )
-        .map_err(|_| RecoveryArtifactError::InvalidReference)?;
+        .map_err(|error| {
+            recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+        })?;
         self.interface_bytes = interface.interface_anchor();
         self.package_imports_bytes = interface.package_imports_anchor();
         self.module_interface = Some(interface);
@@ -281,7 +283,9 @@ impl CertifiedRecoveryProduct {
         let sealed = crate::certified_products::original_execution_source_digest_with_validation(
             &self, validation,
         )
-        .map_err(|_| RecoveryArtifactError::InvalidReference)?;
+        .map_err(|error| {
+            recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+        })?;
         if sealed != Some(graph.digest()) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
@@ -502,10 +506,22 @@ pub struct VerifiedRecoveryJoin {
     pub package_imports_bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RecoveryAdmissionFailure {
+    #[error("{0}")]
+    Decode(#[source] tidepool_repr::execution_schema::ParseError),
+    #[error("{format:?} size {actual} exceeds {limit} bytes")]
+    CertificateSize {
+        format: crate::certified_products::CertificationFormat,
+        actual: usize,
+        limit: usize,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
     #[error("inventory accounting: {0}")]
-    InventoryAccounting(#[from] tidepool_repr::execution_schema::ParseError),
+    InventoryAccounting(RecoveryAdmissionFailure),
     #[error("invalid recovery artifact reference")]
     InvalidReference,
     #[error("execution source producer differs for {unit}:{module}")]
@@ -541,6 +557,64 @@ pub enum RecoveryArtifactError {
     InvalidModuleCertificate(PathBuf),
     #[error("recovery artifact I/O: {0}")]
     Io(#[from] io::Error),
+}
+
+fn accounting_charge_error(
+    cause: tidepool_repr::execution_schema::ParseError,
+) -> RecoveryArtifactError {
+    RecoveryArtifactError::InventoryAccounting(RecoveryAdmissionFailure::Decode(cause))
+}
+
+// Limits describe this admission's resources, not damage to immutable bytes.
+// All semantic/canonical failures retain the caller's precise artifact path.
+fn recovery_validation_error(
+    error: crate::certified_products::CertificationError,
+    invalid: RecoveryArtifactError,
+) -> RecoveryArtifactError {
+    use crate::certified_products::CertificationError;
+    use tidepool_repr::execution_schema::ParseError;
+    match error {
+        CertificationError::Product(cause) => match cause {
+            cause @ (ParseError::ByteLimit { .. }
+            | ParseError::InventoryByteLimit { .. }
+            | ParseError::ModuleByteLimit { .. }
+            | ParseError::LimitExceeded(_)) => accounting_charge_error(cause),
+            ParseError::Truncated
+            | ParseError::TrailingBytes
+            | ParseError::InvalidTag(_)
+            | ParseError::UnsupportedVersion(_)
+            | ParseError::UnsupportedTarget(_)
+            | ParseError::InvalidReference(_)
+            | ParseError::InvalidScope(_)
+            | ParseError::InvalidSignature(_)
+            | ParseError::InvalidLayout(_)
+            | ParseError::DuplicateDefinition(_)
+            | ParseError::Malformed(_) => invalid,
+        },
+        CertificationError::SizeLimit {
+            format,
+            actual,
+            limit,
+        } => {
+            RecoveryArtifactError::InventoryAccounting(RecoveryAdmissionFailure::CertificateSize {
+                format,
+                actual,
+                limit,
+            })
+        }
+        CertificationError::CapturedModulePayload(
+            error @ RecoveryArtifactError::InventoryAccounting(_),
+        ) => error,
+        CertificationError::CapturedModulePayload(_)
+        | CertificationError::UnsupportedVersion { .. }
+        | CertificationError::Receipt(_)
+        | CertificationError::Mismatch(_)
+        | CertificationError::FinalizedInterfaceRequirement { .. }
+        | CertificationError::OriginalInterfaceClosure { .. }
+        | CertificationError::StaleEvidence
+        | CertificationError::CandidateEvidence { .. }
+        | CertificationError::ExecutionSource(_) => invalid,
+    }
 }
 
 fn hex(digest: &[u8; 32]) -> String {
@@ -749,7 +823,9 @@ impl PackageInterfaceValidation {
                 path.to_path_buf(),
             ));
         }
-        self.inventory.charge(metadata.len() as usize + 1)?;
+        self.inventory
+            .charge(metadata.len() as usize + 1)
+            .map_err(accounting_charge_error)?;
         let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
         file.take(metadata.len() + 1)
             .read_to_end(&mut bytes)
@@ -933,7 +1009,12 @@ fn read_certification(
         crate::certified_products::home_certification_digests_with_validation(
             &bytes, owner, validation,
         )
-        .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
+        .map_err(|error| {
+            recovery_validation_error(
+                error,
+                RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()),
+            )
+        })?;
     Ok(VerifiedCertification {
         bytes,
         execution_source_digest,
@@ -1049,9 +1130,18 @@ pub(crate) fn validate_package_import_evidence_with_validation(
 
     let invalid = || RecoveryArtifactError::InvalidPackageImports(sidecar_path.to_path_buf());
     validation.decoded_bytes += bytes.len() as u64;
-    let witness: Value = validation.inventory.decode_value(bytes, 32 << 20)?;
-    validation.inventory.charge_value_copies(&witness, 2)?;
-    validation.inventory.charge(bytes.len())?;
+    let witness: Value = validation
+        .inventory
+        .decode_value(bytes, 32 << 20)
+        .map_err(|cause| recovery_validation_error(cause.into(), invalid()))?;
+    validation
+        .inventory
+        .charge_value_copies(&witness, 2)
+        .map_err(accounting_charge_error)?;
+    validation
+        .inventory
+        .charge(bytes.len())
+        .map_err(accounting_charge_error)?;
     let mut canonical = Vec::new();
     ciborium::ser::into_writer(&witness, &mut canonical).map_err(|_| invalid())?;
     if canonical != bytes {
@@ -1258,7 +1348,10 @@ fn read_admission_bytes(
             path.to_path_buf(),
         ));
     }
-    validation.inventory.charge(metadata.len() as usize + 1)?;
+    validation
+        .inventory
+        .charge(metadata.len() as usize + 1)
+        .map_err(accounting_charge_error)?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
     file.take(metadata.len() + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 != metadata.len() {
@@ -1651,7 +1744,10 @@ pub(crate) fn capture_module_payload(
     {
         return Err(RecoveryArtifactError::InvalidCapturedPayload(path));
     }
-    validation.inventory.charge(metadata.len() as usize + 1)?;
+    validation
+        .inventory
+        .charge(metadata.len() as usize + 1)
+        .map_err(accounting_charge_error)?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
     file.take(metadata.len() + 1)
         .read_to_end(&mut bytes)
@@ -1729,8 +1825,11 @@ pub(crate) fn recover_module_interface(
         core,
         validation,
     )
-    .map_err(|_| {
-        RecoveryArtifactError::InvalidModuleCertificate(root.join(&reference.certificate_path))
+    .map_err(|error| {
+        recovery_validation_error(
+            error,
+            RecoveryArtifactError::InvalidModuleCertificate(root.join(&reference.certificate_path)),
+        )
     })?;
     if interface.unit() != anchor.unit
         || interface.module() != anchor.module
@@ -1866,8 +1965,11 @@ pub(crate) fn materialize_certified_products_with_validation(
                 owner,
                 validation,
             )
-            .map_err(|_| {
-                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())
+            .map_err(|error| {
+                recovery_validation_error(
+                    error,
+                    RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+                )
             })?;
         if source_digest != product.execution_source().map(|graph| graph.digest()) {
             return Err(RecoveryArtifactError::InvalidCertifiedOwners(
@@ -2245,6 +2347,87 @@ mod tests {
     use super::*;
     use ciborium::value::Value;
     use tidepool_repr::execution_schema::ModuleVersion;
+
+    #[test]
+    fn malformed_package_witness_and_admission_limits_remain_distinct() {
+        use tidepool_repr::execution_schema::{
+            InventoryDecodeLimits, InventoryOperation, ParseError,
+        };
+        let path = Path::new("owner.packages");
+        let bytes = package_witness("home", "A", &[7; 32], vec![]);
+        assert!(validate_package_imports(&bytes, "home", "A", &[7; 32], path).is_ok());
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert!(matches!(
+            validate_package_imports(&truncated, "home", "A", &[7; 32], path),
+            Err(RecoveryArtifactError::InvalidPackageImports(actual)) if actual == path
+        ));
+        let mut limited = PackageInterfaceValidation::with_inventory(Arc::new(
+            InventoryOperation::new(InventoryDecodeLimits {
+                max_work: 0,
+                ..InventoryDecodeLimits::default()
+            }),
+        ));
+        assert!(matches!(
+            validate_package_imports_with_validation(
+                &bytes,
+                "home",
+                "A",
+                &[7; 32],
+                path,
+                &mut limited
+            ),
+            Err(RecoveryArtifactError::InventoryAccounting(
+                RecoveryAdmissionFailure::Decode(ParseError::LimitExceeded(_))
+            ))
+        ));
+    }
+
+    #[test]
+    fn certificate_size_refusal_retains_its_original_format_and_bounds() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owner.cert");
+        let owner = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: tidepool_repr::execution_schema::ModuleVersion([3; 32]),
+            skinny_iface_sha256: [7; 32],
+            product_sha256: [8; 32],
+        };
+        let bytes =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(read_certification(
+            &path,
+            None,
+            &owner,
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_ok());
+        let limit = bytes.len() - 1;
+        let mut limited = PackageInterfaceValidation::with_inventory(Arc::new(
+            InventoryOperation::new(InventoryDecodeLimits {
+                max_module_bytes: limit,
+                ..InventoryDecodeLimits::default()
+            }),
+        ));
+        assert!(matches!(
+            read_certification(&path, None, &owner, &mut limited),
+            Err(RecoveryArtifactError::InventoryAccounting(
+                RecoveryAdmissionFailure::CertificateSize { format, actual, limit: bound }
+            )) if format == crate::certified_products::CertificationFormat::HomeOwners
+                && actual == bytes.len() && bound == limit
+        ));
+        let mut changed = bytes;
+        changed.push(0);
+        fs::write(&path, changed).unwrap();
+        assert!(matches!(
+            read_certification(&path, None, &owner, &mut PackageInterfaceValidation::default()),
+            Err(RecoveryArtifactError::InvalidCertifiedOwners(actual)) if actual == path
+        ));
+    }
 
     #[test]
     fn same_native_owner_preserves_distinct_source_context_certificates() {

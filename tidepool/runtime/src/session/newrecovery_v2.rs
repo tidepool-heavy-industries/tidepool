@@ -429,7 +429,7 @@ pub(crate) struct RecoveryError {
 pub(crate) enum RecoveryErrorKind {
     Manifest,
     Format(RecoveryRefusal),
-    InventoryAccounting(tidepool_repr::execution_schema::ParseError),
+    InventoryAccounting(tidepool_toolchain::recovery_artifacts::RecoveryAdmissionFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2525,7 +2525,9 @@ mod tests {
             max_work: 0,
             ..InventoryDecodeLimits::default()
         });
-        let cause = operation.decode_value(&[0x80], 1).unwrap_err();
+        let cause = tidepool_toolchain::recovery_artifacts::RecoveryAdmissionFailure::Decode(
+            operation.decode_value(&[0x80], 1).unwrap_err(),
+        );
         let failure = artifact_error_loss(
             home_artifact(&wire),
             RecoveryArtifactError::InventoryAccounting(cause.clone()),

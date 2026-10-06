@@ -418,7 +418,7 @@ pub enum SessionError {
     #[error("recovery inventory admission at {} refused: {cause}", path.display())]
     RecoveryInventoryRefused {
         path: PathBuf,
-        cause: tidepool_repr::execution_schema::ParseError,
+        cause: tidepool_toolchain::recovery_artifacts::RecoveryAdmissionFailure,
     },
     /// The declaration and binding visibility swap has completed. Retry only
     /// [`SessionLib::confirm_recovery_durability`], never this declaration.
