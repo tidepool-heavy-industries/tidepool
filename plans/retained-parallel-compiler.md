@@ -50,13 +50,29 @@ environment without turning the retained version inventory into lexical scope.
 Store completed versions once; do not append a full context snapshot or aggregate
 every historical interface cache on each request.
 
+Index versions by their known source/dependency inputs before validating actual
+interface usages. Select recovery entries by owner rather than scanning each
+historical context. Keep one package finder owner for the fixed package universe;
+an attempt must not add another fallback layer to the previous attempt's finder.
+Interpreter invalidation traverses reverse dependencies of replaced owners.
+
 Retain completed lowering and exact-original recovery alongside interfaces.
 Native, checked and presentation purposes must not repeatedly lower or recover
 the same valid owner. Growing recovery demand prepares only newly demanded work.
+Authority-bearing prepared code needs an opaque witness of the nominal and sibling
+definitions actually consumed, including relevant negative lookups. A fresh
+request ID cannot by itself invalidate that code. Issue the witness from the same
+resolved values used by elaboration and revalidate it before reuse. Package
+recovery may prepare canonical private-dependency components together when GHC
+requires their local binder scope; retain stable original identities and report
+the extra groups prepared rather than claiming binder-level demand granularity.
 Interpreter retention distinguishes an inactive compatible module from a replaced
 executable version; bytecode containing remote pointers belongs to its interpreter
 epoch. Rotation preserves pure compiler products but cannot reuse stale remote
 pointers. Reissue such bytecode from retained finalized Core when required.
+An unsuccessful linker operation may mutate the interpreter before its registry
+rolls back. Registry contents alone cannot prove recovery; uncertain executable
+mutation retires the interpreter epoch while retaining completed pure products.
 
 Retain compatible interpreter/linkable state. Classify actual BCO and foreign
 object components; unload/relink changed supported home code and rotate only
@@ -149,6 +165,14 @@ Add exomonad prepare for root/configured worker entries. Init prepares root firs
 starts it, then prepares configured common worker specializations in background.
 Check remains check-only; do not enumerate all effect subsets.
 
+Prepared workspace and installer artifacts retain an immutable source deployment
+independent of live run identity. Multiple fresh processes/runs may select the
+same completed artifact with fresh actor state. A source-only recipe key cannot
+stand in for an exact completed TH output or bypass replay eligibility. Carry
+source-owner manifests through ready lookup instead of rereading immutable roots
+for every actor. Launch environment assembly consumes the selections already
+verified during that acquisition; independent acquisitions still verify inputs.
+
 ### Resource admission
 
 Extend the existing daemon admission before ACCEPTED with typed workload class
@@ -209,6 +233,13 @@ or baked wire versions. Property suites belong in the repository.
   actual frontend/finalization/projection work, bytes read/written/decoded,
   native hits, CPU/allocation/GC and aggregate peaks. Use existing codegen detail
   and standard GHC profiling/eventlogs. Do not sum overlapping CPU phase counters.
+- Emit reuse decisions at the stage that performs or avoids work: frontend,
+  interface, finalized Core, prepared body/site authority, original recovery,
+  raw projection, artifact reference/transfer and native image. Correlate them
+  to the actual request/worker and owner version, retain concrete miss reasons,
+  and mark observed stage completion. Missing instrumentation is unknown, not
+  zero work. Calibrate counters against deliberately disabled reuse, and report
+  distinct-cell, binding-growth and A/B/A behavior separately.
 
 Performance misses remain explicit open results. An identical request cache hit
 does not substitute for genuinely new-cell acceptance.
