@@ -1,8 +1,8 @@
-use super::{
+use ciborium::value::Value;
+use tidepool_repr::execution_schema::{
     testing, DecodeLimits, InventoryDecodeLimits, InventoryOperation, ParseError,
     ProgramRequirements,
 };
-use ciborium::value::Value;
 
 fn requirements() -> ProgramRequirements {
     let envelope = testing::envelope();
@@ -26,8 +26,15 @@ fn row(unit: &str, module: &str, interface: &[u8], groups: &[Vec<u8>]) -> Value 
 
 fn inventory(rows: Vec<Value>) -> Vec<u8> {
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&("TPMOD", super::MODULE_PRODUCTS_VERSION, rows), &mut bytes)
-        .unwrap();
+    ciborium::ser::into_writer(
+        &(
+            "TPMOD",
+            tidepool_repr::execution_schema::MODULE_PRODUCTS_VERSION,
+            rows,
+        ),
+        &mut bytes,
+    )
+    .unwrap();
     bytes
 }
 
@@ -166,7 +173,8 @@ fn many_real_rows_validate_and_duplicate_owners_or_group_ordinals_fail() {
         .map(|index| {
             let module = format!("Module{index}");
             let mut wire = testing::wire_program();
-            if let super::Group::NonRecursive(top) = &mut wire.bindings[0] {
+            if let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0]
+            {
                 top.identity.unit = "unit".into();
                 top.identity.module = module.clone();
             }

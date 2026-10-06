@@ -2201,7 +2201,7 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
     }
     let mut ordinals = BTreeSet::new();
     let mut binders_seen = BTreeSet::new();
-    for (ordinal, binders, globals) in &witness.groups {
+    for (ordinal, binders, _) in &witness.groups {
         if !ordinals.insert(*ordinal) {
             return Err(CertificationError::Receipt("duplicate group ordinal"));
         }
@@ -9772,8 +9772,8 @@ pub(crate) mod tests {
     fn receipt_decoder_requires_bounded_exact_tuple() {
         let source = "module Fresh where";
         let bytes = sidecar();
-        let evidence = evidence(source);
-        let accepted = receipt(&bytes, &evidence, source);
+        let source_evidence = evidence(source);
+        let accepted = receipt(&bytes, &source_evidence, source);
         let value = Value::Array(vec![
             Value::Text("TPCERT".into()),
             Value::Integer(2.into()),

@@ -69,13 +69,12 @@ fn module_framing_normalizes_outer_widths_and_preserves_opaque_group_bytes() {
     for value in &fields[1..] {
         ciborium::ser::into_writer(value, &mut widened).unwrap();
     }
-    let (products, frames) =
-        parse_module_products_with_framing(
-            &widened,
-            &requirements,
-            InventoryDecodeLimits::default(),
-        )
-            .unwrap();
+    let (products, frames) = parse_module_products_with_framing(
+        &widened,
+        &requirements,
+        InventoryDecodeLimits::default(),
+    )
+    .unwrap();
     assert_eq!(products[0].interface, [0x42, 0x00, 0xff]);
     assert_eq!(frames, [singleton.clone()]);
     let Value::Array(header) = ciborium::de::from_reader(frames[0].as_slice()).unwrap() else {
@@ -93,13 +92,12 @@ fn module_framing_normalizes_outer_widths_and_preserves_opaque_group_bytes() {
     ]);
     let mut combined = Vec::new();
     ciborium::ser::into_writer(&("TPMOD", 1u64, [&row, &unrelated]), &mut combined).unwrap();
-    let (_, frames) =
-        parse_module_products_with_framing(
-            &combined,
-            &requirements,
-            InventoryDecodeLimits::default(),
-        )
-            .unwrap();
+    let (_, frames) = parse_module_products_with_framing(
+        &combined,
+        &requirements,
+        InventoryDecodeLimits::default(),
+    )
+    .unwrap();
     assert_eq!(frames[0], singleton);
     let mut limits = InventoryDecodeLimits::default();
     limits.max_bytes = widened.len() - 1;
@@ -467,12 +465,8 @@ fn module_product_groups_share_one_operation_work_budget() {
         Err(ParseError::LimitExceeded("work")),
     );
     let (_, frames) =
-        parse_module_products_with_framing(
-            &combined,
-            &required,
-            InventoryDecodeLimits::default(),
-        )
-        .unwrap();
+        parse_module_products_with_framing(&combined, &required, InventoryDecodeLimits::default())
+            .unwrap();
     assert_eq!(frames.len(), 2);
     assert_eq!(products.len(), 2);
     assert!(products.iter().all(|product| product.groups.len() == 1));

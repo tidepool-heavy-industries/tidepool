@@ -17,3 +17,6 @@ mod strict_jsonl_directory;
 
 #[path = "../projected_groups.rs"]
 mod projected_groups;
+
+#[path = "../inventory_limits.rs"]
+mod inventory_limits;
