@@ -471,6 +471,13 @@ impl ExtractRequest {
             .collect()
     }
 
+    pub(crate) fn selected_session_values(&self) -> impl Iterator<Item = &OsStr> {
+        self.fields.iter().filter_map(|field| match field {
+            Field::InjectVal(value) => Some(value.as_os_str()),
+            _ => None,
+        })
+    }
+
     pub fn is_turn(&self) -> bool {
         self.fields.iter().any(|field| matches!(field, Field::Turn))
     }

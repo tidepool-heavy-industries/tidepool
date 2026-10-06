@@ -695,6 +695,14 @@ impl ExtractCmd {
         self
     }
 
+    /// Values selected by the typed injection fields, in request order.
+    ///
+    /// This preserves duplicates and the original OS strings without parsing
+    /// module names. Read it after any command mutation that adds selections.
+    pub fn selected_session_values(&self) -> impl Iterator<Item = &OsStr> {
+        self.request.selected_session_values()
+    }
+
     /// `--bind-gen <n>` — the session generation this turn binds into.
     pub fn bind_gen(&mut self, gen: u64) -> &mut Self {
         self.request.bind_gen(gen);
@@ -906,6 +914,67 @@ mod tests {
                 "bind:x,y",
             ]
         );
+    }
+
+    #[test]
+    fn selected_session_values_preserve_typed_fields_and_late_appends() {
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        assert_eq!(cmd.selected_session_values().count(), 0);
+        cmd.input("Tidepool.Session.Val.G900")
+            .include("Tidepool.Session.Val.G901")
+            .session_root("Tidepool.Session.Val.G902")
+            .inspect_type("Tidepool.Session.Val.G903")
+            .inject_vals([
+                "Tidepool.Session.Val.G2",
+                "Tidepool.Session.Val.G1",
+                "Tidepool.Session.Val.G2",
+                "Tidepool.Session.Val.G0",
+                "not a session value",
+            ]);
+        let expected: Vec<OsString> = [
+            "Tidepool.Session.Val.G2",
+            "Tidepool.Session.Val.G1",
+            "Tidepool.Session.Val.G2",
+            "Tidepool.Session.Val.G0",
+            "not a session value",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let bytes = cmd.request_bytes();
+        let snapshot: Vec<OsString> = cmd.selected_session_values().map(OsStr::to_owned).collect();
+        assert_eq!(snapshot, expected);
+        assert_eq!(cmd.request_bytes(), bytes);
+        let decoded = ExtractRequest::decode(&bytes).unwrap();
+        assert_eq!(
+            decoded.selected_session_values().collect::<Vec<_>>(),
+            expected.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+        );
+
+        cmd.module_candidates(Path::new("Tidepool.Session.Val.G904"))
+            .inject_val("Tidepool.Session.Val.G3");
+        let mut appended = expected.clone();
+        appended.push(OsString::from("Tidepool.Session.Val.G3"));
+        assert_eq!(snapshot, expected);
+        assert_eq!(
+            cmd.selected_session_values()
+                .map(OsStr::to_owned)
+                .collect::<Vec<_>>(),
+            appended
+        );
+        let transported = ExtractRequest::decode_worker_argv(&cmd.worker_argv()).unwrap();
+        assert_eq!(
+            transported.selected_session_values().collect::<Vec<_>>(),
+            appended.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let raw = OsString::from_vec(b"Tidepool.Session.Val.G\xff".to_vec());
+            cmd.inject_val(&raw);
+            assert_eq!(cmd.selected_session_values().last(), Some(raw.as_os_str()));
+        }
     }
 
     #[test]
