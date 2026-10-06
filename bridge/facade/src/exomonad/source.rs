@@ -2005,7 +2005,8 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             return Err("owned source graph has no admitted run revision roots".into());
         }
         let mut identities = run_identities;
-        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)?;
+        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)
+            .map_err(|error| error.to_string())?;
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
