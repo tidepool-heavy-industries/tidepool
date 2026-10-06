@@ -4917,6 +4917,7 @@ where
         effect_owner: CurrentEffectOwner<'_>,
         start: crate::ResidentActorStart,
     ) -> child_launch::PreparedChildLaunch {
+        tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = start.child.descriptor.label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
         let fork_group = child.descriptor.fork_group();
         let original_placement = child.descriptor.placement();

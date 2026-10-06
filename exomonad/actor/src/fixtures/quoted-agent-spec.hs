@@ -25,5 +25,5 @@ quotedDescription = Text.pack (show ([capture|{quotation-input}|] :: Int))
 agentSpec :: AgentSpec Tools effects
 agentSpec = defaultSpec
   { specTools = Tools
-      { probe = presentWith id $ tool quotedDescription (\_ -> pure "quoted original") }
+      { probe = presentWith id $ tool quotedDescription (\_ -> pure quotedDescription) }
   }

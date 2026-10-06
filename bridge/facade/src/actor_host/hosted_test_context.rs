@@ -372,6 +372,7 @@ pub(super) struct ObservedInstallation {
     pub(super) checkpoint: bool,
     pub(super) context_parent: Option<ActorRef>,
     pub(super) tools: Vec<exomonad_tool::HostedTool>,
+    pub(super) installed_at: std::time::Instant,
 }
 
 #[derive(Clone)]
@@ -398,6 +399,7 @@ impl HostTestObserver {
                 checkpoint: installation.checkpoint.is_some(),
                 context_parent: installation.context_parent,
                 tools: installation.policy.tools().to_vec(),
+                installed_at: std::time::Instant::now(),
             },
         );
         self.changed.send_modify(|revision| *revision += 1);
@@ -716,7 +718,22 @@ impl HostedTestRuntime {
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Result<Self, HostedStartupError> {
-        Self::start_owned(settings, configure, Some(Arc::clone(transport)), None).await
+        Self::start_owned(
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+        )
+        .await
+    }
+
+    pub(super) async fn start_prepared_configured(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(settings, configure, Some(Arc::clone(transport)), None, true).await
     }
 
     pub(super) async fn start_with_factory(
@@ -729,7 +746,7 @@ impl HostedTestRuntime {
             + Send
             + 'static,
     ) -> Result<Self, HostedStartupError> {
-        Self::start_owned(settings, configure, None, Some(Box::new(transport))).await
+        Self::start_owned(settings, configure, None, Some(Box::new(transport)), false).await
     }
 
     async fn start_owned(
@@ -737,6 +754,7 @@ impl HostedTestRuntime {
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
         transport_factory: Option<HostTransportFactory>,
+        prepare: bool,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::install_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -806,6 +824,62 @@ impl HostedTestRuntime {
             jev: None,
         };
         configure(&mut config);
+        if prepare {
+            let started = std::time::Instant::now();
+            let directory = Arc::new(
+                config
+                    .run_directory
+                    .child("prepared-deployment")
+                    .map_err(|error| error.to_string())?,
+            );
+            let mut frozen = crate::exomonad::workspace::FrozenWorkspace::begin_preparation(
+                &config.workspace,
+                &directory,
+            )
+            .map_err(|error| error.to_string())?;
+            let source = Arc::new(
+                crate::exomonad::source::ExomonadSourceReload::new_owned(
+                    frozen.clone(),
+                    config.workspace.clone(),
+                    directory.path().to_owned(),
+                    frozen.runtime_actors(),
+                    crate::exomonad::source::SourceRootOwner::Prepared(Arc::clone(&directory)),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+            let entries = super::prepare_workspace_toolsets(
+                &config.workspace,
+                &directory,
+                frozen.clone(),
+                source,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let revision = crate::exomonad::source::SourceLayer::new(directory.path())
+                .read_active()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "production preparation did not settle its source revision".to_owned()
+                })?;
+            frozen
+                .complete_preparation(&directory, revision.identity, entries)
+                .map_err(|error| error.to_string())?;
+            eprintln!(
+                "prepared-runtime-first-preparation {}",
+                serde_json::json!({
+                    "elapsed_ns": started.elapsed().as_nanos(), "deployment": directory.path(),
+                    "completed": true,
+                })
+            );
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::select_prepared(
+                    &config.workspace,
+                    config.run_directory.path(),
+                    Some(directory.path()),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
         if let Some(diagnostics) = &mut diagnostics {
             diagnostics.workspace = config.workspace.clone();
             diagnostics.run_root = config.run_directory.path().to_path_buf();

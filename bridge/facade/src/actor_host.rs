@@ -86,6 +86,8 @@ mod overlay_resource;
 mod packaged_catalog_tests;
 #[cfg(test)]
 mod prepared_display_tests;
+#[cfg(test)]
+mod prepared_runtime_acceptance;
 pub(crate) use overlay_resource::valid_artifact_path;
 
 mod workspace;
