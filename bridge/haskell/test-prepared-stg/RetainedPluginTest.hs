@@ -40,7 +40,6 @@ verifyCompilerReuse :: FilePath -> IO ()
 verifyCompilerReuse dir = do
   forM_ ["ImportProducerExposed.hs", "ImportConsumerExposed.hs", "RetainedUnrelatedLibrary.hs"] $ \name ->
     copyFile ("test-prepared-stg" </> name) (dir </> name)
-  retainedRef <- newIORef emptyRetainedContext
   compiledRef <- newIORef (Map.empty :: Map.Map String Int)
   libdir <- getLibdir
   let a = Set.fromList [identity "producerValue", identity "producerFn"]
@@ -73,13 +72,14 @@ verifyCompilerReuse dir = do
       { importPaths = [dir], ghcLink = NoLink
       , objectDir = Just dir, hiDir = Just dir })
     env <- getSession
-    let installed = installRetainedUnfoldingsPlugin retainedRef env
+    let installed = installRetainedUnfoldingsPlugin emptyRetainedContext env
         plugins = hsc_plugins installed
     setSession (installed { hsc_plugins = plugins
       { staticPlugins = counting : staticPlugins plugins } })
     forM_ steps $ \(retained, expected) -> do
       liftIO (writeIORef compiledRef Map.empty)
-      liftIO (writeIORef retainedRef (retainedContext retained))
+      current <- getSession
+      setSession (installRetainedUnfoldingsPlugin (retainedContext retained) current)
       targets <- mapM (\name -> guessTarget (dir </> name ++ ".hs") Nothing Nothing)
         [consumer, library]
       setTargets targets
@@ -152,25 +152,26 @@ verifyPreparedScope dir = do
       [summary] -> pure summary
       _ -> ioError (userError "prepared producer omitted its actual module summary")
   libdir <- getLibdir
-  contextRef <- newIORef emptyRetainedContext
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
     _ <- setSessionDynFlags flags
     env <- getSession
-    let installed = installRetainedUnfoldingsPlugin contextRef env
+    let installed = installRetainedUnfoldingsPlugin emptyRetainedContext env
+        original = installRetainedUnfoldingsPlugin (retainedContext (Set.singleton relevant)) env
         pluginFor scoped = case staticPlugins (hsc_plugins scoped) of
           plugin : _ -> spPlugin plugin
           [] -> error "retained plugin was not installed"
-        fingerprint retained = do
-          liftIO (writeIORef contextRef (retainedContext retained))
-          let plugin = pluginFor (scopeRetainedSummaryHscEnv producerSummary installed)
+        fingerprint owningEnvironment = do
+          let plugin = pluginFor (scopeRetainedSummaryHscEnv producerSummary owningEnvironment)
           result <- liftIO (pluginRecompile (paPlugin plugin) (paArguments plugin))
           case result of
             MaybeRecompile hash -> pure hash
             _ -> error "custom module environment was not scoped"
-    baseline <- fingerprint (Set.singleton relevant)
-    withUnrelated <- fingerprint (Set.insert relevant unrelated)
-    changed <- fingerprint Set.empty
+    baseline <- fingerprint original
+    withUnrelated <- fingerprint (installRetainedUnfoldingsPlugin
+      (retainedContext (Set.insert relevant unrelated)) env)
+    changed <- fingerprint installed
+    recovered <- fingerprint original
     let unscoped = pluginFor installed
     unscopedResult <- liftIO (pluginRecompile (paPlugin unscoped) (paArguments unscoped))
     liftIO $ case unscopedResult of
@@ -185,5 +186,5 @@ verifyPreparedScope dir = do
       first : _ | paArguments (spPlugin first) == ["other-plugin", "argument"]
                   && spInitialised first -> pure ()
       _ -> ioError (userError "retained scope changed another static plugin")
-    liftIO $ unless (baseline == withUnrelated && baseline /= changed)
+    liftIO $ unless (baseline == withUnrelated && baseline /= changed && baseline == recovered)
       (ioError (userError "scoped interface fingerprint changed with unrelated retained identities"))

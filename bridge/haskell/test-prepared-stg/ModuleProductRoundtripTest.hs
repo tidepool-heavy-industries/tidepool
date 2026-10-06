@@ -45,7 +45,7 @@ import Tidepool.ExecutionProjection
   , prepareProjection, projectSelected )
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
+  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope, newOriginalInterfaceArtifacts
   , noCheckedValueImports, installExactLexicalGraph )
 import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
@@ -58,6 +58,7 @@ import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, writeGenuineCandidateManifestFor )
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
+import Tidepool.CompilerProducts qualified as Products
 
 -- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
@@ -89,6 +90,7 @@ verifyModuleProductInterfaceRoundtrip work = do
         , projectionTarget = Schema.TargetDescriptor Schema.X86_64
             Schema.LittleEndian 64 64 "sysv64" []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = Schema.SymbolIdentity "main" "ModuleProductA"
             "value" "produce" Nothing
         , projectionAuxiliaryRoots = []
@@ -307,6 +309,7 @@ verifyOriginalProductCatalogue work = do
         , projectionTarget = Schema.TargetDescriptor Schema.X86_64
             Schema.LittleEndian 64 64 "sysv64" []
         , projectionRetainedGenerations = mempty
+        , projectionCurrentOriginals = mempty
         , projectionEntry = Schema.SymbolIdentity "main" "ModuleProductCatalogB"
             "value" "consumeSafe" Nothing
         , projectionAuxiliaryRoots = []
@@ -363,6 +366,31 @@ verifyOriginalProductCatalogue work = do
   case freshClosure safe of
     Right _ -> pure ()
     Left reason -> ioError (userError ("fresh safe original product closure failed: " ++ reason))
+  originalInterfaces <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult result))
+    (pprFinalizedModules result) [] directory
+  (originalModules, originalContext) <- Products.prepareOriginalProducts
+    (prHscEnv (pprPipelineResult result)) Nothing (pprProductInterfaces result)
+    context Set.empty (pprModules result)
+  admitted <- Products.admitCurrentOriginalProducts originalInterfaces directory result originalContext
+  inventory <- maybe (ioError (userError "catalogue did not issue its current original inventory")) pure
+    (Products.preparedCurrentOriginalInventory admitted)
+  let targetContext = contextFor "ModuleProductCatalogB" "consumeSafe"
+      currentContext = targetContext { projectionCurrentOriginals =
+        Products.currentOriginalBindingsExcept inventory (Set.singleton (projectionEntry targetContext)) }
+  current <- either (ioError . userError . show) (pure . fst)
+    (prepareProjection currentContext originalModules >>= projectSelected)
+  let defined = Set.fromList
+        [identity | group <- Schema.programBindings current
+          , Schema.TopBinding identity _ <- case group of
+              Schema.NonRecursive binding -> [binding]
+              Schema.Recursive bindings -> bindings]
+      currentSafe = [Schema.globalIdentity global | global <- Schema.programGlobals current
+        , Schema.symbolModule (Schema.globalIdentity global) == "ModuleProductCatalogA"
+        , Schema.symbolOccurrence (Schema.globalIdentity global) == "safeValue"]
+  unless (not (Map.null (projectionCurrentOriginals currentContext))
+      && projectionEntry currentContext `Set.member` defined
+      && length currentSafe == 1 && all (`Set.notMember` defined) currentSafe) $
+    ioError (userError "target projection did not reference its compiler-admitted current original")
   assertRejected "direct raw progress helper" "ModuleProductCatalogA" "rawProgress"
   assertRejected "helper depending on raw progress" "ModuleProductCatalogA" "dependentProgress"
   assertRejected "transitive target depending on raw progress"
