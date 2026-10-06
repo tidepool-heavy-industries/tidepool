@@ -562,10 +562,16 @@ forkExactContextWithPackageFacts :: PackageFinderFacts -> HscEnv -> IO HscEnv
 forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env = do
   unless (ghcMode (hsc_dflags env) == CompManager) $
     throwIO ExactContextRequiresCompilationManager
-  let homeUnits = Set.union packageHomes (hsc_all_home_unit_ids env)
-      eps = ue_eps (hsc_unit_env env)
+  let units = hsc_unit_env env
+      actualHomes = hsc_all_home_unit_ids env
+      homeUnits = Set.union packageHomes actualHomes
+      activeHome = ue_current_unit units
+      eps = ue_eps units
+  -- hsc_home_unit_maybe still requires the active HUG entry to exist.
+  unless (actualHomes == Set.singleton activeHome && homeUnits == actualHomes) $
+    throwIO ExactContextRequiresSingleDefiniteHomeUnit
   unless (case hsc_home_unit_maybe env of
-      Just home -> isHomeUnitDefinite home && homeUnits == Set.singleton (homeUnitId home)
+      Just home -> isHomeUnitDefinite home && homeUnitId home == activeHome
       Nothing -> False) $
     throwIO ExactContextRequiresSingleDefiniteHomeUnit
   cleared <- atomicModifyIORef' (euc_eps eps) $ \external ->
