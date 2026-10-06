@@ -1009,6 +1009,15 @@ pub(super) async fn run_interactive_applications(
     .await
     .unwrap_or_else(|_| Some("interactive application supervisor panicked".into()));
 
+    if let Some(error) = &failure {
+        readiness
+            .send(ActorHostReadiness::CoordinationFailed {
+                root: root_identity,
+                error: error.clone(),
+            })
+            .ok();
+    }
+
     close_release_observations(&mut lifecycle, &mut release_waiters, |actor| {
         observed_resource_release(actor, &application_owners)
     });

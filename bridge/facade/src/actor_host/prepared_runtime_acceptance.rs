@@ -120,6 +120,7 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
     .await
     .expect("actual production preparation and selected deployment start the host");
     host.run_scenario(|host| Box::pin(async move {
+        let scenario = async move {
         let prepared_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         assert!(!prepared_executions.is_empty(), "the original producer executed the real quoter");
         std::fs::write(&input, "42").unwrap();
@@ -133,7 +134,7 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
         let mut shared = None;
         let mut rows = Vec::new();
         for ordinal in 1..=20 {
-            let label = format!("prepared-child-{ordinal}");
+            let label = format!("prepared-runtime/probe-{ordinal}/prepared-child-{ordinal}");
             let round = match pending.pop_front() {
                 Some(round) => round,
                 None => tokio::time::timeout(std::time::Duration::from_secs(300), requests.recv())
@@ -152,6 +153,8 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
             assert_eq!(conversation.identity().actor, *origin.actor());
             let installed = host.context.observer.installation(child.actor).await;
             assert!(!installed.checkpoint);
+            assert_eq!(installed.context_parent, None, "selected provider context");
+            assert_eq!(installed.role, exomonad_actor::ActorRole::Research);
             assert!(installed.tools.iter().any(|tool| matches!(tool,
                 exomonad_tool::HostedTool::Function(tool) if tool.name == "probe" && tool.description == "41")));
             let (elapsed, compiler_requests, details) = {
@@ -195,5 +198,8 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
             "first_preparation_reported_separately":true}));
         assert!(rows.iter().all(|row| row["compiler_requests_during_setup"].as_array().unwrap().is_empty()),
             "completed readiness must not compile installer source during child setup");
+        };
+        host.while_host_running(scenario).await
+            .expect("the production host remains available through all twenty native replies");
     })).await;
 }

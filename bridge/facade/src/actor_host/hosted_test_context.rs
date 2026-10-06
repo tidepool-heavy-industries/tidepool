@@ -166,6 +166,59 @@ type HostOutcome =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>;
 type ScenarioResult = Result<(), Box<dyn std::any::Any + Send>>;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum HostBarrierFailure {
+    CoordinationFailed { root: ActorRef, error: String },
+    HostExited { outcome: Result<(), String> },
+}
+
+impl std::fmt::Display for HostBarrierFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CoordinationFailed { root, error } => {
+                write!(formatter, "production host {root} failed: {error}")
+            }
+            Self::HostExited {
+                outcome: Err(error),
+            } => {
+                write!(
+                    formatter,
+                    "production host exited before the barrier: {error}"
+                )
+            }
+            Self::HostExited { outcome: Ok(()) } => {
+                formatter.write_str("production host exited successfully before the barrier")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HostBarrierFailure {}
+
+async fn observe_host_barrier<F: std::future::Future>(
+    outcome: HostOutcome,
+    readiness: &mut mpsc::UnboundedReceiver<ActorHostReadiness>,
+    future: F,
+) -> Result<F::Output, HostBarrierFailure> {
+    tokio::pin!(future);
+    let mut outcome = outcome;
+    let mut readiness_closed = false;
+    loop {
+        tokio::select! {
+            biased;
+            event = readiness.recv(), if !readiness_closed => match event {
+                Some(ActorHostReadiness::CoordinationFailed { root, error }) => {
+                    return Err(HostBarrierFailure::CoordinationFailed { root, error });
+                }
+                Some(_) => {},
+                None => readiness_closed = true,
+            },
+            outcome = &mut outcome => return Err(HostBarrierFailure::HostExited { outcome }),
+            result = &mut future => return Ok(result),
+        }
+    }
+}
+
 struct HostTermination {
     result: Option<Result<(), String>>,
     joined: Result<(), String>,
@@ -371,6 +424,7 @@ pub(super) struct ObservedInstallation {
     pub(super) actor: LocalActorRef,
     pub(super) checkpoint: bool,
     pub(super) context_parent: Option<ActorRef>,
+    pub(super) role: exomonad_actor::ActorRole,
     pub(super) tools: Vec<exomonad_tool::HostedTool>,
     pub(super) installed_at: std::time::Instant,
 }
@@ -398,6 +452,7 @@ impl HostTestObserver {
                 actor: installation.actor.clone(),
                 checkpoint: installation.checkpoint.is_some(),
                 context_parent: installation.context_parent,
+                role: installation.effective_role.role(),
                 tools: installation.policy.tools().to_vec(),
                 installed_at: std::time::Instant::now(),
             },
@@ -504,6 +559,7 @@ pub(super) struct HostedTestRuntime {
     pub(super) address: std::net::SocketAddr,
     stop: watch::Sender<bool>,
     outcome: HostOutcome,
+    readiness: tokio::sync::Mutex<mpsc::UnboundedReceiver<ActorHostReadiness>>,
     thread: Option<std::thread::JoinHandle<()>>,
     diagnostics: Option<HostedTestDiagnostics>,
     _repository: exomonad_worktree::testing::TestRepo,
@@ -519,6 +575,21 @@ impl Drop for HostedTestRuntime {
 }
 
 impl HostedTestRuntime {
+    /// A barrier requiring the existing production host must fail on its own
+    /// terminal result, including a successful early exit. Coordination failure
+    /// arrives before teardown; the host outcome retains teardown's result.
+    pub(super) async fn while_host_running<F: std::future::Future>(
+        &self,
+        future: F,
+    ) -> Result<F::Output, HostBarrierFailure> {
+        observe_host_barrier(
+            self.outcome.clone(),
+            &mut *self.readiness.lock().await,
+            future,
+        )
+        .await
+    }
+
     /// Settle assertions and the production host independently. The run and
     /// workspace exist under the case root before execution, so a watchdog kill
     /// leaves its pending report and original inputs available.
@@ -1094,6 +1165,7 @@ impl HostedTestRuntime {
                 })
                 .boxed()
                 .shared(),
+            readiness: tokio::sync::Mutex::new(readiness),
             thread: Some(thread),
             diagnostics,
             _repository: repository,
@@ -1194,6 +1266,94 @@ pub(super) fn cell_output_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn host_barrier_prioritizes_successful_and_failed_host_exit_over_deadline() {
+        for terminal in [Ok(()), Err("injected host failure".to_owned())] {
+            let (_publisher, mut readiness) = mpsc::unbounded_channel();
+            let (complete, outcome) = oneshot::channel();
+            complete.send(terminal.clone()).unwrap();
+            let outcome = outcome.map(Result::unwrap).boxed().shared();
+            let barrier =
+                tokio::time::timeout(Duration::ZERO, futures_util::future::pending::<()>());
+            assert_eq!(
+                observe_host_barrier(outcome, &mut readiness, barrier).await,
+                Err(HostBarrierFailure::HostExited { outcome: terminal }),
+            );
+        }
+        let (_publisher, mut readiness) = mpsc::unbounded_channel();
+        let (_complete, outcome) = oneshot::channel::<Result<(), String>>();
+        let outcome = outcome.map(Result::unwrap).boxed().shared();
+        assert!(matches!(
+            observe_host_barrier(
+                outcome,
+                &mut readiness,
+                tokio::time::timeout(Duration::ZERO, futures_util::future::pending::<()>()),
+            )
+            .await,
+            Ok(Err(_)),
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordination_failure_preempts_provider_wait_before_cleanup_settles() {
+        let directory = tempfile::tempdir().unwrap();
+        let diagnostics = diagnostics(&directory);
+        let (publisher, mut readiness) = mpsc::unbounded_channel();
+        let (complete, outcome) = oneshot::channel::<Result<(), String>>();
+        let outcome = outcome.map(Result::unwrap).boxed().shared();
+        let barrier_outcome = outcome.clone();
+        let root = ActorRef::first(exomonad_actor::ActorId(1));
+        publisher
+            .send(ActorHostReadiness::CoordinationFailed {
+                root,
+                error: "injected provider attachment refusal".into(),
+            })
+            .unwrap();
+        let (provider, mut requests) = super::super::test_campaign::hosted_script_provider();
+        let (scenario, cleanup, evidence) = settle_scenario(
+            async {
+                let failure =
+                    match observe_host_barrier(barrier_outcome, &mut readiness, requests.recv())
+                        .await
+                    {
+                        Err(failure) => failure,
+                        Ok(_) => panic!("provider wait cannot settle without a provider request"),
+                    };
+                assert_eq!(
+                    failure,
+                    HostBarrierFailure::CoordinationFailed {
+                        root,
+                        error: "injected provider attachment refusal".into(),
+                    }
+                );
+                panic!("{failure}");
+            },
+            async {
+                assert_eq!(
+                    report(&directory)["scenario"]["message"],
+                    "production host 1@1 failed: injected provider attachment refusal",
+                );
+                assert_eq!(report(&directory)["cleanup"]["status"], "unknown");
+                complete
+                    .send(Err("injected cleanup refusal".into()))
+                    .unwrap();
+                outcome.await
+            },
+            |scenario, cleanup| diagnostics.report(scenario, cleanup),
+        )
+        .await;
+        drop(provider);
+        assert!(scenario.is_err());
+        assert_eq!(cleanup, Err("injected cleanup refusal".into()));
+        assert!(evidence.is_empty());
+        assert_eq!(report(&directory)["scenario"]["status"], "failed");
+        assert_eq!(report(&directory)["cleanup"]["status"], "failed");
+        assert_eq!(
+            report(&directory)["cleanup"]["message"],
+            "injected cleanup refusal"
+        );
+    }
 
     async fn terminated_host(panic: bool) -> (HostTermination, watch::Receiver<bool>) {
         let (stop, stopping) = watch::channel(false);
