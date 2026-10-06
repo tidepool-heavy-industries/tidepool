@@ -654,12 +654,64 @@ fn capture(
     .map_err(CertificationError::CapturedModulePayload)
 }
 
+#[cfg(test)]
 pub(super) fn canonical_certificate(
     producer: [u8; 32],
     envelope: &FinalizationEnvelope,
     module: &FinalizedModuleReceipt,
     origin: &CanonicalOrigin,
 ) -> CertResult<Vec<u8>> {
+    canonical_certificate_with_operation(
+        producer,
+        envelope,
+        module,
+        origin,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+fn canonical_certificate_with_operation(
+    producer: [u8; 32],
+    envelope: &FinalizationEnvelope,
+    module: &FinalizedModuleReceipt,
+    origin: &CanonicalOrigin,
+    operation: &InventoryOperation,
+) -> CertResult<Vec<u8>> {
+    operation.reserve::<Value>(48)?;
+    operation.charge(
+        module
+            .unit
+            .len()
+            .checked_add(module.module.len())
+            .and_then(|size| size.checked_add(512))
+            .ok_or(CertificationError::Receipt("canonical owner size"))?,
+    )?;
+    for unit in &envelope.home_units {
+        operation.reserve::<Value>(2)?;
+        operation.charge(unit.len())?;
+    }
+    for (unit, name) in module.interface_requirements.keys() {
+        operation.reserve::<Value>(8)?;
+        operation.charge(
+            unit.len()
+                .checked_add(name.len())
+                .and_then(|size| size.checked_add(64))
+                .ok_or(CertificationError::Receipt("canonical requirement size"))?,
+        )?;
+    }
+    if let CanonicalOrigin::SourceOriginal { imports } = origin {
+        for import in imports.iter() {
+            operation.reserve::<Value>(10)?;
+            operation.charge(import.module.len())?;
+            if let Some(unit) = &import.home_unit {
+                operation.charge(unit.len())?;
+            }
+            match &import.qualifier {
+                crate::cache::ImportQualifier::ThisUnit(unit)
+                | crate::cache::ImportQualifier::OtherUnit(unit) => operation.charge(unit.len())?,
+                _ => operation.charge(16)?,
+            }
+        }
+    }
     // Scratch paths and descriptor sizes are not durable semantic identity.
     let value = value_array([
         value_text("TPFINALMODULE"),
@@ -679,13 +731,12 @@ pub(super) fn canonical_certificate(
         encode_interface_requirements(&module.interface_requirements),
         origin.encode(),
     ]);
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&value, &mut bytes)
-        .map_err(|_| CertificationError::Receipt("finalized certificate encoding"))?;
-    if bytes.len() > CANONICAL_CERTIFICATE_LIMIT {
-        return Err(CertificationError::Receipt("finalized certificate size"));
-    }
-    Ok(bytes)
+    encode_value_with_operation(
+        &value,
+        CertificationFormat::CanonicalModuleCertificate,
+        CANONICAL_CERTIFICATE_LIMIT,
+        operation,
+    )
 }
 
 pub(super) fn issue_value_interfaces(
@@ -908,7 +959,13 @@ pub(super) fn issue_interfaces(
                 CanonicalOrigin::decode(&origin.encode(), module, &envelope.home_units)?
             }
         };
-        let certificate = canonical_certificate(producer, envelope, module, &origin)?;
+        let certificate = canonical_certificate_with_operation(
+            producer,
+            envelope,
+            module,
+            &origin,
+            &validation.inventory,
+        )?;
         issued.push(CertifiedModuleInterface {
             producer_sha256: producer,
             receipt: module.clone(),
@@ -1015,7 +1072,14 @@ pub(super) fn recover_interface(
         home_units: envelope.home_units,
         modules: BTreeMap::new(),
     };
-    if canonical_certificate(producer, &canonical_envelope, &receipt, &origin)? != certificate {
+    if canonical_certificate_with_operation(
+        producer,
+        &canonical_envelope,
+        &receipt,
+        &origin,
+        &validation.inventory,
+    )? != certificate
+    {
         return Err(CertificationError::Receipt(
             "noncanonical finalized certificate",
         ));

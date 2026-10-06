@@ -401,6 +401,7 @@ thread_local! {
 pub enum CertificationFormat {
     ProductReceipt,
     HomeOwners,
+    CanonicalModuleCertificate,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3769,9 +3770,11 @@ impl<'a> ParsedModuleProducts<'a> {
             .map_err(|_| CertificationError::Mismatch("production requirements"))?;
         let (products, sidecars) =
             operation.parse_module_products_with_framing(bytes, &requirements)?;
-        operation.charge(package_bundle.len())?;
-        let package_imports =
-            crate::module_candidates::split_package_imports(package_bundle, &products);
+        let package_imports = crate::module_candidates::split_package_imports_with_operation(
+            package_bundle,
+            &products,
+            &operation,
+        )?;
         Ok(Self {
             operation,
             bytes,
@@ -9819,10 +9822,7 @@ pub(crate) mod tests {
                         value_text(hex(&accepted.skinny_iface_sha256)),
                         value_text(hex(&accepted.product_sha256)),
                         value_text(hex(&accepted.dependency_witness_sha256)),
-                        value_array([value_array([
-                            Value::Integer(0.into()),
-                            value_array([]),
-                        ])]),
+                        value_array([value_array([Value::Integer(0.into()), value_array([])])]),
                     ])
                 })
                 .collect::<Vec<_>>();
@@ -9843,10 +9843,10 @@ pub(crate) mod tests {
             assert_eq!(decoded.finalization.modules.len(), module_count);
             assert!(decoded.modules.iter().all(|module| {
                 module.groups.len() == 1
-                    && decoded.finalization.modules.contains_key(&(
-                        module.unit.clone(),
-                        module.module.clone(),
-                    ))
+                    && decoded
+                        .finalization
+                        .modules
+                        .contains_key(&(module.unit.clone(), module.module.clone()))
             }));
         }
     }

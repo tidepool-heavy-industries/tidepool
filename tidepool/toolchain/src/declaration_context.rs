@@ -1893,12 +1893,30 @@ impl ExactCompilationRequest {
         source: &str,
         fresh_evidence: &[u8],
     ) -> Result<ExactSourceAdmission, CompileError> {
+        self.admit_source_with_validation(
+            source_path,
+            source,
+            fresh_evidence,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+
+    pub(crate) fn admit_source_with_validation(
+        &self,
+        source_path: &Path,
+        source: &str,
+        fresh_evidence: &[u8],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<ExactSourceAdmission, CompileError> {
         use sha2::Digest;
         let expected: [u8; 32] = sha2::Sha256::digest(source.as_bytes()).into();
-        self.validate_outputs(
+        self.validate_outputs_selected_with_validation(
             source_path
                 .parent()
                 .ok_or_else(|| failure("source has no directory"))?,
+            None,
+            &self.context,
+            validation,
         )?
         .into_iter()
         .find(|admitted| {
@@ -1978,10 +1996,32 @@ impl ExactCompilationRequest {
         planned: Option<&ExactModuleIdentity>,
         context: &ExactDeclarationContext,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
+        self.validate_outputs_selected_with_validation(
+            root,
+            planned,
+            context,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+    fn validate_outputs_selected_with_validation(
+        &self,
+        root: &Path,
+        planned: Option<&ExactModuleIdentity>,
+        context: &ExactDeclarationContext,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         let context_validate_start = std::time::Instant::now();
         self.context.validate_artifacts(&self.artifacts)?;
         self.checked_value_imports.validate()?;
-        if sha256(&std::fs::read(&self.manifest)?) != self.request_sha256 {
+        if sha256(
+            &crate::certified_products::read_bounded_with_operation(
+                &self.manifest,
+                EXACT_SCOPE_BYTES_LIMIT as u64,
+                &validation.inventory,
+            )
+            .map_err(failure)?,
+        ) != self.request_sha256
+        {
             return Err(failure("scope request changed during compilation"));
         }
         crate::timing::record_stage(
@@ -2000,7 +2040,18 @@ impl ExactCompilationRequest {
                     directory.display()
                 ))
             })?
-            .map(|entry| entry.map(|entry| entry.path()))
+            .map(|entry| {
+                validation
+                    .inventory
+                    .reserve::<PathBuf>(1)
+                    .map_err(failure)?;
+                let path = entry?.path();
+                validation
+                    .inventory
+                    .charge(path.as_os_str().len())
+                    .map_err(failure)?;
+                Ok::<_, CompileError>(path)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         receipts.sort();
         if receipts.is_empty() || receipts.len() > 4096 {
@@ -2008,7 +2059,14 @@ impl ExactCompilationRequest {
         }
         let admitted = receipts
             .iter()
-            .map(|path| self.validate_receipt(&path.join("receipt.cbor"), planned, context))
+            .map(|path| {
+                self.validate_receipt_with_validation(
+                    &path.join("receipt.cbor"),
+                    planned,
+                    context,
+                    validation,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -2020,11 +2078,27 @@ impl ExactCompilationRequest {
         Ok(admitted)
     }
 
+    #[cfg(test)]
     fn validate_receipt(
         &self,
         path: &Path,
         planned: Option<&ExactModuleIdentity>,
         context: &ExactDeclarationContext,
+    ) -> Result<ExactSourceAdmission, CompileError> {
+        self.validate_receipt_with_validation(
+            path,
+            planned,
+            context,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+
+    fn validate_receipt_with_validation(
+        &self,
+        path: &Path,
+        planned: Option<&ExactModuleIdentity>,
+        context: &ExactDeclarationContext,
+        validation: &mut PackageInterfaceValidation,
     ) -> Result<ExactSourceAdmission, CompileError> {
         let DecodedExactCompilationReceipt {
             source_path,
@@ -2035,9 +2109,10 @@ impl ExactCompilationRequest {
             edges,
             claims,
             selection_evidence,
-        } = decode_exact_compilation_receipt(
+        } = decode_exact_compilation_receipt_with_operation(
             path,
             Some((&self.request_sha256, self.semantic_sha256)),
+            &validation.inventory,
         )?;
         let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
             evidence,
@@ -2152,7 +2227,7 @@ impl ExactCompilationRequest {
                 .iter()
                 .map(|(unit, module)| identity(unit, module))
                 .collect();
-            crate::execution_source::validate_source_selected_originals(
+            crate::execution_source::validate_source_selected_originals_with_validation(
                 claims,
                 selection_evidence,
                 crate::execution_source::SourceSelectionContext {
@@ -2164,6 +2239,7 @@ impl ExactCompilationRequest {
                     roots: &source_selection_roots,
                     independent: &independent,
                 },
+                validation,
             )?
         };
         let mut seen = BTreeSet::new();
@@ -2304,13 +2380,22 @@ fn decode_exact_compilation_receipt(
     path: &Path,
     expected: Option<(&str, [u8; 32])>,
 ) -> Result<DecodedExactCompilationReceipt, CompileError> {
+    decode_exact_compilation_receipt_with_operation(
+        path,
+        expected,
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+}
+fn decode_exact_compilation_receipt_with_operation(
+    path: &Path,
+    expected: Option<(&str, [u8; 32])>,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<DecodedExactCompilationReceipt, CompileError> {
     use sha2::Digest;
-    let bytes = bounded_read(path, 4 * 1024 * 1024)?;
-    let mut cursor = std::io::Cursor::new(&bytes);
-    let value: Value = ciborium::de::from_reader(&mut cursor).map_err(failure)?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(failure("compile receipt has trailing bytes"));
-    }
+    let bytes = crate::certified_products::read_bounded_with_operation(path, 4 << 20, operation)
+        .map_err(failure)?;
+    let value = operation.decode_value(&bytes, 4 << 20).map_err(failure)?;
+    operation.charge_value_copies(&value, 3).map_err(failure)?;
     let header = row(&value, 10)?;
     if string(&header[0])? != "TPEXACTCOMPILE" || string(&header[1])? != "3" {
         return Err(failure(
@@ -2339,7 +2424,10 @@ fn decode_exact_compilation_receipt(
     {
         return Err(failure("compile source snapshot has another owner"));
     }
-    let source_bytes = bounded_read(&snapshot, 32 * 1024 * 1024)?;
+    let source_bytes =
+        crate::certified_products::read_bounded_with_operation(&snapshot, 32 << 20, operation)
+            .map_err(failure)?;
+    operation.charge(source_bytes.len()).map_err(failure)?;
     let source_sha256: [u8; 32] = sha2::Sha256::digest(&source_bytes).into();
     if string(&header[5])? != hex(&source_sha256) {
         return Err(failure("compile source snapshot changed"));
@@ -2348,6 +2436,14 @@ fn decode_exact_compilation_receipt(
         .map_err(failure)?
         .to_owned();
     let evidence_bytes = string(&header[7])?.as_bytes().to_vec();
+    operation
+        .charge(
+            evidence_bytes
+                .len()
+                .checked_mul(32)
+                .ok_or_else(|| failure("source evidence accounting overflow"))?,
+        )
+        .map_err(failure)?;
     let evidence: crate::cache::DependencyEvidence =
         serde_json::from_slice(&evidence_bytes).map_err(failure)?;
     if evidence.version != 4 {

@@ -79,6 +79,20 @@ pub(crate) fn validate_source_selected_originals(
     evidence: &DependencyEvidence,
     context: SourceSelectionContext<'_>,
 ) -> Result<BTreeMap<ExactModuleIdentity, SourceSelectedOriginal>, CompileError> {
+    validate_source_selected_originals_with_validation(
+        claims,
+        evidence,
+        context,
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn validate_source_selected_originals_with_validation(
+    claims: Vec<SourceSelectedOriginalClaim>,
+    evidence: &DependencyEvidence,
+    context: SourceSelectionContext<'_>,
+    package_validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<BTreeMap<ExactModuleIdentity, SourceSelectedOriginal>, CompileError> {
     let refused = |detail: &str| failure(&format!("current source selection: {detail}"));
     if claims.is_empty()
         || claims.len() > OWNER_LIMIT
@@ -143,7 +157,6 @@ pub(crate) fn validate_source_selected_originals(
     }
     let mut selected = BTreeMap::new();
     let mut paths = BTreeSet::new();
-    let mut package_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let mut packages = BTreeSet::new();
     let mut expected_resolutions = BTreeMap::new();
     let mut record_resolution =
@@ -204,15 +217,18 @@ pub(crate) fn validate_source_selected_originals(
         if !metadata.is_file() || metadata.len() > SOURCE_BYTES_LIMIT as u64 {
             return Err(refused("selected source exceeds its bound"));
         }
-        let mut bytes = Vec::new();
-        file.take(SOURCE_BYTES_LIMIT as u64 + 1)
-            .read_to_end(&mut bytes)?;
+        package_validation
+            .inventory
+            .charge(metadata.len() as usize + 1)
+            .map_err(|error| failure(&error.to_string()))?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+        file.take(metadata.len() + 1).read_to_end(&mut bytes)?;
         use std::os::unix::fs::MetadataExt;
         let current_metadata = std::fs::metadata(&node.source)?;
         if metadata.dev() != current_metadata.dev() || metadata.ino() != current_metadata.ino() {
             return Err(refused("selected source path changed during capture"));
         }
-        if bytes.len() > SOURCE_BYTES_LIMIT
+        if bytes.len() as u64 != metadata.len()
             || <[u8; 32]>::from(Sha256::digest(&bytes)) != claim.source_sha256
         {
             return Err(refused("selected original source changed"));
@@ -246,7 +262,7 @@ pub(crate) fn validate_source_selected_originals(
                 interface.module(),
                 &claim.interface_sha256,
                 Path::new("canonical-source-selection"),
-                &mut package_validation,
+                package_validation,
             )
             .map_err(|_| refused("canonical package interface changed"))?;
         let mut imports = BTreeSet::new();

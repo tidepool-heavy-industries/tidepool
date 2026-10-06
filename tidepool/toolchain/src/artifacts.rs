@@ -2382,7 +2382,9 @@ fn seal_turn_outputs_with_validation(
     let exact_source = offer
         .exact
         .as_ref()
-        .map(|request| request.admit_source(source_path, source, &evidence_bytes))
+        .map(|request| {
+            request.admit_source_with_validation(source_path, source, &evidence_bytes, validation)
+        })
         .transpose()?;
     let exact = offer
         .exact
@@ -3539,6 +3541,9 @@ fn compile_invocation_inner(
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+            inventory_operation.clone(),
+        );
         let evidence_bytes = certified_products::read_bounded_with_operation(
             &output_owner.path().join("dependencies.json"),
             32 << 20,
@@ -3559,7 +3564,14 @@ fn compile_invocation_inner(
         }
         let exact_source = exact_request
             .as_ref()
-            .map(|request| request.admit_source(&input_path, inv.source, &evidence_bytes))
+            .map(|request| {
+                request.admit_source_with_validation(
+                    &input_path,
+                    inv.source,
+                    &evidence_bytes,
+                    &mut validation,
+                )
+            })
             .transpose()?;
         let exact = exact_request
             .as_ref()
@@ -3581,9 +3593,6 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
-        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
-            inventory_operation.clone(),
-        );
         let receipt_bytes = certified_products::read_bounded_with_operation(
             &output_owner.path().join("certified-products.cbor"),
             validation.inventory.limits().max_bytes as u64,
@@ -3609,7 +3618,11 @@ fn compile_invocation_inner(
                     "candidate product certificate unavailable".into(),
                 ));
             }
-            let fresh_products = decode_fresh_products(&product_bytes)?;
+            let requirements = crate::prepared_artifact::production_requirements()
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            let fresh_products = inventory_operation
+                .parse_module_products(&product_bytes, &requirements)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             if !fresh_products.is_empty() {
                 return Err(CompileError::ExtractFailed(
                     "fresh module product certificate unavailable".into(),

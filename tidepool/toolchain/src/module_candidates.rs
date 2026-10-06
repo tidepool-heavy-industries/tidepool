@@ -34,7 +34,6 @@ const RECORD_MAGIC: &[u8; 8] = b"TPCRE10\n";
 const RECORD_VERSION: u32 = 10;
 const HEADER_LIMIT: usize = 64 << 10;
 const PAYLOAD_LIMIT: usize = 128 << 20;
-const PACKAGE_BUNDLE_LIMIT: usize = 16 << 20;
 // A measured 33,955,557-byte ordinary resident display graph fits within one
 // module's bound. The enclosing inventory can contain many such owners.
 pub(crate) const PRODUCT_MODULE_MAX_BYTES: usize = 64 << 20;
@@ -96,46 +95,95 @@ pub(crate) fn split_package_imports(
     bytes: &[u8],
     products: &[RawModuleProduct],
 ) -> Option<BTreeMap<(String, String), Vec<u8>>> {
-    if bytes.len() > PACKAGE_BUNDLE_LIMIT {
-        return None;
-    }
-    let value: Value = ciborium::de::from_reader(bytes).ok()?;
-    let mut canonical = Vec::new();
-    ciborium::ser::into_writer(&value, &mut canonical).ok()?;
-    if canonical != bytes {
-        return None;
-    }
-    let Value::Array(fields) = value else {
-        return None;
+    split_package_imports_with_operation(
+        bytes,
+        products,
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+    .ok()
+    .flatten()
+}
+
+pub(crate) fn split_package_imports_with_operation(
+    bytes: &[u8],
+    products: &[RawModuleProduct],
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<Option<BTreeMap<(String, String), Vec<u8>>>, tidepool_repr::execution_schema::ParseError>
+{
+    let value = match operation.decode_value(bytes, operation.limits().max_bytes) {
+        Ok(value) => value,
+        Err(
+            error @ tidepool_repr::execution_schema::ParseError::LimitExceeded(
+                "work" | "accounting owner",
+            ),
+        )
+        | Err(error @ tidepool_repr::execution_schema::ParseError::ByteLimit { .. }) => {
+            return Err(error)
+        }
+        Err(_) => return Ok(None),
     };
-    let [Value::Text(magic), Value::Integer(version), Value::Array(rows)] =
-        <[Value; 3]>::try_from(fields).ok()?
-    else {
-        return None;
-    };
-    if magic != "TPPKGBUNDLES" || version != 1.into() || rows.len() != products.len() {
-        return None;
+    operation.charge_value_copies(&value, 1)?;
+    operation.charge(bytes.len())?;
+    struct OriginalEncoding<'a> {
+        bytes: &'a [u8],
+        position: usize,
     }
-    let mut by_owner = BTreeMap::new();
-    for row in rows {
-        let Value::Array(fields) = row else {
+    impl std::io::Write for OriginalEncoding<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let end = self
+                .position
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("canonical size overflow"))?;
+            if self.bytes.get(self.position..end) != Some(bytes) {
+                return Err(std::io::Error::other("noncanonical package bundle"));
+            }
+            self.position = end;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut original = OriginalEncoding { bytes, position: 0 };
+    if ciborium::ser::into_writer(&value, &mut original).is_err()
+        || original.position != bytes.len()
+    {
+        return Ok(None);
+    }
+    let decoded = (|| {
+        let Value::Array(fields) = value else {
             return None;
         };
-        let [Value::Text(unit), Value::Text(module), Value::Bytes(sidecar)] =
+        let [Value::Text(magic), Value::Integer(version), Value::Array(rows)] =
             <[Value; 3]>::try_from(fields).ok()?
         else {
             return None;
         };
-        if sidecar.len() > (4 << 20)
-            || !products
-                .iter()
-                .any(|product| product.unit == unit && product.module == module)
-            || by_owner.insert((unit, module), sidecar).is_some()
-        {
+        if magic != "TPPKGBUNDLES" || version != 1.into() || rows.len() != products.len() {
             return None;
         }
-    }
-    Some(by_owner)
+        let mut by_owner = BTreeMap::new();
+        for row in rows {
+            let Value::Array(fields) = row else {
+                return None;
+            };
+            let [Value::Text(unit), Value::Text(module), Value::Bytes(sidecar)] =
+                <[Value; 3]>::try_from(fields).ok()?
+            else {
+                return None;
+            };
+            if sidecar.len() > (4 << 20)
+                || !products
+                    .iter()
+                    .any(|product| product.unit == unit && product.module == module)
+                || by_owner.insert((unit, module), sidecar).is_some()
+            {
+                return None;
+            }
+        }
+        Some(by_owner)
+    })();
+    Ok(decoded)
 }
 
 fn identity_value(identity: &SymbolIdentity) -> Value {
@@ -221,11 +269,10 @@ impl CandidateProduct {
         bytes: &[u8],
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
     ) -> Option<RawModuleProduct> {
-        let mut products = tidepool_repr::execution_schema::InventoryOperation::new(
-            product_decode_limits(),
-        )
-        .parse_module_products(bytes, requirements)
-        .ok()?;
+        let mut products =
+            tidepool_repr::execution_schema::InventoryOperation::new(product_decode_limits())
+                .parse_module_products(bytes, requirements)
+                .ok()?;
         if products.len() != 1 {
             return None;
         }
@@ -926,8 +973,7 @@ fn eligible_records_with_report(
     certified: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     report: &mut impl FnMut(&RawModuleProduct, Option<usize>, PublicationDisposition),
 ) -> (Vec<RawModuleProduct>, Vec<Record>) {
-    let (inventory, products, per_module_bytes, package_imports) =
-        parsed.into_publication_parts();
+    let (inventory, products, per_module_bytes, package_imports) = parsed.into_publication_parts();
     macro_rules! reject_all {
         ($disposition:expr) => {{
             for product in products.iter().take(CANDIDATE_LIMIT) {
