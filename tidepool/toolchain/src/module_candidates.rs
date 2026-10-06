@@ -2865,7 +2865,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
 
@@ -3051,6 +3051,15 @@ mod tests {
     }
 
     pub(super) fn package_imports(unit: &str, module: &str, iface: &[u8]) -> Vec<u8> {
+        package_imports_with_roots(unit, module, iface, vec![])
+    }
+
+    pub(crate) fn package_imports_with_roots(
+        unit: &str,
+        module: &str,
+        iface: &[u8],
+        roots: Vec<Value>,
+    ) -> Vec<u8> {
         let value = Value::Array(vec![
             Value::Text("TPPKGROOTS".into()),
             Value::Text("2".into()),
@@ -3059,7 +3068,7 @@ mod tests {
                 Value::Text(module.into()),
                 Value::Text(sha(iface)),
             ]),
-            Value::Array(vec![]),
+            Value::Array(roots),
             Value::Array(vec![]),
         ]);
         let mut bytes = Vec::new();
@@ -3068,14 +3077,31 @@ mod tests {
     }
 
     pub(super) fn package_bundle(unit: &str, module: &str, iface: &[u8]) -> Vec<u8> {
+        package_bundle_with_sidecars(vec![(
+            unit.into(),
+            module.into(),
+            package_imports(unit, module, iface),
+        )])
+    }
+
+    pub(crate) fn package_bundle_with_sidecars(
+        sidecars: Vec<(String, String, Vec<u8>)>,
+    ) -> Vec<u8> {
         let value = Value::Array(vec![
             Value::Text("TPPKGBUNDLES".into()),
             Value::Integer(1.into()),
-            Value::Array(vec![Value::Array(vec![
-                Value::Text(unit.into()),
-                Value::Text(module.into()),
-                Value::Bytes(package_imports(unit, module, iface)),
-            ])]),
+            Value::Array(
+                sidecars
+                    .into_iter()
+                    .map(|(unit, module, sidecar)| {
+                        Value::Array(vec![
+                            Value::Text(unit),
+                            Value::Text(module),
+                            Value::Bytes(sidecar),
+                        ])
+                    })
+                    .collect(),
+            ),
         ]);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();

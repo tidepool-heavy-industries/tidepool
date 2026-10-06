@@ -4882,32 +4882,18 @@ mod compiler_sidecar_tests {
                 Value::Text(interface_sha.clone()),
             ]));
         }
-        let mut rows = Vec::new();
+        let mut sidecars = Vec::new();
         let mut products = Vec::new();
         for index in 0..13 {
             let module = format!("Owner{index}");
-            let mut sidecar = Vec::new();
-            ciborium::ser::into_writer(
-                &Value::Array(vec![
-                    Value::Text("TPPKGROOTS".into()),
-                    Value::Text("2".into()),
-                    Value::Array(vec![
-                        Value::Text("main".into()),
-                        Value::Text(module.clone()),
-                        Value::Text(interface_sha.clone()),
-                    ]),
-                    Value::Array(package_roots.clone()),
-                    Value::Array(vec![]),
-                ]),
-                &mut sidecar,
-            )
-            .unwrap();
+            let sidecar = module_candidates::tests::package_imports_with_roots(
+                "main",
+                &module,
+                interface,
+                package_roots.clone(),
+            );
             assert!(sidecar.len() < 4 << 20);
-            rows.push(Value::Array(vec![
-                Value::Text("main".into()),
-                Value::Text(module.clone()),
-                Value::Bytes(sidecar),
-            ]));
+            sidecars.push(("main".into(), module.clone(), sidecar));
             products.push(RawModuleProduct {
                 unit: "main".into(),
                 module,
@@ -4915,16 +4901,7 @@ mod compiler_sidecar_tests {
                 groups: vec![],
             });
         }
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(
-            &Value::Array(vec![
-                Value::Text("TPPKGBUNDLES".into()),
-                Value::Integer(1.into()),
-                Value::Array(rows),
-            ]),
-            &mut bytes,
-        )
-        .unwrap();
+        let bytes = module_candidates::tests::package_bundle_with_sidecars(sidecars);
         assert!(bytes.len() > certified_products::COMPILER_RECEIPT_BYTES_LIMIT);
         let path = root
             .path()
