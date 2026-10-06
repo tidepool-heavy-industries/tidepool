@@ -9,7 +9,9 @@ module SourceBootFixtureSupport
   , requireFailedCompilerTransaction
   , manifest, writeManifestFor, originalCompilerInput, digest, withScratch, preparedNames ) where
 
-import Control.Exception (SomeException, IOException, bracket, bracketOnError, finally, mask, onException, throwIO, try)
+import Control.Exception
+  ( Exception(..), SomeAsyncException, SomeException, IOException, bracket, bracketOnError
+  , finally, fromException, mask, onException, throwIO, try )
 import Control.Monad (filterM, void)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
@@ -73,12 +75,22 @@ requireOriginalSourceBytesChanged label owner path originalSha action = do
 -- API's userError in InputRejection. Match that exact owner diagnostic.
 requireSourceSelectionInput :: String -> String -> IO a -> IO ()
 requireSourceSelectionInput label diagnostic action = do
-  result <- try (void action)
+  result <- try (void action) :: IO (Either SomeException ())
   case result of
-    Left (OriginalSourceSelectionInputUnavailable actual)
-      | actual == show (userError diagnostic) -> pure ()
-    Left failure -> throwIO failure
+    Left failure
+      | Just (OriginalSourceSelectionInputUnavailable actual) <- fromException failure
+      , actual == show (userError diagnostic) -> pure ()
+      | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
+      | otherwise -> throwIO (RefusalControlFailure
+          (label ++ ": expected source-selection diagnostic " ++ diagnostic) failure)
     Right () -> fail (label ++ ": expected source-selection diagnostic " ++ diagnostic)
+
+data RefusalControlFailure = RefusalControlFailure String SomeException
+  deriving (Show)
+
+instance Exception RefusalControlFailure where
+  displayException (RefusalControlFailure context cause) =
+    context ++ "; original exception: " ++ displayException cause
 
 requireUserError :: String -> String -> IO a -> IO ()
 requireUserError label diagnostic action = do
