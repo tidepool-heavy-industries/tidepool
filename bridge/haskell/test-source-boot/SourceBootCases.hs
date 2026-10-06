@@ -59,7 +59,7 @@ import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hscEPS)
-import GHC.Unit.Env (UnitEnv(..), unitEnv_insert, unitEnv_delete, ue_currentHomeUnitEnv)
+import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..), unitEnv_insert, unitEnv_delete, ue_currentHomeUnitEnv)
 import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(eps_PIT, eps_inst_env))
 import GHC.Unit.Module.Env (lookupModuleEnv, extendModuleEnv)
 import GHC.Iface.Load (loadInterface, WhereFrom(ImportBySystem))
@@ -5989,6 +5989,10 @@ lazyHomePackageInstances = withScratch $ \work -> do
   requireModeFailure ExactContextRequiresSingleDefiniteHomeUnit $
     forkExactContextWithPackageFacts packages (selected {hsc_unit_env = units
       {ue_home_unit_graph = unitEnv_delete (ue_current_unit units) (ue_home_unit_graph units)}})
+  requireModeFailure ExactContextRequiresSingleDefiniteHomeUnit $
+    forkExactContextWithPackageFacts packages (selected {hsc_unit_env = units
+      {ue_home_unit_graph = unitEnv_insert (ue_current_unit units)
+        ((ue_currentHomeUnitEnv units) {homeUnitEnv_home_unit = Nothing}) (ue_home_unit_graph units)}})
   -- A genuine positive interface in EPS is an unsupported owner state, not
   -- a row the repair may silently delete. Inject only this refusal fault.
   external <- hscEPS selected
