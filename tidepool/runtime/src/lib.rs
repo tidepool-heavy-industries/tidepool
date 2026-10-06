@@ -313,7 +313,7 @@ pub fn run_compiled_target<U, H: DispatchEffect<U>>(
     let target = artifacts.targets.get(target).ok_or_else(|| {
         CompileError::ExtractFailed(format!("compiled artifact has no target {target:?}"))
     })?;
-    let certification = session::TurnCertification::from_artifacts(artifacts, target);
+    let certification = session::turn::TurnCertification::from_artifacts(artifacts, target);
     let mut state = session::PersistentSession::new(None, nursery_size);
     let resolved = state.resolve_certification_in(
         ScopeId::ROOT,
