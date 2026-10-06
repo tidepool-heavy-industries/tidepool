@@ -27,3 +27,7 @@ execution_platforms = root//platforms:platforms
 # optimization while retaining compiler diagnostics.
 [tidepool]
 profile = fast-dev
+
+# Keep source-control metadata outside Buck input discovery.
+[project]
+ignore = .git
