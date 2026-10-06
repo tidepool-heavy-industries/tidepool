@@ -22,6 +22,7 @@ import Data.ByteString.Lazy qualified as BSL
 import Data.Bits (testBit)
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (newMVar, modifyMVar_, readMVar)
 import Data.IntMap.Strict qualified as IntMap
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -36,7 +37,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
+import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod, ms_mod_name, ms_location, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
@@ -112,15 +113,17 @@ import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
-  , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
+  , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
+  , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
 import Tidepool.PreparedStg
   ( newPreparedBodyCache, PreparedBodyReuse(..), pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
+  , acquirePreparedModuleWithSiteEnvironment, resolvePreparedSiteEnvironment
   , runPreparedModuleTask, copyPreparedBodyCache, selectPreparedBodyCaches
   , preparedSiteDependenciesEquivalent )
 import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
 import Tidepool.Timing (ReuseContext(..))
-import Tidepool.CompilerExecution (withCompilerExecutor, serialCompilerExecutionGrant)
+import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasks, serialCompilerExecutionGrant)
 import System.Mem.StableName (makeStableName)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
@@ -289,6 +292,135 @@ sourceBootReuseAt work = do
   unless (exit == ExitSuccess) $ fail ("fresh worker reuse failed: " ++ errors)
   _ <- reuseFresh work >>= requireReused "reuse after refusal"
   putStrLn "SOURCE boot cache: cold, resident, warm, fresh-worker, ABI and CPP refusal passed"
+
+-- Frozen GHC originals isolate scheduling from source acquisition and retain
+-- exact Names, interfaces and defining group ordinals across every schedule.
+nativeGraphSchedulingEquality :: IO ()
+nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
+  let fixtureNames = ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"
+        , "ScheduleShared.hs", "ScheduleLeft.hs", "ScheduleRight.hs"
+        , "ScheduleIndependent.hs", "ScheduleEntry.hs"]
+      target = work </> "ScheduleEntry.hs"
+  forM_ fixtureNames $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  produced <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing target [work] Nothing
+  let env = prHscEnv (pprPipelineResult produced)
+      interfaces = pprProductInterfaces produced
+      originals = sortOn pmModule (pprModules produced)
+      targetOwner = mkModule (stringToUnit "main") (mkModuleName "ScheduleEntry")
+      expectedNames = Set.fromList (map takeBaseName (filter (not . isInfixOf "hs-boot") fixtureNames))
+      ownerName = moduleNameString . moduleName
+      summaries = Map.fromList [(ms_mod summary, summary)
+        | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph env), ms_hsc_src summary == HsSrcFile]
+      sourceEdges = Set.fromList
+        [(dependencyModuleUnit owner, dependencyModuleName owner,
+          dependencyImportName imported, dependencyImportBoot imported)
+        | owner <- dependencyModules (preparedFreshDependencies produced)
+        , imported <- dependencyModuleImports owner]
+  unless (Set.fromList (preparedNames produced) == expectedNames
+      && Set.fromList [("main", "ScheduleLeft", "ScheduleShared", False)
+        , ("main", "ScheduleRight", "ScheduleShared", False)
+        , ("main", "CacheEven", "CacheOdd", False)
+        , ("main", "CacheOdd", "CacheEven", True)] `Set.isSubsetOf` sourceEdges) $
+    fail "real GHC graph lost its shared diamond, unrelated owner or legal SOURCE cycle"
+  createDirectory (work </> "oracle")
+  (oracleExit,oracleResult,oracleErrors) <- readProcessWithExitCode "ghc"
+    ["-v0", "-ignore-dot-ghci", "-outputdir", work </> "oracle", "-i" ++ work
+    , target, "-e", "ScheduleEntry.result"] ""
+  unless (oracleExit == ExitSuccess && words oracleResult == ["(42,True)"]) $
+    fail ("independent GHC semantic oracle failed: " ++ oracleResult ++ oracleErrors)
+  context <- prepareCompilerProjectionContext produced Map.empty targetOwner "result" [] Nothing
+  siteEnvironment <- resolvePreparedSiteEnvironment env
+  let siblings = Map.unions (map pmSitedSiblings originals)
+      rawFacts modules = Map.fromList
+        [(pmModule prepared, (rawOriginalProductBinders raw, rawOriginalProductDemands raw))
+        | prepared <- modules
+        , let raw = projectRawOriginalHomeModuleProducts env interfaces context prepared]
+      referenceFacts = rawFacts originals
+      referenceOutcomes modules = preparedModuleProductOutcomes
+        (projectOriginalHomeModuleProducts env interfaces context Set.empty (sortOn pmModule modules))
+      ownerDemands name = maybe Set.empty snd
+        (Map.lookup (mkModule (stringToUnit "main") (mkModuleName name)) referenceFacts)
+      shared = SymbolIdentity "main" "ScheduleShared" "value" "shared" Nothing
+  unless (shared `Set.member` ownerDemands "ScheduleLeft"
+      && shared `Set.member` ownerDemands "ScheduleRight") $
+    fail "real lowered diamond did not retain both demands for its shared defining owner"
+  referenceProgram <- either (fail . show) pure (projectPrepared context originals)
+  let exercise label width queue includeAll = do
+        grant <- either fail pure (compilerExecutionGrant width)
+        withCompilerExecutor grant $ \executor -> do
+          bodyCache <- newPreparedBodyCache
+          rawCache <- newOriginalProjectionCollector
+          completionOrder <- newIORef []
+          workers <- newMVar Set.empty
+          releaseFirst <- newEmptyMVar
+          let inputs = PreparedModuleCompletionInputs
+                (Set.fromList (map pmModule queue)) siblings Set.empty Map.empty (ReuseContext 0 "scheduling-fixture")
+              firstOwner = pmModule (head queue)
+              secondOwner = pmModule (queue !! 1)
+          (observer,worklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
+            Map.empty [] Nothing env interfaces targetOwner Nothing inputs
+          tasks <- forM queue $ \original -> do
+            let owner = pmModule original
+            summary <- maybe (fail (label ++ " omitted its exact GHC source summary")) pure
+              (Map.lookup owner summaries)
+            finalized <- maybe (fail (label ++ " omitted its finalized GHC owner")) pure
+              (Map.lookup (moduleName owner) (pprFinalizedModules produced))
+            unless (mi_module (hm_iface (finalizedHomeModInfo finalized)) == owner) $
+              fail (label ++ " reassigned a finalized interface owner")
+            task <- acquirePreparedModuleWithSiteEnvironment siteEnvironment
+              (scopeRetainedSummaryHscEnv summary env) (ms_location summary) siblings finalized
+            pure (owner,task)
+          prepared <- runCompilerTasks executor
+            (\(owner,task) -> do
+              thread <- myThreadId
+              modifyMVar_ workers (pure . Set.insert thread)
+              value <- runPreparedModuleTask task
+              observePreparedModule observer value
+              -- Independent jobs finish before incorporation. Force the first
+              -- queued owner to settle after the second without timing races.
+              when (width > 1 && owner == firstOwner) (takeMVar releaseFirst)
+              pure value)
+            (\(owner,_) value -> do
+              modifyIORef' completionOrder (++ [owner])
+              when (width > 1 && owner == secondOwner) (putMVar releaseFirst ())
+              completedPreparedModule observer value) tasks
+          order <- readIORef completionOrder
+          threads <- readMVar workers
+          unless (Set.fromList order == Set.fromList (map pmModule queue)
+              && length order == length queue
+              && (if width == 1 then order == map pmModule queue else
+                length (takeWhile (/= secondOwner) order) < length (takeWhile (/= firstOwner) order)
+                  && Set.size threads >= 2)) $
+            fail (label ++ " did not exercise its declared actual completion order and workers")
+          hPutStrLn stderr ("native-graph-schedule label=" ++ label ++ " width=" ++ show width
+            ++ " workers=" ++ show (Set.size threads) ++ " completed=" ++ show (map ownerName order))
+          (_,products) <- prepareOriginalProductsWithWorklist worklist env Nothing interfaces
+            context Set.empty prepared
+          unless (rawFacts prepared == rawFacts queue
+              && preparedModuleProductOutcomes (preparedProductInventory products) == referenceOutcomes queue) $
+            fail (label ++ " changed defining identities, group ordinals, native demands or settled products")
+          when includeAll $ do
+            -- Module traversal order is incidental; nominal identities and
+            -- every defining group's order and complete semantic body remain exact.
+            program <- either (fail . show) pure (projectPrepared context (sortOn pmModule prepared))
+            unless (program == referenceProgram) $
+              fail (label ++ " changed the semantic execution wire program")
+          pure products
+  _ <- exercise "serial" 1 originals True
+  _ <- exercise "reverse width 2" 2 (reverse originals) True
+  _ <- exercise "rotated width 4" 4 (drop 3 originals ++ take 3 originals) True
+  let withoutShared = filter ((/= "ScheduleShared") . ownerName . pmModule) originals
+      refused = referenceOutcomes withoutShared
+      outcome name = lookup (mkModule (stringToUnit "main") (mkModuleName name)) refused
+  unless (case (outcome "ScheduleLeft",outcome "ScheduleRight",outcome "ScheduleIndependent") of
+      (Just (Left (UnavailableOriginalHomeDependencies _)),
+       Just (Left (UnavailableOriginalHomeDependencies _)), Just (Right groups)) -> not (null groups)
+      _ -> False) $
+    fail "independent recomputation did not refuse both shared-owner consumers and preserve the unrelated owner"
+  _ <- exercise "missing shared width 2" 2 (reverse withoutShared) False
+  putStrLn "native graph scheduling: serial/reverse2/rotated4 exact semantic groups and demands; shared diamond, SOURCE cycle, GHC(42,True) and missing-owner isolation passed"
 
 -- One GHC capture supplies a genuine graph larger than the metadata envelope.
 -- Candidate and scope delivery use their existing canonical Rust owners.

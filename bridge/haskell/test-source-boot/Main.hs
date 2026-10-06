@@ -23,6 +23,7 @@ tests = testGroup "source-boot"
   , testCase "exact scope binders" $ exactScopeBinders
   , testCase "original package projection" $ originalPackageProjection
   , testCase "original product projection" $ originalProjectionProducts
+  , testCase "native graph scheduling equality" nativeGraphSchedulingEquality
   , testCase "candidate compact inventory" $ candidateCompactInventory
   , testCase "candidate GHC load" $ candidateGhcLoad
   , testCase "SOURCE boot reuse" $ withTiming (withScratch sourceBootReuseAt)
