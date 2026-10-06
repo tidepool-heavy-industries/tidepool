@@ -2239,6 +2239,208 @@ fn parked_input_owner(
     issued_input(resident, &hole, site, fixture.recipe.clone())
 }
 
+#[test]
+fn durable_activation_binding_retains_private_authored_source_after_retirement_and_collection() {
+    use crate::session::{PublicManifestCommit, PublicationDecision, RecoveryPublicOwner};
+    struct RunOwner {
+        root: PathBuf,
+        _lock: std::fs::File,
+    }
+    impl crate::session::RecoveryRunAuthority for RunOwner {
+        fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+            Ok(root.canonicalize()? == self.root)
+        }
+    }
+    let (root, recipe) = InputFixture::source_recipe(false);
+    let session = SessionId(1741);
+    let mut resident = InputFixture::fresh_in(session, &root, &recipe);
+    let durable_root = tempfile::tempdir().unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(durable_root.path().join("run-owner.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    resident
+        .state
+        .lib_mut()
+        .attach_owned_recovery_graph_v3(
+            durable_root.path().join("declarations.json"),
+            Arc::new(RunOwner {
+                root: durable_root.path().canonicalize().unwrap(),
+                _lock: lock,
+            }),
+        )
+        .unwrap();
+    let public = resident.mint_scope(ScopeId::ROOT).unwrap();
+    let durable = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/private-source-input").unwrap(),
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        resident
+            .initialize_durable_public_scope(durable.clone(), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let public_context = SessionRunContext {
+        lexical_scope: public,
+        ..SessionRunContext::ROOT
+    };
+    resident.set_run_context(public_context).unwrap();
+    let before = resident.public_visibility_snapshot_in(public).unwrap();
+    let producer_execution = Arc::new(
+        resident
+            .begin_durable_private_execution(&durable, public)
+            .unwrap(),
+    );
+    let producer_scope = producer_execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: producer_scope,
+            ..public_context
+        })
+        .unwrap();
+    let checked = check_fixture_cell(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-input-private-source.hs"),
+        producer_execution.clone(),
+        1,
+    );
+    assert_eq!(checked.checked.items.len(), 2);
+    checked.adopt_declaration(&mut resident);
+    let (bound, producer, reservation) = checked.compile_binding(&mut resident, 1);
+    assert!(bound.is_empty());
+    assert!(resident
+        .current_decl_heads_in(producer_scope)
+        .iter()
+        .any(|(name, _)| name == "privateIncrement"));
+    let fixture = InputFixture {
+        root,
+        session,
+        recipe: recipe.clone(),
+        producer,
+    };
+    let reservation_hole = fixture.start(&mut resident);
+    let installed = resident
+        .public_visibility_snapshot_in(producer_scope)
+        .unwrap();
+    assert_ne!(installed.source_instances, before.source_instances);
+    let (submission, activation) = fixture.deliver(&mut resident, reservation_hole, 1);
+    let site = parked_site(&mut resident, &activation);
+    let realm = resident.parked_realm(&activation).unwrap();
+    let captured = resident
+        .capture_activation_input(&activation, realm, site)
+        .unwrap();
+    resident.set_run_context(public_context).unwrap();
+    let activation_execution = Arc::new(
+        resident
+            .begin_durable_private_execution(&durable, public)
+            .unwrap(),
+    );
+    let activation_scope = activation_execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: activation_scope,
+            ..public_context
+        })
+        .unwrap();
+    let (input, interface) = issued_captured_input(&mut resident, captured, recipe.clone());
+    let mounted = mount_original(&mut resident, input, interface);
+    let view = resident
+        .compile_view_for_execution(&activation_execution)
+        .unwrap()
+        .with_scoped_injection();
+    let preview = resident.admit_activation_preview(mounted, view).unwrap();
+    let base = resident
+        .snapshot_host_binding_publication(&activation_execution, &preview)
+        .unwrap();
+    assert!(
+        base.source_keys.is_empty(),
+        "binding reachability retains the private source without promoting its selection"
+    );
+    assert_eq!(
+        resident
+            .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let published = resident.public_visibility_snapshot_in(public).unwrap();
+    assert_eq!(published.source_instances, before.source_instances);
+    assert_eq!(published.source_selection, before.source_selection);
+    assert_eq!(published.declaration_tip, before.declaration_tip);
+    assert!(!resident
+        .current_decl_heads_in(public)
+        .iter()
+        .any(|(name, _)| name == "privateIncrement"));
+    assert!(matches!(
+        fixture.resume_activation(&mut resident, activation),
+        ResidentOutcome::Completed { .. }
+    ));
+    assert!(matches!(
+        resident.resume(submission, ()).unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    resident.set_run_context(public_context).unwrap();
+    drop(preview);
+    drop(reservation);
+    drop(checked);
+    drop(fixture);
+    drop(producer_execution);
+    drop(activation_execution);
+    resident.retire_scope(producer_scope);
+    resident.retire_scope(activation_scope);
+    assert!(resident.parked_holes().is_empty());
+    assert_eq!(resident.outstanding_custody(), 0);
+    let prepared = resident.state.prepared_mut().unwrap();
+    let collections = prepared.heap_stats().gc_count;
+    prepared.quiesce_and_collect_now().unwrap();
+    assert_eq!(prepared.heap_stats().gc_count, collections + 1);
+    let read = Arc::new(
+        resident
+            .begin_durable_private_execution(&durable, public)
+            .unwrap(),
+    );
+    let read_scope = read.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: read_scope,
+            ..public_context
+        })
+        .unwrap();
+    let (bound, code, item) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "privateSourceResult <- pure (sessionInput (1 :: Int))",
+        read.clone(),
+    );
+    let ResidentOutcome::Completed { result, .. } = resident
+        .run_bind_with_sites(
+            "privateSourceResult",
+            code.code(),
+            &bound[0],
+            item.generation().0,
+        )
+        .unwrap()
+    else {
+        panic!("published original closure must complete after collection");
+    };
+    assert_eq!(result.to_json(), serde_json::json!(42));
+    resident.set_run_context(public_context).unwrap();
+    drop(item);
+    drop(code);
+    drop(read);
+    resident.retire_scope(read_scope);
+    assert_eq!(
+        resident.public_visibility_snapshot_in(public).unwrap(),
+        published
+    );
+}
+
 fn assert_unpublished_input(
     resident: &mut TestSession,
     scope: ScopeId,
