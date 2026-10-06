@@ -692,7 +692,7 @@ impl PublicManifestBase {
 
 fn certified_native_dependencies(
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
-    roots: &[tidepool_toolchain::artifact_inventory::ArtifactId],
+    roots: &[tidepool_toolchain::artifact_inventory::NativeRequirementRoot],
 ) -> Result<Vec<recovery::RecoveryLiveDependency>, SessionError> {
     Ok(context
         .artifact_view()
@@ -2389,7 +2389,14 @@ impl SessionLib {
                 "authored native origin differs from the staged original product",
             ));
         }
-        let live_dependencies = certified_native_dependencies(context, &[certified_root])?;
+        let live_dependencies = certified_native_dependencies(
+            context,
+            &[
+                tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
+                    certified_root,
+                ),
+            ],
+        )?;
         graph
             .insert_node(recovery::RecoveryNode {
                 id: staged.generation,

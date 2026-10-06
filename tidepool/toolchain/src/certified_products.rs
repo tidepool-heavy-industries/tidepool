@@ -2781,6 +2781,7 @@ pub(crate) fn original_native_requirements_with_operation(
 /// binding generation; graph reachability grants no native lease.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CertifiedNativeRequirements {
+    pub group_ordinals: BTreeSet<u32>,
     pub artifact_edges: Vec<(
         crate::declaration_join::ExactModuleIdentity,
         crate::artifact_inventory::ArtifactDependency,
@@ -2792,6 +2793,7 @@ fn charge_native_requirements(
     operation: &InventoryOperation,
     requirements: &CertifiedNativeRequirements,
 ) -> CertResult<()> {
+    operation.reserve::<u32>(requirements.group_ordinals.len())?;
     use crate::artifact_inventory::ArtifactDependency;
     operation.reserve::<(
         crate::declaration_join::ExactModuleIdentity,
@@ -2908,6 +2910,11 @@ fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNat
     retained_packages.sort();
     retained_packages.dedup();
     CertifiedNativeRequirements {
+        group_ordinals: witness
+            .groups
+            .iter()
+            .map(|(ordinal, _, _)| *ordinal)
+            .collect(),
         artifact_edges: requirements,
         retained_packages,
     }
@@ -5786,7 +5793,9 @@ pub(crate) mod tests {
         assert_eq!(first.artifact_view().interface_dependencies(), interfaces);
         let required = first
             .artifact_view()
-            .native_binding_requirements_from_roots(&[descriptors[0].id])
+            .native_binding_requirements_from_roots(&[
+                crate::artifact_inventory::NativeRequirementRoot::AllGroups(descriptors[0].id),
+            ])
             .unwrap();
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].generation, 1);
@@ -6679,87 +6688,68 @@ pub(crate) mod tests {
         version: u8,
         packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+        let groups = import.into_iter().map(|import| (7, vec![import])).collect();
+        original_groups_fixture(module, groups, version, packages)
+    }
+
+    pub(crate) fn original_groups_fixture(
+        module: &str,
+        groups: Vec<(u32, Vec<PendingImportOwner>)>,
+        version: u8,
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let interface = vec![0x42];
-        let wire_symbol = |symbol: &SymbolIdentity| {
-            value_array([
-                value_text(&symbol.unit),
-                value_text(&symbol.module),
-                value_text(&symbol.namespace),
-                value_text(&symbol.occurrence),
-                value_array([Value::Integer(0.into())]),
-            ])
-        };
-        let mut encoded_groups = Vec::new();
-        if let Some(import) = &import {
-            let Value::Array(mut fields) = ciborium::de::from_reader(
-                tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program())
-                    .as_slice(),
-            )
-            .unwrap() else {
-                unreachable!()
-            };
-            let (identity, generation) = match import {
-                PendingImportOwner::Source { binder, .. }
-                | PendingImportOwner::Package { binder, .. } => (binder, None),
-                PendingImportOwner::Retained {
-                    identity,
-                    generation,
-                } => (identity, Some(*generation)),
-                PendingImportOwner::RetainedPackage {
-                    binder, generation, ..
-                } => (binder, Some(*generation)),
-            };
-            fields[7] = value_array([value_array([
-                wire_symbol(identity),
-                value_array([Value::Integer(1.into())]),
-                value_array([Value::Integer(0.into())]),
-                Value::Bool(false),
-                generation.map_or_else(
-                    || value_array([Value::Integer(0.into())]),
-                    |generation| {
-                        value_array([Value::Integer(1.into()), Value::Integer(generation.into())])
-                    },
-                ),
-            ])]);
-            fields[10] = value_array([]);
-            let binder = wire_symbol(&testing::identity(module, "entry"));
-            fields[11] = value_array([value_array([
-                Value::Integer(1.into()),
-                value_array([value_array([
-                    binder.clone(),
-                    value_array([
-                        Value::Integer(0.into()),
-                        value_array([Value::Integer(3.into()), Value::Bytes(vec![])]),
-                    ]),
-                ])]),
-            ])]);
-            fields.remove(12);
-            let mut group = vec![
-                value_text("TPGRP"),
-                Value::Integer(1.into()),
-                Value::Integer(7.into()),
-                value_array([binder]),
-            ];
-            group.extend(fields.into_iter().skip(1));
-            let mut bytes = Vec::new();
-            ciborium::ser::into_writer(&Value::Array(group), &mut bytes).unwrap();
-            encoded_groups.push(Value::Bytes(bytes));
-        }
-        let mut product_bytes = Vec::new();
-        ciborium::ser::into_writer(
-            &value_array([
-                value_text("TPMOD"),
-                Value::Integer(1.into()),
-                value_array([value_array([
-                    value_text("fixture"),
-                    value_text(module),
-                    Value::Bytes(interface.clone()),
-                    Value::Array(encoded_groups),
-                ])]),
-            ]),
-            &mut product_bytes,
-        )
-        .unwrap();
+        let projected = groups
+            .iter()
+            .map(|(ordinal, imports)| {
+                let mut wire = testing::wire_program();
+                let tidepool_repr::execution_schema::Group::NonRecursive(top) =
+                    &mut wire.bindings[0]
+                else {
+                    unreachable!()
+                };
+                top.identity = testing::identity(module, &format!("entry_{ordinal}"));
+                // The one-group fixture retains its existing entry identity.
+                if groups.len() == 1 && *ordinal == 7 {
+                    top.identity = testing::identity(module, "entry");
+                }
+                top.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Bytes(Vec::new());
+                let top = top.clone();
+                wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
+                wire.expressions.nodes.clear();
+                wire.globals = imports
+                    .iter()
+                    .map(|import| {
+                        let (identity, required_generation) = match import {
+                            PendingImportOwner::Source { binder, .. }
+                            | PendingImportOwner::Package { binder, .. } => (binder, None),
+                            PendingImportOwner::Retained {
+                                identity,
+                                generation,
+                            } => (identity, Some(*generation)),
+                            PendingImportOwner::RetainedPackage {
+                                binder, generation, ..
+                            } => (binder, Some(*generation)),
+                        };
+                        GlobalDecl {
+                            identity: identity.clone(),
+                            rep: RuntimeRep::LiftedRef,
+                            entry_signature: None,
+                            required_evaluated: false,
+                            required_generation,
+                        }
+                    })
+                    .collect();
+                testing::projected_group(wire, *ordinal).unwrap()
+            })
+            .collect();
+        let product_bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: "fixture".into(),
+                module: module.into(),
+                interface: interface.clone(),
+                groups: projected,
+            }]);
         let owner = CachedHomeOwner {
             unit: "fixture".into(),
             module: module.into(),
@@ -6778,30 +6768,21 @@ pub(crate) mod tests {
         let groups = raw
             .groups
             .into_iter()
-            .map(|group| PendingCertifiedGroup {
+            .zip(groups)
+            .map(|(group, (_, imports))| PendingCertifiedGroup {
                 owner: owner.clone(),
                 origin: ProductOrigin::Fresh,
                 group: Arc::new(group),
-                imports: vec![import.clone().unwrap()].into(),
+                imports: imports.into(),
             })
             .collect::<Vec<_>>();
         let seal = encode_home_certification(&owner, &groups, packages).unwrap();
-        let mut package_bytes = Vec::new();
-        ciborium::ser::into_writer(
-            &value_array([
-                value_text("TPPKGROOTS"),
-                value_text("2"),
-                value_array([
-                    value_text(&owner.unit),
-                    value_text(&owner.module),
-                    value_text(hex(&owner.skinny_iface_sha256)),
-                ]),
-                value_array([]),
-                value_array([]),
-            ]),
-            &mut package_bytes,
-        )
-        .unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            &owner.unit,
+            &owner.module,
+            &interface,
+            Vec::new(),
+        );
         crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             owner,
             interface,

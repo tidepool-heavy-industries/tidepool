@@ -1051,7 +1051,11 @@ impl AcceptedDeclarationPublication {
                         == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
                         && native_owners.contains(&descriptor.owner)
                 })
-                .map(|descriptor| descriptor.id)
+                .map(|descriptor| {
+                    tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
+                        descriptor.id,
+                    )
+                })
                 .collect::<Vec<_>>();
             let live_dependencies = super::certified_native_dependencies(&context, &native_roots)?;
             let mut workbench_imports = base
