@@ -2659,6 +2659,17 @@ originalProjectionProducts = withScratch $ \work -> do
     earlyBodies <- recoveredIdentities earlyDemand
     unless (earlyBodies == firstBodies) $
       fail "completion-driven original demand rebuilt or changed its completed native owners"
+    -- A generation used only by a recovered owner must invalidate adoption,
+    -- even when the target's own raw inputs still match the earlier worklist.
+    (_,changedProducts) <- prepareOriginalProductsWithWorklist earlyWorklist capturedEnv
+      (Just capturedScope) (pprProductInterfaces captured)
+      (capturedContext {projectionRetainedGenerations=Map.singleton bad 1})
+      Set.empty (pprModules captured)
+    let changedOwner = lookup (pmModule ownerModule)
+          (preparedModuleProductOutcomes (preparedProductInventory changedProducts))
+    case changedOwner of
+      Just (Right groups) | bad `notElem` concatMap projectedBinders groups -> pure ()
+      other -> fail ("recovered-only generation change adopted stale original groups: " ++ show other)
     -- A completed cached body is not authority to use changed artifacts.
     ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
       (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))

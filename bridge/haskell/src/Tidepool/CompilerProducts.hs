@@ -92,7 +92,7 @@ import Tidepool.PreparedStg
 import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks)
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule
-  , admittedOriginalProof, admittedOriginalInterface )
+  , admittedOriginalProof, admittedOriginalInterface, originalVersionInScope )
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase, emitCount)
@@ -302,7 +302,7 @@ data OriginalProductWorklist = OriginalProductWorklist
   { worklistObserve :: PreparedModule -> IO ()
   , worklistComplete :: PreparedModule -> IO ()
   , worklistFinish :: IO ([PreparedModule],PreparedProductContext)
-  , worklistMatches :: HscEnv -> Map.Map ModuleName ModIface -> ProjectionContext
+  , worklistMatches :: HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
       -> Set.Set SymbolIdentity -> [PreparedModule] -> IO Bool
   , worklistFallback :: HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
       -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
@@ -328,7 +328,7 @@ prepareOriginalProductsWithWorklist :: OriginalProductWorklist
   -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
 prepareOriginalProductsWithWorklist worklist env exact interfaces context external initial = do
-  accepted <- worklistMatches worklist env interfaces context external initial
+  accepted <- worklistMatches worklist env exact interfaces context external initial
   if accepted then worklistFinish worklist
     else worklistFallback worklist env exact interfaces context external initial
 
@@ -407,7 +407,7 @@ newOriginalProductWorklist completedRaw cache executor env exact interfaces cont
       observe prepared = lower interfaces prepared >> pure ()
       complete prepared = do
         captured <- lookupCachedOriginalHomeModuleProducts completedRaw env interfaces context prepared
-        raw <- maybe (lower interfaces prepared) pure captured
+        raw <- maybe (fail "native completion has no worker-published original projection") pure captured
         completed prepared raw
       finish = do
         modules <- Map.elems <$> readIORef modulesRef
@@ -428,21 +428,32 @@ newOriginalProductWorklist completedRaw cache executor env exact interfaces cont
         first <- evaluate left >>= makeStableName
         second <- evaluate right >>= makeStableName
         pure (first == second)
-      matches selectedEnv selectedInterfaces selectedContext selectedExternal initial = do
+      matches selectedEnv selectedExact selectedInterfaces selectedContext selectedExternal initial = do
         recorded <- readIORef modulesRef
         originals <- readIORef rawRef
+        admitted <- readIORef admittedRef
         let owners = Set.fromList (map pmModule initial)
-        if selectedExternal /= external || owners /= sourceOwners then pure False else
-          fmap and $ forM initial $ \prepared -> case
-              (Map.lookup (pmModule prepared) recorded,Map.lookup (pmModule prepared) originals) of
-            (Just old,Just oldRaw) -> do
-              sameBody <- samePhysical prepared old
-              selectedRaw <- lookupCachedOriginalHomeModuleProducts completedRaw selectedEnv
-                selectedInterfaces selectedContext prepared
-              case selectedRaw of
-                Just raw | sameBody -> samePhysical raw oldRaw
-                _ -> pure False
-            _ -> pure False
+            sameVersion owner = case (exact,selectedExact) of
+              (Just old,Just current) -> case
+                  (originalVersionInScope old owner,originalVersionInScope current owner) of
+                (Just previous,Just selectedVersion) -> previous == selectedVersion
+                _ -> False
+              _ -> False
+            selected = Map.union selectedInterfaces (Map.fromList
+              [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
+                | (owner,original) <- Map.toAscList admitted])
+        if selectedExternal /= external || owners /= sourceOwners
+            || not (all sameVersion (Map.keys admitted)) then pure False else do
+          sameSource <- fmap and $ forM initial $ \prepared ->
+            maybe (pure False) (samePhysical prepared) (Map.lookup (pmModule prepared) recorded)
+          sameRaw <- fmap and $ forM (Map.elems recorded) $ \prepared ->
+            case Map.lookup (pmModule prepared) originals of
+              Nothing -> pure False
+              Just oldRaw -> do
+                selectedRaw <- lookupCachedOriginalHomeModuleProducts completedRaw selectedEnv
+                  selected selectedContext prepared
+                maybe (pure False) (`samePhysical` oldRaw) selectedRaw
+          pure (sameSource && sameRaw)
       fallback = prepareOriginalProductsWithCache cache (Just completedRaw) executor
   pure (OriginalProductWorklist observe complete finish matches fallback)
 
