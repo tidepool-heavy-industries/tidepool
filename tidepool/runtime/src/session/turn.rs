@@ -1749,6 +1749,21 @@ impl Default for TurnCertification {
 }
 
 impl TurnCertification {
+    /// Carry an ordinary compiler target's complete certified import closure.
+    pub(crate) fn from_artifacts(
+        artifacts: &crate::CompiledArtifacts,
+        target: &crate::TargetArtifact,
+    ) -> Self {
+        Self {
+            artifact_view: artifacts.artifact_view.clone(),
+            groups: artifacts.certified_groups.clone().into(),
+            target_owners: target.pending_imports.clone(),
+            package_interfaces: target.package_interfaces.clone(),
+            recovery_products: artifacts.recovery_products.clone(),
+            ..Default::default()
+        }
+    }
+
     pub(super) fn host_prototype(&self) -> Result<Self, CompileError> {
         let TurnPurpose::Execution { execution, prefix } = &self.purpose else {
             return Err(CompileError::ExtractFailed(
@@ -6144,19 +6159,16 @@ mod tests {
     }
 
     #[test]
-    fn checked_declaration_reaps_dropped_scope_before_visible_adoption() {
+    fn checked_declaration_requires_private_custody_and_releases_after_adoption() {
         use crate::session::{
-            resident_cell_check_template, ModuleEnv, PersistentSession, SessionError, SessionLib,
-            SourceImports,
+            resident_cell_check_template, ModuleEnv, PersistentSession, SessionLib, SourceImports,
         };
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::{Generation, SessionId};
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
-        // Each case needs its own compiler admission and fresh mutable session.
-        // A live lease first proves the genuine declaration can be adopted.
-        for drop_lease in [false, true] {
+        for private in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let lib = SessionLib::open(
                 SessionId(1016),
@@ -6167,7 +6179,12 @@ mod tests {
             .with_validation_include(effects.include_paths().to_vec());
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let lease = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
-            let scope = lease.scope();
+            let public = lease.scope();
+            let execution =
+                private.then(|| Arc::new(session.begin_private_execution(public).unwrap()));
+            let scope = execution
+                .as_ref()
+                .map_or(public, |owner| owner.private_scope());
             let view = session.compile_view_in(scope).unwrap();
             let declaration_module = session.next_lib_module().unwrap();
             assert_eq!(declaration_module.gen(), Generation(1));
@@ -6190,17 +6207,25 @@ mod tests {
                 reserved_declaration_modules: Vec::new(),
             };
             let include_paths = view.include_paths(effects.include_paths());
-            let admission = session
-                .admit_cell_in(
+            let admission = match &execution {
+                Some(execution) => session.admit_cell_for_execution(
+                    execution.clone(),
+                    1,
+                    Arc::new(specification.clone()),
+                    specification.specification_digest(),
+                    [1; 32],
+                    include_paths,
+                ),
+                None => session.admit_cell_in(
                     scope,
                     1,
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
                     [1; 32],
                     include_paths,
-                )
-                .unwrap();
-            assert!(admission.private_execution().is_none());
+                ),
+            }
+            .unwrap();
             let view = admission.view();
             let include = admission
                 .include_paths()
@@ -6222,15 +6247,7 @@ mod tests {
                 },
                 admission.clone(),
                 &[],
-            )
-            .unwrap();
-            assert_eq!(checked.items.len(), 1);
-            let item = checked.checked_item(0).unwrap();
-            assert!(item.planned_declaration().is_some());
-            let prefix = session
-                .begin_checked_prefix(admission, item.clone())
-                .unwrap();
-            let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
+            );
             let original = session.public_visibility_snapshot_in(scope).unwrap();
             assert_eq!(original.declaration_tip, Generation(0));
             assert_eq!(original.epoch, 0);
@@ -6239,45 +6256,48 @@ mod tests {
                 .log
                 .certified_authored_at(Generation(1))
                 .is_none());
-            let mut lease = Some(lease);
-            if drop_lease {
-                // Drop queues retirement; it does not mutate the checked view.
-                drop(lease.take());
-                assert!(session.scope_tree().is_live(scope));
+            if !private {
+                let failure = checked
+                    .err()
+                    .expect("raw admission cannot check declarations");
+                let CompileError::ExtractFailed(message) = failure.error else {
+                    panic!("raw admission must be refused at the execution-owner boundary");
+                };
+                assert_eq!(
+                    message,
+                    "checked execution requires its owning private or native setup admission"
+                );
+                assert!(admission.private_execution().is_none());
                 assert_eq!(session.public_visibility_snapshot_in(scope), Some(original));
-            }
-            let result = session.adopt_checked_declaration(reservation);
-            if drop_lease {
-                let error = result.unwrap_err();
-                assert!(
-                    session
-                        .lib()
-                        .log
-                        .certified_authored_at(Generation(1))
-                        .is_none(),
-                    "a rejected original lease must not commit its declaration: {error:?}"
-                );
-                assert!(
-                    matches!(error, SessionError::StaleStagedDeclaration),
-                    "{error:?}"
-                );
-                assert!(error.published_declaration_commit().is_none());
-                assert!(!session.scope_tree().is_live(scope));
                 assert!(session.lib().log.is_reserved(Generation(1)));
-                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-            } else {
-                let commit = result.unwrap();
-                assert_eq!(commit.generation, Generation(1));
-                let visible = session.public_visibility_snapshot_in(scope).unwrap();
-                assert_eq!(visible.declaration_tip, Generation(1));
-                assert_eq!(visible.epoch, 1);
-                assert!(session
-                    .lib()
-                    .log
-                    .certified_authored_at(Generation(1))
-                    .is_some());
-                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+                continue;
             }
+            let checked = checked.unwrap();
+            assert_eq!(checked.items.len(), 1);
+            let item = checked.checked_item(0).unwrap();
+            assert!(item.planned_declaration().is_some());
+            let prefix = session
+                .begin_checked_prefix(admission.clone(), item.clone())
+                .unwrap();
+            let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
+            // The external public lease does not own the detached private scope.
+            drop(lease);
+            drop(execution);
+            session.reap_admission_leases();
+            assert!(!session.scope_tree().is_live(public));
+            assert!(session.scope_tree().is_live(scope));
+            assert_eq!(session.public_visibility_snapshot_in(scope), Some(original));
+            let commit = session.adopt_checked_declaration(reservation).unwrap();
+            assert_eq!(commit.generation, Generation(1));
+            let visible = session.public_visibility_snapshot_in(scope).unwrap();
+            assert_eq!(visible.declaration_tip, Generation(1));
+            assert_eq!(visible.epoch, 1);
+            assert!(session
+                .lib()
+                .log
+                .certified_authored_at(Generation(1))
+                .is_some());
+            assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
             assert_eq!(session.lib().scope_tip(ScopeId::ROOT), Generation(0));
             assert_eq!(
                 session
@@ -6286,6 +6306,11 @@ mod tests {
                     .epoch,
                 0
             );
+            drop(checked);
+            drop(prefix);
+            drop(admission);
+            session.reap_admission_leases();
+            assert!(!session.scope_tree().is_live(scope));
         }
     }
 

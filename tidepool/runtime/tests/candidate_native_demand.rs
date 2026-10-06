@@ -114,12 +114,41 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         .iter()
         .filter(|group| group.owner().module.starts_with("CandidateDemand"))
         .all(|group| group.origin() == ProductOrigin::Fresh));
+    let mut handlers = frunk::HNil;
+    let cancelled = tidepool_runtime::run_compiled_target(
+        &cold,
+        "__prepared",
+        1024 * 1024,
+        &mut handlers,
+        &(),
+        |cancel| cancel.cancel(),
+    )
+    .expect_err("cancellation must reach the installed imported target");
+    assert!(matches!(
+        cancelled,
+        tidepool_runtime::RuntimeError::Prepared(
+            tidepool_runtime::session::prepared::PreparedRuntimeError::Cancelled
+        )
+    ));
     assert_eq!(
         evaluator
             .run_target(&cold, "__prepared", frunk::HNil)
             .json(),
         expected
     );
+
+    let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let executed = tidepool_runtime::compile_and_run_cancellable(
+        CONSUMER,
+        "result",
+        &include_refs,
+        &mut handlers,
+        &(),
+        1024 * 1024,
+        |_| {},
+    )
+    .expect("production one-shot execution preserves certified imported groups");
+    assert_eq!(executed.to_json(), expected);
 
     // The warmer demands the facade and class anchors as well as the instance.
     // Their production-issued originals form a closed candidate cohort.
