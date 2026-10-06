@@ -4462,12 +4462,16 @@ mod tests {
         ) {
             // Representation-only policy rows issue no certificate or site authority.
             // Every case includes both retained roles, ignored conflicting rows,
-            // exact duplication, and a distinct record parent for the same spelling.
+            // exact duplication, and each identity field distinguished independently.
             let first = (0, 0, 0, 0, None);
             let package = (1, 1, 0, 1, None);
             let mut rows = vec![
                 (first, 1, 0), (package, 2, 1), (first, 3, 2),
                 (package, 3, 3), (first, 1, 0), ((0, 0, 0, 0, Some(0)), 2, 0),
+                ((1, 0, 0, 0, None), 2, 1),
+                ((0, 1, 0, 0, None), 3, 0),
+                ((0, 0, 1, 0, None), 2, 0),
+                ((0, 0, 0, 1, None), 3, 1),
             ];
             rows.extend(tail);
             let explicit: BTreeMap<_, _> = explicit.into_iter()
