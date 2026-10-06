@@ -24,7 +24,7 @@ import Control.Concurrent.MVar (MVar, newMVar, modifyMVar_, readMVar)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
-import Data.IORef (newIORef, readIORef, modifyIORef')
+import Data.IORef (newIORef, readIORef, modifyIORef', atomicModifyIORef')
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust)
 import Data.Set qualified as Set
@@ -88,7 +88,7 @@ import Tidepool.HomeProducts
   , admittedOriginalProof, admittedOriginalInterface, admittedOriginalLocation )
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import GHC.Unit.Home.ModInfo (hm_iface)
-import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase, emitCount)
 
 -- The production worker and original-product fixtures share the compiler
 -- profile and native package/type authorities. Callers select only their real
@@ -155,10 +155,16 @@ observeOriginalProjection (OriginalProjectionCollector completed) retained auxil
   context <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
     "__original_projection" auxiliaryRoots json
   let observe prepared = do
-        raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts environment interfaces context prepared)
         identity <- evaluate prepared >>= makeStableName
         let selectedContext = originalProjectionContext prepared context
-        modifyMVar_ completed (pure . Map.insert (pmModule prepared) (identity,selectedContext,raw))
+        captured <- Map.lookup (pmModule prepared) <$> readMVar completed
+        case captured of
+          Just (capturedIdentity,capturedContext,_)
+            | identity == capturedIdentity && selectedContext == capturedContext -> pure ()
+          _ -> do
+            raw <- forceRawModuleProducts
+              (projectRawOriginalHomeModuleProducts environment interfaces context prepared)
+            modifyMVar_ completed (pure . Map.insert (pmModule prepared) (identity,selectedContext,raw))
   pure (PreparedModuleObserver observe (\_ -> pure ()))
 
 originalProjectionContext :: PreparedModule -> ProjectionContext -> ProjectionContext
@@ -294,6 +300,8 @@ prepareOriginalProductsUsingCollector
   -> Map.Map ModuleName ModIface -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
 prepareOriginalProductsUsingCollector collector executor env exact interfaces context external initial = do
+  timing <- readTimingEnabled
+  workRef <- newIORef (0 :: Integer,0 :: Integer)
   seeds <- case collector of
     Nothing -> pure Map.empty
     Just (OriginalProjectionCollector completed) -> readMVar completed
@@ -308,9 +316,14 @@ prepareOriginalProductsUsingCollector collector executor env exact interfaces co
         case Map.lookup (pmModule prepared) seeds of
           Just (capturedIdentity,capturedContext,raw)
             | identity == capturedIdentity
-            , originalProjectionContext prepared context == capturedContext -> pure raw
-          _ -> forceRawModuleProducts
-            (projectRawOriginalHomeModuleProducts env selected context prepared)
+            , originalProjectionContext prepared context == capturedContext -> do
+                atomicModifyIORef' workRef (\(projected,hits) -> ((projected,hits + 1),()))
+                pure raw
+          _ -> do
+            raw <- forceRawModuleProducts
+              (projectRawOriginalHomeModuleProducts env selected context prepared)
+            atomicModifyIORef' workRef (\(projected,hits) -> ((projected + 1,hits),()))
+            pure raw
       completed _ raw = do
         modifyIORef' rawRef (Map.insert (rawOriginalProductOwner raw) raw)
         modules <- readIORef modulesRef
@@ -354,6 +367,9 @@ prepareOriginalProductsUsingCollector collector executor env exact interfaces co
   admitted <- readIORef admittedRef
   raw <- Map.elems <$> readIORef rawRef
   let (products,_) = settleOriginalHomeModuleProducts env external raw
+  (projected,hits) <- readIORef workRef
+  emitCount timing "original_raw_projected_modules" projected
+  emitCount timing "original_raw_seed_hits" hits
   pure (modules,PreparedProductContext products admitted modules (Just raw) external Nothing)
 
 -- Captures come from the exact scope, including its admitted checked values,
