@@ -82,7 +82,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
     );
         let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
         let compile_start = std::time::Instant::now();
-        let mut compiled = tidepool_runtime::compile_targets(
+        let compiled = tidepool_runtime::compile_targets(
             &source,
             &[target],
             &source_roots,
@@ -133,16 +133,10 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             })
             .count();
         assert_eq!(replayed, 0, "catalog owners must not be re-extracted");
-        let prepared = compiled
-            .targets
-            .remove(target)
-            .unwrap()
-            .prepared
-            .into_prepared();
         let execution_start = std::time::Instant::now();
-        let value = tidepool_runtime::run_prepared_program(
-            prepared,
-            &compiled.table,
+        let value = tidepool_runtime::run_compiled_target(
+            &compiled,
+            target,
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             &mut frunk::HNil,
             &(),
