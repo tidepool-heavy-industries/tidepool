@@ -4,13 +4,12 @@ use crate::suspension::ValueHandle;
 use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
 use tidepool_repr::Generation;
 
-fn entry(name: &str, generation: u64, slot: &mut *mut u8) -> BindingEntry {
+fn entry(name: &str, generation: u64) -> BindingEntry {
     BindingEntry {
         name: BindingName(name.into()),
         id: SessionVarId::from_extract(generation),
         module: SessionModule::val(Generation(generation)),
         value: BoundValue {
-            root: unsafe { RootSlot::new(slot) },
             handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
             identity: SymbolIdentity {
                 unit: "test".into(),
@@ -50,20 +49,14 @@ fn persistent_membership_roots_share_append_and_unchanged_capture_custody() {
     let mut tree = ScopeTree::new();
     let owner = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut first_slot = std::ptr::null_mut();
-    let mut second_slot = std::ptr::null_mut();
-    let first = table
-        .bind_in(owner, entry("first", 1, &mut first_slot))
-        .unwrap();
+    let first = table.bind_in(owner, entry("first", 1)).unwrap();
     let old = tree.mint_isolated();
     table.seed_detached_scope(&tree, owner, old);
     assert!(table.tips[&old]
         .retained
         .ptr_eq(&table.capturable_membership[&owner].retained));
     assert_eq!(table.lease_count(first), 1);
-    let second = table
-        .bind_in(owner, entry("second", 2, &mut second_slot))
-        .unwrap();
+    let second = table.bind_in(owner, entry("second", 2)).unwrap();
     let latest = tree.mint_isolated();
     table.seed_detached_scope(&tree, owner, latest);
     assert_eq!(table.scope_reachable_binding_ids(&tree, old), vec![first]);
@@ -117,10 +110,9 @@ fn persistent_membership_observation_fallback_handles_cycles_resave_and_cross_ow
     let b = tree.mint_isolated();
     let c = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut slots = [std::ptr::null_mut(); 3];
-    let aid = table.bind_in(a, entry("a", 1, &mut slots[0])).unwrap();
-    let bid = table.bind_in(b, entry("b", 2, &mut slots[1])).unwrap();
-    let cid = table.bind_in(c, entry("c", 3, &mut slots[2])).unwrap();
+    let aid = table.bind_in(a, entry("a", 1)).unwrap();
+    let bid = table.bind_in(b, entry("b", 2)).unwrap();
+    let cid = table.bind_in(c, entry("c", 3)).unwrap();
     assert!(table.save_observation(cid, &[], 10).is_empty());
     assert!(table.save_observation(bid, &[], 10).is_empty());
     assert!(table.save_observation(aid, &[bid.var()], 10).is_empty());
@@ -186,16 +178,9 @@ fn observation_retraction_preserves_frozen_membership_and_removes_unleased_own_i
     let foreign = tree.mint_isolated();
     let child = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut slots = [std::ptr::null_mut(); 4];
-    let inherited = table
-        .bind_in(parent, entry("inherited", 1, &mut slots[0]))
-        .unwrap();
-    let extra = table
-        .bind_in(foreign, entry("foreign", 2, &mut slots[1]))
-        .unwrap();
-    let own = table
-        .bind_in(child, entry("own", 3, &mut slots[2]))
-        .unwrap();
+    let inherited = table.bind_in(parent, entry("inherited", 1)).unwrap();
+    let extra = table.bind_in(foreign, entry("foreign", 2)).unwrap();
+    let own = table.bind_in(child, entry("own", 3)).unwrap();
     table.save_observation(inherited, &[], 10);
     table.save_observation(extra, &[], 10);
     table.save_observation(own, &[inherited.var(), extra.var()], 10);
@@ -203,9 +188,7 @@ fn observation_retraction_preserves_frozen_membership_and_removes_unleased_own_i
     table.seed_detached_scope(&tree, child, old);
     table.seed_detached_scope(&tree, parent, child);
     table.save_observation(own, &[], 10);
-    let removable = table
-        .bind_in(child, entry("removed", 4, &mut slots[3]))
-        .unwrap();
+    let removable = table.bind_in(child, entry("removed", 4)).unwrap();
     assert_eq!(table.remove_live(removable).unwrap().id, removable);
     let latest = tree.mint_isolated();
     table.seed_detached_scope(&tree, child, latest);
@@ -241,20 +224,21 @@ fn immutable_identity_reinsertion_is_idempotent_and_conflicts_are_atomic() {
     let scope = tree.mint_isolated();
     let foreign = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut slot = std::ptr::null_mut();
-    let id = table.bind_in(scope, entry("answer", 1, &mut slot)).unwrap();
+    let id = table.bind_in(scope, entry("answer", 1)).unwrap();
     let revision = table.mutation_revision();
     let witness = table.scope_witness(&tree, scope);
-    assert_eq!(table.bind_in(scope, entry("answer", 1, &mut slot)), Ok(id));
+    assert_eq!(table.bind_in(scope, entry("answer", 1)), Ok(id));
     assert_eq!(table.mutation_revision(), revision);
     assert_eq!(table.scope_witness(&tree, scope), witness);
     for change in 0..8 {
-        let mut changed = entry("answer", 1, &mut slot);
+        let mut changed = entry("answer", 1);
         let changed_scope = if change == 0 { foreign } else { scope };
         match change {
             1 => changed.name = BindingName("other".into()),
             2 => changed.module = SessionModule::val(Generation(2)),
-            3 => changed.value.root = unsafe { RootSlot::new(std::ptr::null_mut()) },
+            3 => {
+                changed.value.handle = PreparedHandle::new(ValueHandle(1), RuntimeRep::UnliftedRef)
+            }
             4 => changed.value.handle = PreparedHandle::new(ValueHandle(2), RuntimeRep::LiftedRef),
             5 => changed.value.identity.record_parent = Some("Record".into()),
             6 => changed.type_display = None,
@@ -273,7 +257,7 @@ fn immutable_identity_reinsertion_is_idempotent_and_conflicts_are_atomic() {
     }
     table.remove_current_in(scope, "answer");
     let hidden_revision = table.mutation_revision();
-    table.bind_in(scope, entry("answer", 1, &mut slot)).unwrap();
+    table.bind_in(scope, entry("answer", 1)).unwrap();
     assert!(table.resolve_in(&tree, scope, "answer").is_none());
     assert_eq!(table.mutation_revision(), hidden_revision);
 }
@@ -285,23 +269,14 @@ fn witnesses_follow_owner_mutations_without_invalidating_frozen_siblings() {
     let child = tree.mint_isolated();
     let sibling = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut first_slot = std::ptr::null_mut();
-    let first = table
-        .bind_in(parent, entry("answer", 1, &mut first_slot))
-        .unwrap();
+    let first = table.bind_in(parent, entry("answer", 1)).unwrap();
     table.seed_detached_scope(&tree, parent, child);
     let frozen = table.scope_witness(&tree, child);
     let parent_before = table.scope_witness(&tree, parent);
-    let mut later_slot = std::ptr::null_mut();
-    table
-        .bind_in(parent, entry("answer", 2, &mut later_slot))
-        .unwrap();
+    table.bind_in(parent, entry("answer", 2)).unwrap();
     assert_ne!(table.scope_witness(&tree, parent), parent_before);
     assert_eq!(table.scope_witness(&tree, child), frozen);
-    let mut sibling_slot = std::ptr::null_mut();
-    table
-        .bind_in(sibling, entry("answer", 3, &mut sibling_slot))
-        .unwrap();
+    table.bind_in(sibling, entry("answer", 3)).unwrap();
     assert_eq!(table.scope_witness(&tree, child), frozen);
     let leased_revision = table.mutation_revision();
     let shares = table.acquire_leases([first]);
@@ -313,8 +288,7 @@ fn witnesses_follow_owner_mutations_without_invalidating_frozen_siblings() {
     let hidden = table.scope_witness(&tree, child);
     table.remove_current_in(child, "answer");
     assert_eq!(table.scope_witness(&tree, child), hidden);
-    let mut alias_slot = std::ptr::null_mut();
-    let alias = entry("page", 4, &mut alias_slot);
+    let alias = entry("page", 4);
     table.bind_alias_in(parent, alias, first).unwrap();
     let dependency_before = table.scope_witness(&tree, child);
     assert!(table.retain_scope_dependencies(&tree, parent, child));
@@ -335,10 +309,7 @@ fn observation_promotion_and_final_release_keep_witnesses_and_indexes_complete()
     let scope = tree.mint_isolated();
     let target = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut slot = std::ptr::null_mut();
-    let id = table
-        .bind_in(scope, entry("observation", 1, &mut slot))
-        .unwrap();
+    let id = table.bind_in(scope, entry("observation", 1)).unwrap();
     let before = table.scope_witness(&tree, scope);
     table.save_observation(id, &[], 1);
     assert_ne!(table.scope_witness(&tree, scope), before);
@@ -369,11 +340,10 @@ fn exhausted_revisions_disable_witnesses_without_reusing_an_identity() {
     let scope = tree.mint_isolated();
     let mut table = BindingTable::new();
     table.revision = u64::MAX;
-    let mut slot = std::ptr::null_mut();
-    let id = table.bind_in(scope, entry("answer", 1, &mut slot)).unwrap();
+    let id = table.bind_in(scope, entry("answer", 1)).unwrap();
     assert_eq!(table.mutation_revision(), None);
     assert_eq!(table.scope_witness(&tree, scope), None);
-    assert_eq!(table.bind_in(scope, entry("answer", 1, &mut slot)), Ok(id));
+    assert_eq!(table.bind_in(scope, entry("answer", 1)), Ok(id));
     assert_eq!(table.mutation_revision(), None);
     assert_indexes(&table);
 }
@@ -385,12 +355,8 @@ fn frozen_exact_ids_cannot_gain_later_ancestor_dependencies_or_sibling_aliases()
     let child = tree.mint_isolated();
     let sibling = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut parent_slot = std::ptr::null_mut();
-    let parent_id = table
-        .bind_in(parent, entry("parent", 1, &mut parent_slot))
-        .unwrap();
-    let mut sibling_slot = std::ptr::null_mut();
-    let sibling_entry = entry("sibling", 2, &mut sibling_slot);
+    let parent_id = table.bind_in(parent, entry("parent", 1)).unwrap();
+    let sibling_entry = entry("sibling", 2);
     let sibling_id = sibling_entry.id;
     let sibling_identity = sibling_entry.value.identity.clone();
     table.bind_in(sibling, sibling_entry).unwrap();
@@ -406,8 +372,7 @@ fn frozen_exact_ids_cannot_gain_later_ancestor_dependencies_or_sibling_aliases()
     assert!(table
         .scope_reachable_binding_ids(&tree, parent)
         .contains(&sibling_id));
-    let mut alias_slot = std::ptr::null_mut();
-    let mut alias = entry("foreign_alias", 3, &mut alias_slot);
+    let mut alias = entry("foreign_alias", 3);
     alias.module = SessionModule::val(Generation(1));
     alias.value.identity = sibling_identity.clone();
     table.bind_in(sibling, alias).unwrap();
@@ -438,10 +403,7 @@ fn unseeded_witness_tracks_ancestor_frames_and_last_removal() {
     let child = tree.mint_child(parent).unwrap();
     let mut table = BindingTable::new();
     let before = table.scope_witness(&tree, child);
-    let mut slot = std::ptr::null_mut();
-    let id = table
-        .bind_in(parent, entry("parent", 1, &mut slot))
-        .unwrap();
+    let id = table.bind_in(parent, entry("parent", 1)).unwrap();
     let named = table.scope_witness(&tree, child);
     assert_ne!(named, before);
     table.remove_live(id).unwrap();
@@ -456,12 +418,9 @@ fn observation_witness_covers_mutable_cross_scope_dependency_metadata() {
     let b = tree.mint_isolated();
     let c = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut a_slot = std::ptr::null_mut();
-    let mut b_slot = std::ptr::null_mut();
-    let mut c_slot = std::ptr::null_mut();
-    let a_id = table.bind_in(a, entry("a", 1, &mut a_slot)).unwrap();
-    let b_id = table.bind_in(b, entry("b", 2, &mut b_slot)).unwrap();
-    let c_id = table.bind_in(c, entry("c", 3, &mut c_slot)).unwrap();
+    let a_id = table.bind_in(a, entry("a", 1)).unwrap();
+    let b_id = table.bind_in(b, entry("b", 2)).unwrap();
+    let c_id = table.bind_in(c, entry("c", 3)).unwrap();
     table.save_observation(c_id, &[], 1);
     table.save_observation(b_id, &[], 1);
     table.save_observation(a_id, &[b_id.var()], 1);
@@ -500,10 +459,7 @@ fn persistent_name_roots_keep_alias_masks_hiding_and_reader_winners_exact() {
     let parent = tree.mint_isolated();
     let child = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut old_slot = std::ptr::null_mut();
-    let original = table
-        .bind_in(parent, entry("answer", 1, &mut old_slot))
-        .unwrap();
+    let original = table.bind_in(parent, entry("answer", 1)).unwrap();
     table.seed_detached_scope(&tree, parent, child);
     assert!(table.tips[&child]
         .visible
@@ -514,12 +470,8 @@ fn persistent_name_roots_keep_alias_masks_hiding_and_reader_winners_exact() {
         .visible
         .ptr_eq(&table.tips[&child].visible));
 
-    let mut source_slot = std::ptr::null_mut();
-    let source = table
-        .bind_in(child, entry("source", 3, &mut source_slot))
-        .unwrap();
-    let mut alias_slot = std::ptr::null_mut();
-    let mut alias = entry("answer", 4, &mut alias_slot);
+    let source = table.bind_in(child, entry("source", 3)).unwrap();
+    let mut alias = entry("answer", 4);
     alias.value = table.get(source).unwrap().value.clone();
     let alias = table.bind_alias_in(child, alias, source).unwrap().0;
     assert_eq!(table.resolve_in(&tree, child, "answer").unwrap().id, alias);
@@ -538,10 +490,7 @@ fn persistent_name_roots_keep_alias_masks_hiding_and_reader_winners_exact() {
     let hidden = tree.mint_isolated();
     table.seed_detached_scope(&tree, child, hidden);
     assert!(table.resolve_in(&tree, hidden, "answer").is_none());
-    let mut new_slot = std::ptr::null_mut();
-    let newer = table
-        .bind_in(child, entry("answer", 5, &mut new_slot))
-        .unwrap();
+    let newer = table.bind_in(child, entry("answer", 5)).unwrap();
     assert_projected_names(&table, &tree, child);
     let latest = tree.mint_isolated();
     table.seed_detached_scope(&tree, child, latest);
@@ -576,19 +525,10 @@ fn persistent_names_follow_promotion_observation_expiry_and_legacy_ancestry() {
     let target = tree.mint_isolated();
     let source = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut parent_slot = std::ptr::null_mut();
-    table
-        .bind_in(parent, entry("answer", 10, &mut parent_slot))
-        .unwrap();
-    let mut legacy_slot = std::ptr::null_mut();
-    let legacy_id = table
-        .bind_in(legacy, entry("answer", 2, &mut legacy_slot))
-        .unwrap();
+    table.bind_in(parent, entry("answer", 10)).unwrap();
+    let legacy_id = table.bind_in(legacy, entry("answer", 2)).unwrap();
     let before = tree.mint_isolated();
-    let mut before_slot = std::ptr::null_mut();
-    let preexisting = table
-        .bind_in(before, entry("before_seed", 12, &mut before_slot))
-        .unwrap();
+    let preexisting = table.bind_in(before, entry("before_seed", 12)).unwrap();
     table.seed_detached_scope(&tree, legacy, before);
     assert_eq!(
         table.resolve_in(&tree, before, "answer").unwrap().id,
@@ -599,9 +539,8 @@ fn persistent_names_follow_promotion_observation_expiry_and_legacy_ancestry() {
         preexisting
     );
     assert_projected_names(&table, &tree, before);
-    let mut extra_slot = std::ptr::null_mut();
     let extra = table
-        .bind_in(parent, entry("ancestor_progress", 11, &mut extra_slot))
+        .bind_in(parent, entry("ancestor_progress", 11))
         .unwrap();
     let after = tree.mint_isolated();
     table.seed_detached_scope(&tree, legacy, after);
@@ -621,16 +560,10 @@ fn persistent_names_follow_promotion_observation_expiry_and_legacy_ancestry() {
     );
 
     table.seed_detached_scope(&tree, parent, target);
-    let mut newer_slot = std::ptr::null_mut();
-    let newer = table
-        .bind_in(target, entry("answer", 99, &mut newer_slot))
-        .unwrap();
+    let newer = table.bind_in(target, entry("answer", 99)).unwrap();
     let old_reader = tree.mint_isolated();
     table.seed_detached_scope(&tree, target, old_reader);
-    let mut promoted_slot = std::ptr::null_mut();
-    let promoted = table
-        .bind_in(source, entry("answer", 5, &mut promoted_slot))
-        .unwrap();
+    let promoted = table.bind_in(source, entry("answer", 5)).unwrap();
     table
         .promote_exact_bindings_in(source, target, &[promoted])
         .unwrap();
@@ -649,17 +582,11 @@ fn persistent_names_follow_promotion_observation_expiry_and_legacy_ancestry() {
         promoted
     );
 
-    let mut first_slot = std::ptr::null_mut();
-    let first = table
-        .bind_in(target, entry("observation1", 100, &mut first_slot))
-        .unwrap();
+    let first = table.bind_in(target, entry("observation1", 100)).unwrap();
     table.save_observation(first, &[], 1);
     let observed = tree.mint_isolated();
     table.seed_detached_scope(&tree, target, observed);
-    let mut second_slot = std::ptr::null_mut();
-    let second = table
-        .bind_in(target, entry("observation2", 101, &mut second_slot))
-        .unwrap();
+    let second = table.bind_in(target, entry("observation2", 101)).unwrap();
     table.save_observation(second, &[], 1);
     assert_projected_names(&table, &tree, target);
     let expired = tree.mint_isolated();
@@ -702,10 +629,9 @@ fn semantic_scope_snapshot_ignores_sibling_cache_changes_but_tracks_transitive_d
     let b = tree.mint_isolated();
     let c = tree.mint_isolated();
     let mut table = BindingTable::new();
-    let mut slots = [std::ptr::null_mut(); 3];
-    let aid = table.bind_in(a, entry("a", 91, &mut slots[0])).unwrap();
-    let bid = table.bind_in(b, entry("b", 92, &mut slots[1])).unwrap();
-    let cid = table.bind_in(c, entry("c", 93, &mut slots[2])).unwrap();
+    let aid = table.bind_in(a, entry("a", 91)).unwrap();
+    let bid = table.bind_in(b, entry("b", 92)).unwrap();
+    let cid = table.bind_in(c, entry("c", 93)).unwrap();
     table.save_observation(cid, &[], 10);
     table.save_observation(bid, &[], 10);
     table.save_observation(aid, &[bid.var()], 10);
@@ -724,8 +650,7 @@ fn semantic_scope_snapshot_ignores_sibling_cache_changes_but_tracks_transitive_d
 
     // Two own roots retain B. Removing A's edge changes its publication
     // dependency closure while D keeps the complete scoped root union intact.
-    let mut d_slot = std::ptr::null_mut();
-    let did = table.bind_in(a, entry("d", 94, &mut d_slot)).unwrap();
+    let did = table.bind_in(a, entry("d", 94)).unwrap();
     table.save_observation(did, &[bid.var()], 10);
     let both_roots = table.scope_snapshot(&tree, a).unwrap();
     table.save_observation(aid, &[], 10);

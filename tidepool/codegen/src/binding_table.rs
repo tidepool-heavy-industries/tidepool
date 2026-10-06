@@ -43,9 +43,8 @@
 //! resolve_in(_, ROOT, n)`, and `iter_current()` is the ROOT frame. The scoped
 //! siblings take the [`ScopeTree`] as a PARAMETER rather than owning one: the
 //! persistent declaration environment keys off the same [`ScopeId`]s, so exactly one tree exists per
-//! session (`PersistentSession::scopes`) and this table stays machine-free —
-//! which is what keeps its `unsafe impl Send` justification a claim about
-//! `RootSlot` addresses alone.
+//! session (`PersistentSession::scopes`). This table stores handle identities;
+//! their owning machine resolves them when a program imports or evaluates a value.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
@@ -53,7 +52,6 @@ use std::sync::{Arc, Weak};
 use rpds::{HashTrieMapSync, HashTrieSetSync};
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
-use crate::old_space::RootSlot;
 use crate::prepared_program::{GroupInstanceId, SourceBinder, SourceInstanceLease};
 use crate::scope::{ScopeId, ScopeTree};
 
@@ -355,14 +353,13 @@ impl CapturableMembership {
 }
 
 /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
-/// deep-forced, so its preparation policy is Tier-1's), rooted by `root` for
-/// the machine's life. `handle` is the machine's own ownership handle for that root
-/// (what a later program's `ImportBindings` names), held under the machine's
+/// deep-forced, so its preparation policy is Tier-1's). `handle` names its
+/// exact retained value in the owning machine's resource ledger. Later
+/// programs name that handle in `ImportBindings`. It is held under the machine's
 /// ROOT scope so no resource-scope close releases it; `identity` is what a later
 /// program links against when it imports this binding.
 #[derive(Clone, Debug)]
 pub struct BoundValue {
-    pub root: RootSlot,
     pub handle: crate::prepared_program::PreparedHandle,
     pub identity: tidepool_repr::execution_schema::SymbolIdentity,
 }
@@ -394,7 +391,7 @@ pub struct BindingEntry {
     pub scope: ScopeId,
 }
 
-/// The `name → (SessionVarId, RootSlot, SessionModule)` bridge (domain §4).
+/// The `name → (SessionVarId, PreparedHandle, SessionModule)` bridge (domain §4).
 ///
 /// `current` maps a name to its newest binding's id (shadowing: latest-wins);
 /// `live` retains EVERY still-rooted binding, including shadowed older ones, so
@@ -455,22 +452,17 @@ pub struct BindingTable {
 #[cfg(test)]
 mod promotion_tests {
     use super::*;
-    use crate::old_space::RootSlot;
     use crate::prepared_program::PreparedHandle;
     use crate::suspension::ValueHandle;
     use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
     use tidepool_repr::{Generation, SessionModule};
 
-    fn entry(name: &str, generation: u64, slot: &mut *mut u8) -> BindingEntry {
-        // The binding table only records this stable cell address; no machine
-        // or collector dereferences it in these bookkeeping tests.
-        let root = unsafe { RootSlot::new(slot as *mut *mut u8) };
+    fn entry(name: &str, generation: u64) -> BindingEntry {
         BindingEntry {
             name: BindingName(name.into()),
             id: SessionVarId::from_extract(generation),
             module: SessionModule::val(Generation(generation)),
             value: BoundValue {
-                root,
                 handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
                 identity: SymbolIdentity {
                     unit: "test".into(),
@@ -492,10 +484,9 @@ mod promotion_tests {
         let source = tree.mint_isolated();
         let public = tree.mint_isolated();
         let mut table = BindingTable::new();
-        let mut public_slot = std::ptr::null_mut();
-        let mut private_slot = std::ptr::null_mut();
-        let old = entry("answer", 9, &mut public_slot);
-        let newer_completion = entry("answer", 3, &mut private_slot);
+
+        let old = entry("answer", 9);
+        let newer_completion = entry("answer", 3);
         let old_id = old.id;
         let private_id = newer_completion.id;
         table.bind_in(public, old).expect("fresh immutable binding");
@@ -535,13 +526,14 @@ mod promotion_tests {
         let source = tree.mint_isolated();
         let public = tree.mint_isolated();
         let mut table = BindingTable::new();
-        let mut source_slot = std::ptr::null_mut();
-        let root = entry("root", 4, &mut source_slot);
+
+        let root = entry("root", 4);
         let root_id = root.id;
         table
             .bind_in(source, root)
             .expect("fresh immutable binding");
-        let alias = entry("alias", 5, &mut source_slot);
+        let mut alias = entry("alias", 5);
+        alias.value.handle = table.get(root_id).unwrap().value.handle;
         let alias_id = alias.id;
         table
             .bind_alias_in(source, alias, root_id)
@@ -577,22 +569,22 @@ mod promotion_tests {
     fn exact_retained_import_uses_frozen_scope_not_global_newest() {
         let mut tree = ScopeTree::new();
         let mut table = BindingTable::new();
-        let mut first_slot = std::ptr::null_mut();
-        let first = entry("answer", 4, &mut first_slot);
+
+        let first = entry("answer", 4);
         let first_id = first.id;
         let first_identity = first.value.identity.clone();
         table
             .bind_in(ScopeId::ROOT, first)
             .expect("fresh immutable binding");
-        let mut shadow_slot = std::ptr::null_mut();
+
         table
-            .bind_in(ScopeId::ROOT, entry("answer", 6, &mut shadow_slot))
+            .bind_in(ScopeId::ROOT, entry("answer", 6))
             .expect("fresh immutable binding");
 
         let captured = tree.mint_child(ScopeId::ROOT).expect("live root");
         table.seed_scope(&tree, ScopeId::ROOT, captured);
-        let mut later_slot = std::ptr::null_mut();
-        let later = entry("later", 7, &mut later_slot);
+
+        let later = entry("later", 7);
         let later_identity = later.value.identity.clone();
         table
             .bind_in(ScopeId::ROOT, later)
@@ -600,8 +592,8 @@ mod promotion_tests {
         let descendant = tree.mint_child(captured).expect("captured scope lives");
         table.seed_scope(&tree, captured, descendant);
         let sibling = tree.mint_isolated();
-        let mut newer_slot = std::ptr::null_mut();
-        let newer = entry("answer", 5, &mut newer_slot);
+
+        let newer = entry("answer", 5);
         let newer_identity = newer.value.identity.clone();
         table
             .bind_in(sibling, newer)
@@ -680,17 +672,6 @@ impl Default for BindingTable {
         }
     }
 }
-
-// SAFETY: a `BindingTable` is only `!Send` because a `BindingEntry`'s
-// `BoundValue` carries a `RootSlot(*mut *mut u8)`. That slot is a stable
-// ADDRESS into the owning `PreparedMachine`'s persistent-root region — process-
-// global address space, valid on any thread, and moved together WITH the machine
-// (a resident session owns both). It is only ever dereferenced during a run, and
-// a session is stowed-XOR-running (the same discipline that justifies
-// `unsafe impl Send for PreparedMachine`), so the table and its slots are
-// touched by exactly one thread at a time. Sending ownership across the
-// suspend/resume thread boundary is therefore sound.
-unsafe impl Send for BindingTable {}
 
 impl Drop for BindingTable {
     fn drop(&mut self) {
@@ -1084,7 +1065,6 @@ impl BindingTable {
             if existing.scope != scope
                 || existing.name != entry.name
                 || existing.module != entry.module
-                || existing.value.root.addr() != entry.value.root.addr()
                 || existing.value.handle != entry.value.handle
                 || existing.value.identity != entry.value.identity
                 || existing.type_display != entry.type_display
@@ -1886,13 +1866,6 @@ impl BindingTable {
     /// the entry into `live`; any prior entry for the same name stays in `live`
     /// under its own (older) id. Returns the bound id.
     ///
-    /// # Safety
-    /// `entry.value`'s [`RootSlot`] must be a registered persistent GC root
-    /// valid until the session machine drops (the contract carried by
-    /// [`crate::machine::PreparedMachine::run_fragment_and_bind`], which is
-    /// the only minter of a `RootSlot`). This method only stores the slot — it
-    /// never dereferences it — so it is itself safe; the liveness invariant is
-    /// upheld at the bind site and the Var-miss load site.
     pub fn bind(&mut self, entry: BindingEntry) -> Result<SessionVarId, BindingIdentityError> {
         self.bind_in(ScopeId::ROOT, entry)
     }
@@ -1905,9 +1878,6 @@ impl BindingTable {
     /// representation, not by a check), and sibling frames are disjoint
     /// maps, so two siblings binding the same name never collide.
     ///
-    /// # Safety
-    /// Same slot-liveness contract as [`Self::bind`] — this method only stores
-    /// the [`RootSlot`], never dereferences it.
     pub fn bind_in(
         &mut self,
         scope: ScopeId,
@@ -2234,12 +2204,11 @@ impl BindingTable {
     ///
     /// PURE BOOKKEEPING: it removes the entry from `live`, and clears the
     /// owning frame's `name → id` mapping if (and only if) that frame still
-    /// points at this id. It does NOT touch the machine — releasing the
-    /// entry's GC root is the caller's separate, scope-owned step
-    /// (`PreparedMachine::retire_scope_root`), which is what keeps this type
-    /// machine-free and its `unsafe impl Send` justification intact.
+    /// points at this id. It does not touch the machine. The session owner
+    /// releases the retained handle after its final alias
+    /// leaves the store.
     ///
-    /// Returns the evicted entry (so the caller can read its [`RootSlot`]), or
+    /// Returns the evicted entry with its retained handle, or
     /// `None` if `id` was not live.
     pub fn remove_live(&mut self, id: SessionVarId) -> Option<BindingEntry> {
         if self.leases.get(&id).copied().unwrap_or(0) > 0 {

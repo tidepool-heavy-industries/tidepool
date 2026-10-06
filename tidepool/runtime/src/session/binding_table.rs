@@ -3,7 +3,7 @@
 //! `tidepool_codegen::binding_table::BindingTable` is a flat, globally-keyed
 //! store; it answers "is this id live" in O(1) but has no cheap answer to
 //! "which prepared bindings does this import identity retain", "what is the
-//! live `Val.G<g>` module set", or "is this root slot still aliased by
+//! live `Val.G<g>` module set", or "is this handle still aliased by
 //! another live binding" -- those were previously answered by scanning every
 //! live binding on EVERY turn ([`super::prepared`]'s `resolve_prepared_import`,
 //! and [`super::persistent`]'s `prepared_retained`, `live_val_modules`, and
@@ -26,20 +26,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
-use tidepool_codegen::old_space::RootSlot;
+use tidepool_codegen::suspension::ValueHandle;
 use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::{SessionModule, SessionVarId};
 
-/// A minimal, index-relevant view of one binding, taken from a `BindingEntry`
-/// at the moment it enters or leaves `live`. Deliberately decoupled from
-/// `BoundValue` (which carries a `PreparedHandle` this crate has no public
-/// constructor for) so index maintenance -- and its unit
-/// tests -- never need a real prepared handle, only the identity, generation,
-/// and root address the index actually keys on.
+/// Immutable index facts captured before the entry is moved into the store.
+/// Exact typed handle identity determines alias custody; the machine alone
+/// owns and resolves physical root cells.
 pub(super) struct BindRecord {
     id: SessionVarId,
     module: SessionModule,
-    root: RootSlot,
+    handle: ValueHandle,
     identity: SymbolIdentity,
 }
 
@@ -49,7 +46,7 @@ impl BindRecord {
         BindRecord {
             id: entry.id,
             module: entry.module,
-            root: entry.value.root,
+            handle: entry.value.handle.raw(),
             identity: identity.clone(),
         }
     }
@@ -74,15 +71,9 @@ pub(crate) struct BindingIndex {
     /// evicting one must preserve it until the last id leaves.
     /// Order within an id vector has no semantic meaning.
     prepared_by_identity: BTreeMap<SymbolIdentity, BTreeMap<u64, Vec<SessionVarId>>>,
-    /// How many live entries currently resolve to each root-slot address --
-    /// the aliasing refcount `release_binding_roots` used to recompute by
-    /// scanning every live binding per evicted entry. Keyed by the address
-    /// as `usize` (never dereferenced here, only compared/hashed) rather
-    /// than the raw `*mut *mut u8` so `BindingIndex` -- unlike `RootSlot`
-    /// and `BindingTable` -- needs no `unsafe impl Send` of its own: a
-    /// `PersistentSession` holding one stays auto-`Send` exactly because
-    /// this index carries no live pointer.
-    root_refs: HashMap<usize, usize>,
+    /// Number of bindings sharing each exact retained handle. A fresh handle
+    /// gets a process-unique identity even when an allocator reuses its cell.
+    handle_refs: HashMap<ValueHandle, usize>,
 }
 
 enum RetainedValueInterface {
@@ -193,10 +184,10 @@ impl BindingIndex {
 
     /// Record a binding that just left `live` (one entry
     /// [`super::persistent::PersistentSession::release_binding_roots`] is
-    /// processing). Returns whether the underlying root slot is now
+    /// processing). Returns whether the underlying handle is now
     /// unreferenced by any other still-live entry, replacing the old
     /// `bindings.iter_live().any(..)` alias scan (and its `released.contains`
-    /// intra-batch dedup: two evicted entries sharing one root each decrement
+    /// intra-batch dedup: two evicted entries sharing one handle each decrement
     /// this refcount, so the LAST one to be processed is the one that
     /// observes zero and actually releases).
     pub(super) fn on_evict(&mut self, entry: &BindingEntry) -> bool {
@@ -212,10 +203,7 @@ impl BindingIndex {
             .live_modules
             .entry(record.module.module_name())
             .or_insert(0) += 1;
-        *self
-            .root_refs
-            .entry(record.root.addr() as usize)
-            .or_insert(0) += 1;
+        *self.handle_refs.entry(record.handle).or_insert(0) += 1;
         let generation = record.module.gen().0;
         self.prepared_by_identity
             .entry(record.identity.clone())
@@ -250,12 +238,11 @@ impl BindingIndex {
                 self.prepared_by_identity.remove(&record.identity);
             }
         }
-        let addr = record.root.addr() as usize;
-        match self.root_refs.get_mut(&addr) {
+        match self.handle_refs.get_mut(&record.handle) {
             Some(count) => {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    self.root_refs.remove(&addr);
+                    self.handle_refs.remove(&record.handle);
                     true
                 } else {
                     false
@@ -316,11 +303,6 @@ mod tests {
     use super::*;
     use tidepool_repr::Generation;
 
-    fn fake_slot(boxed: &mut *mut u8) -> RootSlot {
-        // SAFETY: test-only; never dereferenced.
-        unsafe { RootSlot::new(boxed as *mut *mut u8) }
-    }
-
     fn identity(name: &str) -> SymbolIdentity {
         SymbolIdentity {
             unit: "unit".into(),
@@ -331,11 +313,11 @@ mod tests {
         }
     }
 
-    fn record(gen: u64, raw: u64, root: RootSlot, identity: &SymbolIdentity) -> BindRecord {
+    fn record(gen: u64, raw: u64, handle: ValueHandle, identity: &SymbolIdentity) -> BindRecord {
         BindRecord {
             id: SessionVarId::from_extract(raw),
             module: SessionModule::val(Generation(gen)),
-            root,
+            handle,
             identity: identity.clone(),
         }
     }
@@ -383,10 +365,8 @@ mod tests {
 
     #[test]
     fn bind_shadow_evict_matches_brute_force_recomputation() {
-        let mut pointer_a: *mut u8 = std::ptr::null_mut();
-        let mut pointer_b: *mut u8 = std::ptr::null_mut();
-        let slot_a = fake_slot(&mut pointer_a);
-        let slot_b = fake_slot(&mut pointer_b);
+        let handle_a = ValueHandle(1);
+        let handle_b = ValueHandle(2);
 
         let id_x = identity("x");
         let id_y = identity("y");
@@ -396,11 +376,11 @@ mod tests {
 
         // Bind: two distinct identities, distinct generations, distinct
         // roots.
-        let r1 = record(1, 1, slot_a, &id_x);
+        let r1 = record(1, 1, handle_a, &id_x);
         index.on_bind_record(&r1);
         live.push(r1);
 
-        let r2 = record(2, 2, slot_b, &id_y);
+        let r2 = record(2, 2, handle_b, &id_y);
         index.on_bind_record(&r2);
         live.push(r2);
 
@@ -417,10 +397,10 @@ mod tests {
         );
 
         // Shadow: rebind `x` at a newer generation under the SAME identity,
-        // sharing the SAME root slot (as an aliasing rebind would); the old
+        // sharing the SAME handle (as an aliasing rebind would); the old
         // entry stays live (as `BindingTable::bind_in` leaves a shadowed
         // gen), so both remain in the index simultaneously.
-        let r3 = record(3, 3, slot_a, &id_x);
+        let r3 = record(3, 3, handle_a, &id_x);
         index.on_bind_record(&r3);
         live.push(r3);
 
@@ -438,14 +418,14 @@ mod tests {
         assert_eq!(index.resolve_prepared(&id_x, None).unwrap().raw(), 3);
 
         // Evict the shadowed (older) `x` record; the newer one must remain
-        // resolvable, and the aliasing refcount for its shared root
-        // (slot_a, shared between r1 and r3) must reflect that a live
+        // resolvable, and the aliasing refcount for its shared handle
+        // (handle_a, shared between r1 and r3) must reflect that a live
         // binding (r3) still references it.
         let evicted = live.remove(0); // r1
         let safe = index.on_evict_record(&evicted);
         assert!(
             !safe,
-            "slot_a is still referenced by r3 (same root, later gen)"
+            "handle_a is still referenced by r3 (same handle, later gen)"
         );
 
         let brute = BruteForce { live: &live };
@@ -457,15 +437,15 @@ mod tests {
         );
         assert_eq!(index.resolve_prepared(&id_x, Some(1)), None);
 
-        // Evict everything else; slot_b (r2, unshared) must report safe to
-        // release, and slot_a's last live reference (r3) must too.
+        // Evict everything else; handle_b (r2, unshared) must report safe to
+        // release, and handle_a's last live reference (r3) must too.
         let evicted = live.remove(0); // r2 (index 0 after the first removal)
         let safe = index.on_evict_record(&evicted);
-        assert!(safe, "slot_b had no other live reference");
+        assert!(safe, "handle_b had no other live reference");
 
         let evicted = live.remove(0); // r3
         let safe = index.on_evict_record(&evicted);
-        assert!(safe, "r3 was slot_a's last live reference");
+        assert!(safe, "r3 was handle_a's last live reference");
 
         let brute = BruteForce { live: &live };
         assert!(live.is_empty());
@@ -479,19 +459,17 @@ mod tests {
 
     #[test]
     fn evicting_one_binding_keeps_its_shared_value_module_live() {
-        let mut pointer_a: *mut u8 = std::ptr::null_mut();
-        let mut pointer_b: *mut u8 = std::ptr::null_mut();
         let module = SessionModule::val(Generation(20));
         let page = BindRecord {
             id: SessionVarId::from_extract(1),
             module,
-            root: fake_slot(&mut pointer_a),
+            handle: ValueHandle(1),
             identity: identity("retained"),
         };
         let alias = BindRecord {
             id: SessionVarId::from_extract(2),
             module,
-            root: fake_slot(&mut pointer_b),
+            handle: ValueHandle(2),
             identity: identity("alias"),
         };
         let mut index = BindingIndex::new();
@@ -506,11 +484,10 @@ mod tests {
     }
     #[test]
     fn evicting_one_of_same_identity_generation_keeps_pair_retained() {
-        let mut pointer = std::ptr::null_mut();
-        let root = fake_slot(&mut pointer);
+        let handle = ValueHandle(1);
         let name = identity("shared_pair");
-        let first = record(7, 1, root, &name);
-        let second = record(7, 2, root, &name);
+        let first = record(7, 1, handle, &name);
+        let second = record(7, 2, handle, &name);
         let mut index = BindingIndex::new();
         index.on_bind_record(&first);
         index.on_bind_record(&second);
@@ -788,6 +765,13 @@ mod tests {
             max_generation: u64,
         ) {
             let brute = BruteForce { live };
+            let handles: std::collections::BTreeSet<_> =
+                live.iter().map(|entry| entry.handle).collect();
+            assert_eq!(index.handle_refs.len(), handles.len());
+            for handle in handles {
+                let references = live.iter().filter(|entry| entry.handle == handle).count();
+                assert_eq!(index.handle_refs.get(&handle), Some(&references));
+            }
             assert_eq!(index.live_modules(), brute.live_modules());
             assert_eq!(index.prepared_retained(), brute.prepared_retained());
             for generation in 0..=max_generation + 1 {
@@ -814,10 +798,10 @@ mod tests {
         /// Vec records and Vec interface markers are the independent model;
         /// no production refcount or candidate map is copied into the oracle.
         fn replay(ops: &[Op]) -> Support {
-            // The boxed slot array never moves. Slots are borrowed only while
-            // it lives, and the index compares addresses without dereferencing.
-            let mut pointers = Box::new([std::ptr::null_mut::<u8>(); ROOTS + 1]);
-            let slots: Vec<_> = pointers.iter_mut().map(fake_slot).collect();
+            // Bounded groups select aliases. A group's later admission gets
+            // a fresh handle once its last binding has released the old one.
+            let mut handles = [None; ROOTS + 1];
+            let mut next_handle = 1u64;
             let mut index = BindingIndex::new();
             let mut live = Vec::<BindRecord>::new();
             let mut interfaces = Vec::<(u64, Option<Arc<[u8]>>)>::new();
@@ -840,16 +824,22 @@ mod tests {
                             live.iter()
                                 .any(|entry| entry.module.gen().0 == binding.generation),
                         );
-                        support.shared_roots += usize::from(
-                            live.iter()
-                                .any(|entry| entry.root.addr() == slots[binding.root].addr()),
-                        );
+                        let handle = match handles[binding.root] {
+                            Some(handle) => handle,
+                            None => {
+                                let handle = ValueHandle(next_handle);
+                                next_handle += 1;
+                                handles[binding.root] = Some(handle);
+                                handle
+                            }
+                        };
+                        support.shared_roots +=
+                            usize::from(live.iter().any(|entry| entry.handle == handle));
                         support.reinsertions += usize::from(
                             !pair_live && seen.contains(&(binding.identity, binding.generation)),
                         );
                         seen.push((binding.identity, binding.generation));
-                        let entry =
-                            record(binding.generation, binding.id, slots[binding.root], &name);
+                        let entry = record(binding.generation, binding.id, handle, &name);
                         index.on_bind_record(&entry);
                         live.push(entry);
                         max_generation = max_generation.max(binding.generation);
@@ -860,14 +850,20 @@ mod tests {
                         // Preserve model order: candidate lookup's old scanning
                         // oracle must not inherit the index's swap_remove order.
                         let entry = live.remove(position);
-                        let final_reference = !live
-                            .iter()
-                            .any(|other| other.root.addr() == entry.root.addr());
+                        let final_reference =
+                            !live.iter().any(|other| other.handle == entry.handle);
                         assert_eq!(
                             index.on_evict_record(&entry),
                             final_reference,
                             "root release at step {step}: {op:?}"
                         );
+                        if final_reference {
+                            for group in &mut handles {
+                                if *group == Some(entry.handle) {
+                                    *group = None;
+                                }
+                            }
+                        }
                         if !live.iter().any(|other| other.module == entry.module) {
                             interfaces
                                 .retain(|(generation, _)| *generation != entry.module.gen().0);

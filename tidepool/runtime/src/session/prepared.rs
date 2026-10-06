@@ -5469,17 +5469,10 @@ impl PreparedEngine {
         Ok(managed)
     }
 
-    /// Hand a run result to the session binding store: the handle moves into
-    /// the machine's ROOT scope (no resource-scope close releases it) and its
-    /// persistent root slot is returned for the binding to load through.
-    pub fn adopt(
-        &mut self,
-        handle: PreparedHandle,
-    ) -> Option<tidepool_codegen::old_space::RootSlot> {
-        self.machine
-            .adopt_handle(handle)
-            .then(|| self.machine.handle_root(handle))
-            .flatten()
+    /// Move a live handle into ROOT so resource-scope closure cannot release
+    /// a value published in the session binding store.
+    pub fn adopt(&mut self, handle: PreparedHandle) -> bool {
+        self.machine.adopt_handle(handle)
     }
 
     /// Duplicate a live root into independent custody of the same heap object.
@@ -8663,8 +8656,8 @@ pub(super) mod tests {
         };
         let handle = *handle;
         assert!(engine.release(binding.value.handle));
+        assert!(engine.adopt(handle));
         binding.value = BoundValue {
-            root: engine.adopt(handle).unwrap(),
             handle,
             identity: binding.value.identity,
         };
@@ -8686,19 +8679,158 @@ pub(super) mod tests {
             .machine
             .retain_top(program, top)
             .expect("retain fixture top");
-        let root = engine.adopt(handle).expect("adopt real fixture root");
+        assert!(engine.adopt(handle));
         BindingEntry {
             name: tidepool_repr::BindingName(name.into()),
             id: SessionVarId::from_extract(generation),
             module: SessionModule::val(tidepool_repr::Generation(generation)),
             value: BoundValue {
-                root,
                 handle,
                 identity: producer_identity(),
             },
             type_display: None,
             defining_expr: None,
             scope: tidepool_codegen::scope::ScopeId::ROOT,
+        }
+    }
+
+    #[test]
+    fn exact_handle_alias_custody_survives_capture_and_distinct_handle_retirement() {
+        use tidepool_repr::{BindingName, Generation, SessionModule};
+
+        for capture_first in [false, true] {
+            let mut state = super::super::PersistentSession::new(None, 64 * 1024);
+            let original_scope = state.mint_isolated_scope();
+            let alias_scope = state.mint_isolated_scope();
+            let distinct_scope = state.mint_isolated_scope();
+            let original = evaluated_publication_fixture(&mut state, "original", 901);
+            let original_id = original.id;
+            let handle = original.value.handle;
+            let shared_value = original.value.clone();
+            let distinct = state
+                .prepared_mut()
+                .unwrap()
+                .retain_handle_value(handle, RealmId::ROOT)
+                .unwrap();
+            assert_ne!(handle.raw(), distinct.raw());
+            {
+                let engine = state.prepared_mut().unwrap();
+                // Independent handles keep independent cells for one object.
+                let first = engine.handle_slot(handle.raw()).unwrap();
+                let second = engine.handle_slot(distinct.raw()).unwrap();
+                assert_ne!(first.addr(), second.addr());
+                assert_eq!(unsafe { first.current() }, unsafe { second.current() });
+            }
+            state.bind_in(original_scope, original).unwrap();
+            state
+                .bind_in(
+                    distinct_scope,
+                    BindingEntry {
+                        name: BindingName("distinct".into()),
+                        id: SessionVarId::from_extract(902),
+                        module: SessionModule::val(Generation(902)),
+                        value: BoundValue {
+                            handle: distinct,
+                            identity: shared_value.identity.clone(),
+                        },
+                        type_display: None,
+                        defining_expr: None,
+                        scope: distinct_scope,
+                    },
+                )
+                .unwrap();
+            let mut alias_value = shared_value;
+            alias_value.identity.occurrence = "alias".into();
+            state
+                .publish_alias_in(
+                    original_scope,
+                    BindingEntry {
+                        name: BindingName("alias".into()),
+                        id: SessionVarId::from_extract(903),
+                        module: SessionModule::val(Generation(903)),
+                        value: alias_value,
+                        type_display: None,
+                        defining_expr: None,
+                        scope: original_scope,
+                    },
+                    original_id,
+                )
+                .unwrap();
+            let sibling_value = state
+                .resolve_in(original_scope, "alias")
+                .unwrap()
+                .value
+                .clone();
+            state
+                .bind_in(
+                    alias_scope,
+                    BindingEntry {
+                        name: BindingName("sibling".into()),
+                        id: SessionVarId::from_extract(905),
+                        module: SessionModule::val(Generation(905)),
+                        value: sibling_value,
+                        type_display: None,
+                        defining_expr: None,
+                        scope: alias_scope,
+                    },
+                )
+                .unwrap();
+            let capture = state.mint_detached_scope(original_scope).unwrap();
+            let roots = state.persistent_roots_count();
+            assert_eq!(state.value_handle_count(), 2);
+            assert_eq!(state.retire_scope(original_scope).roots_released, 0);
+            assert_eq!(
+                state.resolve_in(capture, "original").unwrap().id,
+                original_id
+            );
+            assert_eq!(state.retire_scope(distinct_scope).roots_released, 1);
+            assert!(state
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(distinct.raw())
+                .is_none());
+            assert_eq!(state.persistent_roots_count(), roots - 1);
+            let order = if capture_first {
+                [capture, alias_scope]
+            } else {
+                [alias_scope, capture]
+            };
+            assert_eq!(state.retire_scope(order[0]).roots_released, 0);
+            {
+                let engine = state.prepared_mut().unwrap();
+                engine.quiesce_and_collect_now().unwrap();
+                let CodegenPreparedOuter::Constructor { identity, fields } = engine
+                    .machine
+                    .inspect_outer(handle, RealmId::ROOT)
+                    .expect("surviving alias or frozen capture retains the original value");
+                assert_eq!(identity, tidepool_repr::DataConId(980));
+                assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
+            }
+            assert_eq!(state.value_handle_count(), 1);
+            assert_eq!(state.retire_scope(order[1]).roots_released, 1);
+            assert_eq!(state.value_handle_count(), 0);
+            assert_eq!(state.persistent_roots_count(), roots - 2);
+            let engine = state.prepared_mut().unwrap();
+            assert!(engine.prepared_handle_of(handle.raw()).is_none());
+            assert!(matches!(
+                engine.retain_handle_value(handle, RealmId::ROOT),
+                Err(PreparedRuntimeError::Run(
+                    ExecutionError::UnknownPreparedHandle
+                ))
+            ));
+            // A later admission cannot revive the stale handle identity.
+            let fresh = evaluated_publication_fixture(&mut state, "fresh", 904);
+            let fresh_handle = fresh.value.handle;
+            assert_ne!(fresh_handle.raw(), handle.raw());
+            let fresh_scope = state.mint_isolated_scope();
+            state.bind_in(fresh_scope, fresh).unwrap();
+            assert!(state
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(handle.raw())
+                .is_none());
+            assert_eq!(state.retire_scope(fresh_scope).roots_released, 1);
+            assert_eq!(state.value_handle_count(), 0);
         }
     }
 
@@ -8877,13 +9009,12 @@ pub(super) mod tests {
             .machine
             .retain_top(first, top)
             .expect("producer top binds");
-        let root = engine.adopt(handle).expect("retained handle adopts a root");
+        assert!(engine.adopt(handle));
         let entry = BindingEntry {
             name: tidepool_repr::BindingName("producer".into()),
             id: SessionVarId::from_extract(1),
             module: SessionModule::val(tidepool_repr::Generation(1)),
             value: BoundValue {
-                root,
                 handle,
                 identity: producer_identity(),
             },
@@ -11588,7 +11719,7 @@ pub(super) mod tests {
         for (name, id, scope) in [("a", 11, private_a), ("b", 12, private_b)] {
             let engine = state.prepared_mut().unwrap();
             let handle = engine.machine.retain_top(program, top).unwrap();
-            let root = engine.adopt(handle).unwrap();
+            assert!(engine.adopt(handle));
             state
                 .bind_in(
                     scope,
@@ -11597,7 +11728,6 @@ pub(super) mod tests {
                         id: SessionVarId::from_extract(id),
                         module: SessionModule::val(Generation(id)),
                         value: BoundValue {
-                            root,
                             handle,
                             identity: producer_identity(),
                         },

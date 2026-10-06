@@ -556,7 +556,6 @@ fn mount_original(
     assert_eq!(resident.outstanding_custody(), custody - 1);
     let entry = resident.state.bindings().get(mounted.binding()).unwrap();
     assert_eq!(entry.value.handle.raw(), original_handle);
-    assert_eq!(entry.value.root.addr(), original_root.addr());
     assert_eq!(
         resident
             .state

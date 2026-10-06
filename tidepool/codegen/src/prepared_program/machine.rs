@@ -11611,11 +11611,7 @@ mod tests {
         assert_eq!(cached_b, headers_a);
     }
 
-    fn captured_binding(
-        name: &str,
-        generation: u64,
-        slot: crate::old_space::RootSlot,
-    ) -> crate::binding_table::BindingEntry {
+    fn captured_binding(name: &str, generation: u64) -> crate::binding_table::BindingEntry {
         use crate::binding_table::{BindingEntry, BoundValue};
         use tidepool_repr::{BindingName, Generation, SessionModule, SessionVarId};
 
@@ -11624,7 +11620,6 @@ mod tests {
             id: SessionVarId::from_extract(generation),
             module: SessionModule::val(Generation(generation)),
             value: BoundValue {
-                root: slot,
                 handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
                 identity: SymbolIdentity {
                     unit: "test".into(),
@@ -11648,19 +11643,13 @@ mod tests {
 
         let mut scopes = ScopeTree::new();
         let original = scopes.mint_isolated();
-        let mut old_root = Box::new(std::ptr::null_mut::<u8>());
-        let mut new_root = Box::new(std::ptr::null_mut::<u8>());
         let mut bindings = BindingTable::new();
-        // SAFETY: these stable box cells outlive the binding table in this test;
-        // no code dereferences their null payloads.
-        let old_slot = unsafe { crate::old_space::RootSlot::new(old_root.as_mut()) };
-        let new_slot = unsafe { crate::old_space::RootSlot::new(new_root.as_mut()) };
         let old = SessionVarId::from_extract(1);
         bindings
-            .bind_in(original, captured_binding("value", 1, old_slot))
+            .bind_in(original, captured_binding("value", 1))
             .expect("fresh immutable binding");
         bindings
-            .bind_in(original, captured_binding("value", 2, new_slot))
+            .bind_in(original, captured_binding("value", 2))
             .expect("fresh immutable binding");
 
         let first = scopes.mint_isolated();
@@ -11714,18 +11703,13 @@ mod tests {
 
         let mut scopes = ScopeTree::new();
         let original = scopes.mint_isolated();
-        let mut old_root = Box::new(std::ptr::null_mut::<u8>());
-        let mut new_root = Box::new(std::ptr::null_mut::<u8>());
         let mut bindings = BindingTable::new();
-        // SAFETY: stable box cells outlive the table and their payloads are never read.
-        let old_slot = unsafe { crate::old_space::RootSlot::new(old_root.as_mut()) };
-        let new_slot = unsafe { crate::old_space::RootSlot::new(new_root.as_mut()) };
         let old = SessionVarId::from_extract(11);
         bindings
-            .bind_in(original, captured_binding("value", 11, old_slot))
+            .bind_in(original, captured_binding("value", 11))
             .expect("fresh immutable binding");
         bindings
-            .bind_in(original, captured_binding("value", 12, new_slot))
+            .bind_in(original, captured_binding("value", 12))
             .expect("fresh immutable binding");
 
         let source = scopes.mint_isolated();
@@ -11767,23 +11751,20 @@ mod tests {
 
         let mut scopes = ScopeTree::new();
         let original = scopes.mint_isolated();
-        let mut value_root = Box::new(std::ptr::null_mut::<u8>());
-        let mut alias_root = Box::new(std::ptr::null_mut::<u8>());
         let mut bindings = BindingTable::new();
-        // SAFETY: stable box cells outlive the table and their payloads are never read.
-        let value_slot = unsafe { crate::old_space::RootSlot::new(value_root.as_mut()) };
-        let alias_slot = unsafe { crate::old_space::RootSlot::new(alias_root.as_mut()) };
         let value = SessionVarId::from_extract(21);
         let alias = SessionVarId::from_extract(22);
         bindings
-            .bind_in(original, captured_binding("value", 21, value_slot))
+            .bind_in(original, captured_binding("value", 21))
             .expect("fresh immutable binding");
 
         let receiver = scopes.mint_isolated();
         bindings.seed_detached_scope(&scopes, original, receiver);
         assert_eq!(bindings.lease_count(value), 1);
+        let mut alias_entry = captured_binding("alias", 22);
+        alias_entry.value.handle = bindings.get(value).unwrap().value.handle;
         bindings
-            .bind_alias_in(original, captured_binding("alias", 22, alias_slot), value)
+            .bind_alias_in(original, alias_entry, value)
             .expect("same-scope alias");
         let source = scopes.mint_isolated();
         bindings.seed_detached_scope(&scopes, original, source);
