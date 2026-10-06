@@ -535,7 +535,7 @@ test-suite prepared-recovery-test
   type:             exitcode-stdio-1.0
   main-is:          PreparedRecoveryTest.hs
   hs-source-dirs:   test-prepared-stg
-  other-modules:    CompilerExecutionTest
+  other-modules:    CompilerExecutionTest RecoveryEntryScopeTest
   build-depends:
     base >= 4.20 && < 5,
     containers,

@@ -59,7 +59,7 @@ import GHC.Driver.Env (HscEnv(..))
 import GHC.Driver.Session
   (GeneralFlag(..), gopt_set, gopt_unset)
 import GHC.IfaceToCore (typecheckIface)
-import GHC.Stg.Pipeline (StgCgInfos, stg2stg)
+import GHC.Stg.Pipeline (StgCgInfos, stg2stgWithExternalScope)
 import GHC.Stg.Syntax (CgStgTopBinding, GenStgTopBinding(..), GenStgBinding(..))
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
@@ -262,7 +262,7 @@ acquireRecoveredModuleWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSi
 acquireRecoveredModuleWithWorkers workers environment hscEnv input = do
   let entries = recoveredEntries input
   bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
-  task <- acquireTypedBindingsWithWorkers workers environment ExactBodySubset
+  task <- acquireTypedBindingsWithEntryScope entries workers environment ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) Map.empty bindings
   pure $ PreparedModuleTask $ do
@@ -309,7 +309,12 @@ data FatPreparationUnit = OriginalComponent Int | ConstructorWorkers
 
 acquireTypedBindingsWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment -> PreparedCoverage
   -> HscEnv -> Module -> ModLocation -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
-acquireTypedBindingsWithWorkers workers selected coverage env owner location tycons imported bindings = do
+acquireTypedBindingsWithWorkers = acquireTypedBindingsWithEntryScope Map.empty
+
+acquireTypedBindingsWithEntryScope :: Map Name Id -> ConstructorWorkerPolicy
+  -> Maybe PreparedSiteEnvironment -> PreparedCoverage -> HscEnv -> Module -> ModLocation
+  -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
+acquireTypedBindingsWithEntryScope entries workers selected coverage env owner location tycons imported bindings = do
   timing <- readTimingEnabled
   let census = censusPreparedIntrinsics tycons bindings
       ownedSiblings = resolvePreparedSiblings bindings
@@ -324,7 +329,7 @@ acquireTypedBindingsWithWorkers workers selected coverage env owner location tyc
   let subset = case coverage of
         CompleteSourceModule -> []
         ExactBodySubset -> recoveredSubsetScope owner rewritten
-  acquireBindingsWithScope workers timing subset env owner location tycons
+  acquireBindingsWithScope workers timing subset entries env owner location tycons
     rewritten coverage ownedSiblings sites preparedSites graph rejections carrier dependencies census
 
 -- | An exact subset can reference other external tops in its defining module.
@@ -805,10 +810,11 @@ trySynchronous action = do
       Nothing -> pure (Left (displayException (exception :: SomeException)))
     Right value -> pure (Right value)
 
-acquireBindingsWithScope :: ConstructorWorkerPolicy -> Bool -> [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
+acquireBindingsWithScope :: ConstructorWorkerPolicy -> Bool -> [Id] -> Map Name Id
+  -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
   -> [SiteRejection] -> Maybe TyCon -> Maybe PreparedSiteDependencies -> IntrinsicCensus -> IO PreparedModuleTask
-acquireBindingsWithScope workers timing subsetScope hscEnv thisModule location tycons optimizedCore coverage
+acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule location tycons optimizedCore coverage
     siblings yieldSites sites graph rejections carrierTyCon dependencies census = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
@@ -836,11 +842,17 @@ acquireBindingsWithScope workers timing subsetScope hscEnv thisModule location t
         preppedCore <- corePrepPgm logger corePrepConfig
           (initCorePrepPgmConfig preparedFlags interactiveVars)
           thisModule location optimizedCore dataTyCons
+        -- CorePrep can expose a different original reference through aliases
+        -- or constructor wrappers. Select exact declaring facts after that
+        -- transformation; supplied definitions keep their own analyzed facts.
+        externalScope <- if Map.null entries then pure [] else
+          mapM canonicalReference (recoveredSubsetScope thisModule preppedCore)
         -- CorePrep's configured end-pass performs the post-preparation Core lint.
         let (initialStg, _, _) =
               coreToStg (initCoreToStgOpts preparedFlags) thisModule location preppedCore
         (stgBindings, tagSigs) <-
-          stg2stg logger interactiveVars stgOptions thisModule initialStg
+          stg2stgWithExternalScope logger (externalScope ++ interactiveVars) externalScope
+            stgOptions thisModule initialStg
         pure PreparedModule
           { preparedModule = thisModule
           , preparedCoverage = coverage
@@ -858,5 +870,14 @@ acquireBindingsWithScope workers timing subsetScope hscEnv thisModule location t
           , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
           , preparedExpectedEntries = Map.empty
           }
+      canonicalReference reference = case Map.lookup (varName reference) entries of
+        Just original
+          | varName original == varName reference
+          , nameModule_maybe (varName original) == Just thisModule
+          , eqType (idType original) (idType reference) -> pure original
+          | otherwise -> ioError (userError ("recovered external entry identity/type mismatch: "
+              ++ showSDocUnsafe (ppr reference)))
+        Nothing -> ioError (userError ("recovered external entry absent from declaring interface: "
+          ++ showSDocUnsafe (ppr reference)))
   pure $ PreparedModuleTask $
     timeModuleDetailPhase timing "prepared_graph" "prepared_stg_task_service" thisModule lower

@@ -4,6 +4,7 @@
 module Main (main, tests) where
 
 import CompilerExecutionTest (compilerExecutionTests)
+import RecoveryEntryScopeTest (entryScopeTests)
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
@@ -82,6 +83,7 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "test-prepared-stg"
   [ compilerExecutionTests
+  , entryScopeTests
   , testCase "overlapping structural groups retain every sibling" assertOverlapMerge
   , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
   , testCase "compiled original recovery and reachability closure" scenario
