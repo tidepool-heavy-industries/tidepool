@@ -1865,6 +1865,15 @@ impl ActivationPublicationResources {
     pub(crate) fn confirmed(&self) -> bool {
         self.execution.owner.is_ready()
     }
+    pub(crate) fn authorizes(&self, actor: crate::ActorRef) -> bool {
+        self.execution.owner.actor() == actor
+    }
+    pub(crate) fn phase(&self) -> tidepool_runtime::session::PublicationPhase {
+        self.execution.decision.phase()
+    }
+    pub(crate) fn claim_commit(&self) -> Option<tidepool_runtime::session::PublicationClaim> {
+        self.execution.decision.claim_commit()
+    }
 }
 
 pub(crate) enum ActivationInputPublication {
@@ -7169,19 +7178,9 @@ where
             let publication = self.access.with_machine(context.clone(), move |session, _, _| {
                 let mut activation = None;
                 let mut refusal = None;
-                let mut retired = None;
                 let outcome = session.publish_staged_public_manifest_admitted(ticket, || {
                     let admitted = native_requests.begin_activation_publication(
-                        actor, request, native_resources.clone(), || {
-                            let mut claim = None;
-                            match native_retirement.claim_before_shutdown(|| {
-                                claim = native_resources.execution.decision.claim_commit();
-                                claim.is_some()
-                            }) {
-                                Ok(_) => claim,
-                                Err(terminal) => { retired = Some(terminal); None }
-                            }
-                        },
+                        actor, request, native_resources.clone(), &native_retirement,
                     );
                     match admitted {
                         Ok(Some((claim, lease))) => {
@@ -7197,7 +7196,6 @@ where
                         Err(error) => { refusal = Some(error); None }
                     }
                 }).map_err(ResidentError::Session)?;
-                let completion = activation.map(|lease| lease.finish_native(&outcome));
                 // Confirm the same visible native owner while this operation still
                 // owns its checkout/fence. No JoinHandle delivery is required.
                 let outcome = if matches!(outcome,
@@ -7212,7 +7210,6 @@ where
                         .expect("only a durable owner needs confirmation");
                     match session.confirm_durable_public_scope(owner, native_resources.execution.public_scope) {
                         Ok(()) => {
-                            completion.as_ref().expect("visible commit retains exact request lease").confirm_native();
                             tidepool_runtime::session::PublicManifestCommit::Durable
                         }
                         Err(error) => {
@@ -7224,20 +7221,19 @@ where
                         }
                     }
                 } else { outcome };
+                let completion = activation.map(|lease| lease.finish());
                 #[cfg(test)]
                 if let Some(observer) = &native_observer {
                     observer(ActivationPublicationObservation::NativeSettled(&outcome))
                         .expect("native settlement observer must release its phase");
                 }
-                if let Some(terminal) = retired {
-                    return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal));
-                }
-                if let Some(error) = refusal {
-                    if error != crate::ReplyError::CancellationRequested {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "activation native claim refused: {error:?}"
-                        )));
-                    }
+                match refusal {
+                    Some(crate::request::ActivationPublicationRefusal::Retired(terminal)) =>
+                        return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
+                    Some(crate::request::ActivationPublicationRefusal::Request(error))
+                        if error != crate::ReplyError::CancellationRequested =>
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!("activation native claim refused: {error:?}"))),
+                    _ => {},
                 }
                 Ok((outcome, completion))
             }).await?;
@@ -17775,6 +17771,198 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             }
         }
         (session, context, source, inputs, root)
+    }
+
+    /// Authentic retained input for request-settlement component histories.
+    /// Compiler/native admission run once; each history owns a fresh native
+    /// decision while sharing the immutable admission and checked input proof.
+    pub(crate) struct ActivationPublicationPhaseFixture {
+        prepared: PreparedActivationInput,
+        session: Mutex<ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        context: crate::ActorSessionContext,
+        _receipt: tidepool_runtime::session::CheckoutReceipt,
+        _machines: Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        run_root: tempfile::TempDir,
+        _source_root: tempfile::TempDir,
+    }
+
+    impl ActivationPublicationPhaseFixture {
+        pub(crate) fn actor(&self) -> crate::ActorRef {
+            self.context.actor
+        }
+
+        pub(crate) fn fresh_resources(
+            &self,
+        ) -> (
+            Arc<ActivationPublicationResources>,
+            Arc<tidepool_runtime::session::PublicationDecision>,
+        ) {
+            let original = &self.prepared.execution;
+            let decision = tidepool_runtime::session::PublicationDecision::new();
+            let execution = Arc::new(ExecutionPrivateScope {
+                owner: original.owner.clone(),
+                public_scope: original.public_scope,
+                private_scope: original.private_scope,
+                admission: original.admission.clone(),
+                decision: decision.clone(),
+            });
+            (
+                Arc::new(ActivationPublicationResources {
+                    execution,
+                    input: self.prepared.admission.clone(),
+                }),
+                decision,
+            )
+        }
+
+        pub(crate) fn make_pending(&self) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut session = self.session.lock();
+            let owner = self.prepared.execution.owner.durable().unwrap();
+            let scope = self.context.placement.lexical_scope;
+            let writer = session
+                .begin_durable_private_execution(owner, scope)
+                .unwrap();
+            let intent = session.freeze_private_execution(&writer).unwrap();
+            let tidepool_runtime::session::ExecutionPublication::Bindings(base) = session
+                .restage_execution_publication(owner.clone(), intent)
+                .unwrap()
+            else {
+                panic!("empty native writer has no declaration projection");
+            };
+            let ticket = base.stage().unwrap();
+            std::fs::set_permissions(self.run_root.path(), std::fs::Permissions::from_mode(0o300))
+                .unwrap();
+            let outcome = session.publish_staged_public_manifest(
+                ticket,
+                &tidepool_runtime::session::PublicationDecision::new(),
+            );
+            std::fs::set_permissions(self.run_root.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            assert!(matches!(
+                outcome.unwrap(),
+                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            ));
+            assert!(!self.prepared.execution.owner.is_ready());
+        }
+
+        pub(crate) fn make_ready(&self) {
+            self.session
+                .lock()
+                .confirm_durable_public_scope(
+                    self.prepared.execution.owner.durable().unwrap(),
+                    self.context.placement.lexical_scope,
+                )
+                .unwrap();
+            assert!(self.prepared.execution.owner.is_ready());
+        }
+    }
+
+    pub(crate) async fn activation_publication_phase_fixture() -> ActivationPublicationPhaseFixture
+    {
+        struct RunOwner {
+            root: PathBuf,
+            _lock: std::fs::File,
+        }
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        let run_root = tempfile::tempdir().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(run_root.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let authority = Arc::new(RunOwner {
+            root: run_root.path().canonicalize().unwrap(),
+            _lock: lock,
+        });
+        let (mut session, mut context, source, mut inputs, source_root) =
+            activation_input_fixture(|lib| {
+                lib.attach_owned_recovery_graph_v3(
+                    run_root.path().join("declarations.json"),
+                    authority,
+                )
+                .unwrap();
+            });
+        context.placement.lexical_scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let path = tidepool_repr::ActorPath::parse("root/activation-phases").unwrap();
+        let durable =
+            tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
+                .unwrap();
+        session
+            .initialize_durable_public_scope(durable.clone(), context.placement.lexical_scope)
+            .unwrap();
+        let descriptor = crate::ActorDescriptor::new("activation phases", context.placement)
+            .with_actor_path(path)
+            .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+        let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+            &context,
+            &descriptor,
+            Some(
+                session
+                    .durable_public_readiness(&durable, context.placement.lexical_scope)
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let runner = ResidentActorRunner::new(machines.clone(), source.clone());
+        let execution = Arc::new(
+            runner
+                .begin_private_execution(
+                    context.clone(),
+                    owner,
+                    tidepool_runtime::session::PublicationDecision::new(),
+                )
+                .await
+                .unwrap(),
+        );
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = execution.private_scope;
+        let (compile_context, authority) =
+            crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                private_context,
+                crate::CheckpointSourceLayer::default(),
+                None,
+                None,
+            )
+            .unwrap();
+        let workbench = ResidentActorWorkbench::new(machines.clone(), source, None)
+            .with_compilation_authority(authority)
+            .with_private_execution(execution);
+        let prepared = workbench
+            .mount_activation_input(
+                compile_context,
+                inputs.remove(0),
+                "()".into(),
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        drop(inputs);
+        drop(workbench);
+        drop(runner);
+        let (session, receipt) = machines
+            .checkout_run(context.placement.session)
+            .unwrap()
+            .into_parts();
+        ActivationPublicationPhaseFixture {
+            prepared,
+            session: Mutex::new(*session),
+            context,
+            _receipt: receipt,
+            _machines: machines,
+            run_root,
+            _source_root: source_root,
+        }
     }
 
     #[test]

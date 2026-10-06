@@ -1666,6 +1666,9 @@ fn settle_root_public_owner_record(
         tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
             detail,
         } => {
+            if matches!(record.public_owner, ActorPublicOwnerPlane::DurableReady(_)) {
+                return Ok(());
+            }
             record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
                 owner: expected_owner.clone(),
                 detail: detail.clone(),

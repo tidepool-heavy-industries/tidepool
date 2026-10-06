@@ -261,7 +261,7 @@ impl WorkbenchPublicOwner {
         self.actor == context.actor && self.placement == context.placement
     }
 
-    pub(super) fn actor(&self) -> ActorRef {
+    pub(crate) fn actor(&self) -> ActorRef {
         self.actor
     }
     pub(super) fn placement(&self) -> crate::ActorPlacement {

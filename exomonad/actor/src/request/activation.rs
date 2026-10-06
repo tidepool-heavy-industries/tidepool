@@ -1,183 +1,157 @@
-//! Request activation's native publication fence. The request record owns its
-//! disposition and retained native authority; affine leases supply exact facts.
+//! Request settlement retains the native input owner until its original
+//! publication decision and native confirmation state establish an outcome.
 
 use super::*;
 use std::sync::Arc;
-use tidepool_runtime::session::{PublicManifestCommit, PublicationClaim};
+use tidepool_runtime::session::{PublicationClaim, PublicationPhase};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NativePhase {
-    InFlight,
-    OutcomeUnknown,
-    PublishedUnconfirmed,
+pub(super) enum ActivationRecord {
+    Pending(Arc<crate::resident_workbench::ActivationPublicationResources>),
     Published,
     Refused,
 }
 
-pub(super) struct ActivationRecord {
-    identity: Arc<()>,
-    phase: NativePhase,
-    retained: Option<Arc<crate::resident_workbench::ActivationPublicationResources>>,
-}
-
 impl ActivationRecord {
-    pub(super) fn fences_settlement(&mut self) -> bool {
-        self.reconcile_confirmation();
-        matches!(
-            self.phase,
-            NativePhase::InFlight | NativePhase::OutcomeUnknown | NativePhase::PublishedUnconfirmed
-        )
-    }
-
-    fn reconcile_confirmation(&mut self) {
-        // Only finish_native's exact visible outcome can enter this state.
-        // Native admission prevents any later manifest write while its receipt
-        // remains pending, so readiness of this same owner proves confirmation.
-        if self.phase == NativePhase::PublishedUnconfirmed
-            && self
-                .retained
-                .as_ref()
-                .is_some_and(|resources| resources.confirmed())
-        {
-            self.phase = NativePhase::Published;
-            self.retained = None;
+    fn reconcile(&mut self) {
+        let Self::Pending(resources) = self else {
+            return;
+        };
+        match resources.phase() {
+            PublicationPhase::Published if resources.confirmed() => *self = Self::Published,
+            PublicationPhase::Terminated => *self = Self::Refused,
+            // CommitClaimed stays fenced even when the native graph is ready:
+            // only the original native publisher can establish local promotion.
+            _ => {}
         }
     }
+
+    pub(super) fn fences_settlement(&mut self) -> bool {
+        self.reconcile();
+        matches!(self, Self::Pending(_))
+    }
+}
+
+pub(crate) enum ActivationPublicationRefusal {
+    Request(ReplyError),
+    Retired(ActorTerminal),
 }
 
 pub(crate) struct RequestActivationPublication {
     registry: Arc<RequestRegistry>,
     target: ActorRef,
     request: RequestId,
-    identity: Arc<()>,
 }
 
 pub(crate) struct RequestActivationCompletion(RequestActivationPublication);
 
 impl RequestRegistry {
-    /// Called at the runtime publisher's existing claim point after all native
-    /// preflights. Neither this lock nor the actor retirement lock covers fsync.
+    /// The native publisher calls this after its ticket, epoch and view checks.
+    /// Only the retained input's original decision can supply the native claim;
+    /// neither request nor retirement locks cover fsync or local promotion.
     pub(crate) fn begin_activation_publication(
         self: &Arc<Self>,
         target: ActorRef,
         request: RequestId,
         retained: Arc<crate::resident_workbench::ActivationPublicationResources>,
-        claim: impl FnOnce() -> Option<PublicationClaim>,
-    ) -> Result<Option<(PublicationClaim, RequestActivationPublication)>, ReplyError> {
+        retirement: &crate::RetainedActorExit,
+    ) -> Result<
+        Option<(PublicationClaim, RequestActivationPublication)>,
+        ActivationPublicationRefusal,
+    > {
         let mut state = self.state.lock();
-        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
-        authorize_target(record, target)?;
+        let record = state
+            .requests
+            .get_mut(&request)
+            .ok_or(ActivationPublicationRefusal::Request(ReplyError::Stale))?;
+        authorize_target(record, target).map_err(ActivationPublicationRefusal::Request)?;
+        if !retained.authorizes(target) {
+            return Err(ActivationPublicationRefusal::Request(
+                ReplyError::Unauthorized,
+            ));
+        }
         match record.target_state {
             TargetState::Presented => {}
             TargetState::CancellationRequested { .. }
             | TargetState::AcknowledgingCancellation(_) => {
-                return Err(ReplyError::CancellationRequested);
+                return Err(ActivationPublicationRefusal::Request(
+                    ReplyError::CancellationRequested,
+                ))
             }
-            TargetState::Closed => return Err(ReplyError::AlreadySettled),
-            _ => return Err(ReplyError::Stale),
+            TargetState::Closed => {
+                return Err(ActivationPublicationRefusal::Request(
+                    ReplyError::AlreadySettled,
+                ))
+            }
+            _ => return Err(ActivationPublicationRefusal::Request(ReplyError::Stale)),
         }
         if record.activation.is_some() {
-            return Err(ReplyError::AlreadySettled);
+            return Err(ActivationPublicationRefusal::Request(
+                ReplyError::AlreadySettled,
+            ));
         }
-        let Some(claim) = claim() else {
+        let mut claim = None;
+        retirement
+            .claim_before_shutdown(|| {
+                claim = retained.claim_commit();
+                claim.is_some()
+            })
+            .map_err(ActivationPublicationRefusal::Retired)?;
+        let Some(claim) = claim else {
             return Ok(None);
         };
-        let identity = Arc::new(());
-        record.activation = Some(ActivationRecord {
-            identity: identity.clone(),
-            phase: NativePhase::InFlight,
-            retained: Some(retained),
-        });
+        record.activation = Some(ActivationRecord::Pending(retained));
         Ok(Some((
             claim,
             RequestActivationPublication {
                 registry: self.clone(),
                 target,
                 request,
-                identity,
             },
         )))
     }
 }
 
 impl RequestActivationPublication {
-    fn with_record<T>(&self, operation: impl FnOnce(&mut ActivationRecord) -> T) -> Option<T> {
+    fn reconcile(&self) {
         let mut state = self.registry.state.lock();
-        let record = state.requests.get_mut(&self.request)?;
-        if record.target != self.target {
-            return None;
+        if let Some(record) = state.requests.get_mut(&self.request) {
+            if record.target == self.target {
+                if let Some(activation) = &mut record.activation {
+                    activation.reconcile();
+                }
+            }
         }
-        let activation = record.activation.as_mut()?;
-        if !Arc::ptr_eq(&activation.identity, &self.identity) {
-            return None;
-        }
-        Some(operation(activation))
     }
 
-    /// The blocking operation settles the real native outcome before its result
-    /// can be lost with the async waiter. Known facts survive later lease drop.
-    pub(crate) fn finish_native(
-        self,
-        outcome: &PublicManifestCommit,
-    ) -> RequestActivationCompletion {
-        self.with_record(|record| {
-            if record.phase != NativePhase::InFlight {
-                return;
-            }
-            record.phase = match outcome {
-                PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral => {
-                    NativePhase::Published
-                }
-                PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
-                    NativePhase::PublishedUnconfirmed
-                }
-                PublicManifestCommit::BeforeRename { .. }
-                | PublicManifestCommit::Cancelled
-                | PublicManifestCommit::Stale => NativePhase::Refused,
-            };
-            if !record.fences_settlement() {
-                record.retained = None;
-            }
-        });
+    /// Native reconciliation precedes delivery to the async waiter. Drop also
+    /// reads the same authoritative facts and cannot manufacture an outcome.
+    pub(crate) fn finish(self) -> RequestActivationCompletion {
+        self.reconcile();
         RequestActivationCompletion(self)
     }
 }
 
 impl Drop for RequestActivationPublication {
     fn drop(&mut self) {
-        self.with_record(|record| {
-            if record.phase == NativePhase::InFlight {
-                record.phase = NativePhase::OutcomeUnknown;
-            }
-        });
+        self.reconcile();
     }
 }
 
 impl RequestActivationCompletion {
-    /// Confirmation runs in its native owning closure, not after JoinHandle delivery.
-    pub(crate) fn confirm_native(&self) {
-        self.0.with_record(|record| {
-            if record.phase == NativePhase::PublishedUnconfirmed {
-                record.phase = NativePhase::Published;
-                record.retained = None;
-            }
-        });
-    }
-
     pub(crate) fn publish_if_current<R>(
         self,
         publish: impl FnOnce() -> R,
     ) -> Result<R, ReplyError> {
-        let state = self.0.registry.state.lock();
+        let mut state = self.0.registry.state.lock();
         let record = state
             .requests
-            .get(&self.0.request)
+            .get_mut(&self.0.request)
             .ok_or(ReplyError::Stale)?;
         authorize_target(record, self.0.target)?;
-        if record.activation.as_ref().is_none_or(|activation| {
-            !Arc::ptr_eq(&activation.identity, &self.0.identity)
-                || activation.phase != NativePhase::Published
-        }) {
+        if let Some(activation) = &mut record.activation {
+            activation.reconcile();
+        }
+        if !matches!(record.activation, Some(ActivationRecord::Published)) {
             return Err(ReplyError::Stale);
         }
         match record.target_state {

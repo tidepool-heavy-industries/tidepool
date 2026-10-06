@@ -2,7 +2,7 @@
 mod sequence_tests;
 
 mod activation;
-pub(crate) use activation::RequestActivationCompletion;
+pub(crate) use activation::{ActivationPublicationRefusal, RequestActivationCompletion};
 
 mod invocation;
 pub(crate) mod routes;
