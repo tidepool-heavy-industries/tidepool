@@ -26,6 +26,7 @@ module Tidepool.GhcPipeline
   , CompilerTransactionFailure(..)
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
+  , CompilerScope(..), CompilerScopeRunner, withResidentCompilerScopes
   , withExactInterfaceTransaction
   ) where
 
@@ -3760,7 +3761,27 @@ withResidentPipelineSelectedRequests
   :: [FilePath]
   -> (RequestRunner -> IO a)
   -> IO a
-withResidentPipelineSelectedRequests baseIncludes useRequests = do
+withResidentPipelineSelectedRequests baseIncludes useRequests =
+  withResidentCompilerScopes baseIncludes $ \runScope ->
+    useRequests $ \clearRecovery action ->
+      runScope clearRecovery (action . scopedCompile)
+
+-- | One transaction-issued capability serves compilation and auxiliary GHC
+-- operations. Every operation uses the same owner-thread and phase guard.
+data CompilerScope = CompilerScope
+  { scopedCompile :: ResidentCompiler
+  , scopedRunGhc :: forall result. Ghc result -> IO result
+  , scopedParserFlags :: DynFlags
+  }
+
+type CompilerScopeRunner = forall requestResult.
+  IO () -> (CompilerScope -> IO requestResult) -> IO requestResult
+
+withResidentCompilerScopes
+  :: [FilePath]
+  -> (CompilerScopeRunner -> IO a)
+  -> IO a
+withResidentCompilerScopes baseIncludes useRequests = do
   producer <- captureCompilerProducerIdentity
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
@@ -3778,7 +3799,7 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
     reifyGhc $ \session ->
       let resetSession = reflectGhc
             (getSession >>= liftIO . freshExactState >>= setSession) session
-          runRequest :: RequestRunner
+          runRequest :: CompilerScopeRunner
           runRequest clearRecovery action = bracket acquire release $ \() -> do
             -- These caches contain GHC values tied to this environment, not
             -- portable products. No cache entry survives its owning bracket.
@@ -3787,8 +3808,8 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
             stateOriginRef <- newIORef OrdinarySourceState
             phase <- newIORef CompilerReady
             requestIdentity <- newTimingRequestIdentity
-            let compile :: ResidentCompiler
-                compile selection retained purpose mscope path extraIncludes buildProductsDir = mask $ \restore -> do
+            let runOperation :: forall result. Ghc result -> IO result
+                runOperation operation = mask $ \restore -> do
                   caller <- myThreadId
                   unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
                   previous <- atomicModifyIORef' phase $ \state ->
@@ -3798,20 +3819,12 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
                     CompilerRunning -> throwIO CompilerTransactionBusy
                     CompilerFailed -> throwIO CompilerTransactionFailed
                     CompilerClosed -> throwIO CompilerTransactionReleased
-                  result <- restore (do
-                    (writeIORef retainedRef (retainedContext retained) >>
-                      reflectGhc
-                        (residentCompileOne producer selection cacheRef memoRef retainedRef retained stateOriginRef dflags' baseImportPaths
-                          timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
-                        session)
-                      `finally` writeIORef retainedRef emptyRetainedContext)
+                  result <- restore (reflectGhc operation session)
                     `catch` \(failure :: SomeException) -> do
                       writeIORef phase CompilerFailed
                       case fromException failure :: Maybe SomeAsyncException of
                         Just _ -> throwIO failure
                         Nothing -> do
-                          -- A caller may retry a rejected generated instance.
-                          -- No partial compiler or recovery graph is reusable.
                           clearRecovery
                           writeIORef memoRef Map.empty
                           newIfaceCache >>= writeIORef cacheRef
@@ -3821,13 +3834,23 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
                           throwIO failure
                   writeIORef phase CompilerReady
                   pure result
+                compile :: ResidentCompiler
+                compile selection retained purpose mscope path extraIncludes buildProductsDir =
+                  runOperation $ do
+                    liftIO (writeIORef retainedRef (retainedContext retained))
+                    reifyGhc $ \activeSession ->
+                      reflectGhc
+                        (residentCompileOne producer selection cacheRef memoRef retainedRef retained stateOriginRef dflags' baseImportPaths
+                          timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
+                        activeSession
+                        `finally` writeIORef retainedRef emptyRetainedContext
                 finish = do
                   writeIORef phase CompilerClosed
                   writeIORef memoRef Map.empty
                   newIfaceCache >>= writeIORef cacheRef
                   writeIORef stateOriginRef OrdinarySourceState
                   clearRecovery
-            action compile `finally` finish
+            action (CompilerScope compile runOperation dflags) `finally` finish
           acquire = do
             caller <- myThreadId
             unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
