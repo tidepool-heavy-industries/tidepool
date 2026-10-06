@@ -3346,6 +3346,8 @@ def declare_haskell_components():
         "test-source-boot/fixtures/OptionalWiredRoot.hs": "test-source-boot/fixtures/OptionalWiredRoot.hs",
         "test-source-boot/fixtures/OptionalWiredSupport.hs": "test-source-boot/fixtures/OptionalWiredSupport.hs",
         "test-source-boot/fixtures/OriginalPackageCohort.hs": "test-source-boot/fixtures/OriginalPackageCohort.hs",
+        "test-source-boot/fixtures/OriginalTextConsumer.hs": "test-source-boot/fixtures/OriginalTextConsumer.hs",
+        "test-source-boot/fixtures/OriginalTextRequest.hs": "test-source-boot/fixtures/OriginalTextRequest.hs",
         "test-source-boot/fixtures/PackageOriginalHome.hs": "test-source-boot/fixtures/PackageOriginalHome.hs",
         "test-source-boot/fixtures/PackageOriginalSupport.hs": "test-source-boot/fixtures/PackageOriginalSupport.hs",
         "test-source-boot/fixtures/PackageOriginalVal.hs": "test-source-boot/fixtures/PackageOriginalVal.hs",
