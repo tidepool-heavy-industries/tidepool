@@ -585,7 +585,7 @@ newPreparedComponentTaskPreparer env owners stable = do
               pure assembled
             pure $ case outcome of
               Left reason -> Left (RecoveredModulePreparationFailure owner reason)
-              Right prepared -> Right prepared)))
+              Right prepared -> Right prepared))
 
 issueComponentSpellings :: FatIfaceComponent -> PreparedModule -> PreparedModule
 issueComponentSpellings component prepared = prepared
