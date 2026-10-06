@@ -270,9 +270,8 @@ impl CandidateProduct {
         bytes: &[u8],
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
     ) -> Option<RawModuleProduct> {
-        let operation = tidepool_repr::execution_schema::InventoryOperation::new(
-            product_decode_limits(),
-        );
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(product_decode_limits());
         Self::decode_product_with_operation(bytes, requirements, &operation).ok()?
     }
 
@@ -1540,9 +1539,7 @@ fn operation_budget_error(error: &crate::certified_products::CertificationError)
     )
 }
 
-fn operation_parse_budget_error(
-    error: &tidepool_repr::execution_schema::ParseError,
-) -> bool {
+fn operation_parse_budget_error(error: &tidepool_repr::execution_schema::ParseError) -> bool {
     matches!(
         error,
         tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
@@ -2147,21 +2144,24 @@ fn select_records_inner(
                     continue;
                 }
                 drop(wire);
-                let graph = match crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(bytes, digest) {
-                    Ok(graph) => graph,
-                    Err(_) => {
-                        if omit_or_refuse_candidate(
-                            &origin,
-                            &mut selection_omissions,
-                            &record.unit,
-                            &record.module,
-                            CacheOfferOmission::InvalidRecord,
-                        ) {
-                            return None;
+                let graph =
+                    match crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
+                        bytes, digest,
+                    ) {
+                        Ok(graph) => graph,
+                        Err(_) => {
+                            if omit_or_refuse_candidate(
+                                &origin,
+                                &mut selection_omissions,
+                                &record.unit,
+                                &record.module,
+                                CacheOfferOmission::InvalidRecord,
+                            ) {
+                                return None;
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                };
+                    };
                 graph_bytes = next_graph_bytes;
                 graph
             };
@@ -2228,15 +2228,17 @@ fn select_records_inner(
             }
             continue;
         };
-        if let Err(error) = crate::certified_products::validate_canonical_native_bytes_with_operation(
-            &computed_owner(&record),
-            &record.original_certification,
-            &record.interface,
-            &record.package_imports,
-            Some(source_sha256),
-            &canonical,
-            &package_validation.inventory,
-        ) {
+        if let Err(error) =
+            crate::certified_products::validate_canonical_native_bytes_with_operation(
+                &computed_owner(&record),
+                &record.original_certification,
+                &record.interface,
+                &record.package_imports,
+                Some(source_sha256),
+                &canonical,
+                &package_validation.inventory,
+            )
+        {
             let reason = if operation_budget_error(&error) {
                 CacheOfferOmission::OperationBudget
             } else {
@@ -2330,7 +2332,10 @@ fn select_records_inner(
             selection_omissions.omit(
                 &owner.0,
                 &owner.1,
-                if matches!(reason, CandidateInterfaceUnavailable::RequiredInterface { .. }) {
+                if matches!(
+                    reason,
+                    CandidateInterfaceUnavailable::RequiredInterface { .. }
+                ) {
                     CacheOfferOmission::RequiredInterfaceUnavailable
                 } else {
                     CacheOfferOmission::InvalidRecord
@@ -4267,14 +4272,8 @@ mod tests {
                 .map(|record| record.module.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            names(&first),
-            vec!["A".to_owned(), "B".to_owned()]
-        );
-        assert_eq!(
-            names(&second),
-            vec!["A".to_owned(), "B".to_owned()]
-        );
+        assert_eq!(names(&first), vec!["A".to_owned(), "B".to_owned()]);
+        assert_eq!(names(&second), vec!["A".to_owned(), "B".to_owned()]);
         assert_eq!(first.diagnostics.count(CacheOfferOmission::OwnerLimit), 1);
 
         let selected = select_records_inner(
@@ -4360,18 +4359,12 @@ mod tests {
             dependent.interface.clone(),
             dependent.products.clone(),
             dependent.package_imports.clone(),
-            crate::certified_products::encode_home_certification(
-                &owner,
-                &[],
-                &BTreeMap::new(),
-            )
-            .unwrap(),
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap(),
         )
         .with_source_sha256(parse_sha(&dependent.source_sha256).unwrap());
-        let missing_requirement = BTreeMap::from([(
-            ("u".to_owned(), "Missing".to_owned()),
-            [0x55; 32],
-        )]);
+        let missing_requirement =
+            BTreeMap::from([(("u".to_owned(), "Missing".to_owned()), [0x55; 32])]);
         let finalized = crate::certified_products::fixture_finalized_product_with_requirements(
             fresh,
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -4438,9 +4431,7 @@ mod tests {
             vec![("u".into(), "B".into())]
         );
         assert_eq!(
-            selected.by_owner[&("u".into(), "B".into())]
-                .product
-                .bytes(),
+            selected.by_owner[&("u".into(), "B".into())].product.bytes(),
             independent.products
         );
     }
