@@ -3911,8 +3911,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
-    fn failure(error: impl std::fmt::Display) -> KernelBehaviorError {
-        KernelBehaviorError::new(error.to_string())
+    fn failure(detail: impl Into<String>) -> KernelBehaviorError {
+        KernelBehaviorError::new(detail)
     }
 
     fn workbench_failure(error: ResidentActorWorkbenchError) -> KernelBehaviorError {
@@ -12077,7 +12077,7 @@ where
                         &self.launch_worktrees,
                         self.root_startup.as_ref().map(|(intent, _)| intent.clone()),
                     )
-                    .map_err(Self::failure)?;
+                    .map_err(|error| Self::failure(error.to_string()))?;
             }
             kernel.install_session_context(context.clone())?;
             self.environment.actors.lock().insert(
