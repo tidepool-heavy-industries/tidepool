@@ -396,6 +396,7 @@ def declare_haskell_components():
         "-XGHC2024",
         "-XOverloadedStrings",
         "-Wall",
+        "-threaded",
         "-with-rtsopts=-T"
     ]),
         linker_flags = haskell_component_link_flags([
@@ -422,6 +423,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-Wall",
+        "-threaded",
         "-with-rtsopts=-T"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -449,6 +451,7 @@ def declare_haskell_components():
         "-XGHC2024",
         "-XOverloadedStrings",
         "-Wall",
+        "-threaded",
         "-with-rtsopts=-T",
         "-g3",
         "-fexpose-internal-symbols",
@@ -478,6 +481,7 @@ def declare_haskell_components():
         "witherable"
     ], [
         "-Wall",
+        "-threaded",
         "-with-rtsopts=-T"
     ], dynamic = True),
         visibility = ["PUBLIC"],
