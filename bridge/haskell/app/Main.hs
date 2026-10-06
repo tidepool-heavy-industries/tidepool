@@ -349,7 +349,7 @@ dispatchSource compilerScope caches timing request args =
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
-        | requestActivationPreview args          -> runActivationPreviewMode compiler caches request args file
+        | requestActivationPreview args          -> runActivationPreviewMode (scopedParserFlags compilerScope) compiler caches request args file
         | requestCheckSource args                 -> runSourceCheckMode compiler args file
         | requestCellPlan args                    -> runCellPlanMode (scopedParserFlags compilerScope) args file
         | requestCell args                        -> runCellMode admittedScope caches request args file
@@ -364,8 +364,8 @@ dispatchSource compilerScope caches timing request args =
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
-runActivationPreviewMode :: Compiler -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
-runActivationPreviewMode compiler caches request args path = do
+runActivationPreviewMode :: DynFlags -> Compiler -> RecoveryCaches -> AdmittedRequest -> WorkerRequest -> FilePath -> IO ExitCode
+runActivationPreviewMode parserFlags compiler caches request args path = do
   timing <- readTimingEnabled
   lastAttempt <- newIORef Nothing
   result <- timePhase timing "total" $ trySynchronous $ do
@@ -390,7 +390,7 @@ runActivationPreviewMode compiler caches request args path = do
           protected <- either fail pure (renameScaffoldModuleHeader owner original)
           named <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body protected
           (_, moduleName', modulePath) <- writeSplicedModule outDir lastAttempt named
-          recipe <- generatedActivationPreviewRecipe (previewOriginalInterfaces admission)
+          recipe <- generatedActivationPreviewRecipe parserFlags (previewOriginalInterfaces admission)
             (previewOriginalTarget admission) protected named modulePath moduleName' >>= either fail pure
           pure (named, modulePath, GeneratedScaffoldCompile recipe basePurpose)
     (_, probePath, probePurpose) <- render opaque
@@ -1053,7 +1053,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           purpose <- case protectedTemplates of
             Nothing -> pure basePurpose
             Just _ -> do
-              recipe <- generatedScaffoldRecipe templateImports protected spliced modulePath modName >>= either fail pure
+              recipe <- generatedScaffoldRecipe parserFlags templateImports protected spliced modulePath modName >>= either fail pure
               pure (GeneratedScaffoldCompile recipe basePurpose)
           compiler (PreparedProducts (requestModuleCandidates args))
             (Map.keysSet (requestRetainedGenerations args)) purpose
@@ -1217,7 +1217,7 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
       compilePurpose <- case admittedScope >>= scopeCheckedCell of
         Nothing -> pure baseCheckPurpose
         Just admission -> do
-          recipe <- generatedCheckingTemplateRecipe (checkedTemplateImports admission)
+          recipe <- generatedCheckingTemplateRecipe parserFlags (checkedTemplateImports admission)
             template rendered modulePath moduleName' >>= either fail pure
           pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
       compiler checkedSelection Set.empty
@@ -1364,7 +1364,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                   Nothing -> pure baseCheckPurpose
                   Just checked -> do
                     moduleName' <- maybe (fail "compiled cell check has no module owner") pure (extractModuleName globalSource)
-                    recipe <- generatedCheckingTemplateRecipe (checkedTemplateImports checked)
+                    recipe <- generatedCheckingTemplateRecipe parserFlags (checkedTemplateImports checked)
                       template globalSource checkPath moduleName' >>= either fail pure
                     pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
                 scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs))

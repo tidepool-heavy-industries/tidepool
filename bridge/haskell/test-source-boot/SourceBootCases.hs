@@ -1184,6 +1184,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
 -- the canonical target's original orphan visibility census.
 activationPreviewOriginalOrphanScope :: IO ()
 activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
+  parserFlags <- defaultParserDynFlags
   let supportDirectory = work </> "Tidepool/Internal"
       target = work </> "Expr.hs"
       originalTarget = ("main","ExecutionSealedQuoter")
@@ -1219,7 +1220,7 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
   protected <- readFile "test-source-boot/fixtures/GeneratedScaffoldOrphanExpr.hs"
   writeFile target protected
   let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
-      recipe owner source = generatedActivationPreviewRecipe graph owner source source target "Expr"
+      recipe owner source = generatedActivationPreviewRecipe parserFlags graph owner source source target "Expr"
         >>= either fail pure
       requireMissing label action = do
         refused <- sourceFailureDiagnostics action
@@ -1254,6 +1255,7 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
 
 generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do
+  parserFlags <- defaultParserDynFlags
   let supportDirectory = work </> "Tidepool/Internal"
       supportPath = supportDirectory </> "Resume.hs"
       capturePath = work </> "GeneratedScaffoldCapture.hs"
@@ -1270,7 +1272,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   hiddenPath <- writeGenuineCandidateNativeScope [] (originalOwners original) work originalFixture
   let hidden = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
   protected <- readFile target
-  recipe <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected protected target "Expr" >>= either fail pure
+  recipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
       supportOwner = ("main","Tidepool.Internal.Resume")
       requireHiddenSource label = requireOriginalSourceRejection label (ExecutionSourceUnavailable supportOwner)
@@ -1299,7 +1301,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       Right () -> fail "scaffold general-purpose import acquired hidden source authority"
     let extra = unlines (take 5 (lines protected) ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
     writeFile target extra
-    duplicate <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected extra target "Expr" >>= either fail pure
+    duplicate <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected extra target "Expr" >>= either fail pure
     requireHiddenSource "additional authored hidden import" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile duplicate GeneralCompile)
         (Just hidden) target [] Nothing
@@ -1311,12 +1313,12 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     copyFile "test-source-boot/fixtures/GeneratedScaffoldHelper.hs" (work </> "GeneratedScaffoldHelper.hs")
     let helperTarget = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHelper"] ++ drop 5 (lines protected))
     writeFile target helperTarget
-    helperRecipe <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected helperTarget target "Expr" >>= either fail pure
+    helperRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected helperTarget target "Expr" >>= either fail pure
     requireHiddenSource "fresh helper importing hidden support" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile helperRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected)
-    lineRecipe <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
+    lineRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
     requireSourceSelectionInput "logical LINE import location differs from protected occurrence"
       "generated scaffold import occurrence differs from its protected recipe" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile lineRecipe GeneralCompile)
@@ -1334,16 +1336,22 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let templateInterface = CheckedTemplateInterface (exactUnit supportInterface)
           (exactModule supportInterface) (exactSha256 supportInterface) []
         withTemplate = unlines (take 5 (lines protected)
-          ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
+          ++ ["import Tidepool.Internal.Resume hiding (resumeLifted)"] ++ drop 5 (lines protected))
     writeFile target withTemplate
     let templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
         templateImports = CheckedTemplateImports templateRoot [templateInterface]
-    capturedTemplate <- generatedScaffoldRecipe templateImports withTemplate withTemplate target "Expr"
+    capturedTemplate <- generatedScaffoldRecipe parserFlags templateImports withTemplate withTemplate target "Expr"
       >>= either fail pure
     let capturedPurpose = GeneratedScaffoldCompile capturedTemplate (CheckedItemCompile [] Nothing [])
     interfaceOnly <- compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult interfaceOnly))) $
       fail "initial template interface changed the native result"
+    let changedRestriction = T.unpack
+          (T.replace "hiding (resumeLifted)" "hiding (settle)" (T.pack withTemplate))
+    changedRestrictionRecipe <- generatedScaffoldRecipe parserFlags templateImports
+      withTemplate changedRestriction target "Expr"
+    unless (case changedRestrictionRecipe of Left _ -> True; Right _ -> False) $
+      fail "changed protected import list retained template authority"
     let supportOwner = ("main","TemplateSupport")
         rootOwner = ("main","TemplateRoot")
         supportInterface = CheckedTemplateInterface (fst supportOwner) (snd supportOwner) (replicate 64 '1') []
@@ -1353,10 +1361,20 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         leakedSupport = unlines (take 5 (lines protected)
           ++ ["import TemplateRoot","import TemplateSupport"] ++ drop 5 (lines protected))
     writeFile target rootTemplate
-    _ <- generatedScaffoldRecipe (CheckedTemplateImports [rootOwner] rootGraph)
+    _ <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
       rootTemplate rootTemplate target "Expr" >>= either fail pure
+    let prefixCollision = T.unpack (T.replace "import TemplateRoot" "import TemplateRootExtra hiding (x)"
+          (T.pack rootTemplate))
+    prefixRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
+      rootTemplate prefixCollision target "Expr"
+    unless (case prefixRecipe of Left _ -> True; Right _ -> False) $
+      fail "a prefixed module name borrowed the protected template root"
+    let instanceOnlyTemplate = unlines (take 5 (lines protected)
+          ++ ["import TemplateRoot ()"] ++ drop 5 (lines protected))
+    _ <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
+      instanceOnlyTemplate instanceOnlyTemplate target "Expr" >>= either fail pure
     writeFile target leakedSupport
-    supportAsRoot <- generatedScaffoldRecipe (CheckedTemplateImports [rootOwner] rootGraph)
+    supportAsRoot <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
       leakedSupport leakedSupport target "Expr"
     case supportAsRoot of
       Right _ -> pure ()
@@ -1364,14 +1382,14 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let checkPath = work </> "CellCheck.hs"
         checkingTemplate = "module CellCheck where\ncell = 1\n"
     writeFile checkPath checkingTemplate
-    _ <- generatedCheckingTemplateRecipe (CheckedTemplateImports [] [])
+    _ <- generatedCheckingTemplateRecipe parserFlags (CheckedTemplateImports [] [])
       checkingTemplate checkingTemplate checkPath "CellCheck" >>= either fail pure
     writeFile target withTemplate
     requireSourceSelectionInput "template interface cannot replace paired native owner"
       "generated scaffold lacks one paired original native owner" $
       compile (PreparedProducts Nothing) Set.empty
         (ExactScopeCompile capturedPurpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
-    wrongSeal <- generatedScaffoldRecipe (CheckedTemplateImports templateRoot [templateInterface {templateInterfaceSha256=replicate 64 'f'}])
+    wrongSeal <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports templateRoot [templateInterface {templateInterfaceSha256=replicate 64 'f'}])
       withTemplate withTemplate target "Expr" >>= either fail pure
     requireSourceSelectionInput "changed initial template interface seal"
       "checked template graph interface seal changed" $
@@ -1380,20 +1398,20 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let secondImport = unlines (take 5 (lines withTemplate)
           ++ ["import qualified Tidepool.Internal.Resume as AuthoredSecond"] ++ drop 5 (lines withTemplate))
     writeFile target secondImport
-    secondRecipe <- generatedScaffoldRecipe templateImports withTemplate secondImport target "Expr"
+    secondRecipe <- generatedScaffoldRecipe parserFlags templateImports withTemplate secondImport target "Expr"
     unless (case secondRecipe of Left _ -> True; Right _ -> False) $
       fail "authored second import acquired protected template authority"
     let qualifiedTemplate = unlines (take 5 (lines protected)
           ++ ["import qualified Tidepool.Internal.Resume as CapturedTemplate"] ++ drop 5 (lines protected))
     writeFile target qualifiedTemplate
-    qualifiedRecipe <- generatedScaffoldRecipe templateImports qualifiedTemplate qualifiedTemplate target "Expr"
+    qualifiedRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedTemplate qualifiedTemplate target "Expr"
       >>= either fail pure
     qualifiedResult <- compile (PreparedProducts Nothing) Set.empty
       (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing [])) (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult qualifiedResult))) $
       fail "qualified protected template changed original execution"
     let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedTemplate))
-    aliasRecipe <- generatedScaffoldRecipe templateImports qualifiedTemplate changedAlias target "Expr"
+    aliasRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedTemplate changedAlias target "Expr"
     unless (case aliasRecipe of Left _ -> True; Right _ -> False) $
       fail "changed qualified import alias retained protected template authority"
     writeFile target (withTemplate ++ "\ntamperedTemplateTarget = 0 :: Int\n")
@@ -1405,7 +1423,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       let rendered = T.unpack (T.replace "module Expr where" (T.pack ("module " ++ name ++ " where")) (T.pack protected))
           generatedPath = work </> (name ++ ".hs")
       writeFile generatedPath rendered
-      generated <- generatedScaffoldRecipe (CheckedTemplateImports [] []) protected rendered generatedPath name >>= either fail pure
+      generated <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected rendered generatedPath name >>= either fail pure
       let wrapped = ExactScopeCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) admittedScope
       checked <- compile (PreparedProducts Nothing) Set.empty wrapped (Just hidden) generatedPath [] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $

@@ -8752,7 +8752,21 @@ mod tests {
         );
         assert!(
             !template_selects_owner(&[template.to_owned()], &identity("fixture", "JoinedExtra")),
-            "an import modifier does not weaken exact module-name matching"
+            "an import does not select a longer module name"
+        );
+        assert!(
+            !template_selects_owner(
+                &["import JoinedExtra hiding (x)".to_owned()],
+                &identity("fixture", "Joined")
+            ),
+            "a longer imported module name does not select a prefix owner"
+        );
+        assert!(
+            template_selects_owner(
+                &["import qualified Joined as J hiding (x)".to_owned()],
+                &identity("fixture", "Joined")
+            ),
+            "qualified imports with aliases and modifiers retain their exact owner"
         );
         let mut current = initial.as_ref().clone();
         current.lexical.clear();

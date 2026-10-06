@@ -60,7 +60,12 @@ import GHC.Unit.Home.ModInfo
   , lookupHpt )
 import GHC.Iface.Load (readIface)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Driver.Session (targetProfile, ghcMode, GhcMode(CompManager))
+import GHC.Driver.Session (DynFlags, targetProfile, ghcMode, GhcMode(CompManager))
+import GHC.Driver.Config.Parser (initParserOpts)
+import qualified GHC.Parser as Parser (parseImport)
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Data.FastString (mkFastString)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', atomicModifyIORef')
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
@@ -74,7 +79,7 @@ import GHC.Unit.Module.Location
 import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
-import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine)
+import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine, mkRealSrcLoc)
 import GHC.Types.Avail (availNames)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -102,7 +107,7 @@ import Tidepool.FatIface (readExactInterface)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import qualified GHC.Data.Maybe as MErr
-import GHC.Utils.Outputable (text)
+import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
 import Numeric (showHex)
 import System.Directory (getTemporaryDirectory, removeFile, canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -231,8 +236,11 @@ data CheckedTemplateImports = CheckedTemplateImports
   } deriving (Eq, Show)
 
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
-  [(CheckedTemplateInterface,Int,Maybe String)] [CheckedTemplateInterface]
+  [(CheckedTemplateInterface,Int,TemplateImportShape)] [CheckedTemplateInterface]
   GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose
+  deriving (Eq)
+
+newtype TemplateImportShape = TemplateImportShape String
   deriving (Eq)
 
 data GeneratedScaffoldInstanceScope = ImportedTemplateInstances | OriginalPreviewInstances CheckedTemplateInterface
@@ -245,28 +253,39 @@ instance Show GeneratedScaffoldRecipe where
   show (GeneratedScaffoldRecipe path name _ line interfaces _ _ role) =
     "GeneratedScaffoldRecipe " ++ show (path,name,line,interfaces,role)
 
-generatedScaffoldRecipe :: CheckedTemplateImports -> String -> String -> FilePath -> String
+parseTemplateImport :: DynFlags -> String -> Maybe (String, TemplateImportShape)
+parseTemplateImport flags source = case unP Parser.parseImport
+    (initParserState (initParserOpts flags) (stringToStringBuffer source)
+      (mkRealSrcLoc (mkFastString "<checked-template-import>") 1 1)) of
+  PFailed _ -> Nothing
+  POk _ located ->
+    let declaration = unLoc located
+        owner = moduleNameString (unLoc (ideclName declaration))
+        shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
+    in Just (owner,shape)
+
+generatedScaffoldRecipe :: DynFlags -> CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedScaffoldRecipe = generatedScaffoldRecipeFor NativeTurnTemplate
 
-generatedCheckingTemplateRecipe :: CheckedTemplateImports -> String -> String -> FilePath -> String
+generatedCheckingTemplateRecipe :: DynFlags -> CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedCheckingTemplateRecipe = generatedScaffoldRecipeFor CheckingCellTemplate
 
-generatedScaffoldRecipeFor :: GeneratedScaffoldPurpose -> CheckedTemplateImports -> String -> String -> FilePath -> String
+generatedScaffoldRecipeFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedScaffoldRecipeFor purpose (CheckedTemplateImports roots interfaces) protectedTemplate rendered path name = do
+generatedScaffoldRecipeFor purpose flags (CheckedTemplateImports roots interfaces) protectedTemplate rendered path name = do
   canonical <- canonicalizePath path
   let compilerImport = "import qualified Tidepool.Internal.Resume as TidepoolResume"
       occurrences text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == compilerImport]
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
       templateOccurrence interface =
         let owner = templateInterfaceModule interface
-            importShape textLine | textLine == compilerImport = Nothing
-            importShape textLine = case words textLine of
-              ["import", name] | name == owner -> Just Nothing
-              ["import", "qualified", name, "as", alias] | name == owner -> Just (Just alias)
-              _ -> Nothing
+            importShape textLine
+              | textLine == compilerImport = Nothing
+              | otherwise = case parseTemplateImport flags textLine of
+                  Just (moduleName', shape) | moduleName' == owner -> Just shape
+                  _ -> Nothing
             matching text' = [(line,shape) | (line,textLine) <- zip [1..] (lines text')
               , Just shape <- [importShape textLine]]
         in case (matching protectedTemplate,matching rendered) of
@@ -299,12 +318,12 @@ generatedScaffoldRecipeFor purpose (CheckedTemplateImports roots interfaces) pro
 -- Only the activation admission supplies this complete original instance
 -- graph. Its synthetic edges affect GHC's instance traversal without exposing
 -- any original lexical name or permitting an authored source import.
-generatedActivationPreviewRecipe :: [CheckedTemplateInterface] -> (String,String) -> String -> String -> FilePath -> String
+generatedActivationPreviewRecipe :: DynFlags -> [CheckedTemplateInterface] -> (String,String) -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedActivationPreviewRecipe interfaces originalOwner protectedTemplate rendered path name = do
+generatedActivationPreviewRecipe flags interfaces originalOwner protectedTemplate rendered path name = do
   let roots = [(templateInterfaceUnit interface,templateInterfaceModule interface) | interface <- interfaces]
       imports = CheckedTemplateImports roots interfaces
-  recipe <- generatedScaffoldRecipe imports protectedTemplate rendered path name
+  recipe <- generatedScaffoldRecipe flags imports protectedTemplate rendered path name
   pure $ do
     original <- recipe
     let GeneratedScaffoldRecipe canonical target bytes line selected _ _ role = original
@@ -469,7 +488,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
       unless (exactSha256 artifact == templateInterfaceSha256 selected)
         (Left "checked template graph interface seal changed")
       pure (artifact,templateInterfaceImports selected)
-    templateEdges <- forM templateInterfaces $ \(selected,importLine,qualification) -> do
+    templateEdges <- forM templateInterfaces $ \(selected,importLine,expectedShape) -> do
       let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
           original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
       unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env)
@@ -489,11 +508,8 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           , getLocA (ideclName (unLoc located)) == getLoc imported] of
         [declaration] -> Right declaration
         _ -> Left "checked template parsed import differs"
-      let sameQualification = case qualification of
-            Nothing -> ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
-            Just alias -> ideclQualified declaration == QualifiedPre
-              && fmap unLoc (ideclAs declaration) == Just (mkModuleName alias)
-      unless (sameQualification && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+      let actualShape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
+      unless (actualShape == expectedShape && ideclSource declaration == NotBoot
           && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
         (Left "checked template interface import has another shape")
       pure (ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact)
