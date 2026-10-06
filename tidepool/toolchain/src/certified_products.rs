@@ -232,7 +232,10 @@ pub(crate) fn inherited_package_witnesses_with_validation(
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
     let mut selected = BTreeMap::new();
     for product in products {
-        let witness = decode_home_witness(product.certification_bytes())?;
+        let witness = decode_home_witness_with_operation(
+            product.certification_bytes(),
+            &validation.inventory,
+        )?;
         if &witness.owner != product.owner() {
             return Err(CertificationError::Mismatch(
                 "inherited package product owner",
@@ -881,7 +884,6 @@ fn decode_receipt_value_in(
         if name.is_empty() {
             return Err(CertificationError::Receipt("empty target name"));
         }
-        let globals = array(&row[1])?;
         if targets.insert(name, read_globals(&row[1])?).is_some() {
             return Err(CertificationError::Receipt("duplicate target"));
         }
@@ -1653,6 +1655,16 @@ fn encode_interface_requirements(requirements: &BTreeMap<(String, String), [u8; 
 pub(crate) fn original_interface_requirements(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
 ) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
+    original_interface_requirements_with_operation(
+        product,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+
+pub(crate) fn original_interface_requirements_with_operation(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    operation: &InventoryOperation,
+) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
     match product.original_native() {
         Some(witness) if witness.matches_original(product) => {
             Ok(witness.interface_requirements.clone())
@@ -1661,7 +1673,8 @@ pub(crate) fn original_interface_requirements(
             "original native witness bytes",
         )),
         None => {
-            let witness = decode_home_witness(product.certification_bytes())?;
+            let witness =
+                decode_home_witness_with_operation(product.certification_bytes(), operation)?;
             if &witness.owner != product.owner() {
                 return Err(CertificationError::Mismatch("interface requirements owner"));
             }
@@ -2620,7 +2633,28 @@ pub(crate) fn validate_canonical_native_bytes(
     source_sha256: Option<[u8; 32]>,
     interface: &CertifiedModuleInterface,
 ) -> CertResult<()> {
-    let witness = decode_home_witness(certification)?;
+    validate_canonical_native_bytes_with_operation(
+        owner,
+        certification,
+        actual_interface,
+        actual_packages,
+        source_sha256,
+        interface,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+
+pub(crate) fn validate_canonical_native_bytes_with_operation(
+    owner: &CachedHomeOwner,
+    certification: &[u8],
+    actual_interface: &[u8],
+    actual_packages: &[u8],
+    source_sha256: Option<[u8; 32]>,
+    interface: &CertifiedModuleInterface,
+    operation: &InventoryOperation,
+) -> CertResult<()> {
+    let witness = decode_home_witness_with_operation(certification, operation)?;
+
     if witness.owner != *owner {
         return Err(CertificationError::Mismatch(
             "native canonical source owner",
@@ -2639,6 +2673,16 @@ pub(crate) fn validate_canonical_native_bytes(
 pub(crate) fn original_native_requirements(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
 ) -> CertResult<CertifiedNativeRequirements> {
+    original_native_requirements_with_operation(
+        product,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+
+pub(crate) fn original_native_requirements_with_operation(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    operation: &InventoryOperation,
+) -> CertResult<CertifiedNativeRequirements> {
     match product.original_native() {
         Some(witness) if witness.matches_original(product) => {
             Ok(witness.native_requirements.clone())
@@ -2646,7 +2690,11 @@ pub(crate) fn original_native_requirements(
         Some(_) => Err(CertificationError::Mismatch(
             "original native witness bytes",
         )),
-        None => certified_native_requirements(product.certification_bytes(), product.owner()),
+        None => certified_native_requirements_with_operation(
+            product.certification_bytes(),
+            product.owner(),
+            operation,
+        ),
     }
 }
 
@@ -2666,7 +2714,19 @@ pub(crate) fn certified_native_requirements(
     bytes: &[u8],
     owner: &CachedHomeOwner,
 ) -> CertResult<CertifiedNativeRequirements> {
-    let witness = decode_home_witness(bytes)?;
+    certified_native_requirements_with_operation(
+        bytes,
+        owner,
+        &InventoryOperation::new(Default::default()),
+    )
+}
+fn certified_native_requirements_with_operation(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    operation: &InventoryOperation,
+) -> CertResult<CertifiedNativeRequirements> {
+    let witness = decode_home_witness_with_operation(bytes, operation)?;
+
     if &witness.owner != owner {
         return Err(CertificationError::Mismatch("native requirements owner"));
     }
@@ -3500,7 +3560,7 @@ pub(crate) fn certify_recovery_products_with_validation(
                     artifact.certification_bytes,
                 );
             product = product
-                .with_module_interface(artifact.module_interface)
+                .with_module_interface_with_validation(artifact.module_interface, validation)
                 .map_err(|_| CertificationError::Mismatch("recovered canonical module"))?;
             if let Some(graph) = artifact.execution_source {
                 product = product
@@ -3745,18 +3805,24 @@ impl<'a> ParsedModuleProducts<'a> {
     pub(crate) fn into_publication_parts(
         self,
     ) -> (
+        Arc<InventoryOperation>,
         Vec<RawModuleProduct>,
         Vec<Vec<u8>>,
         Option<BTreeMap<(String, String), Vec<u8>>>,
     ) {
-        (self.products, self.sidecars, self.package_imports)
+        (
+            self.operation,
+            self.products,
+            self.sidecars,
+            self.package_imports,
+        )
     }
 
     fn sidecars(&self) -> CertResult<BTreeMap<(String, String), &[u8]>> {
         if self
             .sidecars
             .iter()
-            .any(|bytes| bytes.len() > crate::module_candidates::RECORD_LIMIT)
+            .any(|bytes| bytes.len() > self.operation.limits().max_module_bytes)
         {
             return Err(CertificationError::Mismatch("fresh module product framing"));
         }

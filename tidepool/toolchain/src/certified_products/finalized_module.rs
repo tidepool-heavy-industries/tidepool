@@ -7,6 +7,7 @@ use std::path::Component;
 
 pub(crate) const FINALIZATION_PROFILE: &str = "tidepool-ghc-finalized-module-v1";
 pub(crate) const FINALIZATION_ENVELOPE_PROFILE: &str = "tidepool-ghc-finalized-module-v2";
+const CANONICAL_CERTIFICATE_LIMIT: usize = 4 << 20;
 const CORE_LIMIT: u64 = 32 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -452,11 +453,21 @@ pub(super) fn decode_envelope_with_operation(
             return Err(CertificationError::Receipt("captured value order"));
         }
         previous = Some(key.clone());
+        let interface = descriptor(&row[2], &row[3], &row[4], PACKAGE_INTERFACE_LIMIT)?;
+        let package_imports = descriptor(&row[5], &row[6], &row[7], RECEIPT_LIMIT as u64)?;
+        operation.charge(
+            usize::try_from(interface.bytes)
+                .map_err(|_| CertificationError::Receipt("value payload budget"))?,
+        )?;
+        operation.charge(
+            usize::try_from(package_imports.bytes)
+                .map_err(|_| CertificationError::Receipt("value payload budget"))?,
+        )?;
         value_interfaces.insert(
             key,
             CapturedValueInterfaceReceipt {
-                interface: descriptor(&row[2], &row[3], &row[4], PACKAGE_INTERFACE_LIMIT)?,
-                package_imports: descriptor(&row[5], &row[6], &row[7], RECEIPT_LIMIT as u64)?,
+                interface,
+                package_imports,
                 interface_requirements: decode_interface_requirements(&row[8])?,
             },
         );
@@ -671,7 +682,7 @@ pub(super) fn canonical_certificate(
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes)
         .map_err(|_| CertificationError::Receipt("finalized certificate encoding"))?;
-    if bytes.len() > RECEIPT_LIMIT {
+    if bytes.len() > CANONICAL_CERTIFICATE_LIMIT {
         return Err(CertificationError::Receipt("finalized certificate size"));
     }
     Ok(bytes)
@@ -922,12 +933,12 @@ pub(super) fn recover_interface(
     core: Option<Vec<u8>>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedModuleInterface> {
-    if certificate.len() > RECEIPT_LIMIT {
+    if certificate.len() > CANONICAL_CERTIFICATE_LIMIT {
         return Err(CertificationError::Receipt("finalized certificate size"));
     }
     let value = validation
         .inventory
-        .decode_value(&certificate, RECEIPT_LIMIT)?;
+        .decode_value(&certificate, CANONICAL_CERTIFICATE_LIMIT)?;
     validation.inventory.charge_value_copies(&value, 3)?;
     let row = sized(&value, 13)?;
     if string(&row[0])? != "TPFINALMODULE"

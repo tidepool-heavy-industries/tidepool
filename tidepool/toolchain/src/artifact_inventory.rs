@@ -391,7 +391,11 @@ impl ArtifactEntry {
             )
         })
         .collect();
-        let interface_seals = crate::certified_products::original_interface_requirements(&product)
+        let interface_seals =
+            crate::certified_products::original_interface_requirements_with_operation(
+                &product,
+                &validation.inventory,
+            )
             .map_err(|error| failure(&format!("original interface requirements: {error}")))?
             .into_iter()
             .map(|((unit, module), seal)| (ExactModuleIdentity { unit, module }, seal))
@@ -399,7 +403,11 @@ impl ArtifactEntry {
         // The canonical compiler interface owns type closure. Source lexical
         // adjacency cannot add or remove its sealed interface requirements.
         let requirements = interface_seals.keys().cloned().collect();
-        let native_requirements = crate::certified_products::original_native_requirements(&product)
+        let native_requirements =
+            crate::certified_products::original_native_requirements_with_operation(
+                &product,
+                &validation.inventory,
+            )
             .map_err(|error| {
                 CompileError::ExtractFailed(format!(
                     "artifact inventory native requirements: {error}"

@@ -193,11 +193,29 @@ impl CertifiedRecoveryProduct {
     }
 
     pub(crate) fn with_module_interface(
-        mut self,
+        self,
         interface: crate::certified_products::CertifiedModuleInterface,
     ) -> Result<Self, RecoveryArtifactError> {
-        crate::certified_products::validate_original_module_interface(&self, &interface)
-            .map_err(|_| RecoveryArtifactError::InvalidReference)?;
+        self.with_module_interface_with_validation(
+            interface,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+    pub(crate) fn with_module_interface_with_validation(
+        mut self,
+        interface: crate::certified_products::CertifiedModuleInterface,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, RecoveryArtifactError> {
+        crate::certified_products::validate_canonical_native_bytes_with_operation(
+            self.owner(),
+            self.certification_bytes(),
+            self.interface_bytes(),
+            self.package_imports_bytes(),
+            self.source_sha256(),
+            &interface,
+            &validation.inventory,
+        )
+        .map_err(|_| RecoveryArtifactError::InvalidReference)?;
         self.interface_bytes = interface.interface_anchor();
         self.package_imports_bytes = interface.package_imports_anchor();
         self.module_interface = Some(interface);
@@ -1254,9 +1272,10 @@ fn read_admission_bytes(
 fn read_checked(
     path: &Path,
     expected: &[u8; 32],
+    limit: u64,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
-    let bytes = read_admission_bytes(path, 32 << 20, validation)?;
+    let bytes = read_admission_bytes(path, limit, validation)?;
     validation.read_bytes += bytes.len() as u64;
     if &validation.digest(&bytes) != expected {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
@@ -1465,7 +1484,12 @@ pub(crate) fn materialize_joined_interface_with_validation(
     if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
         return Err(RecoveryArtifactError::InvalidReference);
     }
-    let bytes = read_checked(interface_source, &skinny_iface_sha256, validation)?;
+    let bytes = read_checked(
+        interface_source,
+        &skinny_iface_sha256,
+        PACKAGE_INTERFACE_LIMIT,
+        validation,
+    )?;
     let package_imports_source = package_sidecar_path(interface_source);
     let package_imports = read_package_imports(
         &package_imports_source,
@@ -1946,11 +1970,13 @@ pub fn materialize_recovery_closure(
         let interface_bytes = read_checked(
             artifact.interface_source,
             &owner.skinny_iface_sha256,
+            PACKAGE_INTERFACE_LIMIT,
             &mut validation,
         )?;
         let product_bytes = read_checked(
             artifact.product_source,
             &owner.product_sha256,
+            validation.inventory.limits().max_module_bytes as u64,
             &mut validation,
         )?;
         let package_imports_bytes = read_package_imports(
@@ -1980,7 +2006,7 @@ pub fn materialize_recovery_closure(
                 package_imports_bytes,
                 certification_bytes.bytes,
             )
-            .with_module_interface(module_interface)?,
+            .with_module_interface_with_validation(module_interface, validation)?,
         );
     }
     materialize_certified_products_with_validation(
@@ -2057,8 +2083,12 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
     }
     let interface_path = resolve_owned(recovery_root, &reference.interface_path)?;
     let product_path = resolve_owned(recovery_root, &reference.product_path)?;
-    let interface_bytes =
-        read_checked(&interface_path, &reference.skinny_iface_sha256, validation)?;
+    let interface_bytes = read_checked(
+        &interface_path,
+        &reference.skinny_iface_sha256,
+        PACKAGE_INTERFACE_LIMIT,
+        validation,
+    )?;
     let package_imports_path = resolve_owned(recovery_root, &reference.package_imports_path)?;
     let package_imports_bytes = read_package_imports(
         &package_imports_path,
@@ -2109,7 +2139,12 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
             )
         })
         .transpose()?;
-    let product_bytes = read_checked(&product_path, &reference.product_sha256, validation)?;
+    let product_bytes = read_checked(
+        &product_path,
+        &reference.product_sha256,
+        validation.inventory.limits().max_module_bytes as u64,
+        validation,
+    )?;
     let module_interface = canonical.clone();
     let canonical_ref = reference
         .module_interface
@@ -2181,8 +2216,12 @@ pub(crate) fn verify_materialized_join_with_validation(
         return Err(RecoveryArtifactError::InvalidReference);
     }
     let interface_path = resolve_owned(recovery_root, &reference.interface_path)?;
-    let interface_bytes =
-        read_checked(&interface_path, &reference.skinny_iface_sha256, validation)?;
+    let interface_bytes = read_checked(
+        &interface_path,
+        &reference.skinny_iface_sha256,
+        PACKAGE_INTERFACE_LIMIT,
+        validation,
+    )?;
     let package_imports_path = resolve_owned(recovery_root, &reference.package_imports_path)?;
     let package_imports_bytes = read_package_imports(
         &package_imports_path,
@@ -2251,7 +2290,7 @@ mod tests {
                 packages.clone(),
                 certification,
             )
-            .with_module_interface(canonical.clone())
+            .with_module_interface_with_validation(canonical.clone(), validation)
             .unwrap()
             .with_execution_source(graph)
             .unwrap()
