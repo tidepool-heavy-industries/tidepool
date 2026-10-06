@@ -9,36 +9,135 @@
  where
 
  import GHC.Prelude
-@@ -305,9 +305,27 @@
+@@ -44,7 +44,7 @@
+
+ import Control.Monad
+
+-newtype RM a = RM { unRM :: (State (UniqFM Id TagSig, UniqSupply, Module, IdSet) a) }
++newtype RM a = RM { unRM :: (State (UniqFM Id TagSig, UniqSupply, Module, IdSet, UniqFM Id Id) a) }
+     deriving (Functor, Monad, Applicative)
+
+ ------------------------------------------------------------
+@@ -111,29 +111,36 @@
+
+ instance MonadUnique RM where
+     getUniqueSupplyM = RM $ do
+-        (m, us, mod,lcls) <- get
++        (m, us, mod,lcls,external) <- get
+         let (us1, us2) = splitUniqSupply us
+-        (put) (m,us2,mod,lcls)
++        (put) (m,us2,mod,lcls,external)
+         return us1
+
+ getMap :: RM (UniqFM Id TagSig)
+-getMap = RM $ ((\(fst,_,_,_) -> fst) <$> get)
++getMap = RM $ ((\(fst,_,_,_,_) -> fst) <$> get)
+
+ setMap :: (UniqFM Id TagSig) -> RM ()
+ setMap !m = RM $ do
+-    (_,us,mod,lcls) <- get
+-    put (m, us,mod,lcls)
++    (_,us,mod,lcls,external) <- get
++    put (m, us,mod,lcls,external)
+
+ getMod :: RM Module
+-getMod = RM $ ( (\(_,_,thrd,_) -> thrd) <$> get)
++getMod = RM $ ( (\(_,_,thrd,_,_) -> thrd) <$> get)
+
+ getFVs :: RM IdSet
+-getFVs = RM $ ((\(_,_,_,lcls) -> lcls) <$> get)
++getFVs = RM $ ((\(_,_,_,lcls,_) -> lcls) <$> get)
+
+ setFVs :: IdSet -> RM ()
+ setFVs !fvs = RM $ do
+-    (tag_map,us,mod,_lcls) <- get
+-    put (tag_map, us,mod,fvs)
++    (tag_map,us,mod,_lcls,external) <- get
++    put (tag_map, us,mod,fvs,external)
++
++-- The immutable omitted-original census owns metadata-sensitive decisions.
++-- Actual supplied binders are excluded before this map is installed.
++getOriginalId :: Id -> RM Id
++getOriginalId v = RM $ do
++    (_,_,_,_,external) <- get
++    return $! lookupWithDefaultUFM external v v
+
+ -- Rewrite the RHS(s) while making the id and it's sig available
+ -- to determine if things are tagged/need to be captured as FV.
+@@ -241,7 +248,10 @@
+ For this reason we assert that we are running in interactive mode if a lookup fails.
+ -}
+ isTagged :: Id -> RM Bool
+-isTagged v
++isTagged v = getOriginalId v >>= isTaggedOriginal
++
++isTaggedOriginal :: Id -> RM Bool
++isTaggedOriginal v
+     -- See Note [Bottom functions are TagTagged]
+     | isDeadEndId v = pure False
+     | otherwise = do
+@@ -305,9 +315,30 @@
 
  rewriteTopBinds :: Module -> UniqSupply -> [GenStgTopBinding 'InferTaggedBinders] -> [TgStgTopBinding]
  rewriteTopBinds mod us binds =
-+    rewriteTopBindsWithExternalScope mod [] us binds
++    rewriteTopBindsWithExternalScope mod False [] us binds
 +
 +-- | Seed only exact omitted original tag facts. Actual binders retain their
 +-- inferred signatures even when the supplied scope also contains their Names.
-+rewriteTopBindsWithExternalScope :: Module -> [(Id, TagSig)] -> UniqSupply
++rewriteTopBindsWithExternalScope :: Module -> Bool -> [(Id, TagSig)] -> UniqSupply
 +                                -> [InferStgTopBinding] -> [TgStgTopBinding]
-+rewriteTopBindsWithExternalScope mod external_sigs us binds =
++rewriteTopBindsWithExternalScope mod for_bytecode external_sigs us binds =
      let doBinds = mapM rewriteTop binds
 -
 -    in evalState (unRM doBinds) (mempty, us, mod, mempty)
 +        local_binders = mkVarSet (concatMap topBinders binds)
-+        external_tags = listToUFM
++        omitted_sigs =
 +            [ (v, sig)
 +            | (v, sig) <- external_sigs
 +            , isExternalName (idName v)
 +            , nameModule_maybe (idName v) == Just mod
 +            , not (v `elemVarSet` local_binders) ]
++        external_tags = listToUFM omitted_sigs
++        external_ids = if for_bytecode then emptyUFM
++                       else listToUFM [(v,v) | (v,_) <- omitted_sigs]
 +        topBinders :: InferStgTopBinding -> [Id]
 +        topBinders (StgTopStringLit v _) = [v]
 +        topBinders (StgTopLifted (StgNonRec (v,_) _)) = [v]
 +        topBinders (StgTopLifted (StgRec pairs)) = map (fst . fst) pairs
 +
-+    in evalState (unRM doBinds) (external_tags, us, mod, mempty)
++    in evalState (unRM doBinds) (external_tags, us, mod, mempty, external_ids)
 
  rewriteTop :: InferStgTopBinding -> RM TgStgTopBinding
  rewriteTop (StgTopStringLit v s) = return $! (StgTopStringLit v s)
+@@ -457,10 +488,16 @@
+ rewriteApp (StgApp f []) = do
+     f' <- rewriteId f
+     return $! StgApp f' []
+-rewriteApp (StgApp f args)
++rewriteApp (StgApp f args) = do
++    original_f <- getOriginalId f
++    rewriteAppWithOriginal original_f f args
++rewriteApp _ = panic "Impossible"
++
++rewriteAppWithOriginal :: Id -> Id -> [StgArg] -> RM TgStgExpr
++rewriteAppWithOriginal original_f f args
+     -- pprTrace "rewriteAppOther" (ppr f <+> ppr args) False
+     -- = undefined
+-    | Just marks <- idCbvMarks_maybe f
++    | Just marks <- idCbvMarks_maybe original_f
+     , relevant_marks <- dropWhileEndLE (not . isMarkedCbv) marks
+     , any isMarkedCbv relevant_marks
+     = assertPpr (length relevant_marks <= length args) (ppr f $$ ppr args $$ ppr relevant_marks)
+@@ -478,8 +515,7 @@
+             cbvArgIds = [x | StgVarArg x <- map fstOf3 cbvArgInfo] :: [Id]
+         mkSeqs args cbvArgIds (\cbv_args -> StgApp f cbv_args)
+
+-rewriteApp (StgApp f args) = return $ StgApp f args
+-rewriteApp _ = panic "Impossible"
++rewriteAppWithOriginal _ f args = return $ StgApp f args
+
+ {-
+ Note [Rewriting primop arguments]
 --- a/compiler/GHC/Stg/InferTags/Types.hs
 +++ b/compiler/GHC/Stg/InferTags/Types.hs
 @@ -48,6 +48,7 @@
@@ -150,7 +249,7 @@
      -- Rewrite STG to uphold the strict field invariant
      us_t <- mkSplitUniqSupply 't'
 -    let rewritten_binds = {-# SCC "StgTagRewrite" #-} rewriteTopBinds this_mod us_t stg_binds_w_tags :: [TgStgTopBinding]
-+    let rewritten_binds = {-# SCC "StgTagRewrite" #-} rewriteTopBindsWithExternalScope this_mod external_sigs us_t stg_binds_w_tags :: [TgStgTopBinding]
++    let rewritten_binds = {-# SCC "StgTagRewrite" #-} rewriteTopBindsWithExternalScope this_mod for_bytecode external_sigs us_t stg_binds_w_tags :: [TgStgTopBinding]
 
      return (rewritten_binds,export_tag_info)
 +
