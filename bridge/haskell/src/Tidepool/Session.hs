@@ -411,7 +411,7 @@ injectSessionIfaceWithCapture root sm hsc0 = do
 registerSessionInterfaceLocation :: FilePath -> SessionModule -> HscEnv -> IO ()
 registerSessionInterfaceLocation path owner env = do
   _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
-    (GWIB (renderSessionModule owner) NotBoot :: ModuleNameWithIsBoot, unitString)
+    (GWIB (renderSessionModule owner) NotBoot :: ModuleNameWithIsBoot)
     (sourcelessModLocation path)
   pure ()
 
