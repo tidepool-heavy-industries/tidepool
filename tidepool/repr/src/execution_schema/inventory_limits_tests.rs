@@ -1,6 +1,6 @@
 use super::{
-    DecodeLimits, InventoryDecodeLimits, InventoryOperation, ParseError, ProgramRequirements,
-    testing,
+    testing, DecodeLimits, InventoryDecodeLimits, InventoryOperation, ParseError,
+    ProgramRequirements,
 };
 use ciborium::value::Value;
 
@@ -92,8 +92,7 @@ fn inventory_group_and_operation_limits_refuse_independently() {
     let mut group_limited = limits(bytes.len(), bytes.len());
     group_limited.program.max_bytes = group_bytes.len() - 1;
     assert!(matches!(
-        InventoryOperation::new(group_limited)
-            .parse_module_products(&bytes, &requirements()),
+        InventoryOperation::new(group_limited).parse_module_products(&bytes, &requirements()),
         Err(ParseError::ByteLimit { .. })
     ));
 
@@ -106,8 +105,7 @@ fn inventory_group_and_operation_limits_refuse_independently() {
     let mut operation_limited = limits(bytes.len(), bytes.len());
     operation_limited.max_work = 0;
     assert!(matches!(
-        InventoryOperation::new(operation_limited)
-            .parse_module_products(&bytes, &requirements()),
+        InventoryOperation::new(operation_limited).parse_module_products(&bytes, &requirements()),
         Err(ParseError::LimitExceeded("work"))
     ));
 }
@@ -117,32 +115,28 @@ fn inventory_operation_budget_is_cumulative_and_fresh_operations_reset_it() {
     let bytes = inventory(vec![row("unit", "Small", &[0x42], &[])]);
     let requirements = requirements();
     let mut low = 0;
-    let mut high = 1;
-    while InventoryOperation::new(InventoryDecodeLimits {
+    let mut high = 1 << 20;
+    InventoryOperation::new(InventoryDecodeLimits {
         max_bytes: bytes.len(),
         max_module_bytes: bytes.len(),
-        program: DecodeLimits::default(),
         max_work: high,
+        ..InventoryDecodeLimits::default()
     })
     .parse_module_products(&bytes, &requirements)
-    .is_err()
-    {
-        high *= 2;
-    }
+    .expect("generous bounded fixture budget must admit");
     while low + 1 < high {
         let middle = low + (high - low) / 2;
-        if InventoryOperation::new(InventoryDecodeLimits {
+        match InventoryOperation::new(InventoryDecodeLimits {
             max_bytes: bytes.len(),
             max_module_bytes: bytes.len(),
             program: DecodeLimits::default(),
             max_work: middle,
         })
         .parse_module_products(&bytes, &requirements)
-        .is_ok()
         {
-            high = middle;
-        } else {
-            low = middle;
+            Ok(_) => high = middle,
+            Err(ParseError::LimitExceeded("work")) => low = middle,
+            Err(error) => panic!("unexpected threshold refusal: {error}"),
         }
     }
 
