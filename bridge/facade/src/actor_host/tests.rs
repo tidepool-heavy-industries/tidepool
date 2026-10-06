@@ -206,19 +206,35 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
     let files = tempfile::tempdir().unwrap();
     let settings = test_campaign::hosted_test_settings(&files, 1);
     let (provider, _requests) = test_campaign::hosted_script_provider();
+    let configure = |config: &mut ActorHostConfig, spec| {
+        write_bootstrap_workspace(&config.workspace, spec);
+        test_campaign::commit_workspace(&config.workspace);
+        config.workspace_inputs = Some(
+            crate::exomonad::workspace::FrozenWorkspace::load(
+                &config.workspace,
+                &config.run_directory.path(),
+            )
+            .unwrap(),
+        );
+    };
+    let valid =
+        hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
+            configure(
+                config,
+                include_str!("fixtures/configured_bootstrap_spec.hs"),
+            )
+        })
+        .await
+        .expect("the valid configured spec reaches production root readiness");
+    valid
+        .stop()
+        .await
+        .expect("valid control cleanup is confirmed");
     let result =
         hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
-            write_bootstrap_workspace(
-                &config.workspace,
+            configure(
+                config,
                 include_str!("fixtures/invalid_configured_bootstrap_spec.hs"),
-            );
-            test_campaign::commit_workspace(&config.workspace);
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_directory.path(),
-                )
-                .unwrap(),
             );
         })
         .await;
@@ -227,10 +243,23 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
             host.stop().await.unwrap();
             panic!("invalid configured spec reached production root readiness");
         }
-        Err(failure) => assert!(
-            failure.contains("missingConfiguredStartupSpec"),
-            "{failure}"
-        ),
+        Err(failure) => {
+            // The same valid fixture reached Ready first. The only authored
+            // change now fails in the installed-spec compiler check, before
+            // readiness. Full workspace validation checks its exact diagnostic;
+            // the actor terminal retains this phase and count, not the body.
+            assert!(
+                failure.contains("exited before embedded readiness (Failed)"),
+                "{failure}"
+            );
+            assert!(
+                failure.contains(
+                    "resident cell check failed: Haskell compilation failed (1 diagnostic(s))"
+                ),
+                "{failure}"
+            );
+            assert!(failure.contains("cleanup: Confirmed"), "{failure}");
+        }
     }
 }
 

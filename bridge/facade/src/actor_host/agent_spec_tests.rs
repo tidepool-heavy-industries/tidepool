@@ -1025,44 +1025,68 @@ async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
 /// `AgentSpec.hs` its cells would resolve: no configuration key names it.
 #[tokio::test]
 async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
-    let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        |config| {
-            write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
-            // Remove the configured spec so convention alone selects AgentSpec.
-            write_spec_config(
-                &config.workspace.join(".exomonad"),
-                &["Project.Tools"],
-                None,
-            );
-            std::fs::write(
-                config.workspace.join(".exomonad/AgentSpec.hs"),
-                spec_module(ANNOTATES),
+    use super::hosted_test_context::HostedTestRuntime;
+    use super::test_campaign::{
+        hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    };
+
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
+        // No configuration key or module import selects the conventional spec.
+        write_spec_config(
+            &config.workspace.join(".exomonad"),
+            &["Project.Tools"],
+            None,
+        );
+        std::fs::write(
+            config.workspace.join(".exomonad/AgentSpec.hs"),
+            spec_module(ANNOTATES),
+        )
+        .unwrap();
+        super::test_campaign::commit_workspace(&config.workspace);
+        config.workspace_inputs = Some(
+            crate::exomonad::workspace::FrozenWorkspace::load(
+                &config.workspace,
+                &config.run_directory.path(),
             )
-            .unwrap();
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_directory.path(),
-                )
-                .unwrap(),
+            .unwrap(),
+        );
+    })
+    .await
+    .expect("the conventional spec installs through production root readiness");
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Exercise the conventional agent spec and its after-tool slot.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = std::collections::VecDeque::new();
+            next_hosted_script_round(&mut requests, &mut pending, &root)
+                .await
+                .function(
+                    "conventional-probe",
+                    "probe",
+                    serde_json::json!({"topic": "anything"}),
+                );
+            let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let result = round.settled_text("conventional-probe");
+            assert!(result.contains("keptwhole"), "{result}");
+            assert!(result.contains("twice before"), "{result}");
+            round.function(
+                "conventional-status",
+                "status",
+                serde_json::json!({"view": "detailed"}),
             );
-        },
-    )
+            let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let status = round.settled_text("conventional-status");
+            assert!(status.contains("rule=run module"), "{status}");
+            round.finish();
+        })
+    })
     .await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
-
-    let result = probe(policy).await;
-    assert!(result.contains("keptwhole"), "{result}");
-    assert!(result.contains("twice before"), "{result}");
-
-    let status = status(policy).await;
-    assert!(status.contains("rule=run module"), "{status}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
 }
 
 /// The two tools a model repairs a broken slot with are never annotated, so a

@@ -770,6 +770,10 @@ impl HostedScriptRound {
     }
 
     pub fn settled_output(&self, call_id: &str) -> serde_json::Value {
+        serde_json::from_str(self.settled_text(call_id)).unwrap()
+    }
+
+    pub fn settled_text(&self, call_id: &str) -> &str {
         let output = self
             .request
             .input
@@ -781,7 +785,7 @@ impl HostedScriptRound {
                 ) && item.0["call_id"] == call_id
             })
             .unwrap_or_else(|| panic!("{call_id}: actual provider request has no settled output"));
-        serde_json::from_str(output.0["output"].as_str().unwrap()).unwrap()
+        output.0["output"].as_str().unwrap()
     }
 
     pub fn finish(self) {
