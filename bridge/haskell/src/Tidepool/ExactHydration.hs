@@ -34,10 +34,10 @@ import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (mapAccumL)
+import Data.List (mapAccumL, stripPrefix)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
-import Data.Char (isHexDigit, toLower)
+import Data.Char (isHexDigit, isSpace, toLower)
 import Data.Maybe (isJust, isNothing, catMaybes)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -243,6 +243,9 @@ data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteSt
 newtype TemplateImportShape = TemplateImportShape String
   deriving (Eq)
 
+instance Show TemplateImportShape where
+  show _ = "TemplateImportShape"
+
 data GeneratedScaffoldInstanceScope = ImportedTemplateInstances | OriginalPreviewInstances CheckedTemplateInterface
   deriving (Eq)
 
@@ -279,16 +282,21 @@ generatedScaffoldRecipeFor purpose flags (CheckedTemplateImports roots interface
   let compilerImport = "import qualified Tidepool.Internal.Resume as TidepoolResume"
       occurrences text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == compilerImport]
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
+      importOccurrences source = Map.fromListWith (flip (++))
+        [ (owner,[(line,shape)])
+        | (line,textLine) <- zip [1..] (lines source)
+        , textLine /= compilerImport
+        , let trimmed = dropWhile isSpace textLine
+        , Just rest <- [stripPrefix "import" trimmed]
+        , not (null rest) && isSpace (head rest)
+        , Just (owner,shape) <- [parseTemplateImport flags textLine]
+        ]
+      protectedImports = importOccurrences protectedTemplate
+      renderedImports = importOccurrences rendered
       templateOccurrence interface =
         let owner = templateInterfaceModule interface
-            importShape textLine
-              | textLine == compilerImport = Nothing
-              | otherwise = case parseTemplateImport flags textLine of
-                  Just (moduleName', shape) | moduleName' == owner -> Just shape
-                  _ -> Nothing
-            matching text' = [(line,shape) | (line,textLine) <- zip [1..] (lines text')
-              , Just shape <- [importShape textLine]]
-        in case (matching protectedTemplate,matching rendered) of
+            matching = Map.findWithDefault [] owner
+        in case (matching protectedImports,matching renderedImports) of
           ([],_) -> Right Nothing
           ([(_,shape)],[(line,renderedShape)]) | shape == renderedShape -> Right (Just (interface,line,shape))
           _ -> Left "checked template interface import is missing, duplicated, or changed"
