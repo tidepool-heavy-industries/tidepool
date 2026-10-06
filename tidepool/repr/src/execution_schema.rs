@@ -1367,14 +1367,14 @@ impl Default for InventoryDecodeLimits {
 /// independently reset budgets. It contains no compiler or publication authority.
 pub struct InventoryOperation {
     limits: InventoryDecodeLimits,
-    budget: std::cell::RefCell<OperationBudget>,
+    budget: std::sync::Mutex<OperationBudget>,
 }
 
 impl InventoryOperation {
     pub fn new(limits: InventoryDecodeLimits) -> Self {
         Self {
             limits,
-            budget: std::cell::RefCell::new(OperationBudget::new(limits.max_work)),
+            budget: std::sync::Mutex::new(OperationBudget::new(limits.max_work)),
         }
     }
 
@@ -1383,11 +1383,60 @@ impl InventoryOperation {
     }
 
     pub fn charge(&self, amount: usize) -> Result<(), ParseError> {
-        self.budget.borrow_mut().charge(amount)
+        self.budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?
+            .charge(amount)
     }
 
     pub fn reserve<T>(&self, count: usize) -> Result<(), ParseError> {
-        self.budget.borrow_mut().reserve::<T>(count)
+        self.budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?
+            .reserve::<T>(count)
+    }
+
+    /// Reserve decoded-container and payload copies before a nested owner
+    /// constructs its typed representation. Map nodes include conservative
+    /// pointer/link storage in addition to each value slot.
+    pub fn charge_value_copies(
+        &self,
+        value: &ciborium::value::Value,
+        copies: usize,
+    ) -> Result<(), ParseError> {
+        use ciborium::value::Value;
+        self.reserve::<Value>(
+            copies
+                .checked_mul(4)
+                .ok_or(ParseError::LimitExceeded("work"))?,
+        )?;
+        match value {
+            Value::Bytes(bytes) => self.charge(
+                bytes
+                    .len()
+                    .checked_mul(copies)
+                    .ok_or(ParseError::LimitExceeded("work"))?,
+            )?,
+            Value::Text(text) => self.charge(
+                text.len()
+                    .checked_mul(copies)
+                    .ok_or(ParseError::LimitExceeded("work"))?,
+            )?,
+            Value::Array(values) => {
+                for value in values {
+                    self.charge_value_copies(value, copies)?;
+                }
+            }
+            Value::Map(values) => {
+                for (key, value) in values {
+                    self.charge_value_copies(key, copies)?;
+                    self.charge_value_copies(value, copies)?;
+                }
+            }
+            Value::Tag(_, value) => self.charge_value_copies(value, copies)?,
+            _ => (),
+        }
+        Ok(())
     }
 
     /// Decode another representation belonging to this operation. All CBOR
@@ -1401,7 +1450,14 @@ impl InventoryOperation {
             max_bytes,
             ..self.limits.program
         };
-        codec::decode_value(bytes, limits, &mut self.budget.borrow_mut())
+        codec::decode_value(
+            bytes,
+            limits,
+            &mut self
+                .budget
+                .lock()
+                .map_err(|_| ParseError::LimitExceeded("accounting owner"))?,
+        )
     }
 
     pub fn parse_module_products(
@@ -1413,7 +1469,10 @@ impl InventoryOperation {
             bytes,
             requirements,
             self.limits,
-            &mut self.budget.borrow_mut(),
+            &mut self
+                .budget
+                .lock()
+                .map_err(|_| ParseError::LimitExceeded("accounting owner"))?,
             |_, _, _| Ok(()),
         )
     }
@@ -1428,7 +1487,10 @@ impl InventoryOperation {
             bytes,
             requirements,
             self.limits,
-            &mut self.budget.borrow_mut(),
+            &mut self
+                .budget
+                .lock()
+                .map_err(|_| ParseError::LimitExceeded("accounting owner"))?,
             |row, size, budget| {
                 budget.charge(size)?;
                 budget.reserve::<Vec<u8>>(1)?;
@@ -1449,11 +1511,13 @@ impl InventoryOperation {
 }
 
 /// Count the existing serde encoding before allocating a normalized row.
-struct CountingWriter {
+struct CountingWriter<'a> {
     bytes: usize,
     limit: usize,
+    budget: &'a mut OperationBudget,
+    error: Option<ParseError>,
 }
-impl std::io::Write for CountingWriter {
+impl std::io::Write for CountingWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.bytes = self
             .bytes
@@ -1462,6 +1526,10 @@ impl std::io::Write for CountingWriter {
         if self.bytes > self.limit {
             return Err(std::io::Error::other("module byte limit"));
         }
+        if let Err(error) = self.budget.charge(bytes.len()) {
+            self.error = Some(error);
+            return Err(std::io::Error::other("counting work limit"));
+        }
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -1469,14 +1537,24 @@ impl std::io::Write for CountingWriter {
     }
 }
 
-fn normalized_module_size(row: &ciborium::value::Value, limit: usize) -> Result<usize, ParseError> {
-    let mut writer = CountingWriter { bytes: 0, limit };
-    ciborium::ser::into_writer(&("TPMOD", MODULE_PRODUCTS_VERSION, [row]), &mut writer).map_err(
-        |_| ParseError::ModuleByteLimit {
+fn normalized_module_size(
+    row: &ciborium::value::Value,
+    limit: usize,
+    budget: &mut OperationBudget,
+) -> Result<usize, ParseError> {
+    let mut writer = CountingWriter {
+        bytes: 0,
+        limit,
+        budget,
+        error: None,
+    };
+    if ciborium::ser::into_writer(&("TPMOD", MODULE_PRODUCTS_VERSION, [row]), &mut writer).is_err()
+    {
+        return Err(writer.error.take().unwrap_or(ParseError::ModuleByteLimit {
             limit,
             actual: writer.bytes,
-        },
-    )?;
+        }));
+    }
     Ok(writer.bytes)
 }
 
@@ -1558,7 +1636,7 @@ fn parse_module_products_inner(
                 "module {unit}:{name}"
             )));
         }
-        let normalized_size = normalized_module_size(module, inventory.max_module_bytes)?;
+        let normalized_size = normalized_module_size(module, inventory.max_module_bytes, budget)?;
         budget.reserve::<ProjectedGroup>(groups.len())?;
         let mut seen_ordinals = std::collections::BTreeSet::new();
         let mut seen_binders = std::collections::BTreeSet::new();

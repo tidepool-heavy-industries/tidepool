@@ -701,6 +701,7 @@ impl<'a> Decoder<'a> {
         } else {
             self.charge(values.len())?;
         }
+        self.budget.reserve::<T>(values.len())?;
         values.iter().map(|value| decode(self, value)).collect()
     }
 
