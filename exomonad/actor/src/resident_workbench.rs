@@ -18019,20 +18019,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = execution.private_scope;
-        let (compile_context, authority) =
-            crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                private_context,
-                crate::CheckpointSourceLayer::default(),
-                None,
-                None,
-            )
-            .unwrap();
         let workbench = ResidentActorWorkbench::new(machines.clone(), source, None)
-            .with_compilation_authority(authority)
             .with_private_execution(execution);
         let prepared = workbench
             .mount_activation_input(
-                compile_context,
+                private_context,
                 inputs.remove(0),
                 "()".into(),
                 None,
