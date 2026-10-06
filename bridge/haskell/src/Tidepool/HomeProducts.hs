@@ -9,11 +9,12 @@ module Tidepool.HomeProducts
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
   , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope
-  , OriginalRecoveryScope, admitOriginalRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious ) where
+  , OriginalRecoveryScope, admitOriginalRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
+  , revalidateAdmittedCore ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -261,6 +262,9 @@ materializeInterfaceView directory index interface summary = do
         { ml_hi_file = path, ml_dyn_hi_file = path ++ ".dyn_hi" }
     , ms_iface_date = Just modified
     }
+
+revalidateAdmittedCore :: CanonicalInterfaceAdmission -> IO ()
+revalidateAdmittedCore = void . readAdmittedCore
 
 readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
 readAdmittedCore proof = do
