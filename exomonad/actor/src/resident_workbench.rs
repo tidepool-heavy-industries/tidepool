@@ -15395,7 +15395,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     }
 
     #[tokio::test]
-    async fn source_preparation_retains_actual_close_after_waiter_cancel_and_actor_retirement() {
+    async fn source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation(
+    ) {
         let (_, _, source, _session_root) = host_mount_fixture();
         let retained = crate::RetainedActorExit::new();
         let owner = CompilerCloseOwner::Initialization(retained.clone());
@@ -15441,6 +15442,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             retained.compiler_close_observations().as_slice(),
             [crate::termination::CompilerWorkClose::Pending]
         ));
+        let (shared_registered, shared_observed) = tokio::sync::oneshot::channel();
         let remaining = tokio::spawn({
             let source = source.clone();
             let source_layer = source_layer.clone();
@@ -15449,17 +15451,28 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 // This waiter has no task-local owner; it borrows the admitted
                 // source task instead of registering a replacement compiler.
                 assert!(CompilerCloseOwner::current().is_err());
-                source
-                    .prepare_source_toolset(
-                        tidepool_toolchain::artifacts::CompileWorkload::Preparation,
-                        source_layer,
-                        &[],
-                        &[],
-                        registry,
-                    )
-                    .await
+                let mut waiting = Box::pin(source.prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Preparation,
+                    source_layer,
+                    &[],
+                    &[],
+                    registry,
+                ));
+                // This path reaches the shared task's pending wait before the
+                // winner can compile; do not count merely spawning a waiter.
+                std::future::poll_fn(|context| {
+                    assert!(std::future::Future::poll(waiting.as_mut(), context).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                shared_registered.send(()).unwrap();
+                waiting.await
             }
         });
+        tokio::time::timeout(std::time::Duration::from_secs(15), shared_observed)
+            .await
+            .unwrap()
+            .unwrap();
         first.abort();
         match first.await {
             Err(error) => assert!(error.is_cancelled()),
@@ -15474,7 +15487,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         retained
             .publish(crate::ActorTerminal {
                 kind: crate::ActorExitKind::Cancelled,
-                summary: "retired while shared source preparation remains owned".into(),
+                summary: "owner retirement observed while shared source preparation remains owned"
+                    .into(),
                 diagnostic: None,
             })
             .unwrap();
