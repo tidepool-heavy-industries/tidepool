@@ -4007,9 +4007,24 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       (carried,carriedDiagnostics) <- captureDiagnostics (admittedCheck scope)
       unless (isInt carried && frontends carriedDiagnostics == 0
           && null (counterValues ("hash_bytes.scope_metadata." ++ scopeRequestSha256 admitted) carriedDiagnostics)
-          && length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 3) $
+          && length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 2) $
         fail "carried admission decoded its manifest again or omitted a compiler proof barrier"
       requireCheckedApplicability "carried check" carriedDiagnostics
+      mutatingTemplate <- T.pack <$> readFile (fixture "MetadataMutatingScopeTarget.hs")
+      let mutatingTarget = work </> "MetadataMutatingScopeTarget.hs"
+      writeFile mutatingTarget (T.unpack (T.replace "\"{{SCOPE_MANIFEST}}\""
+        (T.pack (show scopePath)) mutatingTemplate))
+      receiptsBefore <- sort <$> listDirectory (work </> ".exact-compilations")
+      (do
+        requireAdmissionRefusal "manifest changed by actual target TH"
+          "exact scope request changed" $
+          compile CheckedEnvironment Set.empty (CellProgramCompile GeneralCompile admitted)
+            (Just scope) mutatingTarget [work] Nothing
+        mutated <- BS.readFile scopePath
+        receiptsAfter <- sort <$> listDirectory (work </> ".exact-compilations")
+        unless (mutated == BS.snoc originalScopeBytes 0 && receiptsAfter == receiptsBefore) $
+          fail "terminal metadata proof did not observe target TH or published a refused receipt"
+        ) `finally` BS.writeFile scopePath originalScopeBytes
       (native,nativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing

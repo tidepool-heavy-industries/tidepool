@@ -241,10 +241,10 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, writeCheckedExactCompilation, scopeValueInterfaces
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
-  , writeExactCompilation, compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
+  , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
@@ -1289,6 +1289,8 @@ withNativeTypecheckRecovery variant target environment summary parsed action
       Nothing -> action
       Just recipe -> withGeneratedInstanceRecovery recipe environment summary parsed action
 
+data ResultBoundary = NativeMergeBoundary | CheckedReceiptBoundary
+
 -- | The seam values for one run, derived from the downsweep graph.
 data CompilePlan = CompilePlan
   { cpLoadGraph :: ModuleGraph
@@ -1310,9 +1312,10 @@ data CompilePlan = CompilePlan
     -- session path injects value ifaces here, after their declaration-module
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
-  , cpBeforeMerge :: Ghc ()
+  , cpBeforeMerge :: ResultBoundary -> Ghc ()
     -- ^ Runs after the compile loop and its phase emits, before the guts are
-    -- merged. The session path reports accumulated injection timing here.
+    -- merged. Native results validate the current scope here; metadata's
+    -- terminal proof belongs to its checked receipt publication owner.
   , cpFinalEnv :: HscEnv -> HscEnv
     -- ^ Applied to the post-loop session before it becomes 'prHscEnv'.
   }
@@ -3479,7 +3482,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 ++ " validation_only=" ++ show validationOnly
                 ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
             _ -> pure ()
-          timePhase timing "merge_barrier" $ cpBeforeMerge plan
+          timePhase timing "merge_barrier" $ cpBeforeMerge plan NativeMergeBoundary
           -- Merge: dependency module bindings first, target module last
           let isTargetMod output =
                 moduleNameString (moduleName (moduleOutputModule output)) == targetModName
@@ -3644,7 +3647,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       retainInterface " reason=session-value-interface"
                   pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-          cpBeforeMerge plan
+          cpBeforeMerge plan CheckedReceiptBoundary
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
@@ -3655,9 +3658,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 captured <- liftIO (captureDependencySources modGraphRaw)
                 facts <- liftIO (readIORef checkedFactsRef)
                 evidence <- liftIO (dependencyEvidenceFor env captured freshGraph facts)
-                verified <- liftIO (revalidateExactScope env (compilationScope compilation))
-                either (liftIO . ioError . userError) pure verified
-                liftIO (writeExactCompilation compilation evidence)
+                liftIO (writeCheckedExactCompilation env compilation evidence)
               pure CheckedEnvironmentResult
                 { crHscEnv = cpFinalEnv plan env
                 , crTargetTcGblEnv = tcg
@@ -4968,7 +4969,7 @@ normalVariant purpose path = do
       , cpKeepPrivateResult = effectivePurpose == OriginalDeclarationCompile
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpBeforeMerge = pure ()
+      , cpBeforeMerge = \_ -> pure ()
       , cpFinalEnv = id
       }
   }
@@ -5739,12 +5740,14 @@ sessionVariant purpose scope path = do
                     (`Set.union` Set.fromList (map renderSessionModule needed
                       ++ [mkModuleName (completedValueModule value) | captureCompleted, value <- completedValues]))
                   modifyIORef' injectMsRef (+ injectMs)
-        , cpBeforeMerge =
+        , cpBeforeMerge = \boundary ->
             do liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
-               forM_ selectedExact $ \admitted -> do
-                 env <- getSession
-                 verified <- liftIO (revalidateExactScope env admitted)
-                 either (liftIO . fail) pure verified
+               case boundary of
+                 CheckedReceiptBoundary -> pure ()
+                 NativeMergeBoundary -> forM_ selectedExact $ \admitted -> do
+                   env <- getSession
+                   verified <- liftIO (revalidateExactScope env admitted)
+                   either (liftIO . fail) pure verified
         , cpFinalEnv = \env -> hscUpdateFlags canonicalizeDFlags env {hsc_hooks=originalHooks}
         }
    }

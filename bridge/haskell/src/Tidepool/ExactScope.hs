@@ -16,7 +16,7 @@ module Tidepool.ExactScope
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
-  , writeExactCompilation, extendSourceSelectedOriginals
+  , writeExactCompilation, writeCheckedExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
   , originalGroupFromProjected, originalGroupFromCandidate
@@ -971,7 +971,26 @@ revalidateExactScope env scope = do
 -- later successful transaction must not replace an earlier witness.
 writeExactCompilation
   :: ExactCompilation -> DependencyEvidence -> IO ()
-writeExactCompilation compilation evidence = do
+writeExactCompilation compilation evidence =
+  captureExactCompilationReceipt compilation evidence >>= publishExactCompilationReceipt
+
+-- Metadata has completed all compiler work at this boundary. Capture and
+-- validate every consumed source before the terminal current scope/package
+-- proof; publishing the receipt afterwards consumes only captured bytes.
+writeCheckedExactCompilation
+  :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
+writeCheckedExactCompilation env compilation evidence = do
+  receipt <- captureExactCompilationReceipt compilation evidence
+  revalidateExactScope env (compilationScope compilation) >>= either fail pure
+  publishExactCompilationReceipt receipt
+
+-- Kept private so a receipt cannot be constructed from unobserved inputs.
+data ExactCompilationReceipt = ExactCompilationReceipt
+  FilePath Word64 BS.ByteString (FilePath -> BS.ByteString)
+
+captureExactCompilationReceipt
+  :: ExactCompilation -> DependencyEvidence -> IO ExactCompilationReceipt
+captureExactCompilationReceipt compilation evidence = do
   let scope = compilationScope compilation
       transaction = compilationTransaction compilation
       source = compilationSource compilation
@@ -993,16 +1012,13 @@ writeExactCompilation compilation evidence = do
     unless (unchangedSelection && negativeSelection)
       (fail "current original source selection changed before receipt")
   let parent = takeDirectory path </> ".exact-compilations"
-  createDirectoryIfMissing True parent
-  directory <- reserveCompilationDirectory parent transaction
-  let snapshot = directory </> "source.hs"
       encodeArray values = E.encodeListLen (fromIntegral (length values)) <> mconcat values
       text = E.encodeString . T.pack
       importRow (qualifier, name, boot, unit) = encodeArray
         [text (renderDependencyQualifier qualifier), text name, E.encodeBool boot, text unit]
       moduleRow ((unit, name, boot), edges) = encodeArray
         [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
-      receipt = encodeArray
+      receipt snapshot = toStrictByteString $ encodeArray
         [text "TPEXACTCOMPILE", text "3", text (scopeRequestSha256 scope)
         , text (scopeSemanticSha256 scope), text path, text (digest bytes)
         , text snapshot, text (renderDependencyEvidence evidence)
@@ -1013,8 +1029,15 @@ writeExactCompilation compilation evidence = do
               [ encodeArray [encodeArray [text unit,text name,text certificate,text interfaceSha,text sourceSha]
                   | ((unit,name),certificate,interfaceSha,sourceSha) <- selectedOriginalRows selected]
               , text (renderDependencyEvidence (selectedOriginalEvidence selected))]]
+  pure (ExactCompilationReceipt parent transaction bytes receipt)
+
+publishExactCompilationReceipt :: ExactCompilationReceipt -> IO ()
+publishExactCompilationReceipt (ExactCompilationReceipt parent transaction bytes receipt) = do
+  createDirectoryIfMissing True parent
+  directory <- reserveCompilationDirectory parent transaction
+  let snapshot = directory </> "source.hs"
   BS.writeFile snapshot bytes
-  BS.writeFile (directory </> "receipt.cbor") (toStrictByteString receipt)
+  BS.writeFile (directory </> "receipt.cbor") (receipt snapshot)
 
 -- One worker request can check, refine and compile several sources. The
 -- request identity correlates diagnostics; it cannot identify one immutable
