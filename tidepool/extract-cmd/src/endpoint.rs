@@ -1066,11 +1066,12 @@ impl CompilerEndpoint {
         workload: CompileWorkload,
         cancellation: Option<CompilerTransactionCancellation>,
     ) -> Result<CompilerTransaction, SpawnError> {
-        self.transaction_with_cancellation_timeout(cancellation, DIRECT_HANDSHAKE_TIMEOUT)
+        self.transaction_with_cancellation_timeout(workload, cancellation, DIRECT_HANDSHAKE_TIMEOUT)
     }
 
     fn transaction_with_cancellation_timeout(
         self,
+        workload: CompileWorkload,
         cancellation: Option<CompilerTransactionCancellation>,
         timeout: Duration,
     ) -> Result<CompilerTransaction, SpawnError> {
@@ -1340,8 +1341,9 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
     let workload = TRANSACTION_SCOPE
         .with(|scope| scope.borrow().as_ref().map(|state| state.workload))
         .unwrap_or(CompileWorkload::Foreground);
-    let transaction = CompilerEndpoint::bind_unscoped_with_cancellation(cmd, cancellation.as_ref())?
-        .transaction_with_cancellation(workload, cancellation)?;
+    let transaction =
+        CompilerEndpoint::bind_unscoped_with_cancellation(cmd, cancellation.as_ref())?
+            .transaction_with_cancellation(workload, cancellation)?;
     let identity = transaction.identity.clone();
     TRANSACTION_SCOPE.with(|scope| -> Result<(), SpawnError> {
         let mut scope = scope.borrow_mut();
@@ -1436,7 +1438,12 @@ pub fn with_compiler_transaction_cancellable<T>(
     close_sink: impl FnOnce(CompilerTransactionClose),
     action: impl FnOnce() -> T,
 ) -> CompilerTransactionOutcome<T> {
-    with_compiler_transaction_inner(CompileWorkload::Foreground, Some(cancellation), close_sink, action)
+    with_compiler_transaction_inner(
+        CompileWorkload::Foreground,
+        Some(cancellation),
+        close_sink,
+        action,
+    )
 }
 
 /// Declare the workload before the first bind admits the pinned transaction.
@@ -1829,7 +1836,10 @@ mod tests {
                     Duration::from_secs(5),
                 )
                 .and_then(|endpoint| {
-                    endpoint.transaction_with_cancellation(Some(reader_cancellation))
+                    endpoint.transaction_with_cancellation(
+                        CompileWorkload::Foreground,
+                        Some(reader_cancellation),
+                    )
                 })
             });
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1887,6 +1897,7 @@ mod tests {
                 )
                 .and_then(|endpoint| {
                     endpoint.transaction_with_cancellation_timeout(
+                        CompileWorkload::Foreground,
                         Some(reader_cancellation),
                         Duration::from_secs(1),
                     )
@@ -1932,7 +1943,7 @@ mod tests {
         .unwrap();
         let child = owned_direct_child(&cancellation).expect("successful bind must arm child");
         let mut transaction = endpoint
-            .transaction_with_cancellation(Some(cancellation.clone()))
+            .transaction_with_cancellation(CompileWorkload::Foreground, Some(cancellation.clone()))
             .unwrap();
         let command = ExtractCmd {
             program: "fixture".into(),
@@ -2054,7 +2065,7 @@ mod tests {
         .unwrap();
         let child = owned_direct_child(&cancellation).unwrap();
         let mut transaction = endpoint
-            .transaction_with_cancellation(Some(cancellation.clone()))
+            .transaction_with_cancellation(CompileWorkload::Foreground, Some(cancellation.clone()))
             .unwrap();
         let close = transaction.abandon();
         assert!(
@@ -2078,7 +2089,11 @@ mod tests {
         let spec = direct_handshake_fixture(directory.path(), 4);
         let outcome = observed_scope(|| {
             CompilerEndpoint::bind_launch(spec).and_then(|endpoint| {
-                endpoint.transaction_with_cancellation_timeout(None, Duration::from_millis(100))
+                endpoint.transaction_with_cancellation_timeout(
+                    CompileWorkload::Foreground,
+                    None,
+                    Duration::from_millis(100),
+                )
             })
         });
         let primary = outcome.action.unwrap_err();

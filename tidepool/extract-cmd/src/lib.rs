@@ -30,14 +30,14 @@ mod process;
 mod request;
 mod resources;
 pub use endpoint::{
-    with_compiler_transaction, with_compiler_transaction_cancellable, CompilerEndpoint,
-    CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause, CompilerScratchFailure,
-    CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
+    with_compiler_transaction, with_compiler_transaction_cancellable,
+    with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
+    CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
+    CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
     CompilerTransactionOutcome, CompilerTransactionRetirement, CompilerWorkerRetirement,
     DirectCompilerRetirement,
-    with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
