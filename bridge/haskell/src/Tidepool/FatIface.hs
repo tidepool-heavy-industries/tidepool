@@ -8,7 +8,6 @@
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, evictFatIfaceMatching
-  , FatIfaceModule(..), lookupModuleOutcomeWith
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
@@ -39,9 +38,10 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 
 import Control.Concurrent.MVar
-  (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
+  (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
-  ( SomeException, displayException, mask, throwIO, try, uninterruptibleMask_ )
+  ( displayException )
+import Tidepool.FatIface.Internal qualified as Shared
 import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
@@ -110,89 +110,24 @@ lookupFatIfaceBodies hscEnv cache owner requested = do
     FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
     FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
 
--- | Cache of deserialized fat interface Core, keyed by Module. The map lock
--- protects only entry selection and publication; independent module loads can
--- proceed concurrently.
--- Exact Names index original group ordinals. This preserves both Rec group
--- identity and the defining order of private top scope.
-data FatIfaceEntry
-  = FatIfaceCached FatIfaceModule
-  | FatIfaceLoading (MVar (Maybe FatIfaceModule))
+-- | Each stable resolution context owns its decoded Core cache. Sharing
+-- completion is an internal loading mechanism; callers cannot supply bodies.
+newtype FatIfaceCache = FatIfaceCache (Shared.LoadCache Module FatIfaceModule)
 
-data FatIfaceSelection
-  = UseCached FatIfaceModule
-  | AwaitLoad (MVar (Maybe FatIfaceModule))
-  | StartLoad (MVar (Maybe FatIfaceModule))
-
-newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceEntry))
-
--- | Create an empty cache.
 newFatIfaceCache :: IO FatIfaceCache
-newFatIfaceCache = FatIfaceCache <$> newMVar Map.empty
+newFatIfaceCache = FatIfaceCache <$> Shared.newLoadCache
 
--- | Copy completed module outcomes into an independent cache. In-flight
--- generations belong to the source context and are deliberately not shared.
 copyFatIfaceCache :: FatIfaceCache -> IO FatIfaceCache
-copyFatIfaceCache (FatIfaceCache cacheRef) = do
-  entries <- readMVar cacheRef
-  FatIfaceCache <$> newMVar (Map.mapMaybe completed entries)
-  where
-    completed (FatIfaceCached outcome) = Just (FatIfaceCached outcome)
-    completed FatIfaceLoading{} = Nothing
+copyFatIfaceCache (FatIfaceCache cache) = FatIfaceCache <$> Shared.copyLoadCache cache
 
--- | Drop every cached module outcome whose 'Module' key matches the given
--- predicate. Used by the resident daemon to invalidate a request's own
--- target module and every @Tidepool.Session.*@ module between requests,
--- whose @.hi@ files can change underneath an otherwise daemon-lifetime
--- cache; library modules are stable while the daemon lives.
+-- | Request-owned targets and changed private contexts can evict acceleration
+-- without replacing another in-flight generation's eventual publication.
 evictFatIfaceMatching :: FatIfaceCache -> (Module -> Bool) -> IO ()
-evictFatIfaceMatching (FatIfaceCache cacheRef) stale =
-  modifyMVar_ cacheRef (pure . Map.filterWithKey (\modl _ -> not (stale modl)))
+evictFatIfaceMatching (FatIfaceCache cache) = Shared.evictLoadCache cache
 
--- | Load one module once and retain whether it loaded, lacked extra
--- declarations, or failed. Concurrent requests for a module share its load;
--- requests for other modules do not wait for that load. A canceled winner
--- removes only its own generation and wakes its waiters to retry.
 lookupModuleOutcome :: HscEnv -> FatIfaceCache -> Module -> IO FatIfaceModule
-lookupModuleOutcome hscEnv cache modl =
-  lookupModuleOutcomeWith cache modl (loadModuleExtraDecls hscEnv modl)
-
--- | The coalescing primitive is shared by the real interface loader and its
--- controlled concurrency tests. The supplied action runs only for a winning
--- generation.
-lookupModuleOutcomeWith :: FatIfaceCache -> Module -> IO FatIfaceModule -> IO FatIfaceModule
-lookupModuleOutcomeWith cache@(FatIfaceCache cacheRef) modl load = mask $ \restore -> do
-  selected <- modifyMVar cacheRef $ \entries -> case Map.lookup modl entries of
-    Just (FatIfaceCached outcome) -> pure (entries, UseCached outcome)
-    Just (FatIfaceLoading completion) -> pure (entries, AwaitLoad completion)
-    Nothing -> do
-      completion <- newEmptyMVar
-      pure (Map.insert modl (FatIfaceLoading completion) entries, StartLoad completion)
-  case selected of
-    UseCached outcome -> pure outcome
-    AwaitLoad completion -> do
-      settled <- restore (readMVar completion)
-      maybe (restore (lookupModuleOutcomeWith cache modl load)) pure settled
-    StartLoad completion -> do
-      loaded <- try (restore load)
-      case loaded of
-        Left exception -> do
-          uninterruptibleMask_ $ do
-            modifyMVar_ cacheRef $ \entries ->
-              pure $ case Map.lookup modl entries of
-                Just (FatIfaceLoading current) | current == completion -> Map.delete modl entries
-                _ -> entries
-            putMVar completion Nothing
-          throwIO (exception :: SomeException)
-        Right outcome -> do
-          uninterruptibleMask_ $ do
-            modifyMVar_ cacheRef $ \entries ->
-              pure $ case Map.lookup modl entries of
-                Just (FatIfaceLoading current) | current == completion ->
-                  Map.insert modl (FatIfaceCached outcome) entries
-                _ -> entries
-            putMVar completion (Just outcome)
-          pure outcome
+lookupModuleOutcome env (FatIfaceCache cache) owner =
+  Shared.lookupLoadCache cache owner (loadModuleExtraDecls env owner)
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
 -- exact outcome for all selected-body callers.

@@ -1,0 +1,65 @@
+-- | Per-key loading shared by a defining interface's immutable outcomes.
+-- This module owns completion only; it cannot issue executable Core authority.
+module Tidepool.FatIface.Internal
+  ( LoadCache, newLoadCache, copyLoadCache, evictLoadCache, lookupLoadCache ) where
+
+import Control.Concurrent.MVar
+  (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
+import Control.Exception (SomeException, mask, throwIO, try, uninterruptibleMask_)
+import qualified Data.Map.Strict as Map
+
+data Entry value = Cached value | Loading (MVar (Maybe value))
+data Selection value = UseCached value | AwaitLoad (MVar (Maybe value)) | StartLoad (MVar (Maybe value))
+newtype LoadCache key value = LoadCache (MVar (Map.Map key (Entry value)))
+
+newLoadCache :: IO (LoadCache key value)
+newLoadCache = LoadCache <$> newMVar Map.empty
+
+-- | A failed attempt cannot transfer unfinished additions into a completed
+-- context. Copies share immutable completed values but own their map.
+copyLoadCache :: LoadCache key value -> IO (LoadCache key value)
+copyLoadCache (LoadCache ref) = do
+  entries <- readMVar ref
+  LoadCache <$> newMVar (Map.mapMaybe completed entries)
+  where
+    completed (Cached value) = Just (Cached value)
+    completed Loading{} = Nothing
+
+evictLoadCache :: LoadCache key value -> (key -> Bool) -> IO ()
+evictLoadCache (LoadCache ref) stale =
+  modifyMVar_ ref (pure . Map.filterWithKey (\key _ -> not (stale key)))
+
+-- | The map lock is held only for selection and publication. Losing the
+-- winning loader removes its own generation and wakes every waiter to retry;
+-- an evicted generation still settles its existing callers, but cannot replace
+-- a newer generation. Cacheable failure values remain distinct from cancellation.
+lookupLoadCache :: Ord key => LoadCache key value -> key -> IO value -> IO value
+lookupLoadCache cache@(LoadCache ref) key load = mask $ \restore -> do
+  selected <- modifyMVar ref $ \entries -> case Map.lookup key entries of
+    Just (Cached value) -> pure (entries, UseCached value)
+    Just (Loading completion) -> pure (entries, AwaitLoad completion)
+    Nothing -> do
+      completion <- newEmptyMVar
+      pure (Map.insert key (Loading completion) entries, StartLoad completion)
+  case selected of
+    UseCached value -> pure value
+    AwaitLoad completion -> do
+      settled <- restore (readMVar completion)
+      maybe (restore (lookupLoadCache cache key load)) pure settled
+    StartLoad completion -> do
+      loaded <- try (restore load)
+      case loaded of
+        Left exception -> do
+          uninterruptibleMask_ $ do
+            modifyMVar_ ref $ \entries -> pure $ case Map.lookup key entries of
+              Just (Loading current) | current == completion -> Map.delete key entries
+              _ -> entries
+            putMVar completion Nothing
+          throwIO (exception :: SomeException)
+        Right value -> do
+          uninterruptibleMask_ $ do
+            modifyMVar_ ref $ \entries -> pure $ case Map.lookup key entries of
+              Just (Loading current) | current == completion -> Map.insert key (Cached value) entries
+              _ -> entries
+            putMVar completion (Just value)
+          pure value
