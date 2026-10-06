@@ -152,7 +152,7 @@ data ProjectionContext = ProjectionContext
   , projectionJsonAuthority :: Maybe JsonAuthority
   -- | Missing authority rejects text's kernel, not unrelated projection.
   , projectionTextUnit :: Maybe TextUnitAuthority
-  } deriving stock (Eq, Show)
+  } deriving stock (Eq)
 
 data ProjectionError
   = UnsupportedPreparedShape Text
