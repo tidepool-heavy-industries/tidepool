@@ -128,6 +128,112 @@ fn driver_sources_use_run_captured_libraries() {
     assert_eq!(sources.include[3], selected.runtime_stdlib());
 }
 
+fn write_bootstrap_workspace(workspace: &Path, spec: &str) {
+    let authored = workspace.join(".exomonad");
+    std::fs::create_dir_all(authored.join("Project")).unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![".".into()];
+        project.haskell.modules = vec!["Project.BootstrapWitness".into()];
+        project.haskell.spec = Some("ConfiguredSpec.agentSpec".into());
+    });
+    std::fs::write(authored.join("ConfiguredSpec.hs"), spec).unwrap();
+    std::fs::write(
+        authored.join("Project/BootstrapWitness.hs"),
+        include_str!("fixtures/bootstrap_workspace_witness.hs"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec() {
+    let project = tempfile::tempdir().unwrap();
+    let valid_run = tempfile::tempdir().unwrap();
+    let invalid_run = tempfile::tempdir().unwrap();
+    write_bootstrap_workspace(
+        project.path(),
+        include_str!("fixtures/configured_bootstrap_spec.hs"),
+    );
+    let valid = crate::exomonad::workspace::FrozenWorkspace::load(project.path(), valid_run.path())
+        .unwrap();
+    // Public check/init use this full-workspace validation owner.
+    validate_workspace_program(&valid, valid_run.path()).unwrap();
+
+    write_bootstrap_workspace(
+        project.path(),
+        include_str!("fixtures/invalid_configured_bootstrap_spec.hs"),
+    );
+    let invalid =
+        crate::exomonad::workspace::FrozenWorkspace::load(project.path(), invalid_run.path())
+            .unwrap();
+    let bootstrap = compile_driver(
+        Path::new("unused-live-actors"),
+        Some(&invalid),
+        invalid_run.path(),
+        None,
+        DriverCompilePurpose::Bootstrap,
+    )
+    .expect("the fixed driver has no dependency on the invalid workspace spec");
+    let certification = bootstrap.compiled.certification.as_ref().unwrap();
+    assert!(certification.recovery_products.iter().all(|product| {
+        !matches!(
+            product.owner().module.as_str(),
+            "ConfiguredSpec" | "Project.BootstrapWitness"
+        )
+    }));
+    assert!(bootstrap
+        .preamble
+        .contains("import Project.BootstrapWitness"));
+    assert!(bootstrap
+        .preamble
+        .contains("import qualified ConfiguredSpec"));
+    let sources = driver_sources(
+        Path::new("unused-live-actors"),
+        Some(&invalid),
+        invalid_run.path(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(bootstrap.include, sources.include);
+    let failure = validate_workspace_program(&invalid, invalid_run.path()).unwrap_err();
+    assert!(
+        failure.to_string().contains("missingConfiguredStartupSpec"),
+        "{failure}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = test_campaign::hosted_test_settings(&files, 1);
+    let (provider, _requests) = test_campaign::hosted_script_provider();
+    let result =
+        hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
+            write_bootstrap_workspace(
+                &config.workspace,
+                include_str!("fixtures/invalid_configured_bootstrap_spec.hs"),
+            );
+            test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        })
+        .await;
+    match result {
+        Ok(host) => {
+            host.stop().await.unwrap();
+            panic!("invalid configured spec reached production root readiness");
+        }
+        Err(failure) => assert!(
+            failure.contains("missingConfiguredStartupSpec"),
+            "{failure}"
+        ),
+    }
+}
+
 #[test]
 fn later_host_before_root_admission_creates_missing_journals() {
     let directory = tempfile::tempdir().unwrap();

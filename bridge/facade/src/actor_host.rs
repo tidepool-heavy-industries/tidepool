@@ -2726,6 +2726,7 @@ pub(crate) fn validate_workspace_program(
         Some(inputs),
         run_root,
         None,
+        DriverCompilePurpose::ValidateWorkspace,
     )?;
     Ok(())
 }
@@ -2773,8 +2774,9 @@ pub(crate) fn spec_effect_preflight(
         )));
     };
     let DriverSources {
-        mut preamble,
+        workbench_preamble: mut preamble,
         include,
+        ..
     } = driver_sources(
         workspace.runtime_actors().as_path(),
         Some(workspace),
@@ -2855,7 +2857,11 @@ pub(crate) fn typecheck_candidate_revision(
     replaces_run_layer: bool,
     extra_modules: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let DriverSources { preamble, include } = driver_sources(
+    let DriverSources {
+        workbench_preamble: preamble,
+        include,
+        ..
+    } = driver_sources(
         haskell_root,
         Some(inputs),
         run_root,
@@ -2944,10 +2950,16 @@ struct CandidateSources<'a> {
     extra_modules: &'a [String],
 }
 
-/// The preamble and include list read by one driver compile.
+/// Fixed bootstrap code and the full actor workbench share declared sources.
 struct DriverSources {
-    preamble: String,
+    bootstrap_preamble: String,
+    workbench_preamble: String,
     include: Vec<PathBuf>,
+}
+
+enum DriverCompilePurpose {
+    Bootstrap,
+    ValidateWorkspace,
 }
 
 fn driver_sources(
@@ -2991,6 +3003,7 @@ fn driver_sources(
         ),
         DRIVER_MODULE,
     );
+    let bootstrap_preamble = preamble.clone();
     if let Some(inputs) = inputs {
         // The live source layer goes AHEAD of the run's frozen capture, so a
         // reloaded module shadows the copy the run started from. The frozen
@@ -3014,11 +3027,10 @@ fn driver_sources(
         for module in candidate.iter().flat_map(|c| c.extra_modules.iter()) {
             preamble = insert_preamble_imports(&preamble, module);
         }
-        // What an actor installs at startup is compiled here too, so a broken
-        // spec fails `exomonad check` and `exomonad init` instead of the first actor
-        // to start. None of these is in `[haskell] modules`: the spec module is
-        // found by convention, and the configured key names a value, not an import.
-        // They are imported qualified because they only need to typecheck.
+        // Workspace validation includes the installed spec even when no module
+        // import names it. Runtime bootstrap uses the fixed preamble; spec
+        // preparation validates the installed policy before the actor is ready.
+        // Keep these qualified imports in the actor's full workbench template.
         let named = inputs
             .spec
             .as_deref()
@@ -3035,7 +3047,11 @@ fn driver_sources(
             }
         }
     }
-    Ok(DriverSources { preamble, include })
+    Ok(DriverSources {
+        bootstrap_preamble,
+        workbench_preamble: preamble,
+        include,
+    })
 }
 
 #[tracing::instrument(
@@ -3048,10 +3064,18 @@ fn compile_driver(
     inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     run_root: &Path,
     candidate: Option<CandidateSources<'_>>,
+    purpose: DriverCompilePurpose,
 ) -> Result<CompiledExomonadDriver, Box<dyn std::error::Error>> {
-    let DriverSources { preamble, include } =
-        driver_sources(haskell_root, inputs, run_root, candidate)?;
-    let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
+    let DriverSources {
+        bootstrap_preamble,
+        workbench_preamble,
+        include,
+    } = driver_sources(haskell_root, inputs, run_root, candidate)?;
+    let preamble = match purpose {
+        DriverCompilePurpose::Bootstrap => &bootstrap_preamble,
+        DriverCompilePurpose::ValidateWorkspace => &workbench_preamble,
+    };
+    let templates = resident_workbench_templates(preamble, DRIVER_EFFECTS, "");
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let session_root = run_root.join("haskell-session");
     std::fs::create_dir_all(&session_root)?;
@@ -3081,7 +3105,7 @@ fn compile_driver(
     };
 
     Ok(CompiledExomonadDriver {
-        preamble,
+        preamble: workbench_preamble,
         include,
         compiled,
     })
@@ -3125,6 +3149,7 @@ fn compile_root(
         config.workspace_inputs.as_ref(),
         run_root,
         None,
+        DriverCompilePurpose::Bootstrap,
     )?;
     let declarations = exomonad_effect_declarations();
     let session_root = run_root.join("haskell-session");
