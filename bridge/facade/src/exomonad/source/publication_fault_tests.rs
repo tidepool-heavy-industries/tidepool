@@ -31,6 +31,13 @@ const SPEC: &str = include_str!("../../actor_host/fixtures/browser_agent_spec.hs
 const DIRECTORY_FAULT: &str =
     include_str!("../../../../atomic-write/tests/fixtures/directory_fault.c");
 
+fn spec_source() -> String {
+    SPEC.replace(
+        "module AgentSpec (agentSpec)",
+        "module AgentSpec (agentSpec, Probe (..), answer)",
+    )
+}
+
 struct NoHandlers;
 
 impl DispatchEffect<tidepool_mcp::CapturedOutput> for NoHandlers {
@@ -203,8 +210,9 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
             .expect("old accepted handler/source snapshot");
         let before = layers.layer.read_active().unwrap().unwrap();
         let old_link = std::fs::read_link(layers.layer.active_link()).unwrap();
-        let updated = SPEC.replace("value + 2", "value + 200");
-        assert_ne!(updated, SPEC);
+        let initial_spec = spec_source();
+        let updated = initial_spec.replace("value + 2", "value + 200");
+        assert_ne!(updated, initial_spec);
         std::fs::write(project.join(".exomonad/AgentSpec.hs"), updated).unwrap();
         let failure = policy
             .dispatch_json_boxed(invocation(
@@ -287,10 +295,10 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
         let source_cell = policy.dispatch_json_boxed(ToolInvocation {
             context: Some(context("new-visible-source")),
             name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw("import qualified Exomonad.Source.Revision as Revision\nRevision.compiledSourceRevision".into()),
+            arguments: ToolArguments::Raw("import qualified AgentSpec\nAgentSpec.answer (AgentSpec.Probe 40) >>= inspectFull".into()),
         }).await.unwrap();
         assert!(
-            source_cell.to_string().contains(&visible.identity),
+            source_cell.to_string().contains("240"),
             "new source is active together with its handlers: {source_cell}"
         );
         assert!(
@@ -426,7 +434,7 @@ fn postrename_fsync_failure_keeps_paired_spec_and_fresh_process_recovers_visible
     let authored = project.path().join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(authored.join("config.toml"), "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['PublicationFaultDriver']\nspec='AgentSpec.agentSpec'\n").unwrap();
-    std::fs::write(authored.join("AgentSpec.hs"), SPEC).unwrap();
+    std::fs::write(authored.join("AgentSpec.hs"), spec_source()).unwrap();
     std::fs::write(
         authored.join("PublicationFaultDriver.hs"),
         include_str!("publication_fault_driver.hs"),
