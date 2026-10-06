@@ -509,7 +509,17 @@ impl RecoveredArtifactInventory {
         let mut entries = Vec::new();
         let mut losses = Vec::new();
         let mut verified_modules = Vec::new();
-        for reference in module_interfaces {
+        let mut selected_modules = BTreeSet::new();
+        // Native references carry canonical evidence themselves. Explicit rows
+        // add standalone type owners; both inputs cross the same admission.
+        for reference in module_interfaces.iter().chain(
+            products
+                .iter()
+                .filter_map(|product| product.module_interface.as_ref()),
+        ) {
+            if !selected_modules.insert(reference) {
+                continue;
+            }
             match recovery_artifacts::recover_module_interface(root, reference, &mut validation) {
                 Ok(interface) => verified_modules.push((reference, interface)),
                 Err(error) => losses.push((
@@ -2551,6 +2561,8 @@ impl ExactDeclarationContext {
         .extend(authored, joins, lexical)
     }
 
+    /// Admit original references with their embedded canonical proofs, plus
+    /// separately supplied canonical type owners and joined interfaces.
     pub fn capture_recovery(
         root: &Path,
         products: &[RecoveryArtifactRef],
@@ -4558,6 +4570,103 @@ mod tests {
         };
         context.normalize().unwrap();
         (Arc::new(context), producer)
+    }
+
+    #[test]
+    fn recovery_capture_admits_embedded_canonical_and_refuses_corruption() {
+        let producer = [2; 32];
+        let product = crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_witness_fixture(
+                "Original",
+                Some(crate::certified_products::PendingImportOwner::Retained {
+                    identity: tidepool_repr::execution_schema::testing::identity("Value", "live"),
+                    generation: 11,
+                }),
+                7,
+                &BTreeMap::new(),
+            ),
+            producer,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let references = recovery_artifacts::materialize_certified_products(
+            root.path(),
+            producer,
+            std::slice::from_ref(&product),
+        )
+        .unwrap();
+        let embedded = references[0].module_interface.as_ref().unwrap();
+        let captured =
+            ExactDeclarationContext::capture_recovery(root.path(), &references, &[], &[], vec![])
+                .unwrap();
+        let recovered = captured.recovery_products();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].owner(), product.owner());
+        assert_eq!(recovered[0].product_bytes(), product.product_bytes());
+        let duplicate_explicit = ExactDeclarationContext::capture_recovery(
+            root.path(),
+            &references,
+            &[embedded.clone(), embedded.clone()],
+            &[],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            captured.semantic_sha256(),
+            duplicate_explicit.semantic_sha256()
+        );
+        let groups = crate::certified_products::certify_owned_products_with_validation(
+            &[&recovered[0]],
+            &[],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert!(matches!(
+            groups[0].imports()[0],
+            crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+        ));
+
+        let mut missing = references.clone();
+        missing[0].module_interface = None;
+        assert!(
+            ExactDeclarationContext::capture_recovery(root.path(), &missing, &[], &[], vec![])
+                .is_err()
+        );
+        let mut changed = references.clone();
+        changed[0]
+            .module_interface
+            .as_mut()
+            .unwrap()
+            .certificate_sha256 = [99; 32];
+        assert!(
+            ExactDeclarationContext::capture_recovery(root.path(), &changed, &[], &[], vec![])
+                .is_err()
+        );
+        let mut conflicting_explicit = embedded.clone();
+        conflicting_explicit.certificate_path = PathBuf::from("artifacts/missing-canonical.cbor");
+        assert!(
+            ExactDeclarationContext::capture_recovery(
+                root.path(),
+                &references,
+                &[conflicting_explicit],
+                &[],
+                vec![],
+            )
+            .is_err(),
+            "an invalid explicit descriptor cannot hide behind a matching embedded owner"
+        );
+        let certificate = root.path().join(&embedded.certificate_path);
+        let mut corrupted = std::fs::read(&certificate).unwrap();
+        corrupted[0] ^= 1;
+        std::fs::write(certificate, corrupted).unwrap();
+        assert!(ExactDeclarationContext::capture_recovery(
+            root.path(),
+            &references,
+            &[],
+            &[],
+            vec![]
+        )
+        .is_err());
     }
 
     #[test]

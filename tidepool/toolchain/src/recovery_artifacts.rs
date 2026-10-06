@@ -41,7 +41,7 @@ pub struct RecoveryArtifactRef {
 }
 
 /// Captured canonical interface and separately sealed compiler Core companion.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryModuleInterfaceRef {
     pub interface: RecoveryJoinRef,
@@ -50,7 +50,7 @@ pub struct RecoveryModuleInterfaceRef {
     pub core: Option<RecoveryCoreRef>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryCoreRef {
     pub path: PathBuf,
@@ -67,7 +67,7 @@ pub struct RecoveryExecutionSourceRef {
 
 /// A source-less public Join owns only an interface. Its implementation
 /// modules remain independent `RecoveryArtifactRef` product pairs.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct RecoveryJoinRef {
     pub toolchain_identity_sha256: [u8; 32],
     pub unit: String,
