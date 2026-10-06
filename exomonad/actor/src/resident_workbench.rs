@@ -250,6 +250,20 @@ mod failure_diagnostic_tests {
     use super::*;
 
     #[test]
+    fn kernel_failure_roundtrip_keeps_compiler_diagnostic_and_plain_failure() {
+        let compiler = ResidentActorWorkbenchError::Compile(CompileError::MissingOutput(
+            PathBuf::from("captured-release.cbor"),
+        ))
+        .into_kernel_behavior_error();
+        for original in [compiler, crate::KernelBehaviorError::new("scope released")] {
+            let expected = original.clone();
+            let retained = ResidentActorWorkbenchError::from(original);
+            assert_eq!(retained.failure_diagnostic(), expected.diagnostic);
+            assert_eq!(retained.into_kernel_behavior_error(), expected);
+        }
+    }
+
+    #[test]
     fn activation_committed_failure_preserves_compiler_infrastructure_diagnostic() {
         let binding = tidepool_repr::SessionVarId::from_extract(41);
         let error = ResidentActorWorkbenchError::ActivationBindingCommitted {
@@ -3583,6 +3597,8 @@ pub enum ResidentActorWorkbenchError {
     #[error("actor protocol violation: {0}")]
     ActorProtocol(String),
     #[error(transparent)]
+    Kernel(#[from] crate::KernelBehaviorError),
+    #[error(transparent)]
     ToolDeclaration(#[from] exomonad_tool::ToolDeclarationError),
     #[error("unsupported resident actor request `{constructor}`")]
     UnsupportedRequest { constructor: String },
@@ -3629,6 +3645,7 @@ impl ResidentActorWorkbenchError {
             Self::CellCheck(failure) => Some(activation_compile_diagnostic(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
+            Self::Kernel(error) => error.diagnostic.clone(),
             Self::Resident(ResidentError::Session(error))
             | Self::Delivered(ResidentError::Session(error)) => {
                 Some(tidepool_runtime::failclass::classify_session(error))
