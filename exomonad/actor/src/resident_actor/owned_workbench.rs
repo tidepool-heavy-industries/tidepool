@@ -2150,7 +2150,6 @@ where
         owned: OwnedExecution<H, O>,
         mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
-        owned.state.effects.invocation_work.close();
         // Error paths bypass response rendering, but publication requires the
         // same checked item kinds as a successful response.
         let receipts = match &mut result {
@@ -2170,6 +2169,16 @@ where
                 .map(|checked| checked.items.as_slice()),
         );
         if owned.private.is_some() && private_nonpublication_reason(&result).is_none() {
+            if !owned.state.effects.invocation_work.begin_publication() {
+                let failure = private_publication_rejection(
+                    owned.state.effects.control.as_ref().unwrap(),
+                    result,
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "invocation closed before publication began".into(),
+                    ),
+                );
+                return Self::settle_owned_execution(behavior, kernel, owned, Err(failure));
+            }
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
                 behavior.environment.clone(),
@@ -2177,6 +2186,7 @@ where
                 result,
             )));
         }
+        owned.state.effects.invocation_work.close();
         owned
             .state
             .effects

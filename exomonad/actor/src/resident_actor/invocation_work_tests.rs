@@ -40,6 +40,104 @@ fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     assert!(!route_work.matches(owner, &reservation));
 }
 
+fn compiler_owner(work: &Arc<InvocationWork>) -> crate::resident_workbench::CompilerCloseOwner {
+    crate::resident_workbench::CompilerCloseOwner::Invocation {
+        work: work.clone(),
+        control: Some(crate::WorkbenchExecutionControl::untracked()),
+    }
+}
+
+#[test]
+fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
+    use crate::local_actor::WorkerStartupAdmission;
+    let actor = ActorRef::first(crate::ActorId(1));
+    let work = InvocationWork::new(actor, reservation());
+    let owner = compiler_owner(&work);
+    assert!(owner.register_publication_work().is_err());
+    assert!(work.begin_publication());
+    assert!(!work.is_closed(), "publication precedes cleanup");
+    assert!(!work.begin_publication(), "phase cannot restart");
+
+    for generation in 0..2 {
+        assert!(owner.register_work().is_err());
+        assert!(work.register_command("late-command".into()).is_err());
+        assert!(work.register_transient_watch(crate::WatchId(7)).is_err());
+        assert!(work.register_group(crate::ForkGroupId(7)).is_err());
+        assert!(work.reserve(ActorRef::first(crate::ActorId(2))).is_err());
+        // A restaged generation owns its own close receipt. These lifecycle
+        // controls perform no compiler command, so actual close is NotStarted.
+        let ticket = owner.register_publication_work().unwrap();
+        assert_eq!(work.state.lock().compilers.len(), generation + 1);
+        let action = ticket.run(
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            || generation,
+        );
+        assert_eq!(action, generation);
+    }
+    let state = work.state.lock();
+    assert!(state.compilers.iter().all(|receipt| matches!(
+        receipt.observation(),
+        crate::termination::CompilerWorkClose::Settled(
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        )
+    )));
+    assert!(state.commands.is_empty());
+    assert!(state.watches.is_empty());
+    assert!(state.groups.is_empty());
+    assert!(state.pending_workers.is_empty());
+    drop(state);
+    work.close();
+    assert!(work.is_closed());
+    assert!(owner.register_publication_work().is_err());
+    assert!(!work.begin_publication(), "closing never reopens admission");
+}
+
+#[tokio::test]
+async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_cancellation() {
+    let fixture = Fixture::start().await;
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let control = crate::WorkbenchExecutionControl::untracked();
+    let owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
+        work: work.clone(),
+        control: Some(control.clone()),
+    };
+    assert!(work.begin_publication());
+    let ticket = owner.register_publication_work().unwrap();
+    control.request_cancellation();
+    let cleanup = work.cleanup(&fixture.environment, &fixture.kernel).await;
+    assert!(work.is_closed());
+    assert!(cleanup.uncertainty().is_some());
+    assert!(matches!(
+        control.compiler_close_observations().as_slice(),
+        [crate::termination::CompilerWorkClose::Pending]
+    ));
+    assert!(owner.register_publication_work().is_err());
+    assert!(owner.register_work().is_err());
+    assert!(!work.begin_publication());
+    // Closing fences new work but never erases the already admitted ticket.
+    let action = ticket.run(
+        tidepool_runtime::CompilerTransactionCancellation::new(),
+        || Err::<(), _>("original publication refusal"),
+    );
+    assert_eq!(action, Err("original publication refusal"));
+    assert!(cleanup.uncertainty().is_none());
+    fixture.cleanup(&work).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn publication_failure_before_first_stage_closes_without_pending_obligation() {
+    let fixture = Fixture::start().await;
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let owner = compiler_owner(&work);
+    assert!(work.begin_publication());
+    work.close();
+    assert!(work.state.lock().compilers.is_empty());
+    assert!(owner.register_publication_work().is_err());
+    fixture.cleanup(&work).await;
+    fixture.finish().await;
+}
+
 struct Owner {
     context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
     startup_gate: Option<Arc<ShutdownGate>>,

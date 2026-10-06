@@ -98,6 +98,12 @@ fn register_compiler_work(
     CompilerCloseOwner::current()?.register_work()
 }
 
+#[derive(Clone, Copy)]
+enum CompilerWorkAdmission {
+    Active,
+    Publication,
+}
+
 impl CompilerCloseOwner {
     /// Capture before spawning a task; Tokio task-local owners are not inherited.
     pub(crate) fn current() -> Result<Self, ResidentActorWorkbenchError> {
@@ -117,13 +123,33 @@ impl CompilerCloseOwner {
     pub(crate) fn register_work(
         &self,
     ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
+        self.register_work_in(CompilerWorkAdmission::Active)
+    }
+
+    /// Only the publication entrypoint admits finalizer work after user effects stop.
+    pub(crate) fn register_publication_work(
+        &self,
+    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
+        self.register_work_in(CompilerWorkAdmission::Publication)
+    }
+
+    fn register_work_in(
+        &self,
+        admission: CompilerWorkAdmission,
+    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
         let receipt = crate::termination::CompilerWorkReceipt::pending();
         let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), self.clone());
         let admitted = match self {
             CompilerCloseOwner::Initialization(owner) => owner.register_compiler_work(receipt),
             CompilerCloseOwner::Hosted(owner) => owner.register_compiler_work(receipt),
             CompilerCloseOwner::Invocation { work, control } => {
-                work.register_compiler_work(receipt.clone())
+                let admitted = match admission {
+                    CompilerWorkAdmission::Active => work.register_compiler_work(receipt.clone()),
+                    CompilerWorkAdmission::Publication => {
+                        work.register_publication_compiler_work(receipt.clone())
+                    }
+                };
+                admitted
                     && control
                         .as_ref()
                         .is_none_or(|owner| owner.register_compiler_work(receipt))
@@ -7735,9 +7761,11 @@ where
                 .await
                 .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
             let compile_cancellation = cancellation.clone();
-            let compiler_work = register_compiler_work().map_err(|error| {
-                publication_error(PrivatePublicationPhase::CertifyAndStage, error)
-            })?;
+            let compiler_work = CompilerCloseOwner::current()
+                .and_then(|owner| owner.register_publication_work())
+                .map_err(|error| {
+                    publication_error(PrivatePublicationPhase::CertifyAndStage, error)
+                })?;
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 compiler_work.run(
                     compile_cancellation,

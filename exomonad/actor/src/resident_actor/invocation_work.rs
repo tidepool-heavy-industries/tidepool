@@ -11,9 +11,19 @@ pub(crate) struct InvocationWork {
     cleanup_lock: tokio::sync::Mutex<()>,
 }
 
+/// User work stops before publication; finalizer compiler work has the same
+/// cleanup owner until closing fences every admission.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum InvocationWorkPhase {
+    #[default]
+    Active,
+    Publishing,
+    Closing,
+}
+
 #[derive(Default)]
 struct InvocationWorkState {
-    closed: bool,
+    phase: InvocationWorkPhase,
     compilers: Vec<crate::termination::CompilerWorkReceipt>,
     commands: Vec<String>,
     detached_commands: std::collections::HashSet<String>,
@@ -142,7 +152,28 @@ impl InvocationWork {
         receipt: crate::termination::CompilerWorkReceipt,
     ) -> bool {
         let mut state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
+            return false;
+        }
+        state.compilers.push(receipt);
+        true
+    }
+
+    pub(super) fn begin_publication(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.phase != InvocationWorkPhase::Active {
+            return false;
+        }
+        state.phase = InvocationWorkPhase::Publishing;
+        true
+    }
+
+    pub(crate) fn register_publication_compiler_work(
+        &self,
+        receipt: crate::termination::CompilerWorkReceipt,
+    ) -> bool {
+        let mut state = self.state.lock();
+        if state.phase != InvocationWorkPhase::Publishing {
             return false;
         }
         state.compilers.push(receipt);
@@ -151,7 +182,7 @@ impl InvocationWork {
 
     pub(crate) fn register_command(&self, id: String) -> Result<(), CommandError> {
         let mut state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err(CommandError::CommandUnavailable(
                 "invocation ownership is closed".into(),
             ));
@@ -179,7 +210,7 @@ impl InvocationWork {
         let Some(index) = state.commands.iter().position(|job| job == id) else {
             return Err(CommandError::CommandUnauthorized);
         };
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err(CommandError::CommandUnavailable(
                 "invocation cleanup has begun".into(),
             ));
@@ -205,7 +236,7 @@ impl InvocationWork {
             return Err(crate::ReplyError::Unauthorized);
         }
         let state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err(crate::ReplyError::CancellationRequested);
         }
         requests.detach_invocation_request(caller, request, Some(&self.reservation))
@@ -216,7 +247,7 @@ impl InvocationWork {
         watch: crate::WatchId,
     ) -> Result<(), crate::ReplyError> {
         let mut state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err(crate::ReplyError::CancellationRequested);
         }
         if !state.watches.contains(&watch) {
@@ -228,7 +259,7 @@ impl InvocationWork {
     #[cfg(test)]
     fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
         let mut state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err("invocation ownership is closed".into());
         }
         if !state
@@ -268,7 +299,7 @@ impl InvocationWork {
 
     pub(super) fn register_group(&self, group: crate::ForkGroupId) -> Result<(), String> {
         let mut state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err("invocation ownership is closed".into());
         }
         if !state.groups.contains(&group) {
@@ -278,11 +309,11 @@ impl InvocationWork {
     }
 
     pub(super) fn is_closed(&self) -> bool {
-        self.state.lock().closed
+        self.state.lock().phase == InvocationWorkPhase::Closing
     }
 
     pub(super) fn close(&self) {
-        self.state.lock().closed = true;
+        self.state.lock().phase = InvocationWorkPhase::Closing;
     }
 
     pub(super) fn cleanup_observation(&self) -> Option<InvocationCleanup> {
@@ -301,7 +332,7 @@ impl InvocationWork {
         let _cleanup = self.cleanup_lock.lock().await;
         let (commands, mut workers, groups, watches) = {
             let mut state = self.state.lock();
-            state.closed = true;
+            state.phase = InvocationWorkPhase::Closing;
             if let Some(cleanup) = &state.cleanup {
                 if cleanup.uncertainty().is_none() {
                     return cleanup.clone();
@@ -627,7 +658,7 @@ impl InvocationWork {
 impl crate::local_actor::WorkerStartupAdmission for InvocationWork {
     fn reserve(&self, actor: ActorRef) -> Result<(), String> {
         let mut state = self.state.lock();
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err("invocation closed before worker admission".into());
         }
         state.pending_workers.push(actor);
@@ -646,7 +677,7 @@ impl crate::local_actor::WorkerStartupAdmission for InvocationWork {
         {
             state.workers.push(actor);
         }
-        if state.closed {
+        if state.phase != InvocationWorkPhase::Active {
             return Err("invocation closed before worker initialization".into());
         }
         Ok(())
