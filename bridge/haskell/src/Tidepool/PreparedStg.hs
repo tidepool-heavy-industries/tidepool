@@ -15,7 +15,7 @@ module Tidepool.PreparedStg
   , prepareRecoveredModule
   , prepareRecoveredBodies
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
-  , newPreparedOriginalModuleTaskPreparer
+  , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   , newPreparedComponentTaskPreparer
   ) where
@@ -36,6 +36,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Word (Word32, Word64)
+import System.Environment (lookupEnv)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
 import GHC.Core.FVs (exprSomeFreeVars)
@@ -412,6 +413,14 @@ evictPreparedBodyMatching cache stale = do
   modifyMVar_ (cachedFatComponents cache)
     (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
 
+-- A disabled observation is issued only after the normal version and site
+-- witness lookup found an eligible product. It never describes a cold miss.
+data PreparedBodyReuse = PreparedBodyReused | PreparedBodyMiss | PreparedBodyDisabled
+  deriving (Eq, Show)
+
+bodyReuseDisabled :: IO Bool
+bodyReuseDisabled = (== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE"
+
 type PreparedOriginalAlternative = (AdmittedFinalizedOriginal,PreparedModule)
 
 -- Preserve each reusable site view of one canonical body, in completion order.
@@ -439,8 +448,9 @@ insertOriginalAlternative owner version alternative =
 -- a changed site witness can still reuse validated immutable decoded Core.
 newPreparedOriginalModuleTaskPreparer :: HscEnv -> PreparedBodyCache -> ExactScope
   -> IO (Map String Id -> Module
-    -> IO (Maybe (AdmittedFinalizedOriginal,Bool,PreparedModuleTask)))
+    -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
 newPreparedOriginalModuleTaskPreparer env cache scope = do
+  disabled <- bodyReuseDisabled
   admittedScope <- admitOriginalRecoveryScope env scope
   siteEnvironment <- resolvePreparedSiteEnvironment env
   pure $ \siblings owner -> do
@@ -454,12 +464,15 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
     case original of
       Nothing -> pure Nothing
       Just (version,admitted) -> case hit of
-        Just prepared ->
-          pure (Just (admitted,True,PreparedModuleTask (pure prepared)))
+        Just prepared | not disabled ->
+          pure (Just (admitted,PreparedBodyReused,PreparedModuleTask (pure prepared)))
         _ -> do
           task <- acquirePreparedModuleWithSiteEnvironment siteEnvironment env
             (admittedOriginalLocation admitted) siblings (admittedOriginalModule admitted)
-          pure (Just (admitted,False,PreparedModuleTask $ do
+          let observation = case hit of
+                Just _ | disabled -> PreparedBodyDisabled
+                _ -> PreparedBodyMiss
+          pure (Just (admitted,observation,PreparedModuleTask $ do
             prepared <- runPreparedModuleTask task
             modifyMVar_ (cachedOriginalModules cache)
               (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
@@ -504,6 +517,7 @@ runPreparedBodyTask (PreparedBodyTask action) = action
 newPreparedComponentTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedComponentTaskPreparer env owners stable = do
+  disabled <- bodyReuseDisabled
   environment <- resolvePreparedSiteEnvironment env
   acquireSiteBatch <- newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners stable
   timing <- readTimingEnabled
@@ -528,10 +542,10 @@ newPreparedComponentTaskPreparer env owners stable = do
           let key = (version,fatComponentOrdinal component)
           completed <- Shared.lookupCompletedLoadCache bucket key
           task <- case completed of
-            Just prepared -> pure (Right (PreparedModuleTask (pure prepared)))
-            Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context
+            Just prepared | not disabled -> pure (Right (PreparedModuleTask (pure prepared)))
+            _ -> acquireRecoveredWithSiteContext (Just environment) env owner context
               (IntMap.elems (fatComponentBindings component))
-          pure ((component,key),task)
+          pure ((component,key,disabled && maybe False (const True) completed),task)
         -- Site graphs have owner-local indexes. Until their owning type policy
         -- supplies checked rebasing, all selected site units form one typed
         -- batch; pure-unit reuse remains independent of that batch's growth.
@@ -543,14 +557,17 @@ newPreparedComponentTaskPreparer env owners stable = do
           (_, Left failure) -> pure (Left failure)
           (Right tasks, Right site) -> pure (Right (PreparedBodyTask $ do
             outcome <- trySynchronous $ do
-              pureResults <- forM tasks $ \((component,key),task) -> do
-                prepared <- Shared.lookupLoadCache bucket key $ do
-                  fresh <- runPreparedModuleTask task
-                  unless (not (preparedUsesSiteAuthority fresh))
-                    (ioError (userError "pure fat component acquired site authority"))
-                  emitCount timing "prepared_recover_component_new_groups"
-                    (fromIntegral (length (fatComponentOrdinals component)))
-                  pure (issueComponentSpellings component fresh)
+              pureResults <- forM tasks $ \((component,key,normalHitDisabled),task) -> do
+                let lower = do
+                      fresh <- runPreparedModuleTask task
+                      unless (not (preparedUsesSiteAuthority fresh))
+                        (ioError (userError "pure fat component acquired site authority"))
+                      emitCount timing "prepared_recover_component_new_groups"
+                        (fromIntegral (length (fatComponentOrdinals component)))
+                      if normalHitDisabled then emitCount timing "prepared_recover_component_disabled_groups"
+                        (fromIntegral (length (fatComponentOrdinals component))) else pure ()
+                      pure (issueComponentSpellings component fresh)
+                prepared <- if disabled then lower else Shared.lookupLoadCache bucket key lower
                 pure (fatComponentOrdinals component,prepared)
               siteResult <- case site of
                 Nothing -> pure []
@@ -655,6 +672,8 @@ newPreparedBodyTaskPreparerWithSiteEnvironment :: PreparedSiteEnvironment -> Hsc
   -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (Maybe FatOriginalVersion -> Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache = do
+  disabled <- bodyReuseDisabled
+  timing <- readTimingEnabled
   scoped <- newMVar Map.empty
   pure $ \version owner bindings -> do
     let stable = cachedExactBodies bodyCache
@@ -665,9 +684,10 @@ newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache 
           (maybe [] id candidates) of
             hit:_ -> Just hit
             [] -> Nothing
-    case matching stableHit `orElse` matching scopedHit of
-      Just hit -> pure (Right (PreparedBodyTask (pure (Right hit))))
-      Nothing -> do
+    let normalHit = matching stableHit `orElse` matching scopedHit
+    case normalHit of
+      Just hit | not disabled -> pure (Right (PreparedBodyTask (pure (Right hit))))
+      _ -> do
         resolved <- acquireRecoveredContext env owners owner
         acquired <- case resolved of
           Left failure -> pure (Left failure)
@@ -677,6 +697,8 @@ newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache 
           case outcome of
             Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
             Right prepared -> do
+              if disabled && maybe False (const True) normalHit
+                then emitCount timing "prepared_recover_body_disabled_batches" 1 else pure ()
               let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
               modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (flip mergePreparedVariants)) owner
                 (Map.singleton key [prepared]))

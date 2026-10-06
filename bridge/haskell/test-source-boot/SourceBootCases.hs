@@ -115,7 +115,7 @@ import Tidepool.ExecutionProjection
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
 import Tidepool.PreparedStg
-  ( newPreparedBodyCache, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
+  ( newPreparedBodyCache, PreparedBodyReuse(..), pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
   , runPreparedModuleTask, copyPreparedBodyCache, selectPreparedBodyCaches
   , preparedSiteDependenciesEquivalent )
 import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
@@ -2791,12 +2791,12 @@ candidateSitedSiblingsAt work = do
         prepare <- newPreparedOriginalModuleTaskPreparer fullEnv cache fullScope
         prepare siblings fullOwner >>= \case
           Nothing -> fail "authenticated full original site owner became unavailable"
-          Just (_,hit,task) -> do
+          Just (_,observation,task) -> do
             prepared <- runPreparedModuleTask task
             unless (length (pmYieldSites prepared) == 1 && null (pmSiteRejections prepared)) $
               fail "full original cache control lost its genuine typed suspension site"
             stable <- makeStableName prepared
-            pure (hit,stable,prepared)
+            pure (observation == PreparedBodyReused,stable,prepared)
   alternative <- case [binder | prepared <- pprModules reused
       , moduleNameString (moduleName (pmModule prepared)) == "Tidepool.Actors.Unfold"
       , (binding,_) <- pmBindings prepared, binder <- topBinders binding
@@ -2814,6 +2814,28 @@ candidateSitedSiblingsAt work = do
       && coldIdentity /= changedIdentity && restoredHit && coldIdentity == restoredIdentity
       && not (preparedSiteDependenciesEquivalent cold changed)) $
     fail "canonical original site cache rebuilt a retained A/B/A view or reused a changed helper"
+  bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
+    (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
+      setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
+      prepare <- newPreparedOriginalModuleTaskPreparer fullEnv fullBodies fullScope
+      prepare siblingsA fullOwner >>= \case
+        Just (_,PreparedBodyDisabled,task) -> do
+          forced <- runPreparedModuleTask task
+          forcedIdentity <- evaluate forced >>= makeStableName
+          unless (forcedIdentity /= coldIdentity
+              && preparedSiteDependenciesEquivalent forced cold) $
+            fail "body-disable control skipped real lowering or changed admitted site facts"
+        _ -> fail "body-disable control did not identify its normally eligible original"
+      freshBodies <- newPreparedBodyCache
+      prepareCold <- newPreparedOriginalModuleTaskPreparer fullEnv freshBodies fullScope
+      prepareCold siblingsA fullOwner >>= \case
+        Just (_,PreparedBodyMiss,task) -> do
+          _ <- runPreparedModuleTask task
+          pure ()
+        _ -> fail "body-disable control mislabeled a cold miss as disabled"
+  (reenabledHit,reenabledIdentity,_) <- acquireFull fullBodies siblingsA
+  unless (reenabledHit && reenabledIdentity == coldIdentity) $
+    fail "body-disable calibration displaced the normal completed original"
   fullRaw <- newOriginalProjectionCollector
   fullContext <- prepareCompilerProjectionContext reused Map.empty fullOwner "result" [] Nothing
   let rawFor prepared = projectCachedOriginalHomeModuleProducts fullRaw fullEnv

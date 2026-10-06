@@ -88,7 +88,7 @@ import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalIn
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedStg
   ( PreparedModule, pmModule, pmSitedSiblings, runPreparedModuleTask
-  , PreparedBodyCache, newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer )
+  , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer )
 import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks)
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule
@@ -431,13 +431,21 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
           -- prepared hit avoids decoding and lowering, not validation work.
           case original of
             Nothing -> report OriginalRecovery ReuseMiss Absent version (Just 0)
-            Just (_,hit,_) -> do
+            Just (_,observation,_) -> do
+              let hit = observation == PreparedBodyReused
+                  disabled = observation == PreparedBodyDisabled
               report OriginalRecovery ReuseWork Recovery version Nothing
               -- A prepared hit also retained its decoded canonical original.
               -- A prepared miss alone says nothing about decoded-Core reuse.
-              when hit (report OriginalRecovery ReuseHit Matched version Nothing)
-              report PreparedBody (if hit then ReuseHit else ReuseMiss)
-                (if hit then Matched else Recovery) version (if hit then Just 0 else Nothing)
+              when (hit || disabled) (report OriginalRecovery ReuseHit Matched version Nothing)
+              report PreparedBody (case observation of
+                  PreparedBodyReused -> ReuseHit
+                  PreparedBodyDisabled -> ReuseDisabled
+                  PreparedBodyMiss -> ReuseMiss)
+                (case observation of
+                  PreparedBodyReused -> Matched
+                  PreparedBodyDisabled -> CacheDisabled
+                  PreparedBodyMiss -> Recovery) version (if hit then Just 0 else Nothing)
           pure (fmap (\value -> (owner,value)) original)
         admitted <- readIORef admittedRef
         let originals = Map.map (\(original,_,_) -> original) acquired
@@ -448,13 +456,16 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modifyIORef' admittedRef (Map.union originals)
         let tasks = [(owner,task) | (owner,(_,_,task)) <- Map.toAscList acquired]
         modifyIORef' reuseRef (\(hits,lowered) ->
-          (hits + fromIntegral (length [() | (_,True,_) <- Map.elems acquired]),
-           lowered + fromIntegral (length [() | (_,False,_) <- Map.elems acquired])))
+          (hits + fromIntegral (length [() | (_,PreparedBodyReused,_) <- Map.elems acquired]),
+           lowered + fromIntegral (length [() | (_,observation,_) <- Map.elems acquired, observation /= PreparedBodyReused])))
         _ <- runCompilerTasks executor
           (\(owner,task) -> do
             original <- runPreparedModuleTask task
             case Map.lookup owner acquired of
-              Just (_,False,_) -> report PreparedBody ReuseWork Recovery (ownerVersion selected owner) Nothing
+              Just (_,observation,_) | observation /= PreparedBodyReused ->
+                report PreparedBody ReuseWork
+                  (if observation == PreparedBodyDisabled then CacheDisabled else Recovery)
+                  (ownerVersion selected owner) Nothing
               _ -> pure ()
             product' <- lower selected original
             pure (original,product'))

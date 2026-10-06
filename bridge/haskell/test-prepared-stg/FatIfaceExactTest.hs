@@ -33,6 +33,7 @@ import System.Directory
   , removeFile
   , removePathForcibly
   )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (callProcess, readProcess)
@@ -244,6 +245,22 @@ scenario = do
         shuffledBindings <- physicalBindings shuffled
         assert (grownBindings == shuffledBindings && pmStableTopSpellings grown == pmStableTopSpellings shuffled)
           "root permutation or duplication changed canonical prepared component identities"
+        bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
+          (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
+            setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
+            acquireDisabled <- newPreparedComponentTaskPreparer hsc privateOwners componentCache
+            disabledSelection <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
+              FatIfaceComponents selection -> pure selection
+              _ -> fail "body-disable control lost its canonical component"
+            disabledTask <- acquireDisabled disabledSelection >>= either (fail . show) pure
+            disabledPrepared <- runPreparedBodyTask disabledTask >>= either (fail . show) pure
+            disabledBindings <- physicalBindings disabledPrepared
+            assert (any (\(name,identity) -> Map.lookup name disabledBindings /= Just identity)
+              (Map.toList firstBindings))
+              "component body-disable calibration returned completed STG instead of lowering"
+            assert (Set.fromList (Map.elems (pmStableTopSpellings disabledPrepared))
+                == Set.fromList (Map.elems (pmStableTopSpellings first)))
+              "component body-disable calibration changed canonical private spellings"
         selectedCache <- selectPreparedBodyCaches [(componentCache,Set.singleton privateOwner)]
         acquireSelected <- newPreparedComponentTaskPreparer hsc privateOwners selectedCache
         selected <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
