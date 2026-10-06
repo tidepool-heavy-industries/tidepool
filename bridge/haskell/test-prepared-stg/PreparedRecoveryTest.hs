@@ -639,6 +639,7 @@ verifyRecoveryPublication env context modules original = do
     (\(path,handle) -> hClose handle >> removeFile path) $ \(path,handle) -> do
       hPutStr handle "not-a-ghc-interface"
       hFlush handle
+      hClose handle
       finder <- initFinderCache
       addModuleToFinder finder (GWIB (mkModule (toUnitId (moduleUnit owner)) (moduleName owner)) NotBoot)
         location {ml_hi_file=path,ml_dyn_hi_file=path}
