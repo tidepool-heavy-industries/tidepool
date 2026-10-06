@@ -9862,17 +9862,98 @@ mod authored_publication_tests {
         let sibling = session
             .durable_public_readiness(&sibling_owner, sibling_scope)
             .unwrap();
+        let public_before = session.public_visibility_snapshot_in(public).unwrap();
+        let sibling_before = session
+            .public_visibility_snapshot_in(sibling_scope)
+            .unwrap();
+        let execution = session.begin_private_execution(public).unwrap();
+        let private = execution.private_scope();
+        assert!(readiness.is_ready());
+        assert!(sibling.is_ready());
+
+        // The first manifest write reserves an identity, before declaration
+        // validation or adoption. Its uncertainty must not claim a declaration
+        // commit, and the burned identity must remain unavailable afterward.
         session.state.lib_mut().fail_recovery_durability_once = true;
         let error = session
             .define_scoped_with_imports_in(
-                public,
+                private,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
             )
             .unwrap_err();
-        assert!(error.published_declaration_commit().is_some());
+        assert!(
+            matches!(&error, SessionError::RecoveryManifest { .. }),
+            "{error:?}"
+        );
+        assert!(error.published_declaration_commit().is_none(), "{error:?}");
+        assert_eq!(session.state.lib().generation(), Generation(1));
+        assert_eq!(session.state.lib().scope_tip(private), Generation(0));
+        let manifest = root.path().join("declarations.json");
+        let reserved = recovery::read_v2(&manifest, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        assert_eq!(reserved.high_water(), Generation(1));
+        assert_eq!(reserved.nodes().count(), 0);
+        assert_eq!(
+            session.public_visibility_snapshot_in(public),
+            Some(public_before.clone())
+        );
+        assert_eq!(
+            session.public_visibility_snapshot_in(sibling_scope),
+            Some(sibling_before.clone())
+        );
         assert!(!readiness.is_ready());
         assert!(!sibling.is_ready());
+        assert!(readiness.is_current());
+        assert!(sibling.is_current());
+        session
+            .confirm_durable_public_scope(&owner, public)
+            .unwrap();
+        assert!(readiness.is_ready());
+        assert!(sibling.is_ready());
+
+        let receipt = session
+            .state
+            .lib()
+            .declaration_receipt(&["answer :: Int\nanswer = 42"])
+            .unwrap()
+            .unwrap();
+        let staged = session
+            .stage_declarations_in(private, &receipt, &SourceImports::new(), &[])
+            .unwrap();
+        assert_eq!(staged.generation(), Generation(2));
+        session.state.lib_mut().fail_recovery_durability_once = true;
+        let error = session.adopt_staged_declaration_in(staged).unwrap_err();
+        let commit = error.published_declaration_commit().unwrap_or_else(|| {
+            panic!("validated adoption must retain its published declaration commit: {error:?}")
+        });
+        assert_eq!(commit.generation, Generation(2));
+        assert_eq!(session.state.lib().scope_tip(private), Generation(2));
+        assert_eq!(
+            session.public_visibility_snapshot_in(public),
+            Some(public_before.clone())
+        );
+        assert_eq!(
+            session.public_visibility_snapshot_in(sibling_scope),
+            Some(sibling_before.clone())
+        );
+        let published = recovery::read_v2(&manifest, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        assert_eq!(published.high_water(), Generation(2));
+        assert_eq!(published.nodes().count(), 1);
+        assert_eq!(published.nodes().next().unwrap().id, Generation(2));
+        for surface in published.public_surfaces() {
+            assert!(surface.declaration_root.is_none());
+        }
+        let published_bytes = std::fs::read(&manifest).unwrap();
+        assert!(!readiness.is_ready());
+        assert!(!sibling.is_ready());
+        assert!(readiness.is_current());
+        assert!(sibling.is_current());
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
         assert!(session
             .confirm_durable_public_scope(&owner, public)
@@ -9883,6 +9964,10 @@ mod authored_publication_tests {
         session
             .confirm_durable_public_scope(&owner, public)
             .unwrap();
+        session
+            .confirm_durable_public_scope(&sibling_owner, sibling_scope)
+            .unwrap();
+        assert_eq!(std::fs::read(&manifest).unwrap(), published_bytes);
         assert!(readiness.is_ready());
         assert!(sibling.is_ready());
         let next = session

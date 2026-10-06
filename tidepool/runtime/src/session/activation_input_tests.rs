@@ -140,6 +140,10 @@ impl InputFixture {
         let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
             .unwrap()
             .with_validation_include(recipe.include.clone());
+        Self::fresh_with_library(library, recipe)
+    }
+
+    fn fresh_with_library(library: SessionLib, recipe: &InputRecipe) -> TestSession {
         let mut resident = TestSession::unbootstrapped(
             frunk::HNil,
             EmptyOutput,
@@ -2253,7 +2257,9 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     }
     let (root, recipe) = InputFixture::source_recipe(false);
     let session = SessionId(1741);
-    let mut resident = InputFixture::fresh_in(session, &root, &recipe);
+    let mut library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
     let durable_root = tempfile::tempdir().unwrap();
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -2263,9 +2269,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .open(durable_root.path().join("run-owner.lock"))
         .unwrap();
     lock.try_lock().unwrap();
-    resident
-        .state
-        .lib_mut()
+    // Receiver setup reserves a Join identity even for a binding-only
+    // publication. Attach recovery before that allocator can advance.
+    assert_eq!(library.generation(), Generation(0));
+    library
         .attach_owned_recovery_graph_v3(
             durable_root.path().join("declarations.json"),
             Arc::new(RunOwner {
@@ -2273,7 +2280,22 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
                 _lock: lock,
             }),
         )
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!("fresh declaration library must attach recovery: {error:?}")
+        });
+    let mut resident = InputFixture::fresh_with_library(library, &recipe);
+    assert_eq!(resident.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
+    assert_eq!(
+        resident
+            .state
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .high_water(),
+        resident.state.lib().generation(),
+    );
     let public = resident.mint_scope(ScopeId::ROOT).unwrap();
     let durable = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/private-source-input").unwrap(),
