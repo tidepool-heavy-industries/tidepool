@@ -1215,7 +1215,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     cold <- compile (PreparedProducts Nothing) Set.empty purpose Nothing target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult cold))) $
       fail "generated cold source scaffold failed ordinary support admission"
-  putStrLn "generated scaffold: exact hidden support, settled result, ordinary/cold scope, bind/display CellProgram; duplicate/helper/source-drift/native/export/hidden-orphan/family/metadata refusals passed"
+  putStrLn "generated scaffold: exact hidden support, settled result, ordinary/cold scope, binding CellProgram; duplicate/helper/source-drift/native/export/hidden-orphan/family/metadata refusals passed"
 
 -- Native and lexical roots share one immutable compiler capture. The witness
 -- is retained only as canonical interface/Core custody in the emitted scope.

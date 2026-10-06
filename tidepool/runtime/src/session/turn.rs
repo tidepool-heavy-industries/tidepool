@@ -5206,6 +5206,20 @@ mod tests {
                         .unwrap(),
                 );
                 let outcome = match bound.as_slice() {
+                    [binder]
+                        if item.kind()
+                            == tidepool_toolchain::checked_cell::CheckedItemKind::Expression =>
+                    {
+                        resident.run_observation_with_sites(
+                            compiled.code(),
+                            binder,
+                            reservation.generation(),
+                            item.expression_lift().unwrap()
+                                == Some(
+                                    tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
+                                ),
+                        )
+                    }
                     [binder] => resident.run_bind_with_sites(
                         &binder.name,
                         compiled.code(),
@@ -5228,6 +5242,22 @@ mod tests {
                     ),
                     "native completion: {outcome:?}"
                 );
+                let visible = resident
+                    .public_visibility_snapshot_in(
+                        cell.admission.private_execution().unwrap().private_scope(),
+                    )
+                    .unwrap();
+                for binder in &bound {
+                    assert!(
+                        visible
+                            .bindings
+                            .iter()
+                            .any(|(name, id)| name == &binder.name
+                                && *id == tidepool_repr::SessionVarId::from_extract(binder.var_id)),
+                        "item {index} completed without its exact private binding {}: {outcome:?}",
+                        binder.name,
+                    );
+                }
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
             }
             assert_eq!(
@@ -5246,11 +5276,94 @@ mod tests {
         }
 
         fn assert_number(&mut self, name: &str, expected: i64) {
-            let custody = self.resident.retain_binding_custody(name).unwrap().unwrap();
+            let scope = self.resident.run_context().lexical_scope;
+            let visible = self.resident.public_visibility_snapshot_in(scope).unwrap();
+            let id = visible
+                .bindings
+                .iter()
+                .find_map(|(binding, id)| (binding == name).then_some(*id))
+                .unwrap_or_else(|| panic!("missing binding {name} in scope {scope:?}"));
+            let custody = self
+                .resident
+                .retain_binding_custody_in(scope, name, id)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("binding {name} has no exact custody in scope {scope:?}")
+                });
             assert_eq!(
                 self.resident.render_retained_preview(&custody, 64),
-                Some(expected.to_string())
+                Some(expected.to_string()),
+                "binding {name} in scope {scope:?}",
             );
+        }
+
+        fn publish_execution(&mut self, expected_names: &[&str]) {
+            let intent = self
+                .resident
+                .freeze_private_execution(&self.execution)
+                .unwrap();
+            let mut expected = expected_names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            expected.sort();
+            assert_eq!(intent.native_binding_names(), expected);
+            let private = self
+                .resident
+                .public_visibility_snapshot_in(self.execution.private_scope())
+                .unwrap();
+            let private_winners = private
+                .bindings
+                .into_iter()
+                .filter(|(name, _)| expected.contains(name))
+                .collect::<Vec<_>>();
+            assert_eq!(private_winners.len(), expected.len());
+            let publication = self
+                .resident
+                .restage_ephemeral_execution_publication(intent)
+                .unwrap();
+            let ticket = match publication {
+                crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+                crate::session::ExecutionPublication::Declarations(base) => {
+                    let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
+                        base.certify().unwrap()
+                    else {
+                        panic!("checked history publication must be accepted");
+                    };
+                    accepted.stage().unwrap()
+                }
+            };
+            assert_eq!(
+                self.resident
+                    .publish_staged_public_manifest(
+                        ticket,
+                        &crate::session::PublicationDecision::new()
+                    )
+                    .unwrap(),
+                crate::session::PublicManifestCommit::Ephemeral
+            );
+            let public = self.execution.admitted_public().scope;
+            let published = self.resident.public_visibility_snapshot_in(public).unwrap();
+            assert_eq!(
+                published
+                    .bindings
+                    .into_iter()
+                    .filter(|(name, _)| expected.contains(name))
+                    .collect::<Vec<_>>(),
+                private_winners,
+                "publication must preserve the exact settled native winners"
+            );
+            let mut context = self.resident.run_context();
+            context.lexical_scope = public;
+            self.resident.set_run_context(context).unwrap();
+        }
+
+        fn begin_next_execution(&mut self) {
+            let public = self.execution.admitted_public().scope;
+            self.execution = Arc::new(self.resident.begin_private_execution(public).unwrap());
+            let mut context = self.resident.run_context();
+            context.lexical_scope = self.execution.private_scope();
+            self.resident.set_run_context(context).unwrap();
         }
 
         fn remove_sources(&self) {
@@ -5272,6 +5385,8 @@ mod tests {
     fn checked_expression_history_retains_one_original_capture_per_item() {
         use tidepool_toolchain::checked_cell::CheckedExpressionLift;
         let mut fixture = CheckedHomeFixture::new();
+        fixture.publish_execution(&["home", "homeNumber"]);
+        fixture.begin_next_execution();
         let initial = fixture.resident.val_gen().0 + 1;
         let cell = fixture
             .check(
@@ -5332,12 +5447,41 @@ mod tests {
             Some(CheckedExpressionLift::Effectful)
         );
         fixture.execute(cell);
+        let public = fixture.execution.admitted_public().scope;
+        let visible = fixture
+            .resident
+            .public_visibility_snapshot_in(public)
+            .unwrap();
+        for name in [
+            "historyStart",
+            "historyEnd",
+            &observations[0],
+            &observations[1],
+        ] {
+            assert!(
+                visible.bindings.iter().all(|(binding, _)| binding != name),
+                "private history binding {name} became visible before cell publication"
+            );
+        }
+        fixture.publish_execution(&[
+            "historyStart",
+            "historyEnd",
+            &observations[0],
+            &observations[1],
+        ]);
         fixture.assert_number("historyEnd", 39);
+        fixture.begin_next_execution();
         let followup = fixture.check(&format!(
             "let historyStart = (99 :: Int)\nlet originalPure = {} ()\nlet originalEffectful = {} ()\nlet originalEffectfulAgain = {} ()",
             observations[0], observations[1], observations[1],
         ), &[], None).unwrap();
         fixture.execute(followup);
+        fixture.publish_execution(&[
+            "historyStart",
+            "originalPure",
+            "originalEffectful",
+            "originalEffectfulAgain",
+        ]);
         fixture.assert_number("historyStart", 99);
         fixture.assert_number("originalPure", 37);
         fixture.assert_number("originalEffectful", 38);
