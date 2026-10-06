@@ -13,6 +13,7 @@ module Tidepool.PreparedStg
   , prepareRecoveredModule
   , prepareRecoveredBodies
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, evictPreparedBodyMatching
+  , newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   ) where
 
@@ -72,6 +73,10 @@ import Tidepool.PreparedSites
   , resolveRecoveredSiblings, resolveSiteAuthority, requestSiteAuthority )
 import Tidepool.PreparedStg.Internal
 import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
+import Tidepool.ExactScope (ExactScope)
+import Tidepool.HomeProducts
+  ( OriginalVersion, originalVersionOwner, originalVersionInScope, AdmittedFinalizedOriginal
+  , admittedOriginalModule, admittedOriginalLocation, recoverAdmittedFinalizedOriginalWithPrevious )
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitDetailPhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
@@ -265,20 +270,53 @@ recoveredSubsetScope owner bindings =
 
 -- | Only an owner-issued census of intrinsic-free exact bodies permits
 -- daemon reuse. Authority-dependent preparation belongs to one admitted request.
-newtype PreparedBodyCache =
-  PreparedBodyCache (MVar (Map (Module, [[Word64]]) PreparedModule))
+data PreparedBodyCache = PreparedBodyCache
+  { cachedExactBodies :: MVar (Map (Module, [[Word64]]) PreparedModule)
+  , cachedOriginalModules :: MVar (Map OriginalVersion (AdmittedFinalizedOriginal,PreparedModule))
+  }
 
 newPreparedBodyCache :: IO PreparedBodyCache
-newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty
+newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty <*> newMVar Map.empty
 
 -- | Attempt additions are private until their compiler context is promoted.
 copyPreparedBodyCache :: PreparedBodyCache -> IO PreparedBodyCache
-copyPreparedBodyCache (PreparedBodyCache cacheRef) =
-  PreparedBodyCache <$> (readMVar cacheRef >>= newMVar)
+copyPreparedBodyCache cache = PreparedBodyCache
+  <$> (readMVar (cachedExactBodies cache) >>= newMVar)
+  <*> (readMVar (cachedOriginalModules cache) >>= newMVar)
 
 evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
-evictPreparedBodyMatching (PreparedBodyCache cacheRef) stale =
-  modifyMVar_ cacheRef (pure . Map.filterWithKey (\(owner, _) _ -> not (stale owner)))
+evictPreparedBodyMatching cache stale = do
+  modifyMVar_ (cachedExactBodies cache) (pure . Map.filterWithKey (\(owner, _) _ -> not (stale owner)))
+  modifyMVar_ (cachedOriginalModules cache)
+    (pure . Map.filterWithKey (\version _ -> not (stale (originalVersionOwner version))))
+
+-- Full original groups belong to the same retained body owner as recovered
+-- subsets. Only completed intrinsic-free preparation is shared across scopes;
+-- site-bearing bodies can reuse within this one acquired request preparer.
+newPreparedOriginalModuleTaskPreparer :: HscEnv -> PreparedBodyCache
+  -> IO (ExactScope -> Map String Id -> Module
+    -> IO (Maybe (AdmittedFinalizedOriginal,Bool,PreparedModuleTask)))
+newPreparedOriginalModuleTaskPreparer env cache = do
+  scoped <- newMVar Map.empty
+  pure $ \scope siblings owner -> do
+    let key = originalVersionInScope scope owner
+    stableHit <- maybe (pure Nothing) (\version -> Map.lookup version <$> readMVar (cachedOriginalModules cache)) key
+    scopedHit <- maybe (pure Nothing) (\version -> Map.lookup version <$> readMVar scoped) key
+    let hit = case stableHit of Just found -> Just found; Nothing -> scopedHit
+        previous = (,) <$> key <*> (fst <$> hit)
+    original <- recoverAdmittedFinalizedOriginalWithPrevious env scope owner previous
+    case original of
+      Nothing -> pure Nothing
+      Just (version,admitted) -> case hit of
+        Just (_,prepared) -> pure (Just (admitted,True,PreparedModuleTask (pure prepared)))
+        Nothing -> do
+          task <- acquirePreparedModule env (admittedOriginalLocation admitted) siblings
+            (admittedOriginalModule admitted)
+          pure (Just (admitted,False,PreparedModuleTask $ do
+            prepared <- runPreparedModuleTask task
+            let selected = if preparedAuthorityDependent prepared then scoped else cachedOriginalModules cache
+            modifyMVar_ selected (pure . Map.insert version (admitted,prepared))
+            pure prepared))
 
 preparedBodyKey :: Module -> [CoreBind] -> (Module, [[Word64]])
 preparedBodyKey owner bindings =
@@ -317,7 +355,7 @@ newPreparedBodyTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCach
 newPreparedBodyTaskPreparer env owners bodyCache = do
   scoped <- newMVar Map.empty
   pure $ \owner bindings -> do
-    let PreparedBodyCache stable = bodyCache
+    let stable = cachedExactBodies bodyCache
         key = preparedBodyKey owner bindings
     stableHit <- Map.lookup key <$> readMVar stable
     scopedHit <- Map.lookup key <$> readMVar scoped

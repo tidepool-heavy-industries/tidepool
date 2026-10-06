@@ -8,7 +8,8 @@ module Tidepool.HomeProducts
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
-  , admittedOriginalLocation ) where
+  , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope
+  , recoverAdmittedFinalizedOriginalWithPrevious ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
@@ -75,7 +76,7 @@ import Tidepool.ExactScope
   ( ExactScope(..), CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalRequirements, revalidateExactScope )
+  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, revalidateExactScope )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore)
 import Tidepool.FinalizedModule (FinalizedModule)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
@@ -110,11 +111,43 @@ admittedOriginalInterface (AdmittedFinalizedOriginal _ _ row _) = row
 admittedOriginalLocation :: AdmittedFinalizedOriginal -> ModLocation
 admittedOriginalLocation (AdmittedFinalizedOriginal _ _ _ location) = location
 
+-- Content identity includes the compiler producer, complete original Core,
+-- interface and package witness. Paths and request purposes do not identify a
+-- body. The certificate seals its source census and imported requirements.
+data OriginalVersion = OriginalVersion Module String String String String String
+  deriving (Eq, Ord)
+
+originalVersionOwner :: OriginalVersion -> Module
+originalVersionOwner (OriginalVersion owner _ _ _ _ _) = owner
+
+originalVersionInScope :: ExactScope -> Module -> Maybe OriginalVersion
+originalVersionInScope scope owner = do
+  proof <- Map.lookup key (scopeModuleInterfaceProofs scope)
+  unless (isSourceOriginal (canonicalOrigin proof)) Nothing
+  core <- canonicalCoreArtifact proof
+  case [row | row@(artifact,_,_) <- scopeInterfaces scope
+      , (exactUnit artifact,exactModule artifact) == key] of
+    [(artifact,_,packages)] -> Just (OriginalVersion owner (scopeProducerSha256 scope)
+      (canonicalCertificateSha256 proof) (canonicalCoreSha256 core)
+      (exactSha256 artifact) packages)
+    _ -> Nothing
+  where
+    key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+
 -- Absence of a defining capability remains unavailable. Advertised invalid
 -- artifacts are refusals; source lookup and frontend compilation never occur.
 recoverAdmittedFinalizedOriginal
   :: HscEnv -> ExactScope -> Module -> IO (Maybe AdmittedFinalizedOriginal)
-recoverAdmittedFinalizedOriginal env scope owner = case Map.lookup key (scopeModuleInterfaceProofs scope) of
+recoverAdmittedFinalizedOriginal env scope owner =
+  fmap (fmap snd) (recoverAdmittedFinalizedOriginalWithPrevious env scope owner Nothing)
+
+-- A retained body never suppresses current artifact validation. On a hit only
+-- immutable decoded Core is reused; proof, interface row and location belong
+-- to the current consuming scope, including relocated identical artifacts.
+recoverAdmittedFinalizedOriginalWithPrevious
+  :: HscEnv -> ExactScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
+  -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
+recoverAdmittedFinalizedOriginalWithPrevious env scope owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
   Just proof | isSourceOriginal (canonicalOrigin proof), Just _ <- canonicalCoreArtifact proof -> do
     either (ioError . userError) pure =<< revalidateExactScope env scope
     row@(artifact,_,_) <- case [row | row@(selected,_,_) <- scopeInterfaces scope
@@ -129,9 +162,13 @@ recoverAdmittedFinalizedOriginal env scope owner = case Map.lookup key (scopeMod
     let admission = ModuleInterfaceAdmission proof
         location = ms_location (exactInterfaceSummary env artifact)
     home <- admittedHomeInterface env admission owner
-    bytes <- readAdmittedCore admission
-    original <- decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
-    pure (Just (AdmittedFinalizedOriginal original proof row location))
+    version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInScope scope owner)
+    original <- case previous of
+      Just (oldVersion,old) | oldVersion == version -> pure (admittedOriginalModule old)
+      _ -> do
+        bytes <- readAdmittedCore admission
+        decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
+    pure (Just (version,AdmittedFinalizedOriginal original proof row location))
   _ -> pure Nothing
   where
     key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))

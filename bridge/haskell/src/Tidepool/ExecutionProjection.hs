@@ -10,6 +10,8 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
   , RawModuleProducts, projectRawOriginalHomeModuleProducts, forceRawModuleProducts
+  , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache
+  , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
@@ -40,6 +42,7 @@ module Tidepool.ExecutionProjection
   ) where
 
 import Control.Exception (evaluate)
+import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
@@ -102,7 +105,7 @@ import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Unit.State (lookupPackageName)
-import GHC.Unit.Types (Module, Unit, stringToUnit, toUnitId, unitString)
+import GHC.Unit.Types (Module, Unit, UnitId, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
 import Tidepool.ExecutionSchema
@@ -125,6 +128,7 @@ import Tidepool.HostBindingAuthority
   , hostBindingRepresentationJsonAuthority )
 import Tidepool.PreparedJson
   ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout, jsonValueLayoutForType )
+import System.Mem.StableName (StableName, makeStableName)
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -305,6 +309,48 @@ data RawModuleProducts = RawModuleProducts
   , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
   , rawExecutableProduct :: Either ProjectionError [ProjectedGroup]
   }
+
+-- Raw facts retain exact prepared compiler objects and projection authority.
+-- Home-unit classification and interface ownership also affect projection;
+-- neither a nominal owner nor a request identifier admits a hit.
+data OriginalProjectionEntry = OriginalProjectionEntry
+  (StableName PreparedModule) ProjectionContext (Set UnitId) Bool RawModuleProducts
+
+newtype OriginalProjectionCache = OriginalProjectionCache
+  (MVar (Map Module [OriginalProjectionEntry]))
+
+newOriginalProjectionCache :: IO OriginalProjectionCache
+newOriginalProjectionCache = OriginalProjectionCache <$> newMVar Map.empty
+
+copyOriginalProjectionCache :: OriginalProjectionCache -> IO OriginalProjectionCache
+copyOriginalProjectionCache (OriginalProjectionCache entries) =
+  OriginalProjectionCache <$> (readMVar entries >>= newMVar)
+
+evictOriginalProjectionMatching :: OriginalProjectionCache -> (Module -> Bool) -> IO ()
+evictOriginalProjectionMatching (OriginalProjectionCache entries) stale =
+  modifyMVar_ entries (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
+
+projectCachedOriginalHomeModuleProducts :: OriginalProjectionCache -> HscEnv
+  -> Map ModuleName ModIface -> ProjectionContext -> PreparedModule -> IO (Bool,RawModuleProducts)
+projectCachedOriginalHomeModuleProducts (OriginalProjectionCache entries) env interfaces context prepared = do
+  identity <- evaluate prepared >>= makeStableName
+  let owner = pmModule prepared
+      homes = hsc_all_home_unit_ids env
+      hasInterface = maybe False ((== owner) . mi_module) (Map.lookup (moduleName owner) interfaces)
+      normalized = context
+        { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
+        , projectionAuxiliaryRoots = Set.toAscList (Set.fromList (projectionAuxiliaryRoots context)
+            `Set.intersection` Set.fromList (Map.elems (preparedTopIdentityBindings [prepared]))) }
+      matches (OriginalProjectionEntry old oldContext oldHomes oldInterface _) =
+        identity == old && normalized == oldContext && homes == oldHomes && hasInterface == oldInterface
+  known <- Map.findWithDefault [] owner <$> readMVar entries
+  case [raw | entry@(OriginalProjectionEntry _ _ _ _ raw) <- known, matches entry] of
+    raw:_ -> pure (True,raw)
+    [] -> do
+      raw <- forceRawModuleProducts (projectRawOriginalHomeModuleProducts env interfaces context prepared)
+      modifyMVar_ entries (pure . Map.insertWith (++) owner
+        [OriginalProjectionEntry identity normalized homes hasInterface raw])
+      pure (False,raw)
 
 projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> PreparedModule -> RawModuleProducts
