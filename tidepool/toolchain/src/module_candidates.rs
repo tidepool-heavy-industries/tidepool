@@ -265,6 +265,7 @@ pub(crate) struct CandidateProduct {
 }
 
 impl CandidateProduct {
+    #[cfg(test)]
     fn decode_product(
         bytes: &[u8],
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
@@ -2094,21 +2095,44 @@ fn select_records_inner(
                     }
                     continue;
                 }
-                let Some(recovery_work) = bytes.len().checked_mul(32) else {
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
                     if omit_or_refuse_candidate(
                         &origin,
                         &mut selection_omissions,
                         &record.unit,
                         &record.module,
-                        CacheOfferOmission::OperationBudget,
+                        CacheOfferOmission::InvalidRecord,
                     ) {
                         return None;
                     }
                     continue;
+                }
+                let wire = match package_validation
+                    .inventory
+                    .decode_value(&bytes, crate::execution_source::GRAPH_BYTES_LIMIT)
+                {
+                    Ok(wire) => wire,
+                    Err(error) => {
+                        let reason = if operation_parse_budget_error(&error) {
+                            CacheOfferOmission::OperationBudget
+                        } else {
+                            CacheOfferOmission::InvalidRecord
+                        };
+                        if omit_or_refuse_candidate(
+                            &origin,
+                            &mut selection_omissions,
+                            &record.unit,
+                            &record.module,
+                            reason,
+                        ) {
+                            return None;
+                        }
+                        continue;
+                    }
                 };
                 if package_validation
                     .inventory
-                    .charge(recovery_work)
+                    .charge_value_copies(&wire, 2)
                     .is_err()
                 {
                     if omit_or_refuse_candidate(
@@ -2122,18 +2146,7 @@ fn select_records_inner(
                     }
                     continue;
                 }
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
-                    if omit_or_refuse_candidate(
-                        &origin,
-                        &mut selection_omissions,
-                        &record.unit,
-                        &record.module,
-                        CacheOfferOmission::InvalidRecord,
-                    ) {
-                        return None;
-                    }
-                    continue;
-                }
+                drop(wire);
                 let graph = match crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(bytes, digest) {
                     Ok(graph) => graph,
                     Err(_) => {
