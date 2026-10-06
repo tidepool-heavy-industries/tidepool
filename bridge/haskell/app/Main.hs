@@ -15,7 +15,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
   ( evaluate, try, throwIO, SomeException, Exception
-  , toException, IOException )
+  , toException, IOException, bracket )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub, isPrefixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
@@ -51,7 +51,8 @@ import Tidepool.Binders
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
   )
-import Tidepool.CompilerExecution (CompilerExecutor)
+import Tidepool.CompilerExecution (CompilerExecutor, compilerExecutionGrant, withCompilerExecutor)
+import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
@@ -229,6 +230,20 @@ runWorkerInvocation compilerScope caches rawWorkerRequest = do
 runParsedInvocation
   :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
 runParsedInvocation compilerScope caches parsedWorkerRequest = do
+  grant <- either fail pure (compilerExecutionGrant (requestCompilerJobs parsedWorkerRequest))
+  bracket getNumCapabilities setNumCapabilities $ \_previous -> do
+    setNumCapabilities (requestCompilerCapabilities parsedWorkerRequest)
+    withCompilerExecutor grant $ \executor -> do
+      let scope = compilerScope
+            { scopedCompile = \selection -> scopedCompile compilerScope
+                (WithCompilerExecution grant executor selection)
+            , scopedExecutor = Just executor
+            }
+      runGrantedInvocation scope (caches {recoveryExecutor=Just executor}) parsedWorkerRequest
+
+runGrantedInvocation
+  :: CompilerScope -> RecoveryCaches -> WorkerRequest -> IO ExitCode
+runGrantedInvocation compilerScope caches parsedWorkerRequest = do
   -- Read once per invocation (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there.
