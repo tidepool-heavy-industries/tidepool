@@ -3103,7 +3103,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       inputs = PreparedModuleCompletionInputs sourceOwners siblings externalOriginals reuseContext
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
-              lowerTasks preparedReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
+              lowerTasks preparedNormallyReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
                 let summariesByName = Map.fromList [(ms_mod_name summary,summary) | summary <- summaries]
                     lower input = do
                       forM_ (Map.lookup (fst input) summariesByName) $ \summary -> case snd input of
@@ -3116,7 +3116,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           let reason | disabled = CacheDisabled
                                      | otherwise = case cached >>= payloadProduct . gmePayload of
                                          Just product' | Just entry <- cached
-                                           , not (preparedReusable entry product') -> ChangedAuthority
+                                           , not (preparedNormallyReusable entry product') -> ChangedAuthority
                                          Just _ -> ChangedDependency
                                          Nothing -> Absent
                           reuseEvent PreparedBody (if disabled then ReuseDisabled else ReuseMiss) reason summary
@@ -3179,7 +3179,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       task <- acquireFinalized siteEnvironment loaded
                       pure (Just (name, Left task))
               completed <- acquireCompletion observations' tasks
-              preparedResults <- lowerTasks preparedReusable completed tasks
+              preparedResults <- lowerTasks preparedNormallyReusable completed tasks
               let preparedByName = Map.fromList (zip (map fst tasks) preparedResults)
                   collectPrepared loaded = do
                     let summary = loadedSummary loaded
@@ -3297,7 +3297,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         task <- acquireFinalized siteEnvironment (payloadLoaded summary (gmePayload entry))
                         pure (Just (name, Left task))
               completed <- acquireCompletion observations' tasks
-              preparedResults <- lowerTasks preparedReusable completed tasks
+              preparedResults <- lowerTasks preparedNormallyReusable completed tasks
               let preparedByName = Map.fromList (zip (map fst tasks) preparedResults)
                   prepareReachable loaded = case preparation of
                     CheckOnly -> pure Nothing
