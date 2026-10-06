@@ -189,6 +189,9 @@ Keep detailed design references out of always-loaded instructions.
 
 ## Verification
 
+- Keep maintained property tests at component and component-cluster boundaries,
+  with independent oracles, shrinking and observable coverage. See
+  [property testing](docs/property-testing.md); end-to-end gates complement these tests.
 - Compile every changed or directly affected target and run the smallest tests
   that prove its behavior, including meaningful refusal and cleanup controls.
   Coordinate build/test capacity through the execution owner using actual
