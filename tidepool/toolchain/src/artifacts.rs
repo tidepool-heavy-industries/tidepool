@@ -6475,9 +6475,19 @@ mod module_product_tests {
                 let admission = compiled.exact_source_admission.as_ref().unwrap();
                 assert!(!admission.evidence.cache_safe && !admission.evidence.selection_complete);
                 assert!(admission.evidence.revalidate(source).is_ok());
-                let original = admission
-                    .original_execution_context(&compiled.artifact_view)
-                    .unwrap();
+                let request = Arc::new(context.clone())
+                    .prepare_compilation(
+                        &root.path().join("original-execution-scope"),
+                        compiled.producer_identity.as_ref().unwrap(),
+                    )
+                    .unwrap()
+                    .with_source_search_context(&include);
+                let original = crate::declaration_context::ExactProductAdmission {
+                    request: &request,
+                    source: admission,
+                }
+                .original_execution_context(&compiled.artifact_view)
+                .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(
                     crate::declaration_context::RetainedTemplateImports::capture(
