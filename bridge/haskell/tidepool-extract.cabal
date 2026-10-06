@@ -511,6 +511,7 @@ test-suite recovered-body-test
   hs-source-dirs:   test-prepared-stg test
   build-depends:
     base >= 4.20 && < 5,
+    containers,
     directory,
     filepath,
     process,

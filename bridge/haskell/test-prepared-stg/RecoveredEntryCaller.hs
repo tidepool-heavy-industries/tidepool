@@ -1,7 +1,16 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE ConstraintKinds #-}
 module RecoveredEntryCaller where
 
 import Control.Monad.Freer.Internal (Arrs, Eff, qApp)
+
+data Dict constraint where
+  Dict :: constraint => Dict constraint
+
+{-# OPAQUE applicativeDictionary #-}
+applicativeDictionary :: Dict (Applicative (Eff '[]))
+applicativeDictionary = Dict
 
 {-# OPAQUE caller #-}
 caller :: Arrs '[] Int Int -> Int -> Eff '[] Int

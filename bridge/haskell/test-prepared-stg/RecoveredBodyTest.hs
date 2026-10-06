@@ -8,11 +8,18 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (evaluate)
-import Data.List (intercalate)
+import Data.List (intercalate, sortOn)
+import Data.IORef (newIORef)
+import Data.Set qualified as Set
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC
 import GHC.Driver.Env (hsc_HPT)
+import GHC.IfaceToCore (tcTopIfaceBindings)
+import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
+import GHC.Types.TypeEnv (emptyTypeEnv)
+import GHC.Unit.Module.ModIface (mi_extra_decls)
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Home.ModInfo (lookupHpt)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import GHC.Core (Bind(..), bindersOfBinds, maybeUnfoldingTemplate)
@@ -29,7 +36,7 @@ import GHC.Types.Id (idName, idArity, realIdUnfolding)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, varType)
-import GHC.Utils.Outputable (ppr, showSDocUnsafe)
+import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
@@ -46,6 +53,7 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), ValueRef(..), WireProgram(..) )
 import Tidepool.FatIface
   ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact
+  , readExactInterface
   , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
@@ -66,12 +74,93 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "recovered-body"
   [ testCase "original recovered entry contracts" assertRecoveredEntryContracts
+  , testCase "original recovered dictionary ordering" assertRecoveredDictionaryOrdering
   , testCase "original recovered body closure" assertAllRecoveredBodies
   , testCase "owner interface cache reuse eviction and retry" $ do
       root <- getCurrentDirectory
       libdir <- trim <$> readProcessGhc ["--print-libdir"]
       assertSemigroupSubset root libdir
   ]
+
+-- Compare the same genuine defining body set, changing only group order.
+assertRecoveredDictionaryOrdering :: IO ()
+assertRecoveredDictionaryOrdering = do
+  root <- getCurrentDirectory
+  libdir <- trim <$> readProcessGhc ["--print-libdir"]
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (updOptLevel 0 flags)
+      { importPaths = [root </> "test-prepared-stg", root </> "lib"] ++ importPaths flags
+      , backend = noBackend, ghcLink = NoLink }
+    target <- guessTarget (root </> "test-prepared-stg" </> "RecoveredEntryCaller.hs") Nothing Nothing
+    setTargets [target]
+    _ <- load LoadAllTargets
+    summary <- getModSummary (mkModuleName "RecoveredEntryCaller")
+    parsed <- parseModule summary
+    typed <- typecheckModule parsed
+    desugared <- desugarModule typed
+    env <- getSession
+    (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
+    home <- maybe (fail "dictionary fixture has no finalized home interface") pure
+      (lookupHpt (hsc_HPT env) (ms_mod_name summary))
+    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+    let context = ProjectionContext
+          { projectionProfile = Text.pack "recovered-dictionary-order"
+          , projectionToolchain = Text.pack "ghc-9.12.2"
+          , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
+          , projectionRetainedGenerations = mempty
+          , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredEntryCaller")
+              (Text.pack "value") (Text.pack "applicativeDictionary") Nothing
+          , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
+          , projectionTimeAuthority = Nothing, projectionJsonAuthority = Nothing
+          , projectionTextUnit = Nothing }
+    cache <- liftIO newFatIfaceCache
+    owners <- liftIO newOwnerInterfaceCache
+    bodies <- liftIO newPreparedBodyCache
+    closure <- liftIO $ recoverPreparedClosure env cache owners bodies context [prepared]
+    recovered <- case [modul | modul <- closureModules closure
+          , moduleNameString (moduleName (pmModule modul)) == "Control.Monad.Freer.Internal"] of
+      [modul] -> pure modul
+      _ -> fail ("genuine dictionary owner was not recovered: " ++ show (closureFailures closure))
+    let owner = pmModule recovered
+        wanted = Set.fromList [varName identifier
+          | (Stg.StgTopLifted binding, _) <- pmBindings recovered
+          , (identifier, _) <- stgPairs binding]
+    (iface, _) <- liftIO $ readExactInterface env owner
+      >>= either (const (fail "dictionary defining interface is unreadable")) pure
+    ifaceBindings <- maybe (fail "dictionary owner has no canonical fat Core") pure (mi_extra_decls iface)
+    original <- liftIO $ initIfaceCheck (text "dictionary order oracle") env $ do
+      scope <- liftIO $ newIORef emptyTypeEnv
+      initIfaceLcl owner (text "dictionary order oracle") NotBoot (tcTopIfaceBindings scope ifaceBindings)
+    let selected = [group | group <- original
+          , any ((`Set.member` wanted) . varName) (bindersOfBinds [group])]
+        symbolOrder = sortOn (map (occNameString . nameOccName . varName) . bindersOfBinds . pure) selected
+    liftIO $ do
+      assert (any ((== "$fApplicativeEff") . occurrence) (bindersOfBinds selected))
+        "authored dictionary did not retain its genuine Applicative instance"
+      assert (any ((== "$fFunctorEff") . occurrence) (bindersOfBinds selected))
+        "completed dictionary closure omitted its strict Functor superclass"
+      putStrLn ("production recovered dictionary shapes: " ++ shapes recovered)
+      putStrLn ("defining group order: " ++ show (map (map occurrence . bindersOfBinds . pure) selected))
+      canonicalCache <- newPreparedBodyCache
+      canonical <- prepareRecoveredBodies env owners canonicalCache owner selected >>= either (fail . show) pure
+      sortedCache <- newPreparedBodyCache
+      sorted <- prepareRecoveredBodies env owners sortedCache owner symbolOrder >>= either (fail . show) pure
+      putStrLn ("canonical dictionary shapes: " ++ shapes canonical)
+      putStrLn ("symbol-sorted dictionary shapes: " ++ shapes sorted)
+      assert (isConstructor "$fApplicativeEff" canonical)
+        "canonical defining order failed the genuine Applicative constructor entry"
+      assert (isConstructor "$fApplicativeEff" recovered)
+        "production recovered Applicative dictionary is not its canonical constructor entry"
+  where
+    occurrence = occNameString . nameOccName . varName
+    stgPairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
+    stgPairs (Stg.StgRec pairs) = pairs
+    pairs modul = [pair | (Stg.StgTopLifted binding, _) <- pmBindings modul, pair <- stgPairs binding]
+    isConstructor wanted modul = any (\(identifier, rhs) -> occurrence identifier == wanted
+      && case rhs of Stg.StgRhsCon{} -> True; _ -> False) (pairs modul)
+    shapes modul = intercalate "; " [occurrence identifier ++ "=" ++ showSDocUnsafe (ppr rhs)
+      | (identifier, rhs) <- pairs modul, occurrence identifier `elem` ["$fApplicativeEff", "$fFunctorEff"]]
 
 -- Both controls use genuine finalized Core and package interface declarations.
 -- Package decoding and optimization can change qApp's Core shape independently
