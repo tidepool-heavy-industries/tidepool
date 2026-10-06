@@ -806,7 +806,10 @@ impl HostedTestRuntime {
                 assembled = &mut assembly => assembled.map_err(|_| StartupFailure::AssemblyObserverClosed)?,
                 result = &mut outcome => {
                     let result = result.unwrap_or_else(|error| Err(error.to_string()));
-                    let detail = format!("production host exited during startup: {result:?}");
+                    let detail = match &result {
+                        Err(error) => format!("production host failed during startup: {error}"),
+                        Ok(()) => "production host exited during startup: Ok(())".into(),
+                    };
                     exited_during_startup = Some(result);
                     return Err(StartupFailure::HostExited { message: detail });
                 },
