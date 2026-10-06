@@ -73,7 +73,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "recovered-body"
-  [ testCase "original recovered entry contracts" assertRecoveredEntryContracts
+  [ testCase "original recovered hsc package body" assertRecoveredExecutionStackBody
+  , testCase "original recovered entry contracts" assertRecoveredEntryContracts
   , testCase "original recovered dictionary defining body" assertRecoveredDictionaryBody
   , testCase "original recovered body closure" assertAllRecoveredBodies
   , testCase "owner interface cache reuse eviction and retry" $ do
@@ -81,6 +82,69 @@ tests = testGroup "recovered-body"
       libdir <- trim <$> readProcessGhc ["--print-libdir"]
       assertSemigroupSubset root libdir
   ]
+
+-- The pinned boot-library producer must retain original Core from hsc2hs
+-- inputs too. This pure worker is demanded by ordinary error rendering.
+assertRecoveredExecutionStackBody :: IO ()
+assertRecoveredExecutionStackBody = do
+  root <- getCurrentDirectory
+  prepared <- runPipelineSelected PreparedStg
+    (root </> "test-prepared-stg" </> "RecoveredExecutionStackCaller.hs") []
+  let env = prHscEnv (pprPipelineResult prepared)
+      home = pprModules prepared
+      context = ProjectionContext
+        { projectionProfile = Text.pack "recovered-hsc-body"
+        , projectionToolchain = Text.pack "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredExecutionStackCaller")
+            (Text.pack "value") (Text.pack "caller") Nothing
+        , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing, projectionJsonAuthority = Nothing
+        , projectionTextUnit = Nothing }
+  owner <- case [modul | identifier <- preparedTargetReferences context home
+      , Just modul <- [nameModule_maybe (varName identifier)]
+      , moduleNameString (moduleName modul) == "GHC.Internal.ExecutionStack.Internal"] of
+    first : _ -> pure first
+    [] -> fail "authored stack renderer did not demand its genuine package owner"
+  cache <- newFatIfaceCache
+  owners <- newOwnerInterfaceCache
+  bodies <- newPreparedBodyCache
+  _ <- prepareRecoveredBodies env owners bodies owner [] >>= either (fail . show) pure
+  declaring <- lookupOwnerInterface owners owner
+  worker <- case [identifier | Just defining <- [declaring]
+      , identifier <- ownerInterfaceEntries defining
+      , occurrence identifier == "$wshowLocation"] of
+    [identifier] -> pure identifier
+    _ -> fail "defining interface lost its real stack-location worker"
+  required <- case importedIdLFInfo worker of
+    LFReEntrant _ arity _ _ -> pure arity
+    _ -> fail "defining stack-location worker is not callable"
+  assert (required == 4) "pinned stack-location worker changed its entry contract"
+  exact <- recoverExactBody env cache worker
+  case exact of
+    ExactBody defining _ -> assert (defining == owner) "hsc body changed its defining owner"
+    MissingExactBody _ reason -> fail ("hsc defining Core is absent: " ++ show reason)
+    BodyInterfaceFailure _ reason -> fail ("hsc defining interface is unreadable: " ++ reason)
+    BodyTypeMismatch{} -> fail "hsc defining body type is incompatible"
+    UnsupportedBodyCapability{} -> fail "pure stack renderer has unsupported body capability"
+  closure <- recoverPreparedClosure env cache owners bodies context home
+  assert (null (closureFailures closure))
+    ("hsc package closure failed: " ++ show (closureFailures closure))
+  program <- either (fail . ("hsc native projection failed: " ++) . show) pure
+    (projectPreparedTarget context (closureModules closure))
+  case [signature | group <- programBindings program, top <- groupItems group
+      , TopBinding symbol (HeapBinding _ (Function (SignatureId index) _ _ _)) <- [top]
+      , symbolModule symbol == Text.pack "GHC.Internal.ExecutionStack.Internal"
+      , symbolOccurrence symbol == Text.pack "$wshowLocation"
+      , signature : _ <- [drop (fromIntegral index) (programSignatures program)]] of
+    [signature] -> assert (signatureArguments signature == replicate required LiftedRefRep)
+      "native stack-location worker lost its defining callable contract"
+    _ -> fail "native stack renderer did not emit its demanded defining worker"
+  where
+    occurrence = occNameString . nameOccName . varName
+    groupItems (NonRecursive top) = [top]
+    groupItems (Recursive tops) = tops
 
 -- Optimizer DFun recipes need not preserve an exported allocation/entry shape.
 -- The defining fat body does, independently of discovery order.
