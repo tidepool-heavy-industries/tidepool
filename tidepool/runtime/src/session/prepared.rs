@@ -8747,8 +8747,25 @@ pub(super) mod tests {
                 assert!(engine.release(answer));
             }
             assert!(engine.release(value));
+            assert_eq!(engine.handle_count(), 0);
+            assert_eq!(engine.stowed_roots_count(), 0);
+            assert_eq!(engine.code_export_count(), 2);
+            assert!(engine
+                .code_exports
+                .contains_key(&testing::identity("Fixture", "entry")));
+            assert!(engine
+                .code_exports
+                .contains_key(&testing::identity("Fixture", PREPARED_RESUME_TARGET)));
+            assert_eq!(engine.residency().root_cells, 2);
+            // Bootstrap's exports retain their own roots after result custody ends.
+            for export in std::mem::take(&mut engine.code_exports).into_values() {
+                assert_eq!(export.program, program);
+                assert!(engine.release(export.handle));
+            }
+            assert!(engine.unpin(program));
             engine.quiesce_and_collect_now().unwrap();
             assert_eq!(engine.residency().root_cells, 0);
+            assert_eq!(engine.residency().programs, 0);
         }
     }
 
@@ -8806,10 +8823,23 @@ pub(super) mod tests {
         })
         .join()
         .unwrap();
-        assert_eq!(engine.residency().root_cells, 0);
+        assert_eq!(engine.handle_count(), 0);
+        assert_eq!(engine.parked_count(), 0);
+        assert_eq!(engine.stowed_roots_count(), 0);
+        assert_eq!(engine.code_export_count(), 1);
+        assert!(engine.code_exports.contains_key(&producer_identity()));
+        assert_eq!(engine.residency().root_cells, 1);
         assert!(engine.handle_slot(handle.raw()).is_none());
         assert!(!engine.release(handle));
+        // The native export is separate from the explicit transferred handles.
+        for export in std::mem::take(&mut engine.code_exports).into_values() {
+            assert_eq!(export.program, program);
+            assert!(engine.release(export.handle));
+        }
+        assert!(engine.unpin(program));
         engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().root_cells, 0);
+        assert_eq!(engine.residency().programs, 0);
     }
 
     #[test]
