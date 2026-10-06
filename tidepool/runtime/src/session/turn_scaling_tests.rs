@@ -2363,6 +2363,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         .compile_view_in(public)
         .unwrap()
         .exact_declaration_context()
+        .cloned()
         .expect("published binding retains its exact original support");
     eprintln!(
         "quoted-template retained inventory: {:?}; lexical: {:?}",
@@ -2430,6 +2431,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         .compile_view_in(public)
         .unwrap()
         .exact_declaration_context()
+        .cloned()
         .unwrap();
     assert!(context
         .lexical_graph()
