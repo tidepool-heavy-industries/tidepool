@@ -4,11 +4,12 @@ module ExecutionProjectionTest
   ( projectProjectionContract
   , verifyRetainedImportProjection
   , verifyRetainedImportProjectionExposed
+  , verifyUnboxedSumJoinProjection
   , verifyHierarchicalTargetModule
   ) where
 
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.ByteString qualified as BS
 import Data.List (nub)
 import Data.Word (Word64)
@@ -24,7 +25,7 @@ import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.DataCon (dataConName, dataConRepArity)
 import GHC.Core.TyCon (tyConName)
 import GHC.Types.Basic (TypeOrConstraint(TypeLike, ConstraintLike))
-import GHC.Types.Literal (Literal(..))
+import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Id (idType, isDataConWorkId_maybe)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -34,6 +35,7 @@ import GHC.Unit.Types (stringToUnit)
 import GHC.Stg.Syntax
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
+import System.Process (readProcess)
 import Tidepool.PreparedStg (pmModule, pmBindings)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.ExecutionProjection
@@ -1576,3 +1578,98 @@ verifyHierarchicalTargetModule = do
     Left failure -> ioError (userError
       ("hierarchical target module projection failed: " <> show failure))
     Right _ -> pure ()
+
+-- Compile actual sum-tail joins: GHC's unariser introduces signed tag
+-- literals into unsigned join slots. Ordinary signed arguments remain signed.
+verifyUnboxedSumJoinProjection :: IO ()
+verifyUnboxedSumJoinProjection = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/UnboxedSumJoin.hs" ["test-prepared-stg"]
+  oracle <- readProcess "ghc"
+    ["-v0", "test-prepared-stg/UnboxedSumJoin.hs", "-e",
+     "(map sumJoin [True,False], map signedJoin [True,False])"] ""
+  unless (oracle == "([6,9],[-1,2])\n") $
+    fail ("unboxed join GHC oracle changed: " ++ oracle)
+  forM_ [("sumJoin", WordRep 64), ("signedJoin", IntRep 64)] $ \(entry, expectedRep) -> do
+    let context = ProjectionContext
+          { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2"
+          , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+          , projectionRetainedGenerations = mempty, projectionCurrentOriginals = mempty
+          , projectionEntry = SymbolIdentity "main" "UnboxedSumJoin" "value" entry Nothing
+          , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
+          , projectionTimeAuthority = Nothing, projectionJsonAuthority = Nothing
+          , projectionTextUnit = Nothing }
+    when (entry == "sumJoin") $ forM_ [NarrowJoinInteger, FloatingJoinArgument, LiftedJoinArgument] $ \fault -> do
+      let altered = map (faultJoinLiterals fault) (pprModules prepared)
+      case projectPreparedTarget context altered of
+        Left InvalidPreparedRepresentation{} -> pure ()
+        other -> fail ("incompatible join argument was not refused: " ++ show (fault,other))
+    program <- either (fail . show) pure (projectPreparedTarget context (pprModules prepared))
+    let signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
+        tops (NonRecursive item) = [item]
+        tops (Recursive items) = items
+        heapBodies (HeapBinding _ rhs) = case rhs of
+          Function _ _ _ body -> [body]; Thunk _ _ _ body -> [body]; _ -> []
+        collect expression = case expression of
+          LetJoins group body -> concatMap join (tops group) ++ collect body
+          Let group body -> concatMap (concatMap collect . heapBodies) (tops group) ++ collect body
+          Case scrutinee _ _ _ alternatives -> collect scrutinee
+            ++ concatMap (\(Alternative _ _ body) -> collect body) alternatives
+          Jump identity arguments -> [(identity, arguments)]
+          _ -> []
+        join (JoinBinding _ _ _ body) = collect body
+        joins expression = case expression of
+          LetJoins group body -> [(identity, signatureAt signature)
+            | JoinBinding identity signature _ _ <- tops group]
+            ++ concatMap (\(JoinBinding _ _ _ child) -> joins child) (tops group) ++ joins body
+          Let group body -> concatMap (concatMap joins . heapBodies) (tops group) ++ joins body
+          Case scrutinee _ _ _ alternatives -> joins scrutinee
+            ++ concatMap (\(Alternative _ _ body) -> joins body) alternatives
+          _ -> []
+        bodies = concat [heapBodies binding | group <- programBindings program,
+          TopBinding _ binding <- tops group]
+        signatures = Map.fromList (concatMap joins bodies)
+        literalJumps = [(literal, rep) | body <- bodies, (identity, arguments) <- collect body
+          , Signature parameterReps _ <- maybe [] pure (Map.lookup identity signatures)
+          , (Scalar literal, rep) <- zip arguments parameterReps]
+        literalRep (IntLiteral bits _) = IntRep bits
+        literalRep (WordLiteral bits _) = WordRep bits
+        literalRep (FloatLiteral bits _) = FloatRep bits
+        literalRep BytesLiteral{} = AddressRep
+        literalRep NullAddressLiteral = AddressRep
+    unless (length literalJumps >= 2 && all (\(literal,rep) ->
+      literalRep literal == rep && rep == expectedRep) literalJumps) $
+      fail ("compiled join literal conventions differ: " ++ show (entry,literalJumps))
+
+-- Faults alter only actual compiler-produced argument occurrences, retaining
+-- their join's original parameter authority. Narrow integers, floating point,
+-- and existing lifted references cannot inherit the integer tag convention.
+data JoinArgumentFault = NarrowJoinInteger | FloatingJoinArgument | LiftedJoinArgument
+  deriving (Eq, Show)
+
+faultJoinLiterals :: JoinArgumentFault -> PreparedModule -> PreparedModule
+faultJoinLiterals fault prepared = prepared
+  { preparedBindings = [(top binding, facts) | (binding,facts) <- pmBindings prepared] }
+  where
+    top (StgTopLifted binding) = StgTopLifted (changeBinding binding)
+    top binding = binding
+    changeBinding (StgNonRec binder rhs) = StgNonRec binder (changeRhs rhs)
+    changeBinding (StgRec members) = StgRec [(binder,changeRhs rhs) | (binder,rhs) <- members]
+    changeRhs (StgRhsClosure ext ccs update args body ty) =
+      StgRhsClosure ext ccs update args (change body) ty
+    changeRhs rhs = rhs
+    change (StgApp function (StgLitArg LitNumber{} : rest@(_:_))) =
+      StgApp function (replacement rest : rest)
+    change (StgCase scrutinee binder kind alternatives) =
+      StgCase (change scrutinee) binder kind
+        [alternative {alt_rhs = change (alt_rhs alternative)} | alternative <- alternatives]
+    change (StgLet ext binding body) = StgLet ext (changeBinding binding) (change body)
+    change (StgLetNoEscape ext binding body) = StgLetNoEscape ext (changeBinding binding) (change body)
+    change (StgTick tick body) = StgTick tick (change body)
+    change expression = expression
+    replacement rest = case fault of
+      NarrowJoinInteger -> StgLitArg (LitNumber LitNumInt32 1)
+      FloatingJoinArgument -> StgLitArg (LitFloat 1)
+      LiftedJoinArgument -> case [argument | argument@StgVarArg{} <- rest] of
+        argument : _ -> argument
+        [] -> error "sum join fault lacks a genuine lifted payload reference"

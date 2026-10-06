@@ -183,7 +183,7 @@ data EntryContractAdmission = FinalEntryContracts | DeferredEntryContracts
 
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
-  , values :: VarEnv ValueId, joins :: VarEnv JoinId
+  , values :: VarEnv ValueId, joins :: VarEnv (JoinId, [RuntimeRep])
   , entryArities :: VarEnv Int
   , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
   , implicitTops :: [TopBinding]
@@ -2233,7 +2233,10 @@ projectExpr :: ResultContract -> CgStgExpr -> P Expr
 projectExpr expected (StgApp function args) = do
   knownJoins <- gets joins
   case lookupVarEnv knownJoins function of
-    Just join -> Jump join <$> mapM projectArg args
+    Just (join, parameterReps) -> do
+      unless (length args == length parameterReps) $
+        failShape "join argument count differs from its prepared parameters"
+      Jump join <$> sequence (zipWith projectJoinArg parameterReps args)
     Nothing -> case args of
       [] -> do
         deadEnd <- deadEndApplicationSaturated function args
@@ -2387,11 +2390,12 @@ projectJoinGroup (StgNonRec binder rhs) = do
   registerRhsEntryArity binder rhs
   identity <- freshJoin
   projected <- projectJoin identity binder rhs
-  modify' (\current -> current { joins = extendVarEnv (joins current) binder identity })
+  parameterReps <- joinArgumentReps binder rhs
+  modify' (\current -> current { joins = extendVarEnv (joins current) binder (identity, parameterReps) })
   pure (NonRecursive projected)
 projectJoinGroup (StgRec pairs) = do
   mapM_ (uncurry registerRhsEntryArity) pairs
-  identities <- mapM (bindJoin . fst) pairs
+  identities <- mapM (uncurry bindJoin) pairs
   Recursive <$> forM (zip identities pairs) (\(identity, (binder, rhs)) ->
     projectJoin identity binder rhs)
 
@@ -2409,6 +2413,24 @@ projectArg (StgVarArg binder) = do
   reps <- repsForType (varType binder)
   if null reps then pure Void else Ref <$> projectReference binder
 projectArg (StgLitArg literal) = projectLiteralAtom literal
+
+-- GHC unarises sum tags as signed literals while join parameters use
+-- the sum's unsigned slot convention. The actual prepared join determines
+-- that convention; only same-width integer literals change their wire tag.
+-- Variable references and other representations keep their typed identity.
+projectJoinArg :: RuntimeRep -> StgArg -> P Atom
+projectJoinArg expected argument = do
+  actual <- argumentRepsForType $ case argument of
+    StgVarArg binder -> varType binder
+    StgLitArg literal -> literalType literal
+  atom <- projectArg argument
+  case (expected, atom) of
+    (WordRep bits, Scalar (IntLiteral width bytes))
+      | bits == width -> pure (Scalar (WordLiteral width bytes))
+    (IntRep bits, Scalar (WordLiteral width bytes))
+      | bits == width -> pure (Scalar (IntLiteral width bytes))
+    _ | actual == [expected] -> pure atom
+      | otherwise -> failRepresentation "join argument differs from its prepared parameter representation"
 
 projectReference :: Id -> P ValueRef
 projectReference binder | Just kind <- wiredInErrorKind binder =
@@ -2599,11 +2621,18 @@ freshValue = do
   modify' (\current -> current { nextValue = nextValue current + 1 })
   pure identity
 
-bindJoin :: Id -> P JoinId
-bindJoin binder = do
+bindJoin :: Id -> CgStgRhs -> P JoinId
+bindJoin binder rhs = do
+  parameterReps <- joinArgumentReps binder rhs
   identity <- freshJoin
-  modify' (\current -> current { joins = extendVarEnv (joins current) binder identity })
+  modify' (\current -> current { joins = extendVarEnv (joins current) binder (identity, parameterReps) })
   pure identity
+
+joinArgumentReps :: Id -> CgStgRhs -> P [RuntimeRep]
+joinArgumentReps _ (StgRhsClosure _ _ JumpedTo parameters _ _) =
+  concat <$> mapM (argumentRepsForType . varType) parameters
+joinArgumentReps binder _ = failShape
+  ("let-no-escape binding lacks JumpedTo form: " <> symbolText (idSymbol "join" binder))
 
 freshJoin :: P JoinId
 freshJoin = do

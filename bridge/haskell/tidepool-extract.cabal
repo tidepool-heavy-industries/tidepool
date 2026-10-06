@@ -17,6 +17,7 @@ extra-source-files:
   test-prepared-stg/builtin-identity/Data/Text/Internal.hs
   test-prepared-stg/builtin-identity/GHC/Num/Integer.hs
   test-prepared-stg/builtin-identity/GHC/Num/Natural.hs
+  test-prepared-stg/UnboxedSumJoin.hs
   test-prepared-stg/RepPoly.hs
   test-prepared-stg/RepPolyImport.hs
   test-prepared-stg/ModuleProductA.hs
