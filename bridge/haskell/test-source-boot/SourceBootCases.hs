@@ -5877,13 +5877,13 @@ lazyHomePackageInstances = withScratch $ \work -> do
     , "instance Show Hidden where show _ = \"private home\""
     , "request :: Member Signal effects => Eff effects ()"
     , "request = send Signal"
+    , "type SignalProgram = Eff '[Signal] ()"
     ]
   writeFile consumerSource $ unlines
     [ "{-# LANGUAGE DataKinds #-}"
     , "module LazyMemberConsumer where"
-    , "import Control.Monad.Freer (Eff)"
     , "import LazyMemberHelper"
-    , "__result :: Eff '[Signal] ()"
+    , "__result :: SignalProgram"
     , "__result = request"
     ]
   -- This first compile proves the ordinary source/package instance path.
