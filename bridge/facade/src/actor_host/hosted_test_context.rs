@@ -1149,6 +1149,53 @@ pub(super) fn cell_output_matches(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn scenario_panic_is_reported_before_semantic_cleanup_is_confirmed() {
+        let semantic_cleanup = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_effect = semantic_cleanup.clone();
+        let mut reports = Vec::new();
+        let (scenario, cleanup, report_errors) = settle_scenario(
+            async { panic!("injected post-start assertion failure") },
+            async move {
+                cleanup_effect.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            |scenario, cleanup| {
+                reports.push((scenario.clone(), cleanup.clone()));
+                Ok(())
+            },
+        )
+        .await;
+
+        let payload = scenario.expect_err("the deliberate scenario failure is preserved");
+        assert_eq!(
+            panic_message(payload.as_ref()),
+            "injected post-start assertion failure"
+        );
+        assert_eq!(cleanup, Ok(()));
+        assert!(semantic_cleanup.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(report_errors.is_empty());
+        assert_eq!(
+            reports,
+            vec![
+                (
+                    ScenarioOutcome::Failed {
+                        phase: ScenarioPhase::Scenario,
+                        message: "injected post-start assertion failure".into(),
+                    },
+                    CleanupOutcome::Unknown,
+                ),
+                (
+                    ScenarioOutcome::Failed {
+                        phase: ScenarioPhase::Scenario,
+                        message: "injected post-start assertion failure".into(),
+                    },
+                    CleanupOutcome::Confirmed,
+                ),
+            ]
+        );
+    }
+
     async fn terminated_host(panic: bool) -> (HostTermination, watch::Receiver<bool>) {
         let (stop, stopping) = watch::channel(false);
         let (complete, outcome) = oneshot::channel();

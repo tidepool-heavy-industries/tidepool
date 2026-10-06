@@ -875,818 +875,819 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     )
     .await
     .expect("production embedded host starts");
-    host.input("Exercise the captured checkpoint scenario.")
-        .await
-        .unwrap();
-    let transport = prepared_transport
-        .lock()
-        .take()
-        .expect("scripted Responses transport");
-    let campaign = host.context.clone();
-    let actor = campaign.actor.identity();
-    let runtime = Arc::clone(&host.runtime);
-    let address = host.address;
-    let api = format!("http://{address}/api");
-    let origin = format!("https://{address}");
-    let root_origin = transport.root_origin.clone();
-    assert_eq!(
-        root_origin,
-        ConversationIdentity::Embedded {
-            run: runtime_namespace(&campaign.config.run_directory.path()),
-            actor: AgentPath("/root".into()),
-            incarnation: actor.incarnation.0.to_string(),
-        }
-    );
-    let scheduler = runtime.scheduler();
-    let mut setup_settlements = transport.setup_settlements.lock().take().unwrap();
-    campaign
-        .while_root_live(
-            "scope setup provider call",
-            tokio::time::timeout(
-                Duration::from_secs(60),
-                transport.scope_setup_issued.notified(),
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"))
-        .expect("root provider did not issue its original scope setup operation");
-    let setup_operation = transport.operation(&root_origin, "captured-scope-setup");
-    let setup = campaign
-        .while_root_live(
-            "scope setup operation settlement",
-            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-                loop {
-                    let settled = setup_settlements
-                        .recv()
-                        .await
-                        .expect("scope setup settlement observation must remain available");
-                    if settled == setup_operation {
-                        break;
-                    }
+    let shutdown_parked_check = Arc::new(AtomicBool::new(false));
+    let shutdown_parked_check_result = shutdown_parked_check.clone();
+    let forest_after_shutdown = Arc::clone(&host.context.forest);
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Exercise the captured checkpoint scenario.")
+                .await
+                .unwrap();
+            let transport = prepared_transport
+                .lock()
+                .take()
+                .expect("scripted Responses transport");
+            let campaign = host.context.clone();
+            let actor = campaign.actor.identity();
+            let runtime = Arc::clone(&host.runtime);
+            let address = host.address;
+            let api = format!("http://{address}/api");
+            let origin = format!("https://{address}");
+            let root_origin = transport.root_origin.clone();
+            assert_eq!(
+                root_origin,
+                ConversationIdentity::Embedded {
+                    run: runtime_namespace(&campaign.config.run_directory.path()),
+                    actor: AgentPath("/root".into()),
+                    incarnation: actor.incarnation.0.to_string(),
                 }
-                embedded_operation(
-                    &runtime,
-                    &setup_operation,
-                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            );
+            let scheduler = runtime.scheduler();
+            let mut setup_settlements = transport.setup_settlements.lock().take().unwrap();
+            campaign
+                .while_root_live(
+                    "scope setup provider call",
+                    tokio::time::timeout(
+                        Duration::from_secs(60),
+                        transport.scope_setup_issued.notified(),
+                    ),
                 )
                 .await
-                .unwrap()
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"))
-        .expect("original scope setup operation did not settle within its cold budget");
-    assert_committed_haskell_value(&setup, "True");
-    campaign
-        .while_root_live(
-            "provider turn after scope setup",
-            tokio::time::timeout(
-                Duration::from_secs(60),
-                transport.setup_requested.notified(),
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"))
-        .expect("root Engine did not request a turn after scope setup settled");
-    let parked_baseline = if scenario
-        == HostedScenario::Captured(CapturedScenario::CancelWhileParked)
-    {
-        let graph = campaign.forest.inspect_host_graph();
-        assert_eq!(
-            graph.len(),
-            3,
-            "setup owns one root and two record services"
-        );
-        for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
-            let record = graph.iter().find(|node| node.label == label).unwrap();
-            assert!(!record.model_actor);
-            assert!(record.terminal.is_none());
-            assert_eq!(record.creator, Some(actor));
-            assert_eq!(
-                campaign.forest.actor_session(record.actor),
-                campaign.forest.actor_session(actor)
-            );
-        }
-        // These persistent receive loops share the root machine and survive
-        // cancellation of an independent workbench invocation.
-        let parked = campaign
-            .forest
-            .measurement_snapshot()
-            .and_then(|snapshot| snapshot.parked)
-            .expect("quiescent setup retains a fresh shared-machine snapshot");
-        assert_eq!(parked, 3, "root and both record receive loops are parked");
-        eprintln!("[captured-engine] persistent root and record-service baseline: {parked} parked");
-        Some(parked)
-    } else {
-        None
-    };
-    let scenario = match scenario {
-        HostedScenario::Captured(scenario) => scenario,
-        HostedScenario::LocalActorStartup => {
-            let mut settlements = scheduler.operation_settlements();
-            transport.setup_ready.notify_one();
-            let operation = campaign
+                .unwrap_or_else(|error| panic!("{error}"))
+                .expect("root provider did not issue its original scope setup operation");
+            let setup_operation = transport.operation(&root_origin, "captured-scope-setup");
+            let setup = campaign
                 .while_root_live(
-                    "started local actor calls settle",
+                    "scope setup operation settlement",
                     tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
                         loop {
-                            let settled = settlements
+                            let settled = setup_settlements
                                 .recv()
                                 .await
-                                .expect("local call settlement observer");
-                            if settled.origin == root_origin && settled.call.0 == LOCAL_STARTUP_CALL
-                            {
-                                break settled;
+                                .expect("scope setup settlement observation must remain available");
+                            if settled == setup_operation {
+                                break;
                             }
                         }
+                        embedded_operation(
+                            &runtime,
+                            &setup_operation,
+                            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                        )
+                        .await
+                        .unwrap()
                     }),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{error}"))
-                .expect("both started local actors answer their original typed calls");
-            assert_eq!(
-                operation,
-                transport.operation(&root_origin, LOCAL_STARTUP_CALL)
-            );
-            let result =
-                embedded_operation(&runtime, &operation, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
-                    .await
-                    .expect("local actor reads return their original state");
-            assert_committed_haskell_value(&result, "True");
-            received_output(&transport, &operation).await;
-            let graph = campaign.forest.inspect_host_graph();
-            for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
-                let local = graph
-                    .iter()
-                    .find(|node| node.label == label)
-                    .expect("started local actor is retained by its original kernel");
-                assert_eq!(local.creator, Some(actor));
-                assert_eq!(local.supervisor_parent, Some(actor));
-                assert!(!local.model_actor);
-                assert!(local.terminal.is_none());
-            }
-            assert!(transport.children.lock().is_empty());
-            finish_root(&transport, &campaign).await;
-            host.stop()
+                .expect("original scope setup operation did not settle within its cold budget");
+            assert_committed_haskell_value(&setup, "True");
+            campaign
+                .while_root_live(
+                    "provider turn after scope setup",
+                    tokio::time::timeout(
+                        Duration::from_secs(60),
+                        transport.setup_requested.notified(),
+                    ),
+                )
                 .await
-                .expect("production shutdown confirms local actor custody release");
-            return;
-        }
-    };
-    // Subscribe before issuing the parent call: settlement may precede observation,
-    // and Scheduler::wait refuses operations that are not admitted yet.
-    let mut parent_settlements = scheduler.operation_settlements();
-
-    transport.setup_ready.notify_one();
-    let mut sessions = std::collections::HashSet::new();
-    campaign.while_root_live(
-        "initial captured child provider requests",
-        tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-            for _ in 0..2 {
-                let request = {
-                    tokio::select! {
-                        biased;
-                        settled = async {
-                            loop {
-                                let operation = parent_settlements.recv().await
-                                    .expect("exact parent settlement observation must remain available");
-                                if operation.origin == root_origin && operation.call.0 == PENDING_CALL {
-                                    return operation;
-                                }
-                            }
-                        } => {
-                            assert_eq!(settled, transport.operation(&root_origin, PENDING_CALL));
-                            let result = scheduler.wait(&settled).await
-                                .expect("settlement event follows admitted retained terminal output");
-                            panic!("parent settled before both captured children started: {result:?}");
-                        }
-                        request = requests_rx.recv() => request,
-                    }
-                }.expect("captured child provider observation closed before both requests");
-                transport
-                    .parent_prefix
-                    .lock()
-                    .as_ref()
-                    .expect("original request prefix captured")
-                    .assert_inherited(&request);
-                assert!(request
-                    .input
-                    .iter()
-                    .all(|item| item.0["call_id"] != PENDING_CALL && item.0["call_id"] != REUSE_CALL));
-                let parent = transport.operation(&root_origin, PENDING_CALL);
-                assert!(
-                    runtime
-                        .store()
-                        .claims(&parent.call)
-                        .unwrap()
-                        .iter()
-                        .any(|claim| claim.operation == parent
-                            && claim.request == parent.request
-                            && claim.state == harness::store::ClaimState::Pending),
-                    "original exact parent operation settled before both children were offered replies"
+                .unwrap_or_else(|error| panic!("{error}"))
+                .expect("root Engine did not request a turn after scope setup settled");
+            let parked_baseline = if scenario
+                == HostedScenario::Captured(CapturedScenario::CancelWhileParked)
+            {
+                let graph = campaign.forest.inspect_host_graph();
+                assert_eq!(
+                    graph.len(),
+                    3,
+                    "setup owns one root and two record services"
                 );
-                let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
-                let (run, actor) = prefix.rsplit_once(':').unwrap();
-                sessions.insert(ConversationIdentity::Embedded {
-                    run: run.into(),
-                    actor: AgentPath(actor.into()),
-                    incarnation: incarnation.into(),
-                });
-            }
-        }),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{error}"))
-    .expect("both captured children did not start within their shared preparation budget while the parent call was pending");
-    assert_eq!(sessions.len(), 2);
-    eprintln!(
-        "[captured-engine] two child provider branches ready while exact parent claim is pending"
-    );
-    if scenario == CapturedScenario::CancelWhileParked {
-        let pending = transport.operation(&root_origin, PENDING_CALL);
-        let target = harness::embedding::HostIdentity {
-            run: runtime_namespace(&campaign.config.run_directory.path()),
-            actor: AgentPath("/root".into()),
-            incarnation: actor.incarnation.0.to_string(),
-        };
-        let native = exomonad_tool::ToolInvocationContext {
-            origin: exomonad_tool::ToolInvocationOrigin::Model(
-                embedded_harness::original_operation(&target, &pending).unwrap(),
-            ),
-            call_id: pending.call.0.clone(),
-            namespace: None,
-        };
-        campaign
-            .while_root_live(
-                "native cancellation owner admission",
-                tokio::time::timeout(Duration::from_secs(30), async {
-                    while campaign.actor.hosted_workbench_waiting(&native).is_none() {
-                        assert!(runtime
-                            .store()
-                            .claims_for_operation(&pending)
-                            .unwrap()
+                for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                    let record = graph.iter().find(|node| node.label == label).unwrap();
+                    assert!(!record.model_actor);
+                    assert!(record.terminal.is_none());
+                    assert_eq!(record.creator, Some(actor));
+                    assert_eq!(
+                        campaign.forest.actor_session(record.actor),
+                        campaign.forest.actor_session(actor)
+                    );
+                }
+                // These persistent receive loops share the root machine and survive
+                // cancellation of an independent workbench invocation.
+                let parked = campaign
+                    .forest
+                    .measurement_snapshot()
+                    .and_then(|snapshot| snapshot.parked)
+                    .expect("quiescent setup retains a fresh shared-machine snapshot");
+                assert_eq!(parked, 3, "root and both record receive loops are parked");
+                eprintln!("[captured-engine] persistent root and record-service baseline: {parked} parked");
+                Some(parked)
+            } else {
+                None
+            };
+            let scenario = match scenario {
+                HostedScenario::Captured(scenario) => scenario,
+                HostedScenario::LocalActorStartup => {
+                    let mut settlements = scheduler.operation_settlements();
+                    transport.setup_ready.notify_one();
+                    let operation = campaign
+                        .while_root_live(
+                            "started local actor calls settle",
+                            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                                loop {
+                                    let settled = settlements
+                                        .recv()
+                                        .await
+                                        .expect("local call settlement observer");
+                                    if settled.origin == root_origin && settled.call.0 == LOCAL_STARTUP_CALL
+                                    {
+                                        break settled;
+                                    }
+                                }
+                            }),
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{error}"))
+                        .expect("both started local actors answer their original typed calls");
+                    assert_eq!(
+                        operation,
+                        transport.operation(&root_origin, LOCAL_STARTUP_CALL)
+                    );
+                    let result =
+                        embedded_operation(&runtime, &operation, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+                            .await
+                            .expect("local actor reads return their original state");
+                    assert_committed_haskell_value(&result, "True");
+                    received_output(&transport, &operation).await;
+                    let graph = campaign.forest.inspect_host_graph();
+                    for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                        let local = graph
                             .iter()
-                            .any(|claim| claim.state == harness::store::ClaimState::Pending));
-                        tokio::task::yield_now().await;
+                            .find(|node| node.label == label)
+                            .expect("started local actor is retained by its original kernel");
+                        assert_eq!(local.creator, Some(actor));
+                        assert_eq!(local.supervisor_parent, Some(actor));
+                        assert!(!local.model_actor);
+                        assert!(local.terminal.is_none());
+                    }
+                    assert!(transport.children.lock().is_empty());
+                    finish_root(&transport, &campaign).await;
+                    return;
+                }
+            };
+            // Subscribe before issuing the parent call: settlement may precede observation,
+            // and Scheduler::wait refuses operations that are not admitted yet.
+            let mut parent_settlements = scheduler.operation_settlements();
+
+            transport.setup_ready.notify_one();
+            let mut sessions = std::collections::HashSet::new();
+            campaign.while_root_live(
+                "initial captured child provider requests",
+                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                    for _ in 0..2 {
+                        let request = {
+                            tokio::select! {
+                                biased;
+                                settled = async {
+                                    loop {
+                                        let operation = parent_settlements.recv().await
+                                            .expect("exact parent settlement observation must remain available");
+                                        if operation.origin == root_origin && operation.call.0 == PENDING_CALL {
+                                            return operation;
+                                        }
+                                    }
+                                } => {
+                                    assert_eq!(settled, transport.operation(&root_origin, PENDING_CALL));
+                                    let result = scheduler.wait(&settled).await
+                                        .expect("settlement event follows admitted retained terminal output");
+                                    panic!("parent settled before both captured children started: {result:?}");
+                                }
+                                request = requests_rx.recv() => request,
+                            }
+                        }.expect("captured child provider observation closed before both requests");
+                        transport
+                            .parent_prefix
+                            .lock()
+                            .as_ref()
+                            .expect("original request prefix captured")
+                            .assert_inherited(&request);
+                        assert!(request
+                            .input
+                            .iter()
+                            .all(|item| item.0["call_id"] != PENDING_CALL && item.0["call_id"] != REUSE_CALL));
+                        let parent = transport.operation(&root_origin, PENDING_CALL);
+                        assert!(
+                            runtime
+                                .store()
+                                .claims(&parent.call)
+                                .unwrap()
+                                .iter()
+                                .any(|claim| claim.operation == parent
+                                    && claim.request == parent.request
+                                    && claim.state == harness::store::ClaimState::Pending),
+                            "original exact parent operation settled before both children were offered replies"
+                        );
+                        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+                        let (run, actor) = prefix.rsplit_once(':').unwrap();
+                        sessions.insert(ConversationIdentity::Embedded {
+                            run: run.into(),
+                            actor: AgentPath(actor.into()),
+                            incarnation: incarnation.into(),
+                        });
                     }
                 }),
             )
             .await
             .unwrap_or_else(|error| panic!("{error}"))
-            .expect("the exact native cancellation owner is armed");
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
-        let login = client
-            .post(format!("{api}/session"))
-            .header("Origin", &origin)
-            .json(&json!({"secret": "embedded-children-secret-is-long-enough"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(login.status(), reqwest::StatusCode::OK);
-        let cookie = login.headers()[reqwest::header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        let running = root_browser_projection(
-            &campaign,
-            address,
-            &cookie,
-            &target,
-            harness::server::HostActorLifecycle::Running,
-        )
-        .await;
-        let round = running
-            .active_round
-            .expect("running root owns the interrupted Engine round");
-        let interrupt = harness::server::ClientCommand::Host {
-            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-            command: harness::server::HostCommand::Interrupt {
-                target: target.clone(),
-                expected_round: round,
-            },
-        };
-        assert!(campaign.actor.hosted_workbench_waiting(&native).is_some());
-        assert!(scheduler.output(&pending).await.unwrap().is_none());
-        let known_children = campaign
-            .observer
-            .installations()
-            .into_iter()
-            .filter(|installation| installation.checkpoint)
-            .map(|installation| installation.actor)
-            .collect::<Vec<_>>();
-        assert_eq!(known_children.len(), 2);
-        let graph = campaign.forest.inspect_host_graph();
-        let mut child_requests = std::collections::HashSet::new();
-        for child in &known_children {
-            assert_eq!(
-                campaign.forest.actor_session(child.identity()),
-                campaign.forest.actor_session(actor),
-                "captured child uses the original shared machine"
+            .expect("both captured children did not start within their shared preparation budget while the parent call was pending");
+            assert_eq!(sessions.len(), 2);
+            eprintln!(
+                "[captured-engine] two child provider branches ready while exact parent claim is pending"
             );
-            let node = graph
-                .iter()
-                .find(|node| node.actor == child.identity())
-                .expect("original captured child remains installed");
-            assert!(node.terminal.is_none());
-            assert_eq!(node.creator, Some(actor));
-            assert_eq!(node.workbench, exomonad_actor::ActorWorkbenchPosture::Idle);
-            assert_eq!(
-                node.active_requests.len(),
-                1,
-                "each child owns its original presented request: {node:?}"
-            );
-            assert!(node.queued_requests.is_empty(), "{node:?}");
-            assert!(node
-                .provider_turn
-                .as_ref()
-                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
-            assert!(child_requests.insert(node.active_requests[0]));
-        }
-        let baseline = parked_baseline.expect("cancellation retains its persistent baseline");
-        // A typed child request runs inside a mailbox handler. SuspendedCast
-        // retains the agentLoop receiver, while ResidentInteractiveAwait owns
-        // the separate handler continuation waiting for the model's reply.
-        let child_receivers = known_children.len();
-        let child_handlers = child_requests.len();
-        assert_eq!(
-            campaign
-                .forest
-                .measurement_snapshot()
-                .and_then(|snapshot| snapshot.parked),
-            Some(baseline + child_receivers + child_handlers + 1),
-            "child receivers, presented request handlers and the original parent await are parked"
-        );
-        eprintln!(
-            "[captured-engine] parked owners: persistent {baseline}, child receivers {child_receivers}, child requests {child_requests:?}, original parent await 1"
-        );
-        let requested = client
-            .post(format!("{api}/commands"))
-            .header("Origin", &origin)
-            .header(reqwest::header::COOKIE, &cookie)
-            .json(&interrupt)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(requested.status(), reqwest::StatusCode::ACCEPTED);
-        let parent = transport.operation(&root_origin, PENDING_CALL);
-        let cancelled = tokio::time::timeout(Duration::from_secs(30), scheduler.wait(&parent))
-            .await
-            .expect("exact original parent operation settles after browser interrupt")
-            .unwrap();
-        match cancelled {
-            JobOutput::CancelledWithReceipt(Ok(ref receipt)) => {
-                assert_eq!(receipt["publication"]["status"], "notPublished");
-                assert_eq!(receipt["publication"]["reason"], "cancelled");
-            }
-            JobOutput::CancelledWithReceipt(Err(ref failure)) => {
-                let metadata = failure
-                    .metadata()
-                    .expect("cancellation retains its publication outcome");
-                assert_eq!(metadata["publication"]["status"], "notPublished");
-                assert_eq!(metadata["publication"]["reason"], "cancelled");
-            }
-            other => panic!("parked pipeline did not settle as cancelled: {other:?}"),
-        }
-        assert!(
-            matches!(
-                scheduler
-                    .cancellation_acknowledgment(&pending)
+            if scenario == CapturedScenario::CancelWhileParked {
+                let pending = transport.operation(&root_origin, PENDING_CALL);
+                let target = harness::embedding::HostIdentity {
+                    run: runtime_namespace(&campaign.config.run_directory.path()),
+                    actor: AgentPath("/root".into()),
+                    incarnation: actor.incarnation.0.to_string(),
+                };
+                let native = exomonad_tool::ToolInvocationContext {
+                    origin: exomonad_tool::ToolInvocationOrigin::Model(
+                        embedded_harness::original_operation(&target, &pending).unwrap(),
+                    ),
+                    call_id: pending.call.0.clone(),
+                    namespace: None,
+                };
+                campaign
+                    .while_root_live(
+                        "native cancellation owner admission",
+                        tokio::time::timeout(Duration::from_secs(30), async {
+                            while campaign.actor.hosted_workbench_waiting(&native).is_none() {
+                                assert!(runtime
+                                    .store()
+                                    .claims_for_operation(&pending)
+                                    .unwrap()
+                                    .iter()
+                                    .any(|claim| claim.state == harness::store::ClaimState::Pending));
+                                tokio::task::yield_now().await;
+                            }
+                        }),
+                    )
                     .await
-                    .unwrap(),
-                Some(harness::provider::CancellationAcknowledgment::StoppedWithReceipt(_))
-            ),
-            "the exact native owner must acknowledge cancellation"
-        );
-        durable_output(&runtime, &pending, &cancelled).await;
-        for child in &known_children {
-            let terminal = child.terminal();
-            tokio::time::timeout(Duration::from_secs(30), terminal.wait())
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .expect("the exact native cancellation owner is armed");
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .unwrap();
+                let login = client
+                    .post(format!("{api}/session"))
+                    .header("Origin", &origin)
+                    .json(&json!({"secret": "embedded-children-secret-is-long-enough"}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(login.status(), reqwest::StatusCode::OK);
+                let cookie = login.headers()[reqwest::header::SET_COOKIE]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                let running = root_browser_projection(
+                    &campaign,
+                    address,
+                    &cookie,
+                    &target,
+                    harness::server::HostActorLifecycle::Running,
+                )
+                .await;
+                let round = running
+                    .active_round
+                    .expect("running root owns the interrupted Engine round");
+                let interrupt = harness::server::ClientCommand::Host {
+                    operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                    command: harness::server::HostCommand::Interrupt {
+                        target: target.clone(),
+                        expected_round: round,
+                    },
+                };
+                assert!(campaign.actor.hosted_workbench_waiting(&native).is_some());
+                assert!(scheduler.output(&pending).await.unwrap().is_none());
+                let known_children = campaign
+                    .observer
+                    .installations()
+                    .into_iter()
+                    .filter(|installation| installation.checkpoint)
+                    .map(|installation| installation.actor)
+                    .collect::<Vec<_>>();
+                assert_eq!(known_children.len(), 2);
+                let graph = campaign.forest.inspect_host_graph();
+                let mut child_requests = std::collections::HashSet::new();
+                for child in &known_children {
+                    assert_eq!(
+                        campaign.forest.actor_session(child.identity()),
+                        campaign.forest.actor_session(actor),
+                        "captured child uses the original shared machine"
+                    );
+                    let node = graph
+                        .iter()
+                        .find(|node| node.actor == child.identity())
+                        .expect("original captured child remains installed");
+                    assert!(node.terminal.is_none());
+                    assert_eq!(node.creator, Some(actor));
+                    assert_eq!(node.workbench, exomonad_actor::ActorWorkbenchPosture::Idle);
+                    assert_eq!(
+                        node.active_requests.len(),
+                        1,
+                        "each child owns its original presented request: {node:?}"
+                    );
+                    assert!(node.queued_requests.is_empty(), "{node:?}");
+                    assert!(node
+                        .provider_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
+                    assert!(child_requests.insert(node.active_requests[0]));
+                }
+                let baseline = parked_baseline.expect("cancellation retains its persistent baseline");
+                // A typed child request runs inside a mailbox handler. SuspendedCast
+                // retains the agentLoop receiver, while ResidentInteractiveAwait owns
+                // the separate handler continuation waiting for the model's reply.
+                let child_receivers = known_children.len();
+                let child_handlers = child_requests.len();
+                assert_eq!(
+                    campaign
+                        .forest
+                        .measurement_snapshot()
+                        .and_then(|snapshot| snapshot.parked),
+                    Some(baseline + child_receivers + child_handlers + 1),
+                    "child receivers, presented request handlers and the original parent await are parked"
+                );
+                eprintln!(
+                    "[captured-engine] parked owners: persistent {baseline}, child receivers {child_receivers}, child requests {child_requests:?}, original parent await 1"
+                );
+                let requested = client
+                    .post(format!("{api}/commands"))
+                    .header("Origin", &origin)
+                    .header(reqwest::header::COOKIE, &cookie)
+                    .json(&interrupt)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(requested.status(), reqwest::StatusCode::ACCEPTED);
+                let parent = transport.operation(&root_origin, PENDING_CALL);
+                let cancelled = tokio::time::timeout(Duration::from_secs(30), scheduler.wait(&parent))
+                    .await
+                    .expect("exact original parent operation settles after browser interrupt")
+                    .unwrap();
+                match cancelled {
+                    JobOutput::CancelledWithReceipt(Ok(ref receipt)) => {
+                        assert_eq!(receipt["publication"]["status"], "notPublished");
+                        assert_eq!(receipt["publication"]["reason"], "cancelled");
+                    }
+                    JobOutput::CancelledWithReceipt(Err(ref failure)) => {
+                        let metadata = failure
+                            .metadata()
+                            .expect("cancellation retains its publication outcome");
+                        assert_eq!(metadata["publication"]["status"], "notPublished");
+                        assert_eq!(metadata["publication"]["reason"], "cancelled");
+                    }
+                    other => panic!("parked pipeline did not settle as cancelled: {other:?}"),
+                }
+                assert!(
+                    matches!(
+                        scheduler
+                            .cancellation_acknowledgment(&pending)
+                            .await
+                            .unwrap(),
+                        Some(harness::provider::CancellationAcknowledgment::StoppedWithReceipt(_))
+                    ),
+                    "the exact native owner must acknowledge cancellation"
+                );
+                durable_output(&runtime, &pending, &cancelled).await;
+                for child in &known_children {
+                    let terminal = child.terminal();
+                    tokio::time::timeout(Duration::from_secs(30), terminal.wait())
+                        .await
+                        .expect("invocation-owned children retire after the interrupted call");
+                    let cleanup = terminal
+                        .cleanup()
+                        .expect("retirement retains owner cleanup evidence");
+                    assert_eq!(cleanup.actor(), child.identity());
+                    assert!(cleanup.is_confirmed(), "{cleanup:?}");
+                }
+                assert_eq!(
+                    campaign
+                        .forest
+                        .measurement_snapshot()
+                        .and_then(|snapshot| snapshot.parked),
+                    Some(baseline),
+                    "interrupt consumes the invocation continuations and preserves persistent receive loops"
+                );
+                let graph = campaign.forest.inspect_host_graph();
+                for child in &known_children {
+                    let node = graph
+                        .iter()
+                        .find(|node| node.actor == child.identity())
+                        .expect("original child retains its terminal observation");
+                    assert!(node.terminal.is_some());
+                    assert!(node.active_requests.is_empty(), "{node:?}");
+                    assert!(node.queued_requests.is_empty(), "{node:?}");
+                }
+                for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                    assert!(graph
+                        .iter()
+                        .find(|node| node.label == label)
+                        .expect("persistent record service remains installed")
+                        .terminal
+                        .is_none());
+                }
+                eprintln!(
+                    "[captured-engine] cancellation restored {baseline} persistent parked receive loops"
+                );
+                assert!(
+                    campaign.actor.terminal().get().is_none(),
+                    "interrupt must preserve the root actor"
+                );
+                let waiting = root_browser_projection(
+                    &campaign,
+                    address,
+                    &cookie,
+                    &target,
+                    harness::server::HostActorLifecycle::Waiting,
+                )
+                .await;
+                assert!(
+                    waiting.active_round.is_none(),
+                    "interrupted Engine round must clear before new input"
+                );
+                let input = harness::server::ClientCommand::Host {
+                    operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                    command: harness::server::HostCommand::Input {
+                        target: target.clone(),
+                        text: RESUME_INPUT.into(),
+                    },
+                };
+                let wake = client
+                    .post(format!("{api}/commands"))
+                    .header("Origin", &origin)
+                    .header(reqwest::header::COOKIE, &cookie)
+                    .json(&input)
+                    .send();
+                let resumed = root_tool_call(
+                    &campaign,
+                    &transport,
+                    "captured-after-interrupt",
+                    "let resumedAfterInterrupt = x + getX\ndisplay (resumedAfterInterrupt == 83)",
+                );
+                let (woken, resumed) = tokio::join!(wake, resumed);
+                assert_eq!(woken.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+                assert_committed_haskell_value(
+                    &resumed.expect("new root Haskell call succeeds after interrupt"),
+                    "True",
+                );
+                let absent = root_tool_call(
+                    &campaign,
+                    &transport,
+                    "captured-cancelled-prefix-absent",
+                    "display (capturedValue :: Int)",
+                )
                 .await
-                .expect("invocation-owned children retire after the interrupted call");
-            let cleanup = terminal
-                .cleanup()
-                .expect("retirement retains owner cleanup evidence");
-            assert_eq!(cleanup.actor(), child.identity());
-            assert!(cleanup.is_confirmed(), "{cleanup:?}");
-        }
-        assert_eq!(
-            campaign
-                .forest
-                .measurement_snapshot()
-                .and_then(|snapshot| snapshot.parked),
-            Some(baseline),
-            "interrupt consumes the invocation continuations and preserves persistent receive loops"
-        );
-        let graph = campaign.forest.inspect_host_graph();
-        for child in &known_children {
-            let node = graph
-                .iter()
-                .find(|node| node.actor == child.identity())
-                .expect("original child retains its terminal observation");
-            assert!(node.terminal.is_some());
-            assert!(node.active_requests.is_empty(), "{node:?}");
-            assert!(node.queued_requests.is_empty(), "{node:?}");
-        }
-        for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
-            assert!(graph
-                .iter()
-                .find(|node| node.label == label)
-                .expect("persistent record service remains installed")
-                .terminal
-                .is_none());
-        }
-        eprintln!(
-            "[captured-engine] cancellation restored {baseline} persistent parked receive loops"
-        );
-        assert!(
-            campaign.actor.terminal().get().is_none(),
-            "interrupt must preserve the root actor"
-        );
-        let waiting = root_browser_projection(
-            &campaign,
-            address,
-            &cookie,
-            &target,
-            harness::server::HostActorLifecycle::Waiting,
-        )
-        .await;
-        assert!(
-            waiting.active_round.is_none(),
-            "interrupted Engine round must clear before new input"
-        );
-        let input = harness::server::ClientCommand::Host {
-            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-            command: harness::server::HostCommand::Input {
-                target: target.clone(),
-                text: RESUME_INPUT.into(),
-            },
-        };
-        let wake = client
-            .post(format!("{api}/commands"))
-            .header("Origin", &origin)
-            .header(reqwest::header::COOKIE, &cookie)
-            .json(&input)
-            .send();
-        let resumed = root_tool_call(
-            &campaign,
-            &transport,
-            "captured-after-interrupt",
-            "let resumedAfterInterrupt = x + getX\ndisplay (resumedAfterInterrupt == 83)",
-        );
-        let (woken, resumed) = tokio::join!(wake, resumed);
-        assert_eq!(woken.unwrap().status(), reqwest::StatusCode::ACCEPTED);
-        assert_committed_haskell_value(
-            &resumed.expect("new root Haskell call succeeds after interrupt"),
-            "True",
-        );
-        let absent = root_tool_call(
-            &campaign,
-            &transport,
-            "captured-cancelled-prefix-absent",
-            "display (capturedValue :: Int)",
-        )
-        .await
-        .unwrap();
-        assert_absent_binding(&absent, "capturedValue");
-        let cleaned = root_tool_call(
-            &campaign,
-            &transport,
-            "captured-interrupted-group-cleanup",
-            include_str!("embedded_captured_group_cleanup.hs"),
-        )
-        .await
-        .unwrap();
-        assert_committed_haskell_value(&cleaned, "True");
-        assert!(
-            campaign.actor.terminal().get().is_none(),
-            "resumed root remains live until ordinary shutdown"
-        );
-        received_output(&transport, &pending).await;
-        finish_root(&transport, &campaign).await;
-        host.stop()
+                .unwrap();
+                assert_absent_binding(&absent, "capturedValue");
+                let cleaned = root_tool_call(
+                    &campaign,
+                    &transport,
+                    "captured-interrupted-group-cleanup",
+                    include_str!("embedded_captured_group_cleanup.hs"),
+                )
+                .await
+                .unwrap();
+                assert_committed_haskell_value(&cleaned, "True");
+                assert!(
+                    campaign.actor.terminal().get().is_none(),
+                    "resumed root remains live until ordinary shutdown"
+                );
+                received_output(&transport, &pending).await;
+                finish_root(&transport, &campaign).await;
+                shutdown_parked_check.store(true, Ordering::SeqCst);
+                return;
+            }
+            if scenario == CapturedScenario::ConcurrentNominalJoin {
+                let published_b = root_tool_call(
+                    &campaign,
+                    &transport,
+                    "nominal-join-root-b",
+                    include_str!("embedded_nominal_join_b.hs"),
+                )
+                .await
+                .expect("same-root B publishes while A remains parked");
+                assert_committed_haskell_value(&published_b, "True");
+                assert_eq!(
+                    published_b["publication"]["status"], "published",
+                    "{published_b}"
+                );
+                let original_a = transport.operation(&root_origin, PENDING_CALL);
+                assert!(
+                    runtime
+                        .store()
+                        .claims(&original_a.call)
+                        .unwrap()
+                        .iter()
+                        .any(|claim| claim.operation == original_a
+                            && claim.request == original_a.request
+                            && claim.state == harness::store::ClaimState::Pending),
+                    "B must publish before the original root A call settles"
+                );
+            }
+            transport.reply_children.send_replace(true);
+            // Observe each admitted child's terminal reply before waiting for the parent:
+            // a rejected child cell cannot deliver the typed response the parent awaits.
+            let mut replied = std::collections::HashSet::new();
+            tokio::time::timeout(TYPED_CHILD_REPLY_SETTLEMENT_BUDGET, async {
+                while replied.len() < sessions.len() {
+                    let operation = parent_settlements
+                        .recv()
+                        .await
+                        .expect("child settlement observer");
+                    if sessions.contains(&operation.origin)
+                        && operation.call.0 == format!("captured-child-{}", operation.origin.actor().0)
+                    {
+                        let reply =
+                            embedded_operation(&runtime, &operation, TYPED_CHILD_REPLY_SETTLEMENT_BUDGET)
+                                .await
+                                .unwrap_or_else(|cause| {
+                                    panic!(
+                                "captured child cell rejected before typed reply: {operation:?}: {cause}"
+                            )
+                                });
+                        assert_replied_cell(&reply, 1);
+                        assert!(replied.insert(operation.origin));
+                    }
+                }
+            })
             .await
-            .expect("production shutdown confirms host and forest cleanup");
+            .expect("both captured child operations settle");
+            let result = embedded_operation(
+                &runtime,
+                &transport.operation(&root_origin, PENDING_CALL),
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            )
+            .await;
+            match scenario {
+                CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
+                    assert_committed_haskell_value(&result.unwrap(), "True");
+                    received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
+                    let public = root_tool_call(
+                        &campaign,
+                        &transport,
+                        "captured-public-prefix",
+                        "display (capturedValue == 41 && capturedGetter == 42)",
+                    )
+                    .await
+                    .unwrap();
+                    assert_committed_haskell_value(&public, "True");
+                }
+                CapturedScenario::ConcurrentNominalJoin => {
+                    let published_a = result.unwrap();
+                    assert_committed_haskell_value(&published_a, "True");
+                    assert_eq!(
+                        published_a["publication"]["status"], "published",
+                        "{published_a}"
+                    );
+                    let joined = root_tool_call(
+                        &campaign,
+                        &transport,
+                        "nominal-join-final-read",
+                        include_str!("embedded_nominal_join_final.hs"),
+                    )
+                    .await
+                    .expect("final provider tool reads both A and B public declarations");
+                    assert_committed_haskell_value(&joined, "True");
+                    received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
+                }
+                CapturedScenario::FailureAfterReplies => {
+                    result.expect_err(
+                        "the original unfinished parent cell must fail after its child replies",
+                    );
+                    let failed = scheduler
+                        .wait(&transport.operation(&root_origin, PENDING_CALL))
+                        .await
+                        .unwrap();
+                    let JobOutput::Completed(Err(failure)) = failed else {
+                        panic!("failed creator must retain its exact tool failure: {failed:?}");
+                    };
+                    let metadata = failure
+                        .metadata()
+                        .expect("failed creator retains structured publication");
+                    assert_eq!(metadata["publication"]["status"], "notPublished");
+                    assert_eq!(metadata["publication"]["reason"], "failed");
+                    assert!(metadata["items"]
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|item| item["operations"]
+                            .as_array()
+                            .is_some_and(|operations| !operations.is_empty()))));
+                    assert!(
+                        campaign.actor.terminal().get().is_none(),
+                        "the fixture fails a cell while its parent actor remains live"
+                    );
+                    eprintln!(
+                        "[captured-engine] actual parent execution failed after both typed child replies"
+                    );
+                    let public_names = root_tool_call(
+                        &campaign,
+                        &transport,
+                        "captured-parent-public-probe",
+                        "display (show (x, getX))",
+                    )
+                    .await
+                    .expect("earlier public names remain installed");
+                    assert_committed_haskell_value(&public_names, "(41,42)");
+                    for (name, source) in [
+                        ("capturedValue", "display (capturedValue :: Int)"),
+                        ("capturedGetter", "display (capturedGetter :: Int)"),
+                        (
+                            "privateCapturedHelper",
+                            "display (privateCapturedHelper (0 :: Int))",
+                        ),
+                        ("capturedSuffix", "display (capturedSuffix :: Int)"),
+                    ] {
+                        let absent = root_tool_call(
+                            &campaign,
+                            &transport,
+                            &format!("captured-parent-absent-{name}"),
+                            source,
+                        )
+                        .await
+                        .expect("missing failed-cell name returns a compile rejection");
+                        assert_absent_binding(&absent, name);
+                    }
+                    let rebound = root_tool_call(
+                        &campaign,
+                        &transport, "captured-parent-rebind",
+                        "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\ndisplay (show (capturedValue, capturedGetter))",
+                    ).await.expect("public rebinding succeeds after the failed cell");
+                    assert_committed_haskell_value(&rebound, "(99,100)");
+                    transport.parent_failed.send_replace(true);
+                    let mut retained = std::collections::HashSet::new();
+                    for _ in 0..2 {
+                        let (origin, call) =
+                            tokio::time::timeout(Duration::from_secs(120), reads_rx.recv())
+                                .await
+                                .expect(
+                                    "admitted children did not read their scope after parent cell failure",
+                                )
+                                .unwrap();
+                        let value = embedded_operation(
+                            &runtime,
+                            &transport.operation(&origin, &call),
+                            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                        )
+                        .await
+                        .unwrap();
+                        assert_committed_haskell_value(&value, "(41,42)");
+                        retained.insert(origin);
+                    }
+                    assert_eq!(retained.len(), 2);
+                    let reused = root_tool_call(
+                        &campaign,
+                        &transport,
+                        REUSE_CALL,
+                        include_str!("embedded_captured_unfold_reuse_after_failure.hs"),
+                    )
+                    .await
+                    .expect("the failed cell's transferred capture admits and joins a third child");
+                    let third_request = requests_rx
+                        .try_recv()
+                        .expect("third child provider request");
+                    transport
+                        .parent_prefix
+                        .lock()
+                        .as_ref()
+                        .expect("original request prefix survives parent failure")
+                        .assert_inherited(&third_request);
+                    let (prefix, incarnation) = third_request.session_id.rsplit_once(':').unwrap();
+                    let (run, path) = prefix.rsplit_once(':').unwrap();
+                    let origin = ConversationIdentity::Embedded {
+                        run: run.into(),
+                        actor: AgentPath(path.into()),
+                        incarnation: incarnation.into(),
+                    };
+                    assert!(
+                        !sessions.contains(&origin),
+                        "reuse must admit an independent third child"
+                    );
+                    let third_operation = transport.operation(&origin, &format!("captured-child-{path}"));
+                    let reply = embedded_operation(
+                        &runtime,
+                        &third_operation,
+                        TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
+                    )
+                    .await
+                    .unwrap();
+                    assert_replied_cell(&reply, 3);
+                    assert_committed_haskell_value(&reused, "True");
+                    eprintln!(
+                        "[captured-engine] retained children and independently reused capture succeeded"
+                    );
+                }
+            }
+            let expected_children = if scenario != CapturedScenario::FailureAfterReplies {
+                2
+            } else {
+                3
+            };
+            assert_eq!(transport.children.lock().len(), expected_children);
+            if matches!(
+                scenario,
+                CapturedScenario::FailureAfterReplies | CapturedScenario::ConcurrentNominalJoin
+            ) {
+                for origin in &sessions {
+                    let operation =
+                        transport.operation(origin, &format!("captured-child-{}", origin.actor().0));
+                    received_output(&transport, &operation).await;
+                }
+                let refusal = root_tool_call(
+                    &campaign,
+                    &transport,
+                    "captured-active-cleanup-refusal",
+                    include_str!("embedded_captured_group_cleanup.hs"),
+                )
+                .await
+                .unwrap();
+                assert_committed_haskell_value(&refusal, "False");
+                let actors = campaign
+                    .observer
+                    .installations()
+                    .into_iter()
+                    .filter(|installation| {
+                        installation.checkpoint && installation.actor.terminal().get().is_none()
+                    })
+                    .map(|installation| installation.actor.identity())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actors.len(),
+                    2,
+                    "refused cleanup must retain both actor-owned children"
+                );
+                for actor in &actors {
+                    let node = campaign
+                        .forest
+                        .inspect_host_graph()
+                        .into_iter()
+                        .find(|node| node.actor == *actor)
+                        .unwrap();
+                    assert!(node
+                        .provider_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
+                    assert!(node.terminal.is_none());
+                }
+                transport.finish_children.send_replace(true);
+                successful_rounds(&campaign, &actors).await;
+            }
+            let cleaned = root_tool_call(
+                &campaign,
+                &transport,
+                "captured-group-cleanup",
+                include_str!("embedded_captured_group_cleanup.hs"),
+            )
+            .await
+            .expect("known original group cleanup settles");
+            assert_committed_haskell_value(&cleaned, "True");
+            let known_children = campaign
+                .observer
+                .installations()
+                .into_iter()
+                .filter(|installation| installation.checkpoint)
+                .map(|installation| installation.actor)
+                .collect::<Vec<_>>();
+            assert_eq!(known_children.len(), expected_children);
+            for child in &known_children {
+                let terminal = child.terminal();
+                tokio::time::timeout(Duration::from_secs(30), terminal.wait())
+                    .await
+                    .expect("known captured child retires after group cleanup");
+                let cleanup = terminal
+                    .cleanup()
+                    .expect("child retirement retains cleanup evidence");
+                assert_eq!(cleanup.actor(), child.identity());
+                assert!(cleanup.is_confirmed(), "{cleanup:?}");
+            }
+            finish_root(&transport, &campaign).await;
+        })
+    })
+    .await;
+    if shutdown_parked_check_result.load(Ordering::SeqCst) {
         assert_eq!(
-            campaign
-                .forest
+            forest_after_shutdown
                 .measurement_snapshot()
                 .and_then(|snapshot| snapshot.parked),
             Some(0),
             "full shutdown consumes the root and record-service receive loops"
         );
-        return;
     }
-    if scenario == CapturedScenario::ConcurrentNominalJoin {
-        let published_b = root_tool_call(
-            &campaign,
-            &transport,
-            "nominal-join-root-b",
-            include_str!("embedded_nominal_join_b.hs"),
-        )
-        .await
-        .expect("same-root B publishes while A remains parked");
-        assert_committed_haskell_value(&published_b, "True");
-        assert_eq!(
-            published_b["publication"]["status"], "published",
-            "{published_b}"
-        );
-        let original_a = transport.operation(&root_origin, PENDING_CALL);
-        assert!(
-            runtime
-                .store()
-                .claims(&original_a.call)
-                .unwrap()
-                .iter()
-                .any(|claim| claim.operation == original_a
-                    && claim.request == original_a.request
-                    && claim.state == harness::store::ClaimState::Pending),
-            "B must publish before the original root A call settles"
-        );
-    }
-    transport.reply_children.send_replace(true);
-    // Observe each admitted child's terminal reply before waiting for the parent:
-    // a rejected child cell cannot deliver the typed response the parent awaits.
-    let mut replied = std::collections::HashSet::new();
-    tokio::time::timeout(TYPED_CHILD_REPLY_SETTLEMENT_BUDGET, async {
-        while replied.len() < sessions.len() {
-            let operation = parent_settlements
-                .recv()
-                .await
-                .expect("child settlement observer");
-            if sessions.contains(&operation.origin)
-                && operation.call.0 == format!("captured-child-{}", operation.origin.actor().0)
-            {
-                let reply =
-                    embedded_operation(&runtime, &operation, TYPED_CHILD_REPLY_SETTLEMENT_BUDGET)
-                        .await
-                        .unwrap_or_else(|cause| {
-                            panic!(
-                        "captured child cell rejected before typed reply: {operation:?}: {cause}"
-                    )
-                        });
-                assert_replied_cell(&reply, 1);
-                assert!(replied.insert(operation.origin));
-            }
-        }
-    })
-    .await
-    .expect("both captured child operations settle");
-    let result = embedded_operation(
-        &runtime,
-        &transport.operation(&root_origin, PENDING_CALL),
-        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-    )
-    .await;
-    match scenario {
-        CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
-            assert_committed_haskell_value(&result.unwrap(), "True");
-            received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
-            let public = root_tool_call(
-                &campaign,
-                &transport,
-                "captured-public-prefix",
-                "display (capturedValue == 41 && capturedGetter == 42)",
-            )
-            .await
-            .unwrap();
-            assert_committed_haskell_value(&public, "True");
-        }
-        CapturedScenario::ConcurrentNominalJoin => {
-            let published_a = result.unwrap();
-            assert_committed_haskell_value(&published_a, "True");
-            assert_eq!(
-                published_a["publication"]["status"], "published",
-                "{published_a}"
-            );
-            let joined = root_tool_call(
-                &campaign,
-                &transport,
-                "nominal-join-final-read",
-                include_str!("embedded_nominal_join_final.hs"),
-            )
-            .await
-            .expect("final provider tool reads both A and B public declarations");
-            assert_committed_haskell_value(&joined, "True");
-            received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
-        }
-        CapturedScenario::FailureAfterReplies => {
-            result.expect_err(
-                "the original unfinished parent cell must fail after its child replies",
-            );
-            let failed = scheduler
-                .wait(&transport.operation(&root_origin, PENDING_CALL))
-                .await
-                .unwrap();
-            let JobOutput::Completed(Err(failure)) = failed else {
-                panic!("failed creator must retain its exact tool failure: {failed:?}");
-            };
-            let metadata = failure
-                .metadata()
-                .expect("failed creator retains structured publication");
-            assert_eq!(metadata["publication"]["status"], "notPublished");
-            assert_eq!(metadata["publication"]["reason"], "failed");
-            assert!(metadata["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["operations"]
-                    .as_array()
-                    .is_some_and(|operations| !operations.is_empty()))));
-            assert!(
-                campaign.actor.terminal().get().is_none(),
-                "the fixture fails a cell while its parent actor remains live"
-            );
-            eprintln!(
-                "[captured-engine] actual parent execution failed after both typed child replies"
-            );
-            let public_names = root_tool_call(
-                &campaign,
-                &transport,
-                "captured-parent-public-probe",
-                "display (show (x, getX))",
-            )
-            .await
-            .expect("earlier public names remain installed");
-            assert_committed_haskell_value(&public_names, "(41,42)");
-            for (name, source) in [
-                ("capturedValue", "display (capturedValue :: Int)"),
-                ("capturedGetter", "display (capturedGetter :: Int)"),
-                (
-                    "privateCapturedHelper",
-                    "display (privateCapturedHelper (0 :: Int))",
-                ),
-                ("capturedSuffix", "display (capturedSuffix :: Int)"),
-            ] {
-                let absent = root_tool_call(
-                    &campaign,
-                    &transport,
-                    &format!("captured-parent-absent-{name}"),
-                    source,
-                )
-                .await
-                .expect("missing failed-cell name returns a compile rejection");
-                assert_absent_binding(&absent, name);
-            }
-            let rebound = root_tool_call(
-                &campaign,
-                &transport, "captured-parent-rebind",
-                "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\ndisplay (show (capturedValue, capturedGetter))",
-            ).await.expect("public rebinding succeeds after the failed cell");
-            assert_committed_haskell_value(&rebound, "(99,100)");
-            transport.parent_failed.send_replace(true);
-            let mut retained = std::collections::HashSet::new();
-            for _ in 0..2 {
-                let (origin, call) =
-                    tokio::time::timeout(Duration::from_secs(120), reads_rx.recv())
-                        .await
-                        .expect(
-                            "admitted children did not read their scope after parent cell failure",
-                        )
-                        .unwrap();
-                let value = embedded_operation(
-                    &runtime,
-                    &transport.operation(&origin, &call),
-                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                )
-                .await
-                .unwrap();
-                assert_committed_haskell_value(&value, "(41,42)");
-                retained.insert(origin);
-            }
-            assert_eq!(retained.len(), 2);
-            let reused = root_tool_call(
-                &campaign,
-                &transport,
-                REUSE_CALL,
-                include_str!("embedded_captured_unfold_reuse_after_failure.hs"),
-            )
-            .await
-            .expect("the failed cell's transferred capture admits and joins a third child");
-            let third_request = requests_rx
-                .try_recv()
-                .expect("third child provider request");
-            transport
-                .parent_prefix
-                .lock()
-                .as_ref()
-                .expect("original request prefix survives parent failure")
-                .assert_inherited(&third_request);
-            let (prefix, incarnation) = third_request.session_id.rsplit_once(':').unwrap();
-            let (run, path) = prefix.rsplit_once(':').unwrap();
-            let origin = ConversationIdentity::Embedded {
-                run: run.into(),
-                actor: AgentPath(path.into()),
-                incarnation: incarnation.into(),
-            };
-            assert!(
-                !sessions.contains(&origin),
-                "reuse must admit an independent third child"
-            );
-            let third_operation = transport.operation(&origin, &format!("captured-child-{path}"));
-            let reply = embedded_operation(
-                &runtime,
-                &third_operation,
-                TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
-            )
-            .await
-            .unwrap();
-            assert_replied_cell(&reply, 3);
-            assert_committed_haskell_value(&reused, "True");
-            eprintln!(
-                "[captured-engine] retained children and independently reused capture succeeded"
-            );
-        }
-    }
-    let expected_children = if scenario != CapturedScenario::FailureAfterReplies {
-        2
-    } else {
-        3
-    };
-    assert_eq!(transport.children.lock().len(), expected_children);
-    if matches!(
-        scenario,
-        CapturedScenario::FailureAfterReplies | CapturedScenario::ConcurrentNominalJoin
-    ) {
-        for origin in &sessions {
-            let operation =
-                transport.operation(origin, &format!("captured-child-{}", origin.actor().0));
-            received_output(&transport, &operation).await;
-        }
-        let refusal = root_tool_call(
-            &campaign,
-            &transport,
-            "captured-active-cleanup-refusal",
-            include_str!("embedded_captured_group_cleanup.hs"),
-        )
-        .await
-        .unwrap();
-        assert_committed_haskell_value(&refusal, "False");
-        let actors = campaign
-            .observer
-            .installations()
-            .into_iter()
-            .filter(|installation| {
-                installation.checkpoint && installation.actor.terminal().get().is_none()
-            })
-            .map(|installation| installation.actor.identity())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            actors.len(),
-            2,
-            "refused cleanup must retain both actor-owned children"
-        );
-        for actor in &actors {
-            let node = campaign
-                .forest
-                .inspect_host_graph()
-                .into_iter()
-                .find(|node| node.actor == *actor)
-                .unwrap();
-            assert!(node
-                .provider_turn
-                .as_ref()
-                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
-            assert!(node.terminal.is_none());
-        }
-        transport.finish_children.send_replace(true);
-        successful_rounds(&campaign, &actors).await;
-    }
-    let cleaned = root_tool_call(
-        &campaign,
-        &transport,
-        "captured-group-cleanup",
-        include_str!("embedded_captured_group_cleanup.hs"),
-    )
-    .await
-    .expect("known original group cleanup settles");
-    assert_committed_haskell_value(&cleaned, "True");
-    let known_children = campaign
-        .observer
-        .installations()
-        .into_iter()
-        .filter(|installation| installation.checkpoint)
-        .map(|installation| installation.actor)
-        .collect::<Vec<_>>();
-    assert_eq!(known_children.len(), expected_children);
-    for child in &known_children {
-        let terminal = child.terminal();
-        tokio::time::timeout(Duration::from_secs(30), terminal.wait())
-            .await
-            .expect("known captured child retires after group cleanup");
-        let cleanup = terminal
-            .cleanup()
-            .expect("child retirement retains cleanup evidence");
-        assert_eq!(cleanup.actor(), child.identity());
-        assert!(cleanup.is_confirmed(), "{cleanup:?}");
-    }
-    finish_root(&transport, &campaign).await;
-    host.stop()
-        .await
-        .expect("production shutdown confirms host and forest cleanup");
 }
 
 fn assert_preflight_rejection(response: &Value) {
@@ -1919,279 +1920,281 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     )
     .await
     .expect("production hosted preflight starts");
-    host.input("Exercise whole-cell preflight admission.")
-        .await
-        .unwrap();
-    let transport = slot.lock().take().unwrap();
-    let actor = host.context.actor.identity();
-    let binding = host
-        .context
-        .while_root_live(
-            "preflight root binding",
-            tokio::time::timeout(Duration::from_secs(30), async {
-                loop {
-                    if let Some(binding) = host.context.binding(actor) {
-                        break binding;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"))
-        .expect("actual attached root binding");
-    assert_eq!(
-        binding.inbox.watermark(),
-        0,
-        "ordinary user input must not publish an actor notification"
-    );
-    let source = include_str!("embedded_bad_final_cell.hs")
-        .replace("TARGET_ID", &actor.id.0.to_string())
-        .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Exercise whole-cell preflight admission.")
+                .await
+                .unwrap();
+            let transport = slot.lock().take().unwrap();
+            let actor = host.context.actor.identity();
+            let binding = host
+                .context
+                .while_root_live(
+                    "preflight root binding",
+                    tokio::time::timeout(Duration::from_secs(30), async {
+                        loop {
+                            if let Some(binding) = host.context.binding(actor) {
+                                break binding;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"))
+                .expect("actual attached root binding");
+            assert_eq!(
+                binding.inbox.watermark(),
+                0,
+                "ordinary user input must not publish an actor notification"
+            );
+            let source = include_str!("embedded_bad_final_cell.hs")
+                .replace("TARGET_ID", &actor.id.0.to_string())
+                .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());
 
-    // Prove this installed tool, effect route and target before a negative check.
-    let control_source = source
-        .replace("neverPublished", "publishedControl")
-        .replace("pure (True :: Int)", "display (42 :: Int)");
-    let (_, control) = host
-        .context
-        .while_root_live(
-            "preflight positive control",
-            transport.cell("preflight-positive-control", &control_source),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_committed_haskell_value(&control, "42");
-    assert_eq!(binding.inbox.watermark(), 1);
-    assert!(
-        transport
-            .requests
-            .lock()
-            .last()
-            .unwrap()
-            .input
-            .iter()
-            .any(|item| { item.0["content"] == "whole-cell-preflight-sentinel" }),
-        "positive control notification must reach the actual provider"
-    );
-    assert!(host.runtime.store().unread("/root").unwrap().is_empty());
+            // Prove this installed tool, effect route and target before a negative check.
+            let control_source = source
+                .replace("neverPublished", "publishedControl")
+                .replace("pure (True :: Int)", "display (42 :: Int)");
+            let (_, control) = host
+                .context
+                .while_root_live(
+                    "preflight positive control",
+                    transport.cell("preflight-positive-control", &control_source),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_committed_haskell_value(&control, "42");
+            assert_eq!(binding.inbox.watermark(), 1);
+            assert!(
+                transport
+                    .requests
+                    .lock()
+                    .last()
+                    .unwrap()
+                    .input
+                    .iter()
+                    .any(|item| { item.0["content"] == "whole-cell-preflight-sentinel" }),
+                "positive control notification must reach the actual provider"
+            );
+            assert!(host.runtime.store().unread("/root").unwrap().is_empty());
 
-    let (operation, rejected) = host
-        .context
-        .while_root_live(
-            "preflight type rejection",
-            transport.cell("bad-final-call", &source),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_preflight_rejection(&rejected);
-    assert_eq!(
-        rejected["publication"]["status"], "notPublished",
-        "{rejected}"
-    );
-    assert_eq!(rejected["publication"]["reason"], "rejected", "{rejected}");
-    let diagnostics = rejected.to_string();
-    assert!(
-        diagnostics.contains("Bool") && diagnostics.contains("Int"),
-        "{rejected}"
-    );
-    assert_eq!(
-        binding.inbox.watermark(),
-        1,
-        "type rejection must execute no notification"
-    );
-    let durable = host
-        .runtime
-        .store()
-        .replay_output_operation(&operation)
-        .unwrap()
-        .unwrap();
-    let claims = host
-        .runtime
-        .store()
-        .claims_for_operation(&operation)
-        .unwrap();
-    assert!(!claims.is_empty());
-    assert!(claims
-        .iter()
-        .all(|claim| claim.state == harness::store::ClaimState::Settled));
+            let (operation, rejected) = host
+                .context
+                .while_root_live(
+                    "preflight type rejection",
+                    transport.cell("bad-final-call", &source),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_preflight_rejection(&rejected);
+            assert_eq!(
+                rejected["publication"]["status"], "notPublished",
+                "{rejected}"
+            );
+            assert_eq!(rejected["publication"]["reason"], "rejected", "{rejected}");
+            let diagnostics = rejected.to_string();
+            assert!(
+                diagnostics.contains("Bool") && diagnostics.contains("Int"),
+                "{rejected}"
+            );
+            assert_eq!(
+                binding.inbox.watermark(),
+                1,
+                "type rejection must execute no notification"
+            );
+            let durable = host
+                .runtime
+                .store()
+                .replay_output_operation(&operation)
+                .unwrap()
+                .unwrap();
+            let claims = host
+                .runtime
+                .store()
+                .claims_for_operation(&operation)
+                .unwrap();
+            assert!(!claims.is_empty());
+            assert!(claims
+                .iter()
+                .all(|claim| claim.state == harness::store::ClaimState::Settled));
 
-    // The interrupted stream is real Engine input. Explicit host input recovers
-    // its retained lineage without dispatching the settled Haskell call again.
-    transport
-        .sender
-        .send(PreflightStep::InterruptStream)
-        .unwrap();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap();
-    let api = format!("http://{}/api", host.address);
-    let origin = format!("https://{}", host.address);
-    let login = client
-        .post(format!("{api}/session"))
-        .header("Origin", &origin)
-        .json(&json!({"secret":"whole-cell-preflight-secret-is-long-enough"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(login.status(), reqwest::StatusCode::OK);
-    let cookie = login.headers()[reqwest::header::SET_COOKIE]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let target = harness::embedding::HostIdentity {
-        run: runtime_namespace(&host.context.config.run_directory.path()),
-        actor: AgentPath("/root".into()),
-        incarnation: actor.incarnation.0.to_string(),
-    };
-    let waiting = root_browser_projection(
-        &host.context,
-        host.address,
-        &cookie,
-        &target,
-        harness::server::HostActorLifecycle::Waiting,
-    )
+            // The interrupted stream is real Engine input. Explicit host input recovers
+            // its retained lineage without dispatching the settled Haskell call again.
+            transport
+                .sender
+                .send(PreflightStep::InterruptStream)
+                .unwrap();
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+            let api = format!("http://{}/api", host.address);
+            let origin = format!("https://{}", host.address);
+            let login = client
+                .post(format!("{api}/session"))
+                .header("Origin", &origin)
+                .json(&json!({"secret":"whole-cell-preflight-secret-is-long-enough"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(login.status(), reqwest::StatusCode::OK);
+            let cookie = login.headers()[reqwest::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            let target = harness::embedding::HostIdentity {
+                run: runtime_namespace(&host.context.config.run_directory.path()),
+                actor: AgentPath("/root".into()),
+                incarnation: actor.incarnation.0.to_string(),
+            };
+            let waiting = root_browser_projection(
+                &host.context,
+                host.address,
+                &cookie,
+                &target,
+                harness::server::HostActorLifecycle::Waiting,
+            )
+            .await;
+            assert!(waiting.active_round.is_none());
+            assert!(
+                host.runtime.store().unread("/root").unwrap().is_empty(),
+                "the interrupted round must await explicit input"
+            );
+            let requests_before = transport.requests.lock().len();
+            let compiler_before = tidepool_extract_cmd::extract_spawn_count();
+            let mut changed = transport.changed.subscribe();
+            let wake = client
+                .post(format!("{api}/commands"))
+                .header("Origin", &origin)
+                .header(reqwest::header::COOKIE, &cookie)
+                .json(&harness::server::ClientCommand::Host {
+                    operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                    command: harness::server::HostCommand::Input {
+                        target: target.clone(),
+                        text: "retry retained preflight rejection".into(),
+                    },
+                })
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(wake.status(), reqwest::StatusCode::ACCEPTED);
+            let recovered = host
+                .context
+                .while_root_live(
+                    "preflight recovery provider request",
+                    tokio::time::timeout(Duration::from_secs(30), async {
+                        loop {
+                            if let Some(request) = transport.requests.lock().get(requests_before).cloned() {
+                                break request;
+                            }
+                            changed.changed().await.unwrap();
+                        }
+                    }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"))
+                .expect("real recovery provider request");
+            assert!(recovered
+                .input
+                .iter()
+                .any(|item| { item.0["content"] == "retry retained preflight rejection" }));
+            let returned = recovered
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == operation.call.0
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                returned,
+                vec![durable.clone()],
+                "recovery returns the original receipt exactly once"
+            );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                compiler_before,
+                "recovery of a settled rejection must not resubmit compiler work"
+            );
+            assert_eq!(
+                host.runtime
+                    .store()
+                    .replay_output_operation(&operation)
+                    .unwrap(),
+                Some(durable)
+            );
+            assert_eq!(
+                host.runtime
+                    .store()
+                    .claims_for_operation(&operation)
+                    .unwrap()
+                    .len(),
+                claims.len()
+            );
+            assert_eq!(
+                transport
+                    .operations
+                    .lock()
+                    .keys()
+                    .filter(|call| call.as_str() == "bad-final-call")
+                    .count(),
+                1
+            );
+            assert_eq!(binding.inbox.watermark(), 1);
+
+            let (_, absent) = host
+                .context
+                .while_root_live(
+                    "preflight absent binding",
+                    transport.cell(
+                        "preflight-binding-absent",
+                        "display (neverPublished :: Int)",
+                    ),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_absent_binding(&absent, "neverPublished");
+            let (_, valid) = host
+                .context
+                .while_root_live(
+                    "preflight valid cell after recovery",
+                    transport.cell(
+                        "preflight-valid-after-retry",
+                        &source.replace("pure (True :: Int)", "display (42 :: Int)"),
+                    ),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_committed_haskell_value(&valid, "42");
+            assert!(
+                valid["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["installedBindings"]
+                        .as_array()
+                        .is_some_and(|names| names.iter().any(|name| name == "neverPublished"))),
+                "valid control publishes the binding: {valid}"
+            );
+            assert_eq!(
+                binding.inbox.watermark(),
+                2,
+                "only valid cells send notifications"
+            );
+            assert!(host.context.actor.terminal().get().is_none());
+            transport.sender.send(PreflightStep::Finish).unwrap();
+            host.context
+                .while_root_live(
+                    "successful preflight provider round",
+                    successful_rounds(&host.context, &[actor]),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+        })
+    })
     .await;
-    assert!(waiting.active_round.is_none());
-    assert!(
-        host.runtime.store().unread("/root").unwrap().is_empty(),
-        "the interrupted round must await explicit input"
-    );
-    let requests_before = transport.requests.lock().len();
-    let compiler_before = tidepool_extract_cmd::extract_spawn_count();
-    let mut changed = transport.changed.subscribe();
-    let wake = client
-        .post(format!("{api}/commands"))
-        .header("Origin", &origin)
-        .header(reqwest::header::COOKIE, &cookie)
-        .json(&harness::server::ClientCommand::Host {
-            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-            command: harness::server::HostCommand::Input {
-                target: target.clone(),
-                text: "retry retained preflight rejection".into(),
-            },
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(wake.status(), reqwest::StatusCode::ACCEPTED);
-    let recovered = host
-        .context
-        .while_root_live(
-            "preflight recovery provider request",
-            tokio::time::timeout(Duration::from_secs(30), async {
-                loop {
-                    if let Some(request) = transport.requests.lock().get(requests_before).cloned() {
-                        break request;
-                    }
-                    changed.changed().await.unwrap();
-                }
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"))
-        .expect("real recovery provider request");
-    assert!(recovered
-        .input
-        .iter()
-        .any(|item| { item.0["content"] == "retry retained preflight rejection" }));
-    let returned = recovered
-        .input
-        .iter()
-        .filter(|item| {
-            item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == operation.call.0
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        returned,
-        vec![durable.clone()],
-        "recovery returns the original receipt exactly once"
-    );
-    assert_eq!(
-        tidepool_extract_cmd::extract_spawn_count(),
-        compiler_before,
-        "recovery of a settled rejection must not resubmit compiler work"
-    );
-    assert_eq!(
-        host.runtime
-            .store()
-            .replay_output_operation(&operation)
-            .unwrap(),
-        Some(durable)
-    );
-    assert_eq!(
-        host.runtime
-            .store()
-            .claims_for_operation(&operation)
-            .unwrap()
-            .len(),
-        claims.len()
-    );
-    assert_eq!(
-        transport
-            .operations
-            .lock()
-            .keys()
-            .filter(|call| call.as_str() == "bad-final-call")
-            .count(),
-        1
-    );
-    assert_eq!(binding.inbox.watermark(), 1);
-
-    let (_, absent) = host
-        .context
-        .while_root_live(
-            "preflight absent binding",
-            transport.cell(
-                "preflight-binding-absent",
-                "display (neverPublished :: Int)",
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_absent_binding(&absent, "neverPublished");
-    let (_, valid) = host
-        .context
-        .while_root_live(
-            "preflight valid cell after recovery",
-            transport.cell(
-                "preflight-valid-after-retry",
-                &source.replace("pure (True :: Int)", "display (42 :: Int)"),
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_committed_haskell_value(&valid, "42");
-    assert!(
-        valid["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["installedBindings"]
-                .as_array()
-                .is_some_and(|names| names.iter().any(|name| name == "neverPublished"))),
-        "valid control publishes the binding: {valid}"
-    );
-    assert_eq!(
-        binding.inbox.watermark(),
-        2,
-        "only valid cells send notifications"
-    );
-    assert!(host.context.actor.terminal().get().is_none());
-    transport.sender.send(PreflightStep::Finish).unwrap();
-    host.context
-        .while_root_live(
-            "successful preflight provider round",
-            successful_rounds(&host.context, &[actor]),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    host.stop()
-        .await
-        .expect("production shutdown confirms preflight cleanup");
 }
