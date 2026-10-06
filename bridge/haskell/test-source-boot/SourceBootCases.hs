@@ -4064,10 +4064,17 @@ exactTransactionCancellation = withTiming $ withScratch $ \work -> do
       original <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
         (Just scope) quoterPath [work] Nothing
       objects <- helperObjects original
-      quoted <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
-        (Just scope) quotedPath [work] Nothing
+      (quoted,quoteDiagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile
+          (Just scope) quotedPath [work] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult quoted))) $
         fail "completed A did not execute its real quoter with original42"
+      quotedFinalized <- maybe (fail "executable promotion omitted completed helper Core") pure
+        (Map.lookup helperName (pprFinalizedModules quoted))
+      quotedIdentity <- evaluate quotedFinalized >>= makeStableName
+      unless (quotedIdentity == fst objects && helperFrontends quoteDiagnostics == 0) $
+        fail ("metadata-to-executable promotion replaced completed helper Core: " ++ quoteDiagnostics)
+      mapM_ (`requireHelperHit` quoteDiagnostics) ["source_frontend","finalized_core"]
       pure objects
     (_,cancelDiagnostics) <- captureDiagnostics $ runRequest (pure ()) $ \compile -> do
       source <- readFile (fixture "CancelledMetadataQuoteSupport.hs")
@@ -4102,8 +4109,11 @@ exactTransactionCancellation = withTiming $ withScratch $ \work -> do
       (restored,diagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) quoterPath [work] Nothing
       restoredObjects <- helperObjects restored
-      unless (restoredObjects == originalObjects && helperFrontends diagnostics == 0) $
-        fail ("cancelled B discarded or rebound completed A's compiler objects: " ++ diagnostics)
+      let sameFinalized = fst restoredObjects == fst originalObjects
+          samePrepared = snd restoredObjects == snd originalObjects
+      unless (sameFinalized && samePrepared && helperFrontends diagnostics == 0) $
+        fail ("cancelled B discarded or rebound completed A's compiler objects: finalized="
+          ++ show sameFinalized ++ " prepared=" ++ show samePrepared ++ "\n" ++ diagnostics)
       mapM_ (`requireHelperHit` diagnostics) ["source_frontend","finalized_core","prepared_body"]
       quoted <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
         (Just scope) quotedPath [work] Nothing

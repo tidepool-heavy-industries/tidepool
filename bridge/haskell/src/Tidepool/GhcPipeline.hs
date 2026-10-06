@@ -2476,11 +2476,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               nodeEpoch = completedModuleEpoch <$> Map.lookup (ms_mod summary) selectedVersions
               sameEpoch = nodeEpoch == Just epoch
               home = if sameEpoch then original else withoutBytecode original
-          refreshed <- if not sameEpoch && backendGeneratesCode (backend (ms_hspp_opts summary))
+              hasCode = isJust (homeMod_bytecode (hm_linkable home))
+                || isJust (homeMod_object (hm_linkable home))
+              needsBytecode = backendGeneratesCode (backend (ms_hspp_opts summary))
+                && (not sameEpoch || not hasCode)
+          refreshed <- if needsBytecode
             then do
-              -- Bytecode contains interpreter RemotePtrs. A new epoch consumes
-              -- the retained finalized Core, never the source frontend, and
-              -- publishes a new complete interface/linkable pair.
+              -- Executable demand can follow metadata-only preparation in the
+              -- same epoch. A retired epoch also needs new RemotePtrs. Both
+              -- consume the retained finalized Core and publish its complete
+              -- current interface/linkable pair without a source frontend.
               let native = scopeRetainedSummaryHscEnv summary current
                   guts = (finalizedTidyGuts finalized) {cg_modBreaks=Nothing}
               liftIO markInterpreterMutation
@@ -2491,7 +2496,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           setSession (hscUpdateHPT (\table -> addToHpt table (ms_mod_name summary) refreshed) current)
           let version = compilerIfaceVersion (gmeValidity entry) (hm_iface refreshed)
           case Map.lookup version ifaceVersions of
-            Just (CompilerIfaceEntry storedEpoch replay) | sameEpoch && storedEpoch == epoch -> liftIO (replay cache)
+            Just (CompilerIfaceEntry storedEpoch replay)
+              | not needsBytecode && sameEpoch && storedEpoch == epoch -> liftIO (replay cache)
             _ -> liftIO (addHmiToCache cache refreshed)
     let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
