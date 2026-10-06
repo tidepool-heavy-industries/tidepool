@@ -6,7 +6,7 @@
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
   , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
-  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
+  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
   , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
@@ -21,6 +21,7 @@ import Control.Exception (throwIO)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust)
 import Data.Set qualified as Set
@@ -52,7 +53,8 @@ import Tidepool.ExecutionEncode
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
   , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
-  , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands
+  , projectRawOriginalHomeModuleProducts, forceRawModuleProducts, rawOriginalProductOwner
+  , rawOriginalProductBinders, rawOriginalProductDemands
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings )
 import Tidepool.ExecutionSchema
@@ -74,7 +76,8 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalInterfaces)
 import Tidepool.PreparedTime (resolveTimeAuthority)
-import Tidepool.PreparedStg (PreparedModule, pmModule, pmSitedSiblings, prepareModule)
+import Tidepool.PreparedStg (PreparedModule, pmModule, pmSitedSiblings, acquirePreparedModule, runPreparedModuleTask)
+import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks)
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal, admittedOriginalModule
   , admittedOriginalProof, admittedOriginalInterface, admittedOriginalLocation )
@@ -205,15 +208,12 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
 -- alone does not. Check after recovery's package-root fixed point, when the
 -- selected executable globals are known, rather than rejecting unused owners.
 requireOriginalExecutableGlobals
-  :: HscEnv -> Set.Set SymbolIdentity -> PreparedModuleProducts -> [GlobalDecl]
+  :: HscEnv -> Set.Set SymbolIdentity -> [GlobalDecl]
   -> Either ProjectionError ()
-requireOriginalExecutableGlobals env external products globals =
+requireOriginalExecutableGlobals env available globals =
   if Set.null unavailable then Right ()
     else Left (UnavailableOriginalHomeDependencies (Set.toAscList unavailable))
   where
-    available = Set.union external (Set.fromList
-      [binder | (_,Right groups) <- preparedModuleProductOutcomes products
-        , group <- groups, binder <- projectedBinders group])
     unavailable = Set.fromList
       [identity | global <- globals, globalRequiredGeneration global == Nothing
         , let identity = globalIdentity global
@@ -227,42 +227,67 @@ prepareOriginalProducts
   :: HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
-prepareOriginalProducts env exact interfaces context external initial = do
-  let raw = Map.fromList [(pmModule prepared, projectRawOriginalHomeModuleProducts
-        env interfaces context prepared) | prepared <- initial]
-  go initial Map.empty Set.empty raw (Map.keys raw)
-  where
-    go modules admitted attempted raw completed = do
-      let known = Set.unions (external : map rawOriginalProductBinders (Map.elems raw))
-          demands = Set.unions
-            [rawOriginalProductDemands product' | owner <- completed
-              , Just product' <- [Map.lookup owner raw]]
-          pending = Set.toAscList (Set.fromList
-            [owner | identity <- Set.toAscList (demands `Set.difference` known)
-              , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
-                    (mkModuleName (T.unpack (symbolModule identity)))
-              , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
-              , Map.notMember owner raw, owner `Set.notMember` attempted])
-      recovered <- forM pending $ \owner -> case exact of
-        Nothing -> pure Nothing
-        Just scope -> fmap (fmap (\original -> (owner,original)))
-          (recoverAdmittedFinalizedOriginal env scope owner)
-      let originals = Map.fromList (mapMaybe id recovered)
-          siblings = Map.unions (map pmSitedSiblings modules)
-          selectedInterfaces = Map.union interfaces (Map.fromList
-            [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
-              | (owner,original) <- Map.toAscList originals])
-      prepared <- forM (Map.toAscList originals) $ \(_,original) ->
-        prepareModule env (admittedOriginalLocation original) siblings (admittedOriginalModule original)
-      let added = Map.fromList [(pmModule prepared', projectRawOriginalHomeModuleProducts
-            env selectedInterfaces context prepared') | prepared' <- prepared]
-          merged = Map.union raw added
-          admitted' = Map.union admitted originals
-      if Map.null added
-        then let (products,_) = settleOriginalHomeModuleProducts env external (Map.elems merged)
-          in pure (modules,PreparedProductContext products admitted' modules (Just (Map.elems merged)) external Nothing)
-        else go (modules ++ prepared) admitted'
-          (Set.union attempted (Set.fromList pending)) merged (Map.keys added)
+prepareOriginalProducts env exact interfaces context external initial =
+  withCompilerExecutor serialCompilerExecutionGrant $ \executor ->
+    prepareOriginalProductsWithExecutor executor env exact interfaces context external initial
+
+prepareOriginalProductsWithExecutor
+  :: CompilerExecutor -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
+  -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
+  -> IO ([PreparedModule], PreparedProductContext)
+prepareOriginalProductsWithExecutor executor env exact interfaces context external initial = do
+  modulesRef <- newIORef (Map.fromList [(pmModule prepared, prepared) | prepared <- initial])
+  admittedRef <- newIORef Map.empty
+  attemptedRef <- newIORef Set.empty
+  rawRef <- newIORef Map.empty
+  knownRef <- newIORef (Set.union external (Set.fromList
+    (Map.elems (preparedTopIdentityBindings initial))))
+  let lower selected prepared = forceRawModuleProducts
+        (projectRawOriginalHomeModuleProducts env selected context prepared)
+      completed _ raw = do
+        modifyIORef' rawRef (Map.insert (rawOriginalProductOwner raw) raw)
+        modules <- readIORef modulesRef
+        attempted <- readIORef attemptedRef
+        known <- readIORef knownRef
+        let pending = Set.toAscList (Set.fromList
+              [owner | identity <- Set.toAscList (rawOriginalProductDemands raw `Set.difference` known)
+                , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
+                      (mkModuleName (T.unpack (symbolModule identity)))
+                , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
+                , Map.notMember owner modules, owner `Set.notMember` attempted])
+        modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
+        originals <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> case exact of
+          Nothing -> pure Nothing
+          Just scope -> fmap (fmap (\original -> (owner,original)))
+            (recoverAdmittedFinalizedOriginal env scope owner)
+        admitted <- readIORef admittedRef
+        let allAdmitted = Map.union admitted originals
+            siblings = Map.unions (map pmSitedSiblings (Map.elems modules))
+            selected = Map.union interfaces (Map.fromList
+              [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
+                | (owner,original) <- Map.toAscList allAdmitted])
+        modifyIORef' admittedRef (Map.union originals)
+        tasks <- forM (Map.toAscList originals) $ \(owner,original) -> do
+          task <- acquirePreparedModule env (admittedOriginalLocation original) siblings
+            (admittedOriginalModule original)
+          pure (owner,task)
+        _ <- runCompilerTasks executor
+          (\(_,task) -> do
+            prepared <- runPreparedModuleTask task
+            product' <- lower selected prepared
+            pure (prepared,product'))
+          (\_ (prepared,product') -> do
+            modifyIORef' modulesRef (Map.insert (pmModule prepared) prepared)
+            modifyIORef' knownRef (`Set.union` Set.fromList
+              (Map.elems (preparedTopIdentityBindings [prepared])))
+            completed prepared product') tasks
+        pure ()
+  _ <- runCompilerTasks executor (lower interfaces) completed initial
+  modules <- Map.elems <$> readIORef modulesRef
+  admitted <- readIORef admittedRef
+  raw <- Map.elems <$> readIORef rawRef
+  let (products,_) = settleOriginalHomeModuleProducts env external raw
+  pure (modules,PreparedProductContext products admitted modules (Just raw) external Nothing)
 
 -- Captures come from the exact scope, including its admitted checked values,
 -- or the candidate owner. Their original bytes supply type dependency seals;
@@ -410,20 +435,20 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
       Nothing -> do
         hPutStrLn stderr ("module product unavailable: no interface for " ++ moduleNameString name)
         pure (key, ProductMissingInterface, Nothing, Nothing)
-      Just _ -> case outcome of
-        Left reason -> do
+      Just _ -> do
+        canIssue <- if Map.member owner retained then pure True else case Map.lookup key finalized of
+          Nothing -> fail "fresh original product lacks its captured finalization"
+          Just original -> pure (isJust (localFinalizedCore original))
+        if not canIssue then do
           hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
-            ++ ": " ++ show reason)
-          pure (key, ProductProjectionRejected, Nothing, Nothing)
-        Right groups -> do
-          canIssue <- if Map.member owner retained then pure True else case Map.lookup key finalized of
-            Nothing -> fail "fresh original product lacks its captured finalization"
-            Just original -> pure (isJust (localFinalizedCore original))
-          if not canIssue then do
+            ++ ": finalized Core cannot issue an immutable native original")
+          pure (key, ProductInterfaceOnly, Nothing, Nothing)
+        else case outcome of
+          Left reason -> do
             hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
-              ++ ": finalized Core cannot issue an immutable native original")
-            pure (key, ProductInterfaceOnly, Nothing, Nothing)
-          else issue timing key name owner groups
+              ++ ": " ++ show reason)
+            pure (key, ProductProjectionRejected, Nothing, Nothing)
+          Right groups -> issue timing key name owner groups
   let products = [moduleProduct | (_, _, Just moduleProduct, _) <- outcomes]
       packageBundles =
         [(unit, moduleName', sidecar)

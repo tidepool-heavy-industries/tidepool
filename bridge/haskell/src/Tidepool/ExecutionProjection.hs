@@ -9,7 +9,7 @@ module Tidepool.ExecutionProjection
   , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
-  , RawModuleProducts, projectRawOriginalHomeModuleProducts
+  , RawModuleProducts, projectRawOriginalHomeModuleProducts, forceRawModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
@@ -39,6 +39,7 @@ module Tidepool.ExecutionProjection
   , TextUnitAuthority(..)
   ) where
 
+import Control.Exception (evaluate)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
@@ -318,6 +319,20 @@ projectRawOriginalHomeModuleProducts env interfaces context prepared =
           (projectPreparedModuleGroupOutcomesFor (OriginalHomeProduct isHome) context prepared Nothing)
       _ -> Nothing
     executable = projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing
+
+-- Force the local lowering on its executor worker, before incorporation.
+-- Failed groups remain values; only infrastructure exceptions abort the batch.
+forceRawModuleProducts :: RawModuleProducts -> IO RawModuleProducts
+forceRawModuleProducts raw = do
+  case rawOriginalProductGroups raw of
+    Just _ -> do
+      _ <- evaluate (Set.size (rawOriginalProductDemands raw)
+        + Set.size (rawOriginalProductBinders raw))
+      pure ()
+    Nothing -> do
+      _ <- evaluate (rawExecutableProduct raw)
+      pure ()
+  pure raw
 
 rawOriginalProductBinders :: RawModuleProducts -> Set SymbolIdentity
 rawOriginalProductBinders raw = Set.fromList

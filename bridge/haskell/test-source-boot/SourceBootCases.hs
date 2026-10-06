@@ -2440,6 +2440,10 @@ originalProjectionProducts = withScratch $ \work -> do
       incompleteProductContext =
         projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules
       incompleteProducts = preparedModuleProductOutcomes incompleteProductContext
+      availableOf productContext = Set.fromList
+        [binder | (_,Right groups) <- preparedModuleProductOutcomes productContext
+          , group <- groups, binder <- projectedBinders group]
+      incompleteBinders = availableOf incompleteProductContext
       moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
       rejectedByMissing prepared = case moduleOutcome prepared of
         Just (Left (UnavailableOriginalHomeDependencies identities)) -> any (`Set.member` providerBinders) identities
@@ -2450,7 +2454,7 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "unavailable module sibling did not reject its consumers while preserving an independent owner"
   let safeContext = pairedContext { projectionEntry = safe }
   safeProgram <- either (fail . show) pure (projectPrepared safeContext [independent])
-  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+  unless (requireOriginalExecutableGlobals pairedEnv incompleteBinders
       (programGlobals safeProgram) == Right ()) $
     fail "unselected unavailable home owner rejected an independent executable"
   bad <- findBinder ownerModule "bad"
@@ -2461,21 +2465,21 @@ originalProjectionProducts = withScratch $ \work -> do
           , globalIdentity global `Set.member` providerBinders]
   unless (not (Set.null demanded)) $
     fail "final executable availability control lost its genuine missing-provider demand"
-  case requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext
+  case requireOriginalExecutableGlobals pairedEnv incompleteBinders
       (programGlobals badProgram) of
     Left (UnavailableOriginalHomeDependencies missing)
       | Set.fromList missing == demanded -> pure ()
     other -> fail ("final emitted home demand lost its typed unavailable outcome: " ++ show other)
-  unless (requireOriginalExecutableGlobals pairedEnv providerBinders incompleteProductContext
+  unless (requireOriginalExecutableGlobals pairedEnv (Set.union providerBinders incompleteBinders)
       (programGlobals badProgram) == Right ()) $
     fail "native original binding census did not satisfy the emitted home demand"
   let completeProducts = projectOriginalHomeModuleProducts pairedEnv pairedInterfaces
         pairedContext mempty (pprModules paired)
-  unless (requireOriginalExecutableGlobals pairedEnv mempty completeProducts
+  unless (requireOriginalExecutableGlobals pairedEnv (availableOf completeProducts)
       (programGlobals badProgram) == Right ()) $
     fail "successfully projected original did not satisfy the emitted home demand"
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
-  case requireOriginalExecutableGlobals pairedEnv wrongUnitBinders incompleteProductContext
+  case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
       (programGlobals badProgram) of
     Left (UnavailableOriginalHomeDependencies missing)
       | Set.fromList missing == demanded -> pure ()
@@ -2484,7 +2488,7 @@ originalProjectionProducts = withScratch $ \work -> do
         [if globalIdentity global `Set.member` demanded
           then global {globalRequiredGeneration = Just 7} else global
         | global <- programGlobals badProgram]
-  unless (requireOriginalExecutableGlobals pairedEnv mempty incompleteProductContext retainedGlobals
+  unless (requireOriginalExecutableGlobals pairedEnv incompleteBinders retainedGlobals
       == Right ()) $
     fail "retained generation reopened its original native implementation"
   _ <- certifyProjectedProducts work "independent-after-product-rejection" paired incompleteProducts
