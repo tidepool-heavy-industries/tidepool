@@ -1907,6 +1907,20 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 --
 -- 'retained' is the immutable per-request index used by both the plugin's
 -- recompilation fingerprint and the prepared memo's module validity check.
+-- GHC downsweep indexes every retained summary by its source path. Exact
+-- lexical/linker nodes have no source and belong only to their admitted graph.
+-- CPP summaries also need fresh preprocessing to observe changed includes.
+depanalSourceModules :: [ModuleName] -> Ghc ModuleGraph
+depanalSourceModules excluded = do
+  env <- getSession
+  let sourceSummary (ModuleNode _ summary) =
+        isJust (ml_hs_file (ms_location summary))
+          && not (xopt LangExt.Cpp (ms_hspp_opts summary))
+      sourceSummary _ = True
+  setSession env {hsc_mod_graph = mkModuleGraph
+    (filter sourceSummary (mgModSummaries' (hsc_mod_graph env)))}
+  depanal excluded False
+
 runCompileCycle
   :: PipelineSelection result -> CycleState
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
@@ -2004,14 +2018,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- IgnoreInterfacePragmas. Canonical summaries restore the interface policy
     -- before any shared package interface is demanded. Package unfoldings and
     -- home type identities remain available without an EPS flush.
-    -- GHC may reuse a preprocessed summary solely from the source hash.
-    -- A changed include must run preprocessing again before memo validation.
     previous <- getSession
-    let keepSummary (ModuleNode _ summary) = not (xopt LangExt.Cpp (ms_hspp_opts summary))
-        keepSummary _ = True
-    setSession previous {hsc_mod_graph = mkModuleGraph
-      (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
-    modGraphDownsweep <- depanal (pvDownsweepExcludes variant) False
+    modGraphDownsweep <- depanalSourceModules (pvDownsweepExcludes variant)
     forM_ (pvExactScope variant) $ \scope -> do
       let exactNames = Set.fromList [mkModuleName (exactModule iface)
             | (iface, _, _) <- scopeInterfaces scope]
@@ -5259,7 +5267,7 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
     target <- guessTarget source Nothing Nothing
     pure target {targetAllowObjCode=False}
   setTargets (hsc_targets initial ++ targets)
-  graph <- depanal excluded False
+  graph <- depanalSourceModules excluded
   env <- getSession
   current <- liftIO (dependencyEvidenceFor env ([],True) graph [])
   let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
