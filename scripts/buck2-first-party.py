@@ -674,6 +674,10 @@ def runtime_arguments(env, resources, worker, resource_env=None, *, package_name
         for key in RUNTIME_RESOURCE_ENV_KEYS:
             if key in env:
                 resource_env[key] = env.pop(key)
+    if package_name == "tidepool-toolchain":
+        for key in ("TIDEPOOL_CATALOG_TEST_PYTHON", "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT"):
+            if key in env:
+                resource_env[key] = env.pop(key)
     for key in ("EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN"):
         if key in env:
             resource_env[key] = env.pop(key)

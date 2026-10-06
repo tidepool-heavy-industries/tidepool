@@ -2,6 +2,7 @@
 """Source-layout contracts for the native Buck Rust generator, without a build."""
 
 import ast
+import importlib.util
 import json
 import os
 import pathlib
@@ -788,8 +789,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         runner = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests", "tidepool_rust_isolated_test")
-        self.assertEqual(runner['env']['TIDEPOOL_CATALOG_TEST_PYTHON'], '$(exe toolchains//:python)')
-        self.assertEqual(runner['env']['TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT'],
+        self.assertEqual(runner['resource_env']['TIDEPOOL_CATALOG_TEST_PYTHON'], '$(exe toolchains//:python)')
+        self.assertEqual(runner['resource_env']['TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT'],
                          '$(location //build/package:qualification_script)')
         self.assertIn('toolchains//:python', runner['resources'])
         self.assertIn('//build/package:qualification_script', runner['resources'])
@@ -810,6 +811,53 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                 "//bridge/haskell:declaration_inventory_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json",
             },
         )
+
+    def test_catalog_resources_reach_the_generated_delegated_child_command(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generated = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
+                              "tidepool_rust_isolated_test")
+        wrappers = []
+        definitions = GENERATOR.parents[1] / "build/rust/defs.bzl"
+        namespace = {
+            "rust_optimization_level": lambda *_: "1",
+            "rust_binary": lambda **_: None,
+            "sh_test": lambda **arguments: wrappers.append(arguments),
+            "read_root_config": lambda *_: "/declared/compiler",
+        }
+        exec("\n".join(line for line in definitions.read_text().splitlines()
+                       if not line.startswith("load(")), namespace)
+        namespace["tidepool_rust_isolated_test"](**generated)
+        wrapper = wrappers.pop()
+        args = wrapper["args"]
+        declared = [args[index + 1] for index, value in enumerate(args)
+                    if value == "--resource-env"]
+        environment = dict(wrapper["env"])
+        expected = {
+            "TIDEPOOL_CATALOG_TEST_PYTHON": sys.executable,
+            "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT": str(
+                GENERATOR.parents[1] / "build/package/qualification.py"),
+        }
+        environment.update(expected)
+        environment.update({
+            "TIDEPOOL_TEST_SYSTEMD_RUN": sys.executable,
+            "TIDEPOOL_TEST_SYSTEMCTL": sys.executable,
+            "UNDECLARED_RESOURCE": "/ambient/resource",
+        })
+        runner_path = GENERATOR.parents[1] / "build/rust/isolated-libtest.py"
+        spec = importlib.util.spec_from_file_location("catalog_resource_runner", runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        record = {}
+        command, _ = runner.delegated_command(
+            ["/declared/libtest"], 300, "app.slice", record,
+            environment=environment, declared_resources=declared)
+        for key, value in expected.items():
+            self.assertNotIn(key, generated.get("env", {}))
+            self.assertIn(key, declared)
+            self.assertIn("--setenv=" + key + "=" + value, command)
+            self.assertIn(key, record["environment_names"])
+        self.assertNotIn("UNDECLARED_RESOURCE", record["environment_names"])
 
     def test_source_tree_preserves_fixture_layout_and_target_inputs(self):
         result = self.generate()
