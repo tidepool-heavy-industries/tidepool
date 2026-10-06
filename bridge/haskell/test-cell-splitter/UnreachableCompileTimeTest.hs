@@ -34,7 +34,7 @@ unreachableCompileTimeCompilation = bracket temporary removeDirectoryRecursive $
         unless (owners == ["UnusedCompileTimeTarget"]) $
           fail ("unreachable imported body entered the artifact: " ++ show owners)
         let context = ProjectionContext "counter-test" "ghc-9.12.2"
-              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
               (SymbolIdentity "main" "UnusedCompileTimeTarget" "value" "result" Nothing)
               [] Nothing Nothing Nothing Nothing
         program <- either (fail . show) pure (projectPrepared context (pprModules prepared))

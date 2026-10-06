@@ -2062,7 +2062,7 @@ originalPackageProjection = withScratch $ \work -> do
   let env = prHscEnv (pprPipelineResult original)
       modules = pprModules original
       context = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "PackageOriginalSupport" "value" "packageFunction" Nothing)
         [] Nothing Nothing Nothing Nothing
       imported = [referenceBinder reference | prepared <- modules
@@ -2168,7 +2168,7 @@ originalPackageCohort coreRoot output = do
   json <- resolveJsonAuthority env
   text <- resolveTextPackageUnit env
   let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "Tidepool.Effects.Core" "value" "__result" Nothing)
         [] formatting time json text
       imported = [referenceBinder reference | prepared <- modules
@@ -2422,7 +2422,7 @@ originalProjectionProducts = withScratch $ \work -> do
   let pairedEnv = prHscEnv (pprPipelineResult paired)
       pairedInterfaces = pprProductInterfaces paired
       pairedContext = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         known [] Nothing Nothing Nothing Nothing
       consumerOutcome externalBinders = lookup (pmModule consumer)
         (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts pairedEnv
@@ -2500,7 +2500,7 @@ originalProjectionProducts = withScratch $ \work -> do
     value : _ -> pure value
     [] -> fail "projection fixture lacks an original binder"
   let context = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "MetadataQuoteSupport" "value" "answerValue" Nothing)
         [] Nothing Nothing Nothing Nothing
       rejected = prepared { preparedSiteRejections = [SiteRejection binder "projection fixture refusal"] }
@@ -3808,7 +3808,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
         let root = SymbolIdentity "main" "HydratedSiteExpr" "value" "__result" Nothing
             sibling = SymbolIdentity "main" "Tidepool.Actors.Unfold" "value" "childSited" Nothing
             context = ProjectionContext "test" "matched"
-              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
               root [] Nothing Nothing Nothing Nothing
             tops (NonRecursive binding) = [binding]
             tops (Recursive bindings) = bindings
