@@ -56,7 +56,7 @@ import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
-import GHC.Utils.Logger (Logger, popLogHook)
+import GHC.Utils.Logger (Logger, initLogger, makeThreadSafe, popLogHook, pushLogHook)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
 import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
 import GHC.Unit.Module.Location (ml_hi_file, ml_hs_file)
@@ -2048,21 +2048,35 @@ sourceDiagnosticAt path fragment diagnostic = dSeverity diagnostic == DiagError
     Just (actual,_,_,_,_) -> normalise actual == normalise path
     Nothing -> False
 
--- The returned environment includes this cycle's collector. Removing it must
--- leave the empty boot stack; an older collector would make another pop succeed.
-assertSingleDiagnosticCollector :: HscEnv -> IO ()
-assertSingleDiagnosticCollector environment = do
-  bootLogger <- evaluate (popLogHook (hsc_logger environment))
-  older <- try (evaluate (popLogHook bootLogger)) :: IO (Either SomeException Logger)
-  unless (case older of Left _ -> True; Right _ -> False) $
-    fail "compiler request retained diagnostic collectors from previous cycles"
+loggerLogHookDepth :: Logger -> IO Int
+loggerLogHookDepth = count 0
+  where
+    count depth logger
+      | depth > 64 = fail "logger hook stack exceeded the fixture's finite bound"
+      | otherwise = do
+          remaining <- try (evaluate (popLogHook logger)) :: IO (Either SomeException Logger)
+          either (const (pure depth)) (count (depth + 1)) remaining
+
+-- Prepared results retain GHC's thread-safe lowering wrapper above the current
+-- collector. Compare with an independently constructed GHC logger baseline.
+assertSingleDiagnosticCollector :: Int -> HscEnv -> IO ()
+assertSingleDiagnosticCollector expectedDepth environment = do
+  actualDepth <- loggerLogHookDepth (hsc_logger environment)
+  unless (actualDepth == expectedDepth) $
+    fail ("compiler request retained diagnostic collectors from previous cycles: expected="
+      ++ show expectedDepth ++ " actual=" ++ show actualDepth)
 
 exactToOrdinary :: IO ()
 exactToOrdinary = withTiming $ withScratch $ \work -> do
+  bootLogger <- initLogger
+  referenceLogger <- makeThreadSafe (pushLogHook id bootLogger)
+  expectedLoggerDepth <- loggerLogHookDepth referenceLogger
   forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
     ,"ExecutionSealedTarget.hs","ExecutionClassQuoter.hs","ExecutionClassQuoteTarget.hs"
     ,"MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
       copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  ordinarySource <- BSC.unpack <$> BS.readFile (work </> "ExecutionClassQuoteTarget.hs")
+  diagnosticCycle <- newIORef (0 :: Int)
   sealed <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ExecutionSealedQuoter.hs") [work] Nothing
   sealedFixture <- capturePreparedFixture work sealed
@@ -2085,9 +2099,26 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
   let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   withResidentPipelineSelectedRequests [work] $ \runRequest -> do
     let ordinaryQuote compile = do
-          result <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
-            (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
-          assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult result))
+          diagnosticIndex <- atomicModifyIORef' diagnosticCycle $ \previous ->
+            let next = previous + 1 in (next, next)
+          let probe = "collectorProbe" ++ show diagnosticIndex
+          writeFile (work </> "ExecutionClassQuoteTarget.hs")
+            ("{-# OPTIONS_GHC -Wmissing-signatures #-}\n" ++ ordinarySource
+              ++ "\n" ++ probe ++ " = ()\n")
+          (result, diagnostics) <- captureDiagnostics $
+            compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+              (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
+          assertSingleDiagnosticCollector expectedLoggerDepth (prHscEnv (pprPipelineResult result))
+          let warnings = prWarnings (pprPipelineResult result)
+              emitted = filter (\line -> "warning:" `isInfixOf` line
+                && "-Wmissing-signatures" `isInfixOf` line) (lines diagnostics)
+          unless (length emitted == 1 && length warnings == 1
+              && all (\warning -> probe `isInfixOf` warning
+                && "ExecutionClassQuoteTarget.hs" `isInfixOf` warning) warnings
+              && all ("ExecutionClassQuoteTarget.hs" `isInfixOf`) emitted
+              && probe `isInfixOf` diagnostics) $
+            fail ("ordinary cycle lost its once-only current diagnostic: probe="
+              ++ probe ++ " emitted=" ++ show (length emitted) ++ " captured=" ++ show warnings)
           unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult result))
               && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult result)))))
               && not (isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "ExecutionHiddenOrphan")))
@@ -2141,7 +2172,7 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
       copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
       afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
         (work </> "MetadataQuotedTarget.hs") [work] Nothing
-      assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult afterCancel))
+      assertSingleDiagnosticCollector expectedLoggerDepth (prHscEnv (pprPipelineResult afterCancel))
       unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
           && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
         fail "ordinary request after cancellation reused the old helper executable"
@@ -4364,11 +4395,23 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     ordinary <- compile CheckedEnvironment Set.empty GeneralCompile Nothing
       (work </> "MetadataTarget.hs") [work] Nothing
     (exact, diagnostics) <- captureDiagnostics (checked "MetadataTarget.hs")
-    unless (resultType exact == Just "Int" && resultType ordinary == resultType exact
-        && frontendCount "MetadataOwner" diagnostics == 1
-        && not (loadedOwner `elem` lines diagnostics && checkedOwner `elem` lines diagnostics)
-        && "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics) $
-      fail "exact metadata repeated the loaded source frontend or changed its instance result"
+    let ownerFrontends = frontendCount "MetadataOwner" diagnostics
+        loadedOwnerSeen = loadedOwner `elem` lines diagnostics
+        checkedOwnerSeen = checkedOwner `elem` lines diagnostics
+        targetCheckedSeen = "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics
+        observations =
+          [ ("exact_type_int", resultType exact == Just "Int")
+          , ("ordinary_exact_type_equal", resultType ordinary == resultType exact)
+          , ("owner_frontends_once", ownerFrontends == 1)
+          , ("owner_not_loaded_and_checked", not (loadedOwnerSeen && checkedOwnerSeen))
+          , ("target_checked", targetCheckedSeen)
+          ]
+    unless (all snd observations) $ do
+      hPutStrLn stderr ("exact loaded metadata captured second-cycle diagnostics:\n" ++ diagnostics)
+      fail ("exact metadata repeated the loaded source frontend or changed its instance result: observations="
+        ++ show observations ++ " ordinary_type=" ++ show (resultType ordinary)
+        ++ " exact_type=" ++ show (resultType exact) ++ " owner_frontends=" ++ show ownerFrontends
+        ++ " owner_loaded=" ++ show loadedOwnerSeen ++ " owner_checked=" ++ show checkedOwnerSeen)
     putStrLn ("exact loaded metadata evidence: owner_frontends="
       ++ show (frontendCount "MetadataOwner" diagnostics))
     (extensionOnly, extensionDiagnostics) <- captureDiagnostics
