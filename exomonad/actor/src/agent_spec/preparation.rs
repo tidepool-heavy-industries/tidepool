@@ -194,14 +194,14 @@ impl ToolsetPreparation {
             task.completed.notify_waiters();
             return;
         }
-        drop(state);
-        task.completed.notify_waiters();
         state.ready_order.push_back(key);
         while state.ready_order.len() > RETAINED_TOOLSETS {
             if let Some(retired) = state.ready_order.pop_front() {
                 state.tasks.remove(&retired);
             }
         }
+        drop(state);
+        task.completed.notify_waiters();
     }
 }
 
