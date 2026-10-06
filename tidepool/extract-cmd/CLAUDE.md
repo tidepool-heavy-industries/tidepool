@@ -111,8 +111,17 @@ directories after its final child is reaped, preserving the logical root and
 other owners. Ungraceful frontend/daemon death can leave orphan directories;
 this boundary does not sweep another process's outputs.
 
-Idle worker slots wait for accepted requests. Source compilation can run
-compile-time IO, so daemon startup and idleness never replay a caller's request.
+Idle worker slots wait for accepted requests. The daemon starts resident workers
+with `+RTS -I0 -RTS`: idle major collections cannot hold the retained heap when
+another request arrives. Ordinary allocation-driven collections remain enabled,
+as do live memory admission, settled RSS rotation and process deadlines. Finite
+direct workers retain the RTS defaults. RTS startup configuration belongs to the
+trusted process owner and environment; compiler request payloads do not contain
+RTS arguments. Disabling idle collections also defers idle finalizers and GHC's
+idle deadlock detection; the daemon's bounded operation and process owner remain
+the liveness authority for blocked resident requests.
+Source compilation can run compile-time IO, so daemon startup and idleness never
+replay a caller's request.
 
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork

@@ -384,9 +384,14 @@ a synchronous refusal discards partial additions while preserving previously
 completed versions. Cancellation terminates the transaction. Transactions and
 their requests are serialized and carry their own CWD and compiler options.
 
-The worker process environment is fixed at startup. Restart the daemon after
-changing extractor diagnostic variables, GHC configuration, or its watched
-toolchain stamp.
+The worker process environment and trusted RTS options are fixed at startup.
+The daemon supplies `-I0` for resident workers, retaining allocation-driven GC;
+direct finite invocations keep the normal idle-GC default. Idle collections no
+longer trigger finalizers or GHC idle deadlock detection between requests; normal
+collections still run finalizers. The frontend's request deadlines, cancellation
+and process reaping own resident-request liveness.
+Restart the daemon after changing extractor diagnostic variables, GHC
+configuration, or its watched toolchain stamp.
 
 ## Eval library
 

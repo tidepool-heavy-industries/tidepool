@@ -2843,8 +2843,17 @@ impl Worker {
         build_products_namespace: BuildProductsNamespace,
     ) -> Result<Self, FrontendError> {
         let mut command = prepared.command()?;
+        command.arg("--worker-loop-v2");
+        if matches!(
+            build_products_namespace.transport,
+            BuildProductsTransport::Daemon
+        ) {
+            // Idle major GC can occupy the retained heap when the next request
+            // arrives. Allocation-driven GC and the daemon's memory limits
+            // still govern this worker; finite direct compilers keep defaults.
+            command.args(["+RTS", "-I0", "-RTS"]);
+        }
         command
-            .arg("--worker-loop-v2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
