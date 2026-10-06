@@ -78,7 +78,7 @@ and host memory headroom before acceptance. Preparation cannot borrow the reserv
 foreground CPU allowance or warm worker. These defaults require measured latency
 qualification; available CPU count alone does not establish a passing allocation.
 Explicit `max` and a controller file absent from an existing cgroup impose no
-additional memory limit. Unreadable or malformed installed limits, missing cgroup
+additional memory limit. Unreadable or malformed installed memory limits, missing cgroup
 directories, and unusable usage evidence under a finite limit establish zero
 headroom; they cannot substitute host availability for the enclosing constraint.
 

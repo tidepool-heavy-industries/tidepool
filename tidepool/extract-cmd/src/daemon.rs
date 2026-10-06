@@ -145,12 +145,9 @@ const DEFAULT_MEMORY_BUDGET_MB: u64 = 21 * 1024;
 /// estimation slop. Matches the roughly 10 GiB the historical fixed budget
 /// already left over on its reference 31 GiB box.
 const DEFAULT_MEMORY_HEADROOM_MB: u64 = 10 * 1024;
-/// Floor under the derived default so a box that's nearly out of memory
-/// still gets a daemon that can serve requests, just with a worker that
-/// rotates often, rather than one sized to effectively nothing. Below this,
-/// a warm module memo cannot survive between requests anyway, so there is no
-/// further floor worth defending — the request still completes, just cold
-/// every time.
+/// Floor for the host sizing estimate. Actual observed capacity remains an
+/// independent upper bound; startup rejects a pool that cannot retain even
+/// one warm worker, rather than treating this estimate as available memory.
 const MINIMUM_MEMORY_BUDGET_MB: u64 = 2 * 1024;
 /// Default total RSS budget for this daemon's worker pool: the smaller of
 /// the historical fixed ceiling (`DEFAULT_MEMORY_BUDGET_MB`) and what's
@@ -162,14 +159,9 @@ const MINIMUM_MEMORY_BUDGET_MB: u64 = 2 * 1024;
 /// less of it counted as available and sizes down instead of assuming the
 /// whole machine is free.
 ///
-/// This is the one place daemon sizing reads machine memory. It deliberately
-/// does not add a second cross-process budget registry alongside
-/// `exomonad-node`'s `command_resources` admission service: that service
-/// already gates actor starts on memory actually available
-/// (`/proc/meminfo`'s `MemAvailable`), so a daemon that also sizes itself
-/// from current availability composes with that check for free — the
-/// second daemon to start simply sees less room, without either side having
-/// to register or negotiate anything with the other.
+/// Startup and admission additionally constrain this estimate using the
+/// resource observer's enclosing cgroup limits and live headroom. Observation
+/// adds no cross-process budget registry alongside command-resource admission.
 fn default_memory_budget_mb() -> u64 {
     budget_from_available(available_memory_mb())
 }
@@ -192,10 +184,8 @@ fn budget_from_available(available_mb: Option<u64>) -> u64 {
 struct WorkerSizing {
     workers: usize,
     rss_ceiling_mb: u64,
-    /// `false` when even a single worker's ceiling (the whole budget) falls
-    /// short of `WARM_WORKER_MB` — the daemon still runs one worker at that
-    /// ceiling (the existing floor behaviour), but a worker will rotate on
-    /// almost every request rather than staying warm.
+    /// `false` when even a single worker's ceiling falls below the measured
+    /// warm footprint. Startup validates that footprint before worker spawn.
     can_stay_warm: bool,
 }
 
