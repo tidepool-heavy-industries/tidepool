@@ -724,6 +724,24 @@ impl HostedTestRuntime {
             Some(Arc::clone(transport)),
             None,
             false,
+            None,
+        )
+        .await
+    }
+
+    async fn start_configured_with_diagnostics(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        diagnostics_root: std::path::PathBuf,
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            Some(diagnostics_root),
         )
         .await
     }
@@ -733,7 +751,7 @@ impl HostedTestRuntime {
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Result<Self, HostedStartupError> {
-        Self::start_owned(settings, configure, Some(Arc::clone(transport)), None, true).await
+        Self::start_owned(settings, configure, Some(Arc::clone(transport)), None, true, None).await
     }
 
     pub(super) async fn start_with_factory(
@@ -746,7 +764,7 @@ impl HostedTestRuntime {
             + Send
             + 'static,
     ) -> Result<Self, HostedStartupError> {
-        Self::start_owned(settings, configure, None, Some(Box::new(transport)), false).await
+        Self::start_owned(settings, configure, None, Some(Box::new(transport)), false, None).await
     }
 
     async fn start_owned(
@@ -755,6 +773,7 @@ impl HostedTestRuntime {
         transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
         transport_factory: Option<HostTransportFactory>,
         prepare: bool,
+        diagnostics_root_override: Option<std::path::PathBuf>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::install_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -772,7 +791,16 @@ impl HostedTestRuntime {
         }
         settings.validate().map_err(|error| error.to_string())?;
         tidepool_testing::eval_harness::require_extract();
-        let diagnostic_root = HostedTestDiagnostics::root_from_environment()?;
+        let diagnostic_root = match diagnostics_root_override {
+            Some(root) => {
+                if !root.is_absolute() {
+                    return Err("hosted test diagnostics root must be absolute".into());
+                }
+                std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+                Some(root)
+            }
+            None => HostedTestDiagnostics::root_from_environment()?,
+        };
         let mut repository = match &diagnostic_root {
             Some(root) => exomonad_worktree::testing::TestRepo::init_in(root),
             None => exomonad_worktree::testing::TestRepo::init(),
@@ -1498,6 +1526,52 @@ mod tests {
             &std::fs::read(directory.path().join("hosted-outcome.json")).unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn post_start_scenario_panic_retains_failure_and_confirms_host_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = super::super::test_campaign::hosted_test_settings(&directory, 1);
+        let (transport, _requests) = super::super::test_campaign::hosted_script_provider();
+        let host = HostedTestRuntime::start_configured_with_diagnostics(
+            &settings,
+            &transport,
+            |_| {},
+            directory.path().to_path_buf(),
+        )
+        .await
+        .expect("production host starts before the deliberate scenario failure");
+        let root = host.context.actor.clone();
+        let forest = Arc::clone(&host.context.forest);
+        let failure = std::panic::AssertUnwindSafe(host.run_scenario(|_| {
+            Box::pin(async { panic!("injected post-start assertion failure") })
+        }))
+        .catch_unwind()
+        .await;
+
+        assert!(failure.is_err(), "run_scenario preserves the assertion panic");
+        let recorded = report(&directory);
+        assert_eq!(recorded["scenario"]["status"], "failed");
+        assert_eq!(recorded["scenario"]["phase"], "scenario");
+        assert_eq!(
+            recorded["scenario"]["message"],
+            "injected post-start assertion failure"
+        );
+        assert_eq!(recorded["cleanup"]["status"], "confirmed");
+        let terminal = root.terminal().get().expect("root owner publishes shutdown");
+        assert!(
+            root.terminal()
+                .cleanup()
+                .is_some_and(|cleanup| cleanup.is_confirmed()),
+            "production root cleanup is semantically confirmed: {terminal:?}"
+        );
+        assert_eq!(
+            forest
+                .measurement_snapshot()
+                .and_then(|snapshot| snapshot.parked),
+            Some(0),
+            "production shutdown releases resident parked work"
+        );
     }
 
     #[tokio::test]
