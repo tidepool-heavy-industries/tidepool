@@ -5659,13 +5659,18 @@ mod tests {
     fn program_support_dependency_closure_does_not_select_hidden_names() {
         let directory = tempfile::tempdir().unwrap();
         let hidden = support_product("Hidden");
-        let context = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_checked_original_products([2; 32], &[hidden])
-            .unwrap();
+        let relay = crate::certified_products::fixture_finalized_product_with_requirements(
+            support_product("InstanceRelay"),
+            [2; 32],
+            Some(BTreeMap::from([(
+                ("fixture".into(), "Hidden".into()),
+                hidden.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
         let context = Arc::new(
-            context
-                .extend_checked_original_products([2; 32], &[support_product("InstanceRelay")])
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[hidden, relay])
                 .unwrap(),
         );
         let entries = context
@@ -5681,14 +5686,44 @@ mod tests {
                 ])
                 .unwrap(),
         );
+        let support = request.program_support.as_ref().unwrap();
+        let mut actual_owners = support
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect::<Vec<_>>();
+        actual_owners.sort();
         assert_eq!(
-            request
-                .program_support
-                .as_ref()
-                .unwrap()
-                .descriptors()
-                .len(),
-            2
+            actual_owners,
+            vec![
+                (
+                    identity("fixture", "Hidden"),
+                    ArtifactKind::CanonicalModuleInterface
+                ),
+                (
+                    identity("fixture", "InstanceRelay"),
+                    ArtifactKind::OriginalModule
+                ),
+                (
+                    identity("fixture", "InstanceRelay"),
+                    ArtifactKind::CanonicalModuleInterface
+                ),
+            ]
+        );
+        assert_eq!(
+            support
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.owner.clone())
+                .collect::<Vec<_>>(),
+            vec![identity("fixture", "InstanceRelay")]
+        );
+        assert!(!support
+            .source_implementation_roles()
+            .contains_key(&identity("fixture", "Hidden")));
+        assert_eq!(
+            entries[&identity("fixture", "InstanceRelay")].requirements,
+            vec![identity("fixture", "Hidden")]
         );
         let receipt = import_receipt(directory.path(), &request, "InstanceRelay");
         assert!(request.validate_receipt(&receipt, None, &context).is_ok());
@@ -5698,7 +5733,7 @@ mod tests {
         let (retained, lexical) = context
             .retain_value_source_surface(request.program_support.as_ref().unwrap(), &[])
             .unwrap();
-        assert_eq!(retained.descriptors().len(), 2);
+        assert_eq!(retained.artifact_ids(), support.artifact_ids());
         assert!(lexical.is_empty());
     }
 
