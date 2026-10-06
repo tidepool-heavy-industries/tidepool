@@ -358,7 +358,7 @@ mergePreparedBodyCaches sources = do
     pure (exact, originals)) sources
   components <- mapM (\(cache, keep) -> Map.filterWithKey (\owner _ -> keep owner)
     <$> readMVar (cachedFatComponents cache)) sources >>= mergeComponentBuckets
-  PreparedBodyCache <$> newMVar (Map.unionsWith (Map.unionWith (++)) (map fst selected))
+  PreparedBodyCache <$> newMVar (Map.unionsWith (Map.unionWith mergePreparedVariants) (map fst selected))
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
@@ -372,7 +372,7 @@ selectPreparedBodyCaches sources = do
     pure (exact, originals)) sources
   components <- mapM (\(cache, owners) -> selectOwnerBuckets owners
     <$> readMVar (cachedFatComponents cache)) sources >>= mergeComponentBuckets
-  PreparedBodyCache <$> newMVar (Map.unionsWith (Map.unionWith (++)) (map fst selected))
+  PreparedBodyCache <$> newMVar (Map.unionsWith (Map.unionWith mergePreparedVariants) (map fst selected))
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
@@ -391,6 +391,13 @@ lookupOwnerEntry owner key entries = Map.lookup owner entries >>= Map.lookup key
 
 insertOwnerEntry :: Ord key => Module -> key -> value -> Map Module (Map key value) -> Map Module (Map key value)
 insertOwnerEntry owner key value = Map.insertWith Map.union owner (Map.singleton key value)
+
+mergePreparedVariants :: [PreparedModule] -> [PreparedModule] -> [PreparedModule]
+mergePreparedVariants earlier later = foldl insert earlier later
+  where
+    insert known fresh
+      | any (preparedSiteDependenciesEquivalent fresh) known = known
+      | otherwise = known ++ [fresh]
 
 evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
 evictPreparedBodyMatching cache stale = do
@@ -647,7 +654,7 @@ newPreparedBodyTaskPreparerWithSiteEnvironment environment env owners bodyCache 
             Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
             Right prepared -> do
               let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
-              modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (++)) owner
+              modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (flip mergePreparedVariants)) owner
                 (Map.singleton key [prepared]))
               pure (Right prepared)) acquired
   where
