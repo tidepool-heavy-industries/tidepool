@@ -3315,6 +3315,7 @@ def declare_haskell_components():
         "test-source-boot/fixtures/MetadataHiddenFamily.hs": "test-source-boot/fixtures/MetadataHiddenFamily.hs",
         "test-source-boot/fixtures/MetadataLoadedFamily.hs": "test-source-boot/fixtures/MetadataLoadedFamily.hs",
         "test-source-boot/fixtures/MetadataLoadedFamilyCompatible.hs": "test-source-boot/fixtures/MetadataLoadedFamilyCompatible.hs",
+        "test-source-boot/fixtures/MetadataMutatingScopeTarget.hs": "test-source-boot/fixtures/MetadataMutatingScopeTarget.hs",
         "test-source-boot/fixtures/MetadataOwner.hs": "test-source-boot/fixtures/MetadataOwner.hs",
         "test-source-boot/fixtures/MetadataOwnerWithoutInstance.hs": "test-source-boot/fixtures/MetadataOwnerWithoutInstance.hs",
         "test-source-boot/fixtures/MetadataQuoteFreeTarget.hs": "test-source-boot/fixtures/MetadataQuoteFreeTarget.hs",
