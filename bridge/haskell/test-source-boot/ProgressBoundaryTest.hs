@@ -57,7 +57,7 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
   unless (length [() | site <- sites, input <- ysInputs site, "ProgressNote" `T.isInfixOf` stType input] == 5) $
     fail "progress helper metadata erased nominal newtype identity"
   let context = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
         (SymbolIdentity "main" "ProgressBoundary" "value" "safeSibling" Nothing)
         [] Nothing Nothing Nothing Nothing
       products = projectOriginalHomeModuleProducts
@@ -153,7 +153,7 @@ retainWatchReplyEvidence :: FilePath -> PreparedPipelineResult -> IO [(T.Text, [
 retainWatchReplyEvidence work result = do
     let environment = prHscEnv (pprPipelineResult result)
         context entry = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-          (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+          (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
           (SymbolIdentity "main" "WatchReplyEvidence" "value" entry Nothing)
           [] Nothing Nothing Nothing Nothing
         relevant owner = moduleNameString (moduleName owner) `elem`

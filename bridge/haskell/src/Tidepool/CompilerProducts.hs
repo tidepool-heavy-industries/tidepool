@@ -49,7 +49,8 @@ import Tidepool.ExecutionEncode
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
   , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
-  , projectOriginalHomeModuleProductDemand )
+  , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands
+  , settleOriginalHomeModuleProducts )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram
   , GlobalDecl(..), ProjectedGroup(..) )
@@ -105,6 +106,7 @@ prepareCompilerProjectionContext prepared retainedGenerations owner target auxil
     , projectionToolchain = "ghc-9.12.2"
     , projectionTarget = TargetDescriptor architecture LittleEndian 64 64 abi []
     , projectionRetainedGenerations = retainedGenerations
+    , projectionCurrentOriginals = Map.empty
     , projectionEntry = symbol target
     , projectionAuxiliaryRoots = map symbol auxiliaryRoots
     , projectionFormattingAuthority = formattingAuthority
@@ -151,29 +153,42 @@ prepareOriginalProducts
   :: HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
-prepareOriginalProducts env exact interfaces context external initial = go initial Map.empty Set.empty
+prepareOriginalProducts env exact interfaces context external initial = do
+  let raw = Map.fromList [(pmModule prepared, projectRawOriginalHomeModuleProducts
+        env interfaces context prepared) | prepared <- initial]
+  go initial Map.empty Set.empty raw (Map.keys raw)
   where
-    go modules admitted attempted = do
-      let selectedInterfaces = Map.union interfaces (Map.fromList
-            [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
-            | (owner,original) <- Map.toAscList admitted])
-          (products,demands) = projectOriginalHomeModuleProductDemand env selectedInterfaces context external modules
-          definedOwners = Set.fromList (map pmModule modules)
+    go modules admitted attempted raw completed = do
+      let known = Set.unions (external : map rawOriginalProductBinders (Map.elems raw))
+          demands = Set.unions
+            [rawOriginalProductDemands product' | owner <- completed
+              , Just product' <- [Map.lookup owner raw]]
           pending = Set.toAscList (Set.fromList
-            [owner | identity <- Set.toAscList demands
-              , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity))) (mkModuleName (T.unpack (symbolModule identity)))
-              , owner `Set.notMember` definedOwners, owner `Set.notMember` attempted])
+            [owner | identity <- Set.toAscList (demands `Set.difference` known)
+              , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
+                    (mkModuleName (T.unpack (symbolModule identity)))
+              , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
+              , Map.notMember owner raw, owner `Set.notMember` attempted])
       recovered <- forM pending $ \owner -> case exact of
         Nothing -> pure Nothing
-        Just scope -> fmap (fmap (\original -> (owner,original))) (recoverAdmittedFinalizedOriginal env scope owner)
+        Just scope -> fmap (fmap (\original -> (owner,original)))
+          (recoverAdmittedFinalizedOriginal env scope owner)
       let originals = Map.fromList (mapMaybe id recovered)
           siblings = Map.unions (map pmSitedSiblings modules)
+          selectedInterfaces = Map.union interfaces (Map.fromList
+            [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
+              | (owner,original) <- Map.toAscList originals])
       prepared <- forM (Map.toAscList originals) $ \(_,original) ->
         prepareModule env (admittedOriginalLocation original) siblings (admittedOriginalModule original)
-      if null prepared
-        then pure (modules,(products,admitted))
-        else go (modules ++ prepared) (Map.union admitted originals)
-          (Set.union attempted (Set.fromList pending))
+      let added = Map.fromList [(pmModule prepared', projectRawOriginalHomeModuleProducts
+            env selectedInterfaces context prepared') | prepared' <- prepared]
+          merged = Map.union raw added
+          admitted' = Map.union admitted originals
+      if Map.null added
+        then let (products,_) = settleOriginalHomeModuleProducts env external (Map.elems merged)
+          in pure (modules,(products,admitted'))
+        else go (modules ++ prepared) admitted'
+          (Set.union attempted (Set.fromList pending)) merged (Map.keys added)
 
 -- Captures come from the exact scope, including its admitted checked values,
 -- or the candidate owner. Their original bytes supply type dependency seals;

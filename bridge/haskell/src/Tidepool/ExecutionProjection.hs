@@ -9,6 +9,9 @@ module Tidepool.ExecutionProjection
   , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
+  , RawModuleProducts, projectRawOriginalHomeModuleProducts
+  , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
+  , settleOriginalHomeModuleProducts
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
@@ -18,7 +21,7 @@ module Tidepool.ExecutionProjection
   , projectSelectedWithHostBindings
   , PreparedCandidate, projectSelectedCandidateWithHostBindings
   , candidateGlobals, finalizePreparedCandidate
-  , preparedTopIdentities
+  , preparedTopIdentities, preparedTopIdentityBindings
   , preparedTargetReferences
   , ReferenceFact(..)
   , preparedModuleReferenceFacts
@@ -127,6 +130,9 @@ data ProjectionContext = ProjectionContext
   , projectionToolchain :: Text
   , projectionTarget :: TargetDescriptor
   , projectionRetainedGenerations :: Map SymbolIdentity Word64
+  -- Exact native originals admitted for this compiler batch; source imports
+  -- carry no retained generation.
+  , projectionCurrentOriginals :: Map Name SymbolIdentity
   , projectionEntry :: SymbolIdentity
   -- | Additional tops seeded into reachability beside 'projectionEntry'
   -- (a turn's resume entry). Optional: an absent root is not an error;
@@ -288,94 +294,96 @@ projectOriginalHomeModuleProductDemand :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> Set SymbolIdentity -> [PreparedModule]
   -> (PreparedModuleProducts, Set SymbolIdentity)
 projectOriginalHomeModuleProductDemand env interfaces context externalBinders modules =
+  settleOriginalHomeModuleProducts env externalBinders
+    (map (projectRawOriginalHomeModuleProducts env interfaces context) modules)
+
+-- Independent lowering retains each group's original ordinal and failure.
+-- Missing owners remain demands until the compiler worklist has settled.
+data RawModuleProducts = RawModuleProducts
+  { rawOriginalProductOwner :: Module
+  , rawOriginalProductGroups :: Maybe [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
+  , rawExecutableProduct :: Either ProjectionError [ProjectedGroup]
+  }
+
+projectRawOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
+  -> ProjectionContext -> PreparedModule -> RawModuleProducts
+projectRawOriginalHomeModuleProducts env interfaces context prepared =
+  RawModuleProducts owner original executable
+  where
+    owner = pmModule prepared
+    isHome modul = toUnitId (moduleUnit modul) `Set.member` hsc_all_home_unit_ids env
+    original = case Map.lookup (moduleName owner) interfaces of
+      Just interface | pmCoverage prepared == CompleteSourceModule && isHome owner
+        && mi_module interface == owner -> Just
+          (projectPreparedModuleGroupOutcomesFor (OriginalHomeProduct isHome) context prepared Nothing)
+      _ -> Nothing
+    executable = projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing
+
+rawOriginalProductBinders :: RawModuleProducts -> Set SymbolIdentity
+rawOriginalProductBinders raw = Set.fromList
+  [symbol | outcomes <- maybe [] pure (rawOriginalProductGroups raw)
+    , (_, symbols, _) <- outcomes, symbol <- symbols]
+
+rawOriginalProductDemands :: RawModuleProducts -> Set SymbolIdentity
+rawOriginalProductDemands raw = Set.fromList
+  [globalIdentity global | outcomes <- maybe [] pure (rawOriginalProductGroups raw)
+    , (_, _, Right projected) <- outcomes
+    , global <- projectedGlobals (projectedBody projected)
+    , globalRequiredGeneration global == Nothing]
+
+-- Settlement runs only after queued/running work and completion-driven demand
+-- are empty. Native cycles are ordinary identity edges, never scheduling gates.
+settleOriginalHomeModuleProducts :: HscEnv -> Set SymbolIdentity
+  -> [RawModuleProducts] -> (PreparedModuleProducts, Set SymbolIdentity)
+settleOriginalHomeModuleProducts env externalBinders rows =
   let isHome owner = toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
-      purpose prepared
-        | pmCoverage prepared == CompleteSourceModule && isHome (pmModule prepared)
-        , Just interface <- Map.lookup (moduleName (pmModule prepared)) interfaces
-        , mi_module interface == pmModule prepared =
-            OriginalHomeProduct isHome
-        | otherwise = ExecutableTarget
-      originalRows =
-        [ (prepared, projectPreparedModuleGroupOutcomesFor (purpose prepared)
-            context prepared Nothing)
-        | prepared <- modules, isOriginal prepared ]
-      rowsByOwner = Map.fromList
-        [(pmModule prepared, outcomes) | (prepared, outcomes) <- originalRows]
-      isOriginal prepared = case purpose prepared of
-        OriginalHomeProduct _ -> True
-        ExecutableTarget -> False
+      originalRows = [(rawOriginalProductOwner raw, outcomes)
+        | raw <- rows, Just outcomes <- [rawOriginalProductGroups raw]]
+      rowsByOwner = Map.fromList originalRows
       groupOwners = Map.fromList
-        [ (symbol, (pmModule prepared, ordinal))
-        | (prepared, outcomes) <- originalRows
-        , (ordinal, symbols, _) <- outcomes
-        , symbol <- symbols ]
+        [(symbol, (owner, ordinal)) | (owner, outcomes) <- originalRows
+          , (ordinal, symbols, _) <- outcomes, symbol <- symbols]
       failedBinders = Set.fromList
-        [ symbol
-        | (_, outcomes) <- originalRows
-        , (_, symbols, Left _) <- outcomes
-        , symbol <- symbols ]
+        [symbol | (_, outcomes) <- originalRows
+          , (_, symbols, Left _) <- outcomes, symbol <- symbols]
       knownBinders = Set.union externalBinders (Map.keysSet groupOwners)
       dependencies = Map.fromList
-        [ ((pmModule prepared, projectedOriginalOrdinal projected),
-            Set.fromList
-              [ globalIdentity global
-              | global <- projectedGlobals (projectedBody projected)
-              , globalRequiredGeneration global == Nothing ])
-        | (prepared, outcomes) <- originalRows
-        , (_, _, Right projected) <- outcomes ]
-      unavailableHomeReferences = Set.fromList
-        [ globalIdentity global
-        | (_, outcomes) <- originalRows
-        , (_, _, Right projected) <- outcomes
-        , global <- projectedGlobals (projectedBody projected)
-        , globalRequiredGeneration global == Nothing
-        , isHome (symbolOwner (globalIdentity global))
-        , globalIdentity global `Set.notMember` knownBinders ]
-      blockedHome = closeUnavailableOriginalGroups dependencies groupOwners
-        unavailableHomeReferences
+        [((owner, projectedOriginalOrdinal projected), Set.fromList
+            [globalIdentity global | global <- projectedGlobals (projectedBody projected)
+              , globalRequiredGeneration global == Nothing])
+          | (owner, outcomes) <- originalRows, (_, _, Right projected) <- outcomes]
+      unavailableHomeReferences = Set.filter
+        (\identity -> isHome (symbolOwner identity) && identity `Set.notMember` knownBinders)
+        (Set.unions (map rawOriginalProductDemands rows))
+      blockedHome = closeUnavailableOriginalGroups dependencies groupOwners unavailableHomeReferences
       blocked = closeUnavailableOriginalGroups dependencies groupOwners
         (Set.union failedBinders unavailableHomeReferences)
       initialUnavailableOwners = Set.fromList
-        [ owner | (owner, _) <- Set.toList blockedHome
-        , isJust (Map.lookup owner rowsByOwner) ]
+        [owner | (owner, _) <- Set.toList blockedHome, Map.member owner rowsByOwner]
       unavailableOwners = closeUnavailableOriginalModules dependencies groupOwners
         (Set.fromList [(owner, ordinal) | owner <- Set.toList initialUnavailableOwners
           , (_, (owner', ordinal)) <- Map.toList groupOwners, owner' == owner])
-      finish prepared = case purpose prepared of
-        ExecutableTarget -> (pmModule prepared,
-          projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing, [])
-        OriginalHomeProduct _
-          | pmModule prepared `Set.member` unavailableOwners ->
-            (pmModule prepared,
-              Left (UnavailableOriginalHomeDependencies (Set.toAscList unavailableHomeReferences)), [])
-        OriginalHomeProduct _ ->
-          let outcomes = Map.findWithDefault [] (pmModule prepared) rowsByOwner
-              failed =
-                [ OriginalGroupOmission ordinal symbols
-                    (ProjectionFailed reason)
-                | (ordinal, symbols, Left reason) <- outcomes ]
-              retained =
-                [ projected
-                | (ordinal, _, Right projected) <- outcomes
-                , (pmModule prepared, ordinal) `Set.notMember` blocked ]
+      finish raw = case rawOriginalProductGroups raw of
+        Nothing -> (rawOriginalProductOwner raw, rawExecutableProduct raw, [])
+        Just _ | rawOriginalProductOwner raw `Set.member` unavailableOwners ->
+          (rawOriginalProductOwner raw,
+            Left (UnavailableOriginalHomeDependencies (Set.toAscList unavailableHomeReferences)), [])
+        Just outcomes ->
+          let owner = rawOriginalProductOwner raw
+              failed = [OriginalGroupOmission ordinal symbols (ProjectionFailed reason)
+                | (ordinal, symbols, Left reason) <- outcomes]
+              retained = [projected | (ordinal, _, Right projected) <- outcomes
+                , (owner, ordinal) `Set.notMember` blocked]
               unavailableDependencies projected = Set.fromList
-                [ globalIdentity global
-                | global <- projectedGlobals (projectedBody projected)
-                , globalRequiredGeneration global == Nothing
-                , (globalIdentity global `Map.lookup` groupOwners)
-                    `maybeOwnedBy` blocked ]
-              dependent =
-                [ OriginalGroupOmission ordinal (projectedBinders projected)
-                    (DependsOnUnavailable (Set.toList (unavailableDependencies projected)))
-                | (ordinal, _, Right projected) <- outcomes
-                , (pmModule prepared, ordinal) `Set.member` blocked ]
-          in (pmModule prepared, Right retained, failed ++ dependent)
-  in (PreparedModuleProducts
-      [(owner, outcome, omissions) | prepared <- modules
-        , let (owner, outcome, omissions) = finish prepared], unavailableHomeReferences)
-  where
-    maybeOwnedBy Nothing _ = False
-    maybeOwnedBy (Just owner) blocked' = owner `Set.member` blocked'
+                [globalIdentity global | global <- projectedGlobals (projectedBody projected)
+                  , globalRequiredGeneration global == Nothing
+                  , maybe False (`Set.member` blocked)
+                      (Map.lookup (globalIdentity global) groupOwners)]
+              dependent = [OriginalGroupOmission ordinal (projectedBinders projected)
+                    (DependsOnUnavailable (Set.toAscList (unavailableDependencies projected)))
+                | (ordinal, _, Right projected) <- outcomes, (owner, ordinal) `Set.member` blocked]
+          in (owner, Right retained, failed ++ dependent)
+  in (PreparedModuleProducts (map finish rows), unavailableHomeReferences)
 
 symbolOwner :: SymbolIdentity -> Module
 symbolOwner identity = mkModule
@@ -519,6 +527,15 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
             , projectedJsonLayout = jsonLayout
             }
         }
+
+-- The exact compiler Names travel with their stable full-owner identities.
+-- Filtering groups before assigning private spellings would change collisions.
+preparedTopIdentityBindings :: [PreparedModule] -> Map Name SymbolIdentity
+preparedTopIdentityBindings modules = Map.fromList
+  [(varName binder, symbol) | prepared <- modules
+    , (binding, _) <- pmBindings prepared, binder <- topBinders binding
+    , Just symbol <- [lookupVarEnv identities binder]]
+  where identities = buildTopIdentityMap modules
 
 -- | Corpus tooling enumerates the same identities that projection resolves,
 -- before any target filtering. Preserve module/binding emission order and never
@@ -978,6 +995,7 @@ retainedGenerationOf context binder =
 skippedFromRecovery :: ProjectionContext -> Id -> Bool
 skippedFromRecovery context binder =
   registeredReplacement context binder || isJust (retainedGenerationOf context binder)
+    || Map.member (varName binder) (projectionCurrentOriginals context)
 
 formattingSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe FormattingSpec)
 formattingSpec context binder = case projectionFormattingAuthority context of
@@ -1106,7 +1124,8 @@ dropRetainedTops context = filterPreparedBindings (keepPreparedTop context . fst
 
 keepPreparedTop :: ProjectionContext -> CgStgTopBinding -> Bool
 keepPreparedTop context binding =
-  not (all (isJust . retainedGenerationOf context) (topBinders binding))
+  not (all (\binder -> isJust (retainedGenerationOf context binder)
+    || Map.member (varName binder) (projectionCurrentOriginals context)) (topBinders binding))
 
 -- | Assign stable identities to internal tops before any target reachability
 -- filtering.  Internal names may repeat (and a generated suffix may already
