@@ -956,6 +956,13 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
         ResidentToolError::Invocation(failure) => Some(failure),
         _ => None,
     };
+    let message = invocation
+        .and_then(exomonad_actor::KernelInvocationFailure::publication)
+        .map(workbench_publication_context)
+        .map_or_else(
+            || error.to_string(),
+            |context| format!("{context} {}", error),
+        );
     let mut metadata = diagnostic
         .map(|diagnostic| {
             serde_json::to_value(diagnostic)
@@ -967,7 +974,7 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
         metadata["items"] = serde_json::to_value(invocation.receipts()).unwrap();
     }
     let failure = if diagnostic.is_some() || invocation.is_some() {
-        let full = ToolFailure::with_metadata(error.to_string(), metadata.clone());
+        let full = ToolFailure::with_metadata(message.clone(), metadata.clone());
         if full.metadata_omitted().is_none() {
             full
         } else {
@@ -987,7 +994,7 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
                     .collect::<Vec<_>>())
                 .unwrap_or_default());
             metadata["itemsReduced"] = json!(true);
-            let reduced = ToolFailure::with_metadata(error.to_string(), metadata);
+            let reduced = ToolFailure::with_metadata(message.clone(), metadata);
             if reduced.metadata_omitted().is_none() {
                 reduced
             } else {
@@ -1009,7 +1016,7 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
                     }
                 }
                 ToolFailure::with_metadata(
-                    error.to_string(),
+                    message,
                     json!({
                         "publication": publication,
                         "itemsOmitted": invocation.map_or(0, |failure| failure.receipts().len()),
@@ -1022,6 +1029,25 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
         error.to_string().into()
     };
     ProviderError::Tool(failure)
+}
+
+fn workbench_publication_context(
+    publication: &tidepool_runtime::session::WorkbenchPublicationOutcome,
+) -> &'static str {
+    use tidepool_runtime::session::WorkbenchPublicationOutcome;
+
+    match publication {
+        WorkbenchPublicationOutcome::NotPublished { .. }
+        | WorkbenchPublicationOutcome::Rejected { .. } => {
+            "This cell published no notebook bindings. Per-unit receipts describe private progress and effect outcomes. Completed external effects are not rolled back."
+        }
+        WorkbenchPublicationOutcome::Published { .. } => {
+            "Notebook bindings were published; later failure does not undo publication."
+        }
+        WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. } => {
+            "Notebook bindings reached publication, but durability is unconfirmed."
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1521,79 +1547,80 @@ mod round_control_tests {
 
     #[test]
     fn embedded_tool_failure_preserves_classification_and_original_error_text() {
-        let diagnostic = tidepool_toolchain::failclass::classify_compile(
-            &tidepool_toolchain::CompileError::ExtractFailed("retained owner missing".into()),
-        );
-        let error =
-            ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
-                exomonad_actor::KernelWorkbenchFailure {
-                    actor: ActorRef::first(exomonad_actor::ActorId(7)),
-                    receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
-                        index: 0,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
-                        output: "large retained command output".repeat(1024),
-                        value: None,
-                        diagnostics: Vec::new(),
-                        failure_layer: None,
-                        warnings: Vec::new(),
-                        installed_bindings: vec!["privateValue".into()],
-                        operations: vec![tidepool_runtime::session::WorkbenchOperationReceipt {
-                            id: tidepool_runtime::session::WorkbenchOperationId {
-                                execution:
-                                    tidepool_runtime::session::WorkbenchExecutionId::from_digest(
+        for (output, reduced) in [
+            ("private unit output".to_owned(), false),
+            ("large retained command output".repeat(1024), true),
+        ] {
+            let diagnostic = tidepool_toolchain::failclass::classify_compile(
+                &tidepool_toolchain::CompileError::ExtractFailed("retained owner missing".into()),
+            );
+            let error = ResidentToolError::Invocation(
+                exomonad_actor::KernelInvocationFailure::Workbench(
+                    exomonad_actor::KernelWorkbenchFailure {
+                        actor: ActorRef::first(exomonad_actor::ActorId(7)),
+                        receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                            index: 0,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                            output,
+                            value: None,
+                            diagnostics: Vec::new(),
+                            failure_layer: None,
+                            warnings: Vec::new(),
+                            installed_bindings: vec!["privateValue".into()],
+                            operations: vec![tidepool_runtime::session::WorkbenchOperationReceipt {
+                                id: tidepool_runtime::session::WorkbenchOperationId {
+                                    execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(
                                         [7; 16],
                                     ),
-                                input_unit_index: 0,
-                                effect_ordinal: 0,
-                            },
-                            effect: "record_send".into(),
-                            disposition:
-                                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
-                            display: None,
-                            display_publication: None,
+                                    input_unit_index: 0,
+                                    effect_ordinal: 0,
+                                },
+                                effect: "record_send".into(),
+                                disposition: tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+                                display: None,
+                                display_publication: None,
+                            }],
+                            terminal_transfer: None,
                         }],
-                        terminal_transfer: None,
-                    }],
-                    point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 },
-                    publication: Some(
-                        tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
-                            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                        point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit {
+                            index: 0,
                         },
-                    ),
-                    total: 1,
-                    detail: "retained owner missing".into(),
-                    diagnostic: Some(diagnostic),
-                },
-            ));
-        let original = error.to_string();
-        let failure = provider_tool_error(error).into_tool_failure();
-        assert_eq!(failure.message(), format!("tool failed: {original}"));
-        assert_eq!(
-            failure.metadata().unwrap()["publication"]["status"],
-            "notPublished"
-        );
-        assert_eq!(
-            failure.metadata().unwrap()["publication"]["reason"],
-            "failed"
-        );
-        assert_eq!(failure.metadata().unwrap()["itemsReduced"], true);
-        assert_eq!(
-            failure.metadata().unwrap()["items"][0]["status"],
-            "committed"
-        );
-        assert_eq!(
-            failure.metadata().unwrap()["items"][0]["operations"][0]["disposition"],
-            "committed"
-        );
-        assert_eq!(failure.metadata().unwrap()["class"], "version-skew");
-        assert_eq!(failure.metadata().unwrap()["phase"], "compile");
-        assert_eq!(
-            failure.metadata().unwrap()["cause"]["kind"],
-            "extractor_contract"
-        );
+                        publication: Some(
+                            tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                                reason:
+                                    tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                            },
+                        ),
+                        total: 1,
+                        detail: "retained owner missing".into(),
+                        diagnostic: Some(diagnostic),
+                    },
+                ),
+            );
+            let original = error.to_string();
+            let failure = provider_tool_error(error).into_tool_failure();
+            assert!(failure.message().contains(&original));
+            let metadata = failure.metadata().unwrap();
+            assert_eq!(metadata["publication"]["status"], "notPublished");
+            assert_eq!(metadata["publication"]["reason"], "failed");
+            assert_eq!(metadata["items"][0]["status"], "committed");
+            assert_eq!(
+                metadata["items"][0]["operations"][0]["disposition"],
+                "committed"
+            );
+            if reduced {
+                assert_eq!(metadata["itemsReduced"], true);
+            } else {
+                assert!(metadata.get("itemsReduced").is_none());
+                assert_eq!(metadata["items"][0]["installedBindings"][0], "privateValue");
+            }
+            assert_eq!(metadata["class"], "version-skew");
+            assert_eq!(metadata["phase"], "compile");
+            assert_eq!(metadata["cause"]["kind"], "extractor_contract");
+        }
     }
 
     #[test]
