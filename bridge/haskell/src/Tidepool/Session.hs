@@ -81,6 +81,7 @@ module Tidepool.Session
   ) where
 
 import Tidepool.Timing (readTimingEnabled, emitCount)
+import Tidepool.BoundedRead (readFileAtMost)
 import GHC.Driver.Env
   ( HscEnv, hsc_dflags, hsc_NC, hsc_home_unit, hsc_FC, hscUpdateHPT )
 import GHC.Driver.Session (targetProfile)
@@ -134,7 +135,7 @@ import Data.Char (isDigit)
 import Data.List (isPrefixOf, stripPrefix, nub, sort)
 import Data.Word (Word64)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile, doesFileExist)
-import System.IO (openBinaryTempFile, hClose, hIsClosed, withBinaryFile, IOMode(ReadMode))
+import System.IO (openBinaryTempFile, hClose, hIsClosed)
 import System.FilePath (takeDirectory, (</>), (<.>))
 
 --------------------------------------------------------------------------------
@@ -398,8 +399,8 @@ injectSessionIfaceWithCapture root sm hsc0 = do
         pure (Just (packages,requirements,nominalOwners))
       pure (hsc1, CapturedSessionInterface theMod bytes evidence)
   where
-    readSelected limit path = withBinaryFile path ReadMode $ \handle -> do
-      bytes <- BS.hGet handle (limit + 1)
+    readSelected limit path = do
+      bytes <- readFileAtMost path (limit + 1)
       unless (not (BS.null bytes) && BS.length bytes <= limit)
         (fail "selected session value payload exceeds bounds or is empty")
       pure bytes
