@@ -14894,6 +14894,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             completed_executions
         );
         assert_eq!(first.declarations, second.declarations);
+        crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
+            &first._prepared,
+        ));
 
         // A new ordinary source request must execute the untracked quoter again.
         std::fs::write(&quotation_input, "42").unwrap();

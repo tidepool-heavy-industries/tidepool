@@ -206,7 +206,7 @@ impl ToolsetPreparation {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn recipe(entry: &str) -> InstallerRecipe {
@@ -218,6 +218,37 @@ mod tests {
             entry: entry.into(),
             effects: Vec::new(),
         }
+    }
+
+    /// The consumer supplies a genuinely issued entry; this exercises cache
+    /// retirement without manufacturing source/native authority for a fixture.
+    pub(crate) fn ready_bound_preserves_installed_lease(ready: Arc<PreparedToolset>) {
+        let owner = ToolsetPreparation::default();
+        let first_key = recipe("oldest");
+        let (first, launch) = owner.lookup(&first_key);
+        assert!(launch);
+        let retired = Arc::downgrade(&first);
+        owner.settle(first_key.clone(), &first, Ok(Arc::clone(&ready)));
+        drop(first);
+        for index in 0..RETAINED_TOOLSETS {
+            let key = recipe(&format!("ready-{index}"));
+            let (task, launch) = owner.lookup(&key);
+            assert!(launch);
+            owner.settle(key, &task, Ok(Arc::clone(&ready)));
+        }
+        assert_eq!(owner.state.lock().ready_order.len(), RETAINED_TOOLSETS);
+        assert_eq!(owner.state.lock().tasks.len(), RETAINED_TOOLSETS);
+        assert!(
+            retired.upgrade().is_none(),
+            "the seventeenth ready entry retires the oldest lookup custody"
+        );
+        let retained = Arc::downgrade(&ready);
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "installed tool leases retain the original entry after cache retirement"
+        );
+        assert!(ready.entry.compiled().original_compile_input().is_some());
     }
 
     #[test]
