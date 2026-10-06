@@ -53,7 +53,7 @@ data ReuseReason = Matched | Absent | ChangedSource | ChangedDependency
   | ChangedAuthority | ThFresh | Epoch | Recovery | CacheDisabled | Evicted
   | StageComplete deriving (Eq, Show)
 data ReuseVersionKind = SourceFingerprint | CanonicalSeal | PreparedIdentity
-  | ImageIdentity deriving (Eq, Show)
+  | InterfaceFingerprint | ImageIdentity deriving (Eq, Show)
 data ReuseModule = ReuseModule String String ReuseVersionKind String
 data ReuseContext = ReuseContext Word64 String
 
@@ -82,6 +82,7 @@ reuseVersionName :: ReuseVersionKind -> String
 reuseVersionName kind = case kind of
   SourceFingerprint -> "source_fingerprint"; CanonicalSeal -> "canonical_seal"
   PreparedIdentity -> "prepared_identity"; ImageIdentity -> "image_identity"
+  InterfaceFingerprint -> "interface_fingerprint"
 
 emitReuse :: Bool -> ReuseContext -> ReuseStage -> ReuseDecision -> ReuseReason
   -> Maybe ReuseModule -> Word64 -> Maybe Word64 -> IO ()
