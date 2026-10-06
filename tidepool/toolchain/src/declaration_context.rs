@@ -990,11 +990,7 @@ fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
     }
     let mut rest = rest.trim_start();
     let qualified = if let Some(qualified) = rest.strip_prefix("qualified") {
-        if !qualified
-            .chars()
-            .next()
-            .is_some_and(char::is_whitespace)
-        {
+        if !qualified.chars().next().is_some_and(char::is_whitespace) {
             return false;
         }
         rest = qualified.trim_start();
@@ -1008,11 +1004,7 @@ fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
     if after_module.is_empty() {
         return true;
     }
-    if !after_module
-        .chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-    {
+    if !after_module.chars().next().is_some_and(char::is_whitespace) {
         return false;
     }
     let mut tail = after_module.trim_start();
@@ -1036,10 +1028,7 @@ fn template_import_line(line: &str, owner: &ExactModuleIdentity) -> bool {
     tail.is_empty()
         || tail.starts_with('(')
         || tail.strip_prefix("hiding").is_some_and(|items| {
-            items
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace)
+            items.chars().next().is_some_and(char::is_whitespace)
                 && items.trim_start().starts_with('(')
         })
 }
