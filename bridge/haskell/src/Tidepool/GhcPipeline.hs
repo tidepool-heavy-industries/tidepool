@@ -1854,9 +1854,9 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- order before their importers. The caller owns session bootstrap and decides
 -- whether the immutable module memo survives this cycle.
 --
--- 'CycleState' carries the interface and product caches from their transaction
--- owner. That owner installs a fresh or identically admitted exact environment
--- before entering this function. A standalone exact cycle owns its own reset.
+-- 'CycleState' carries immutable completed versions from its universe owner.
+-- Each attempt has a private EPS/finder/home view and selects only versions
+-- validated against the current source and exact imported environment.
 -- 'sessionT0' includes bootstrap only for standalone compilation.
 --
 -- 'retained' is the immutable per-request index used by both the plugin's
@@ -1944,26 +1944,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     loadedModulesRef <- liftIO (newIORef Map.empty)
     targetEnvironmentRef <- liftIO (newIORef Nothing)
     pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
-    -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
-    -- 'depanal' runs downsweep, whose @enableCodeGenForTH@ downgrades the
-    -- splice-needed home modules' ms_hspp_opts to -O0 +
-    -- Opt_IgnoreInterfacePragmas so 'load' can provision bytecode. That flag
-    -- ALSO governs how external interfaces are READ, and the downgraded
-    -- modules compile FIRST, so the session-global External Package State
-    -- would cache every interface they demand (GHC.Num, GHC.Float,
-    -- freer-simple, …) WITHOUT unfoldings — the -O2 extraction loop below
-    -- then can never fire class-op rules (@negate $fNumDouble@ never
-    -- reduces, chasing Integer machinery → "Unsupported primop: clz#").
-    -- Unset JUST that flag on every summary BEFORE compilation: the
-    -- backend/-O0 downgrade stays (splices still provision via bytecode),
-    -- but interface loading honors pragmas, so the EPS is healthy from the
-    -- start. Non-TH graphs carry no downgrade — the unset is a no-op there.
-    --
-    -- A post-'load' EPS flush cannot work: home-module
-    -- TyCons are already realized in the HPT, so re-typechecking lib modules
-    -- never re-demands the package interfaces that define their instances —
-    -- they never re-enter the fresh EPS, and typechecking fails with e.g.
-    -- "No instance for Monad (Eff '[Console, …])".
+    -- Downsweep may select the interpreter for splice dependencies and enable
+    -- IgnoreInterfacePragmas. Canonical summaries restore the interface policy
+    -- before any shared package interface is demanded. Package unfoldings and
+    -- home type identities remain available without an EPS flush.
     -- GHC may reuse a preprocessed summary solely from the source hash.
     -- A changed include must run preprocessing again before memo validation.
     previous <- getSession
@@ -2024,6 +2008,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (\dependency summary ->
             (summaryFingerprints Map.! dependency, summaryDependencies summary))
           summaryByDependency
+        -- Request rewrites are target-only and targets are never published.
+        -- Reusable dependencies keep their authored import closure; imported
+        -- exact versions include indirect type, instance and orphan owners.
         summaryPolicies = Map.map (\summary -> BS8.pack (show
           (retainedDefinedBy (ms_mod summary) retained,incarnationFor summary,
            [(owner,hexBytes bytes) | (owner,HomeDependencyDigest bytes) <-
