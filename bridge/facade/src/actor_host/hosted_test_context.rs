@@ -751,7 +751,15 @@ impl HostedTestRuntime {
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Result<Self, HostedStartupError> {
-        Self::start_owned(settings, configure, Some(Arc::clone(transport)), None, true, None).await
+        Self::start_owned(
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            true,
+            None,
+        )
+        .await
     }
 
     pub(super) async fn start_with_factory(
@@ -764,7 +772,15 @@ impl HostedTestRuntime {
             + Send
             + 'static,
     ) -> Result<Self, HostedStartupError> {
-        Self::start_owned(settings, configure, None, Some(Box::new(transport)), false, None).await
+        Self::start_owned(
+            settings,
+            configure,
+            None,
+            Some(Box::new(transport)),
+            false,
+            None,
+        )
+        .await
     }
 
     async fn start_owned(
@@ -1543,13 +1559,17 @@ mod tests {
         .expect("production host starts before the deliberate scenario failure");
         let root = host.context.actor.clone();
         let forest = Arc::clone(&host.context.forest);
-        let failure = std::panic::AssertUnwindSafe(host.run_scenario(|_| {
-            Box::pin(async { panic!("injected post-start assertion failure") })
-        }))
-        .catch_unwind()
-        .await;
+        let failure =
+            std::panic::AssertUnwindSafe(host.run_scenario(|_| {
+                Box::pin(async { panic!("injected post-start assertion failure") })
+            }))
+            .catch_unwind()
+            .await;
 
-        assert!(failure.is_err(), "run_scenario preserves the assertion panic");
+        assert!(
+            failure.is_err(),
+            "run_scenario preserves the assertion panic"
+        );
         let recorded = report(&directory);
         assert_eq!(recorded["scenario"]["status"], "failed");
         assert_eq!(recorded["scenario"]["phase"], "scenario");
@@ -1558,7 +1578,10 @@ mod tests {
             "injected post-start assertion failure"
         );
         assert_eq!(recorded["cleanup"]["status"], "confirmed");
-        let terminal = root.terminal().get().expect("root owner publishes shutdown");
+        let terminal = root
+            .terminal()
+            .get()
+            .expect("root owner publishes shutdown");
         assert!(
             root.terminal()
                 .cleanup()

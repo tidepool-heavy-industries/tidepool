@@ -2087,7 +2087,9 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                     "preflight recovery provider request",
                     tokio::time::timeout(Duration::from_secs(30), async {
                         loop {
-                            if let Some(request) = transport.requests.lock().get(requests_before).cloned() {
+                            if let Some(request) =
+                                transport.requests.lock().get(requests_before).cloned()
+                            {
                                 break request;
                             }
                             changed.changed().await.unwrap();
@@ -2105,7 +2107,8 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .input
                 .iter()
                 .filter(|item| {
-                    item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == operation.call.0
+                    item.0["type"] == "custom_tool_call_output"
+                        && item.0["call_id"] == operation.call.0
                 })
                 .cloned()
                 .collect::<Vec<_>>();

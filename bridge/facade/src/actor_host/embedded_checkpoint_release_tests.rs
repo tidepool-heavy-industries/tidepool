@@ -173,15 +173,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             root_after_admission.assert_committed("checkpoint-observer-admission");
             let observer = tokio::time::timeout(Duration::from_secs(120), async {
                 loop {
-                    if let Some(installation) =
-                        host.context
-                            .observer
-                            .installations()
-                            .into_iter()
-                            .find(|installation| {
-                                installation.checkpoint
-                                    && installation.context_parent == Some(issuer_id)
-                            })
+                    if let Some(installation) = host
+                        .context
+                        .observer
+                        .installations()
+                        .into_iter()
+                        .find(|installation| {
+                            installation.checkpoint
+                                && installation.context_parent == Some(issuer_id)
+                        })
                     {
                         return installation;
                     }
