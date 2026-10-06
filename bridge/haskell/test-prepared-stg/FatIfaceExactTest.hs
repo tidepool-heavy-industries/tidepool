@@ -59,8 +59,8 @@ scenario = do
       ["FatFixture.hs", "ThinFixture.hs", "MissingFixture.hs", "FatIfaceUse.hs"]
     let ghc = "ghc"
     compileFixture ghc work ["-fwrite-if-simplified-core"] fatSource
-    compileFixture ghc work [] thinSource
-    compileFixture ghc work ["-fwrite-if-simplified-core"] missingSource
+    compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fno-write-if-simplified-core"] thinSource
+    compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fwrite-if-simplified-core"] missingSource
     libdir <- trim <$> readProcess ghc ["--print-libdir"] ""
     runGhc (Just libdir) $ do
       flags <- getSessionDynFlags
@@ -129,10 +129,12 @@ scenario = do
       absentResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn fatIdentityName))
       liftIO (assert (isBindingAbsent absentResult)
         "loaded fat interface did not distinguish an absent binding")
-      -- Loading the use site under fat flags can rebuild every source
-      -- dependency. Restore this deliberately thin fixture before testing the
-      -- raw-reader outcome; the fat cache has already observed its artifact.
-      liftIO (compileFixture ghc work [] thinSource)
+      -- Loading the use site at O0 under fat flags can rebuild dependencies.
+      -- Restore the deliberately thin artifact and genuine INLINE envelopes
+      -- before reading the defining Ids for the absence/read controls.
+      liftIO (compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fno-write-if-simplified-core"] thinSource)
+      liftIO (compileFixture ghc work
+        ["-O1", "-fexpose-all-unfoldings", "-fwrite-if-simplified-core"] missingSource)
       (thinDeclaring, missingDeclaring) <- liftIO $ (,)
         <$> declaringId hsc thinId <*> declaringId hsc missingId
       thinResult <- liftIO (lookupFatIfaceExact hsc cache thinIdentityName)
