@@ -587,6 +587,18 @@ impl RecoveryArtifactVerification<'_> {
     }
 }
 
+// Count actual package payload I/O across all contexts on this test thread.
+// A regression that accidentally creates hidden fresh contexts must be visible.
+#[cfg(test)]
+thread_local! {
+    static PACKAGE_INTERFACE_IO: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn package_interface_io() -> (u64, u64) {
+    PACKAGE_INTERFACE_IO.with(std::cell::Cell::get)
+}
+
 #[derive(Default)]
 pub(crate) struct PackageInterfaceValidation {
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
@@ -597,8 +609,6 @@ pub(crate) struct PackageInterfaceValidation {
     decoded_bytes: u64,
     #[cfg(test)]
     pub(crate) home_witness_validations: usize,
-    #[cfg(test)]
-    pub(crate) package_interface_opens: usize,
     execution_sources:
         BTreeMap<PathBuf, Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
@@ -660,9 +670,10 @@ impl PackageInterfaceValidation {
             }
         })?;
         #[cfg(test)]
-        {
-            self.package_interface_opens += 1;
-        }
+        PACKAGE_INTERFACE_IO.with(|work| {
+            let (opens, bytes) = work.get();
+            work.set((opens + 1, bytes));
+        });
         let metadata = file
             .metadata()
             .map_err(|error| RecoveryArtifactError::Unreadable {
@@ -681,6 +692,11 @@ impl PackageInterfaceValidation {
                 path: path.to_path_buf(),
                 error,
             })?;
+        #[cfg(test)]
+        PACKAGE_INTERFACE_IO.with(|work| {
+            let (opens, read_bytes) = work.get();
+            work.set((opens, read_bytes + bytes.len() as u64));
+        });
         self.read_bytes += bytes.len() as u64;
         if bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
             return Err(RecoveryArtifactError::InvalidPackageImports(

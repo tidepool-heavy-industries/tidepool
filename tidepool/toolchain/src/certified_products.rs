@@ -5670,6 +5670,8 @@ pub(crate) mod tests {
         let names = (0..17).map(|i| format!("Home{i}")).collect::<Vec<_>>();
         let (products, packages) = make_products(&names);
         let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let observed = crate::recovery_artifacts::package_interface_io;
+        let before = observed();
         let mut admission = PackageInterfaceValidation::default();
         let target_interfaces =
             certify_target_package_interfaces_with_validation(&target, &packages, &mut admission)
@@ -5684,7 +5686,9 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(view.descriptors().len(), names.len());
         assert!(target_interfaces.matches_target(&target));
-        assert_eq!(admission.package_interface_opens, 1);
+        let after = observed();
+        assert_eq!(after.0 - before.0, 1);
+        assert_eq!(after.1 - before.1, bytes.len() as u64);
         assert_eq!(admission.work().read_bytes, bytes.len() as u64);
         assert_eq!(admission.work().hash_bytes, bytes.len() as u64);
         assert!(
@@ -5700,6 +5704,7 @@ pub(crate) mod tests {
         );
 
         // Another admission must really open/read even unchanged package bytes.
+        let before = observed();
         let mut next = PackageInterfaceValidation::default();
         crate::declaration_context::certified_product_artifact_view_with_validation(
             producer,
@@ -5709,12 +5714,15 @@ pub(crate) mod tests {
             &mut next,
         )
         .unwrap();
-        assert_eq!(next.package_interface_opens, 1);
+        let after = observed();
+        assert_eq!(after.0 - before.0, 1);
+        assert_eq!(after.1 - before.1, bytes.len() as u64);
         assert_eq!(next.work().read_bytes, bytes.len() as u64);
 
         let replacement = root.path().join("replacement.hi");
         std::fs::write(&replacement, vec![0x43; bytes.len()]).unwrap();
         std::fs::rename(replacement, &path).unwrap();
+        let before = observed();
         let mut changed = PackageInterfaceValidation::default();
         assert!(
             crate::declaration_context::certified_product_artifact_view_with_validation(
@@ -5726,10 +5734,13 @@ pub(crate) mod tests {
             )
             .is_err()
         );
-        assert_eq!(changed.package_interface_opens, 1);
+        let after = observed();
+        assert_eq!(after.0 - before.0, 1);
+        assert_eq!(after.1 - before.1, bytes.len() as u64);
         assert_eq!(changed.work().read_bytes, bytes.len() as u64);
 
         let (replacement_products, _) = make_products(&["Replacement".into()]);
+        let before = observed();
         assert!(
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 producer,
@@ -5741,7 +5752,7 @@ pub(crate) mod tests {
             .is_err(),
             "the same path with a different expected digest cannot reuse a capture"
         );
-        assert_eq!(admission.package_interface_opens, 1);
+        assert_eq!(observed(), before);
     }
 
     #[test]
