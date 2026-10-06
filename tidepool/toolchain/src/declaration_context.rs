@@ -1609,6 +1609,32 @@ impl ExactCompilationRequest {
                 ));
             }
         }
+        for (owner, entry) in &supplied {
+            if matches!(entry.payload, ArtifactPayload::Original(_)) {
+                if let Some(previous) = retained.get(owner) {
+                    match &previous.payload {
+                        ArtifactPayload::Original(_)
+                            if previous.descriptor.id != entry.descriptor.id =>
+                        {
+                            return Err(failure("supporting original differs from retained owner"));
+                        }
+                        ArtifactPayload::Canonical(interface)
+                            if canonical_source_interface(entry) != Some(interface) =>
+                        {
+                            return Err(failure(
+                                "supporting original differs from canonical module",
+                            ));
+                        }
+                        ArtifactPayload::Interface(_, _) => {
+                            return Err(failure(
+                                "supporting original collides with synthetic interface",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         let extend_start = std::time::Instant::now();
         let mut context = (*context).clone();
         context.admit_producer(self.producer_sha256)?;
@@ -5875,6 +5901,114 @@ mod tests {
         assert!(request
             .admit_program_support(context, &support_view(&[altered]), &[])
             .is_err());
+    }
+
+    #[test]
+    fn program_support_refuses_same_canonical_interface_with_another_native_owner() {
+        let native_variant = |product: &CertifiedRecoveryProduct| {
+            let interface = product.module_interface().unwrap().clone();
+            let mut owner = product.owner().clone();
+            owner.module_version = ModuleVersion([99; 32]);
+            let certification = crate::certified_products::encode_home_certification_with_module(
+                &owner,
+                &[],
+                &BTreeMap::new(),
+                interface.requirements(),
+                Sha256::digest(interface.certificate_bytes()).into(),
+            )
+            .unwrap();
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                product.interface_bytes().to_vec(),
+                product.product_bytes().to_vec(),
+                product.package_imports_bytes().to_vec(),
+                certification,
+            )
+            .with_module_interface(interface)
+            .unwrap()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let original = support_product("Hidden");
+        let variant = native_variant(&original);
+        assert_eq!(variant.module_interface(), original.module_interface());
+        assert_ne!(variant.owner(), original.owner());
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[original])
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), context.clone());
+        let support = support_view(&[variant]);
+        let assert_native_refusal = |error| {
+            assert!(matches!(error, CompileError::ExtractFailed(detail)
+                if detail == "exact declaration context: supporting original differs from retained owner"));
+        };
+        assert_native_refusal(
+            request
+                .admit_program_support(context.clone(), &support, &[])
+                .unwrap_err(),
+        );
+        assert!(request.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        assert_eq!(context.recovery_products().len(), 1);
+        let unchanged = context.recovery_products();
+        let unchanged_support = support_view(&unchanged);
+        let unchanged_context = request
+            .admit_program_support(context.clone(), &unchanged_support, &[])
+            .unwrap();
+        assert_eq!(
+            unchanged_context.recovery_products()[0].owner(),
+            unchanged[0].owner()
+        );
+        let canonical = certified_product_artifact_view(
+            [2; 32],
+            &[],
+            &[unchanged[0].module_interface().unwrap().clone()],
+            None,
+        )
+        .unwrap();
+        let canonical_context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_interface_artifacts(&canonical)
+                .unwrap(),
+        );
+        let mut canonical_request = program_request(directory.path(), canonical_context.clone());
+        let promoted = canonical_request
+            .admit_program_support(canonical_context, &unchanged_support, &[])
+            .unwrap();
+        assert_eq!(
+            promoted.recovery_products()[0].owner(),
+            unchanged[0].owner()
+        );
+        assert!(promoted.lexical_graph().is_empty());
+
+        // A real validated current-source receipt cannot replace native identity
+        // merely because the canonical interface agrees.
+        let (mut request, context, receipt) = source_selected_receipt(directory.path(), true, None);
+        let admission = request.validate_receipt(&receipt, None, &context).unwrap();
+        let products = context.recovery_products();
+        let support = support_view(
+            &products
+                .iter()
+                .map(|product| {
+                    if product.owner().module == "A" {
+                        native_variant(product)
+                    } else {
+                        product.clone()
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_native_refusal(
+            request
+                .admit_program_support(context.clone(), &support, &[admission])
+                .unwrap_err(),
+        );
+        assert!(request.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        assert_eq!(context.recovery_products().len(), 2);
     }
 
     #[test]
