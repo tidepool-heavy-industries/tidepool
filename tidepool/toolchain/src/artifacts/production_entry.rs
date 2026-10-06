@@ -196,6 +196,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 /// Execute fresh source into one complete retained entry through the runtime
 /// compiler endpoint. Source replay and module candidate caches are unavailable.
 /// The caller durably establishes the output parent before requesting publication.
+/// An existing unfinished reservation refuses another execution of that identity.
 pub fn prepare_frozen_production_entry(
     sources: &FrozenEntrySources,
     scratch: &Path,
@@ -220,7 +221,6 @@ pub fn prepare_frozen_production_entry(
         &mut |_, _, _| {},
         CompilationPolicy::RetainedEntry {
             source_path: sources.source(),
-            scratch,
             output,
             sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
         },
@@ -267,69 +267,153 @@ pub fn build_production_entry(
     )
 }
 
-pub(super) fn export(
-    original: &Path,
-    output: &Path,
-    source: &Path,
-    sources: &ProductionEntrySources,
-    deployment: &AdmittedCompilerDeployment,
-    targets: &[&str],
-) -> Result<(), CompileError> {
-    if targets != ["__prepared"] || output.exists() {
-        return Err(invalid(
-            "requires one original settled target and absent output",
-        ));
-    }
-    let parent = output.parent().ok_or_else(|| invalid("output parent"))?;
-    let _parent = tidepool_atomic_write::DirectoryAnchor::open_existing(parent)
-        .map_err(|error| CompileError::Io(error.into()))?;
-    let staging = tempfile::tempdir_in(parent)?;
-    let raw = staging.path().join("raw");
-    std::fs::create_dir(&raw)?;
-    let files = inventory(original)?;
-    for relative in files.keys() {
-        let destination = raw.join(relative);
-        std::fs::create_dir_all(
-            destination
-                .parent()
-                .ok_or_else(|| invalid("artifact parent"))?,
-        )?;
-        std::fs::copy(original.join(relative), destination)?;
-    }
-    if inventory(&raw)? != files {
-        return Err(invalid("original container changed while copying"));
-    }
-    let manifest = EntryManifest {
-        schema: ENTRY_SCHEMA,
-        purpose: EntryPurpose::OriginalSource,
-        producer: deployment.producer_identity,
-        worker: deployment.consumed_worker_identity,
-        target: "__prepared".into(),
-        source: source.to_owned(),
-        sources: sources.clone(),
-        files,
-    };
-    std::fs::write(
-        staging.path().join(MANIFEST),
-        serde_json::to_vec(&manifest).map_err(invalid)?,
-    )?;
-    let CompilerDeploymentConfiguration::Configured(authority) =
-        CompilerDeploymentConfiguration::from_env().map_err(invalid)?
-    else {
-        return Err(invalid("configured compiler deployment unavailable"));
-    };
-    load_selected_production_entry(staging.path(), &authority, sources)?;
-    sync_entry_tree(staging.path())?;
-    std::fs::rename(staging.path(), output)?;
-    // A failure here means the entry is visible. Callers must inspect that
-    // completed output and retry its durability confirmation, never source.
-    tidepool_atomic_write::sync_parent_directory(output).map_err(|source| {
-        CompileError::EntryPublicationUnconfirmed {
-            path: output.to_owned(),
-            source,
+/// One original preparation, exclusively reserved and made durable before the
+/// compiler can execute. Drop preserves unfinished raw output. Only successful
+/// full sealing moves this same container to the caller's ready path.
+pub(super) struct EntryPreparation {
+    staging: PathBuf,
+    raw: PathBuf,
+    output: PathBuf,
+}
+
+impl EntryPreparation {
+    pub(super) fn reserve(output: &Path) -> Result<Self, CompileError> {
+        if output.exists() {
+            return Err(invalid("requires an absent ready entry output"));
         }
-    })?;
+        let parent =
+            std::fs::canonicalize(output.parent().ok_or_else(|| invalid("output parent"))?)?;
+        let _parent = tidepool_atomic_write::DirectoryAnchor::open_existing(&parent)
+            .map_err(|error| CompileError::Io(error.into()))?;
+        let output_name = output
+            .file_name()
+            .ok_or_else(|| invalid("output name"))?
+            .to_os_string();
+        let output = parent.join(&output_name);
+        let mut name = output_name;
+        name.push(".preparing");
+        let staging = parent.join(name);
+        match std::fs::create_dir(&staging) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CompileError::EntryPreparationUnfinished { path: staging });
+            }
+            Err(error) => return Err(error.into()),
+        }
+        // Even a failure to confirm this reservation retains its identity.
+        // Compiler execution is allowed only after every sync has succeeded.
+        checkpoint(EntryCheckpoint::ReservationSync)?;
+        tidepool_atomic_write::sync_parent_directory(&staging)
+            .map_err(|error| CompileError::Io(error.into()))?;
+        let raw = staging.join("raw");
+        std::fs::create_dir(&raw)?;
+        std::fs::File::open(&raw)?.sync_all()?;
+        std::fs::File::open(&staging)?.sync_all()?;
+        Ok(Self {
+            staging,
+            raw,
+            output,
+        })
+    }
+
+    pub(super) fn raw(&self) -> &Path {
+        &self.raw
+    }
+
+    pub(super) fn seal(
+        self,
+        source: &Path,
+        sources: &ProductionEntrySources,
+        deployment: &AdmittedCompilerDeployment,
+        targets: &[&str],
+    ) -> Result<(), CompileError> {
+        if targets != ["__prepared"] || self.output.exists() {
+            return Err(invalid(
+                "requires one original settled target and absent output",
+            ));
+        }
+        let manifest = EntryManifest {
+            schema: ENTRY_SCHEMA,
+            purpose: EntryPurpose::OriginalSource,
+            producer: deployment.producer_identity,
+            worker: deployment.consumed_worker_identity,
+            target: "__prepared".into(),
+            source: source.to_owned(),
+            sources: sources.clone(),
+            files: inventory(self.raw())?,
+        };
+        checkpoint(EntryCheckpoint::ManifestWrite)?;
+        std::fs::write(
+            self.staging.join(MANIFEST),
+            serde_json::to_vec(&manifest).map_err(invalid)?,
+        )?;
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().map_err(invalid)?
+        else {
+            return Err(invalid("configured compiler deployment unavailable"));
+        };
+        load_selected_production_entry(&self.staging, &authority, sources)?;
+        sync_entry_tree(&self.staging)?;
+        checkpoint(EntryCheckpoint::ReadyRename)?;
+        std::fs::rename(&self.staging, &self.output)?;
+        // A failure here means the entry is visible. Confirm its durability
+        // through the completed loader, never by repeating source execution.
+        checkpoint(EntryCheckpoint::PublicationSync)
+            .map_err(|source| tidepool_atomic_write::WriteError {
+                path: self.output.parent().unwrap().to_owned(),
+                source,
+            })
+            .and_then(|()| tidepool_atomic_write::sync_parent_directory(&self.output))
+            .map_err(|source| CompileError::EntryPublicationUnconfirmed {
+                path: self.output.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntryCheckpoint {
+    ReservationSync,
+    ManifestWrite,
+    ReadyRename,
+    PublicationSync,
+}
+
+fn checkpoint(stage: EntryCheckpoint) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAILURE.with(|failure| {
+        if failure.get().is_some_and(|(selected, _)| selected == stage) {
+            failure.set(Some((stage, true)));
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(std::io::Error::other("injected entry preparation failure"));
+    }
+    let _ = stage;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! { static FAILURE: std::cell::Cell<Option<(EntryCheckpoint, bool)>> = const { std::cell::Cell::new(None) }; }
+
+#[cfg(test)]
+pub(super) fn with_failure<T>(stage: EntryCheckpoint, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(EntryCheckpoint, bool)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FAILURE.with(|failure| failure.set(self.0));
+        }
+    }
+    let _restore = Restore(FAILURE.with(|failure| failure.replace(Some((stage, false)))));
+    let result = action();
+    assert!(
+        FAILURE.with(|failure| failure.get() == Some((stage, true))),
+        "preparation did not reach injected checkpoint {stage:?}"
+    );
+    result
 }
 
 fn sync_entry_tree(directory: &Path) -> Result<(), CompileError> {

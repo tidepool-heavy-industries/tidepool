@@ -2787,7 +2787,6 @@ enum CompilationPolicy<'a> {
     Runtime,
     RetainedEntry {
         source_path: &'a Path,
-        scratch: &'a Path,
         output: &'a Path,
         sources: &'a ProductionEntrySources,
     },
@@ -2823,6 +2822,22 @@ enum BuildActionExport<'a> {
         output_root: &'a Path,
         source_selection: &'a ProductionEntrySources,
     },
+}
+
+/// Disposable requests release scratch on return. Original entries reserve
+/// durable custody before execution and preserve it through every failure.
+enum CompilationOutputOwner {
+    Scratch(TempDir),
+    Original(production_entry::EntryPreparation),
+}
+
+impl CompilationOutputOwner {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Scratch(directory) => directory.path(),
+            Self::Original(preparation) => preparation.raw(),
+        }
+    }
 }
 
 /// Compile one declared module and target set for an immutable build action.
@@ -3057,21 +3072,33 @@ fn compile_invocation_inner(
         _ => None,
     };
     let allow_candidates = matches!(&policy, CompilationPolicy::Runtime);
-    let mut temp_dir = match &policy {
+    let mut output_owner = match &policy {
+        CompilationPolicy::RetainedEntry { output, .. }
+        | CompilationPolicy::BuildAction {
+            export:
+                BuildActionExport::ProductionEntry {
+                    output_root: output,
+                    ..
+                },
+            ..
+        } => CompilationOutputOwner::Original(production_entry::EntryPreparation::reserve(output)?),
         CompilationPolicy::BuildAction {
             export: BuildActionExport::CatalogInventory { output_root, .. },
             ..
         } => {
             let raw = output_root.join("raw");
             std::fs::create_dir(&raw)?;
-            TempDir::new_in(raw)?
+            CompilationOutputOwner::Scratch(TempDir::new_in(raw)?)
         }
-        CompilationPolicy::BuildAction { scratch, .. }
-        | CompilationPolicy::RetainedEntry { scratch, .. } => TempDir::new_in(scratch)?,
-        _ => compiler_scratch_directory()?,
+        CompilationPolicy::BuildAction { scratch, .. } => {
+            CompilationOutputOwner::Scratch(TempDir::new_in(scratch)?)
+        }
+        _ => CompilationOutputOwner::Scratch(compiler_scratch_directory()?),
     };
-    if inventory_export.is_some() {
-        temp_dir.disable_cleanup(true);
+    if let (Some(_), CompilationOutputOwner::Scratch(directory)) =
+        (inventory_export, &mut output_owner)
+    {
+        directory.disable_cleanup(true);
     }
     // GHC derives the module name from the filename (capitalize(basename));
     // see `CompileInvocation::fallback_module_name`'s doc for why this
@@ -3082,7 +3109,7 @@ fn compile_invocation_inner(
         CompilationPolicy::BuildAction { source_path, .. }
         | CompilationPolicy::RetainedEntry { source_path, .. } => source_path.to_path_buf(),
         _ => {
-            let path = temp_dir.path().join(format!("{module}.hs"));
+            let path = output_owner.path().join(format!("{module}.hs"));
             std::fs::write(&path, inv.source)?;
             path
         }
@@ -3090,7 +3117,7 @@ fn compile_invocation_inner(
 
     let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
     cmd.input(&input_path)
-        .output_dir(temp_dir.path())
+        .output_dir(output_owner.path())
         .targets(inv.targets)
         .includes(inv.include);
     if let Some(root) = session_root {
@@ -3117,7 +3144,7 @@ fn compile_invocation_inner(
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let request = context
             .prepare_compilation(
-                &temp_dir.path().join("exact-scope"),
+                &output_owner.path().join("exact-scope"),
                 endpoint.identity().producer_bytes(),
             )?
             .with_source_search_context(
@@ -3153,7 +3180,7 @@ fn compile_invocation_inner(
                     output,
                     endpoint.identity().producer_bytes(),
                     &cmd.argv(),
-                    temp_dir.path(),
+                    output_owner.path(),
                     catalog_inventory::Phase::CompilerDeploymentAdmission,
                 )
                 .map_err(CompileAttemptError::Diagnostic)?;
@@ -3162,7 +3189,7 @@ fn compile_invocation_inner(
                 .map_err(CompileAttemptError::Deployment)?;
             match &policy {
                 CompilationPolicy::BuildAction { .. } => {
-                    cmd.build_products_dir(temp_dir.path().join("build-products"));
+                    cmd.build_products_dir(output_owner.path().join("build-products"));
                 }
                 _ => crate::paths::apply_build_products_dir(&mut cmd, &endpoint),
             }
@@ -3171,7 +3198,7 @@ fn compile_invocation_inner(
                 module_candidates::select_configured(
                     endpoint.identity().producer_bytes(),
                     inv.include,
-                    temp_dir.path(),
+                    output_owner.path(),
                 )
                 .map_err(CompileAttemptError::ModulePackage)?
             } else {
@@ -3242,16 +3269,21 @@ fn compile_invocation_inner(
                     output,
                     &producer,
                     &cmd.argv(),
-                    temp_dir.path(),
+                    output_owner.path(),
                     catalog_inventory::Phase::CompilerExecution,
                 )
                 .map_err(CompileAttemptError::Diagnostic)?;
             }
-            let diagnostics = CompilerDiagnosticCapture::start(temp_dir.path(), &cmd);
+            let diagnostics = CompilerDiagnosticCapture::start(output_owner.path(), &cmd);
             endpoint
                 .execute(&cmd)
                 .map(|run| {
-                    diagnostics.completed(temp_dir.path(), &cmd, run.success(), &run.output.stderr);
+                    diagnostics.completed(
+                        output_owner.path(),
+                        &cmd,
+                        run.success(),
+                        &run.output.stderr,
+                    );
                     CompileAttempt::Executed((
                         cmd,
                         run,
@@ -3300,22 +3332,30 @@ fn compile_invocation_inner(
         "extract spawn"
     );
 
-    if let Some((output, _)) = inventory_export {
-        std::fs::write(temp_dir.path().join("compiler.stdout"), &run.output.stdout)?;
-        std::fs::write(temp_dir.path().join("compiler.stderr"), &run.output.stderr)?;
+    if inventory_export.is_some() || matches!(&output_owner, CompilationOutputOwner::Original(_)) {
         std::fs::write(
-            temp_dir.path().join("compiler-status.json"),
+            output_owner.path().join("compiler.stdout"),
+            &run.output.stdout,
+        )?;
+        std::fs::write(
+            output_owner.path().join("compiler.stderr"),
+            &run.output.stderr,
+        )?;
+        std::fs::write(
+            output_owner.path().join("compiler-status.json"),
             serde_json::to_vec(&serde_json::json!({
                 "success": run.output.status.success(), "exit_code": run.output.status.code(),
             }))
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
         )?;
-        catalog_inventory::phase(output, catalog_inventory::Phase::CompilerOutputDecode)?;
+        if let Some((output, _)) = inventory_export {
+            catalog_inventory::phase(output, catalog_inventory::Phase::CompilerOutputDecode)?;
+        }
     }
     let compiler_stderr = run.output.stderr.clone();
     let extracted = extract_and_read(
         run,
-        temp_dir.path(),
+        output_owner.path(),
         inv.targets,
         multi,
         &mut on_stage,
@@ -3329,16 +3369,16 @@ fn compile_invocation_inner(
     // worker. A completed request is never replayed because of its response.
     let (meta_bytes, raw, product_bytes) = extracted.map_err(|error| match &policy {
         CompilationPolicy::BuildAction { .. } => error,
-        _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
+        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
 
     // Store only what DESERIALIZED, so a malformed artifact set is never
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
-        let evidence_bytes = std::fs::read(temp_dir.path().join("dependencies.json"))?;
+        let evidence_bytes = std::fs::read(output_owner.path().join("dependencies.json"))?;
         let package_bundle_bytes =
-            std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
+            std::fs::read(output_owner.path().join("module-package-imports.cbor"))?;
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
         }
@@ -3369,7 +3409,7 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
-        let receipt_bytes = std::fs::read(temp_dir.path().join("certified-products.cbor"))?;
+        let receipt_bytes = std::fs::read(output_owner.path().join("certified-products.cbor"))?;
         if receipt_bytes.is_empty() {
             if inventory_export.is_some() {
                 return Err(CompileError::ExtractFailed(
@@ -3413,8 +3453,9 @@ fn compile_invocation_inner(
             ensure_no_uncertified_globals(&artifacts)?;
             return Ok(artifacts);
         }
-        let receipt = certified_products::decode_receipt_in(&receipt_bytes, Some(temp_dir.path()))
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let receipt =
+            certified_products::decode_receipt_in(&receipt_bytes, Some(output_owner.path()))
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let fresh_products =
             certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -3433,7 +3474,7 @@ fn compile_invocation_inner(
                 &fresh_products,
                 &evidence_bytes,
                 &input_path,
-                temp_dir.path(),
+                output_owner.path(),
                 valid,
                 inv.source,
                 &producer,
@@ -3624,7 +3665,7 @@ fn compile_invocation_inner(
     })();
     let artifacts = assembled.map_err(|error| match &policy {
         CompilationPolicy::BuildAction { .. } => error,
-        _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
+        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
     if let CompilationPolicy::BuildAction {
         export: BuildActionExport::PreparedFixture { output },
@@ -3646,40 +3687,28 @@ fn compile_invocation_inner(
             )?;
         }
     }
-    if let CompilationPolicy::BuildAction {
-        source_path,
-        export:
-            BuildActionExport::ProductionEntry {
-                output_root,
-                source_selection,
-            },
-        ..
-    } = &policy
-    {
-        production_entry::export(
-            temp_dir.path(),
-            output_root,
-            source_path,
-            source_selection,
-            &deployment,
-            inv.targets,
-        )?;
-    }
-    if let CompilationPolicy::RetainedEntry {
-        source_path,
-        output,
-        sources,
-        ..
-    } = &policy
-    {
-        production_entry::export(
-            temp_dir.path(),
-            output,
-            source_path,
-            sources,
-            &deployment,
-            inv.targets,
-        )?;
+    if let CompilationOutputOwner::Original(preparation) = output_owner {
+        match &policy {
+            CompilationPolicy::RetainedEntry {
+                source_path,
+                sources,
+                ..
+            }
+            | CompilationPolicy::BuildAction {
+                source_path,
+                export:
+                    BuildActionExport::ProductionEntry {
+                        source_selection: sources,
+                        ..
+                    },
+                ..
+            } => preparation.seal(source_path, sources, &deployment, inv.targets)?,
+            _ => {
+                return Err(CompileError::ExtractFailed(
+                    "original output owner has a different compilation policy".into(),
+                ))
+            }
+        }
     }
     Ok(artifacts)
 }
@@ -5523,6 +5552,127 @@ mod module_product_tests {
             cohort.len(),
             cached.len()
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn production_entry_reservation_sync_failure_refuses_retry_before_compilation() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (1 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[root.path().to_owned()], &source).unwrap();
+        let output = root.path().join("entry");
+        let error = production_entry::with_failure(
+            production_entry::EntryCheckpoint::ReservationSync,
+            || prepare_frozen_production_entry(&sources, root.path(), &output),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CompileError::Io(_)));
+        assert!(!output.exists());
+        let unfinished = root.path().join("entry.preparing");
+        assert!(unfinished.is_dir());
+        assert!(!unfinished.join("raw").exists());
+        assert!(matches!(
+            prepare_frozen_production_entry(&sources, root.path(), &output),
+            Err(CompileError::EntryPreparationUnfinished { path }) if path == unfinished
+        ));
+        assert_eq!(std::fs::read_dir(unfinished).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn retained_entry_sealing_failures_preserve_original_quotations_without_reexecution() {
+        use crate::toolchain::CompilerDeploymentConfiguration;
+        use production_entry::EntryCheckpoint;
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let input = root.path().join("quote-input");
+        let counter = root.path().join("quote-input.executions");
+        std::fs::write(&input, "37").unwrap();
+        std::fs::write(
+            authored.join("QuotedProvider.hs"),
+            include_str!("../tests/fixtures/completed-source/QuotedProvider.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            authored.join("QuotedOriginal.hs"),
+            include_str!("../tests/fixtures/completed-source/QuotedOriginal.hs")
+                .replace("QUOTE_INPUT_PATH", input.to_str().unwrap()),
+        )
+        .unwrap();
+        let source = authored.join("PreparedOriginal.hs");
+        std::fs::write(
+            &source,
+            include_str!("../tests/fixtures/completed-source/PreparedOriginal.hs"),
+        )
+        .unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        let selected = ProductionEntrySources::FrozenWorkspace(sources.clone());
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("entry failure qualification requires configured matched compiler authority")
+        };
+        let mut previous_executions = String::new();
+        for (index, stage) in [
+            EntryCheckpoint::ManifestWrite,
+            EntryCheckpoint::ReadyRename,
+            EntryCheckpoint::PublicationSync,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = root.path().join(format!("entry-{index}"));
+            let unfinished = root.path().join(format!("entry-{index}.preparing"));
+            let error = production_entry::with_failure(stage, || {
+                prepare_frozen_production_entry(&sources, root.path(), &output)
+            })
+            .unwrap_err();
+            let executions = std::fs::read_to_string(&counter).unwrap();
+            assert!(
+                executions.len() > previous_executions.len(),
+                "an explicit fresh preparation executes its original quotation"
+            );
+            let raw = if stage == EntryCheckpoint::PublicationSync {
+                output.join("raw")
+            } else {
+                unfinished.join("raw")
+            };
+            let original = std::fs::read(raw.join("module-products.cbor")).unwrap();
+            assert!(!original.is_empty());
+            if stage == EntryCheckpoint::PublicationSync {
+                assert!(
+                    matches!(error, CompileError::EntryPublicationUnconfirmed { ref path, .. } if path == &output)
+                );
+                assert!(!unfinished.exists());
+                let entry = load_selected_production_entry(&output, &authority, &selected).unwrap();
+                assert!(entry.products().original_compile_input.is_some());
+                tidepool_atomic_write::sync_parent_directory(&output).unwrap();
+            } else {
+                assert!(matches!(error, CompileError::Io(_)));
+                assert!(!output.exists());
+                assert!(matches!(
+                    prepare_frozen_production_entry(&sources, root.path(), &output),
+                    Err(CompileError::EntryPreparationUnfinished { ref path }) if path == &unfinished
+                ));
+            }
+            assert!(raw.join("certified-products.cbor").is_file());
+            assert!(raw.join("dependencies.json").is_file());
+            for diagnostic in ["compiler.stdout", "compiler.stderr", "compiler-status.json"] {
+                assert!(raw.join(diagnostic).is_file());
+            }
+            assert_eq!(
+                std::fs::read_to_string(&counter).unwrap(),
+                executions,
+                "sealing failure, refusal and completed loading cannot invoke the compiler again"
+            );
+            assert_eq!(
+                std::fs::read(raw.join("module-products.cbor")).unwrap(),
+                original
+            );
+            previous_executions = executions;
+        }
     }
 
     #[test]

@@ -57,6 +57,10 @@ pub enum CompileError {
     /// I/O error during file operations or process execution.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    /// This original preparation was reserved before compiler execution. Its
+    /// retained output must never be mistaken for permission to execute again.
+    #[error("entry preparation {} is unfinished; retain its original output and select a fresh preparation identity to compile again", path.display())]
+    EntryPreparationUnfinished { path: PathBuf },
     /// Complete retained output became visible; source must not be re-executed
     /// to retry its parent-directory durability confirmation.
     #[error("entry {} is visible but durability is unconfirmed: {source}", path.display())]

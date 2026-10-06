@@ -291,7 +291,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
             FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, err.to_string())
         }
         // Spawn/IO failure reaching the extractor.
-        CompileError::Io(_) | CompileError::EntryPublicationUnconfirmed { .. } => {
+        CompileError::Io(_)
+        | CompileError::EntryPreparationUnfinished { .. }
+        | CompileError::EntryPublicationUnconfirmed { .. } => {
             FailureEnvelope::new(FailureClass::Infra, Phase::Compile, err.to_string())
         }
         // The extractor produced no `.cbor`/`meta.cbor`.
@@ -322,9 +324,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         }
     };
     envelope.cause = Some(match err {
-        CompileError::Io(_) | CompileError::EntryPublicationUnconfirmed { .. } => {
-            CompileFailureCause::Io
-        }
+        CompileError::Io(_)
+        | CompileError::EntryPreparationUnfinished { .. }
+        | CompileError::EntryPublicationUnconfirmed { .. } => CompileFailureCause::Io,
         CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
         CompileError::ArtifactInventory(error) => CompileFailureCause::ArtifactInventory {
             failure: error.failure.clone(),
