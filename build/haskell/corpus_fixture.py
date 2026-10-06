@@ -72,6 +72,7 @@ def fresh_test(inputs_path):
     for root in source_roots(inputs["oracle_source_roots"]):
         oracle += ["--include", root]
     work = Path(tempfile.mkdtemp(prefix="fresh-corpus-test-"))
+    print(f"fresh corpus test work: {work}", flush=True)
     args.output = str(work / "corpus")
     scratch = work / "compiler"
     scratch.mkdir()
