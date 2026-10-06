@@ -480,7 +480,9 @@ originalProductRootsProofWith projectedDemand = do
       && reversed == second && laterOnly == Right [unused])
     (fail "recovery-induced source global did not extend exact package roots")
   let dictionary = identity "main" "Tidepool.Aeson.FromJSON" "dictionary"
-      envelope = Execution.ProgramEnvelope 14 (fromString "ghc-9.12-prepared-stg") (fromString "ghc-9.12.2") 8
+      envelope = Execution.ProgramEnvelope Execution.schemaVersion
+        (fromString "ghc-9.12-prepared-stg") (fromString "ghc-9.12.2")
+        Execution.executionAbiVersion
         (Execution.TargetDescriptor Execution.X86_64 Execution.LittleEndian 64 64 (fromString "sysv64") [])
       projected ordinal binders globals = Execution.ProjectedGroup ordinal binders
         (Execution.ProjectedGroupBody
