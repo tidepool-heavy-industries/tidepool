@@ -1121,13 +1121,6 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     let [binder] = bound.as_slice() else {
         panic!("the producer must bind one Eff value");
     };
-    let site = compiled
-        .prepared
-        .sites()
-        .iter()
-        .find(|site| site.delivery == SiteDelivery::LiveReentry)
-        .expect("GHC issues a typed receive site")
-        .clone();
     assert!(matches!(
         source
             .run_bind_with_sites(
@@ -1144,7 +1137,15 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         .unwrap()
         .unwrap();
     let original = Arc::clone(&custody.provenance);
-    assert!(original.sites.contains_key(&site.site));
+    let sites = original.sites();
+    let [issued] = sites.as_slice() else {
+        panic!("the actual receive-value custody must retain its unique GHC-issued site");
+    };
+    let site = issued.site;
+    assert!(
+        compiled.asks.iter().any(|row| row.same_metadata(issued)),
+        "binding custody retains genuine compiler observations"
+    );
 
     // The receiver compiles only an identity runner and the live answer. It
     // has never executed or installed the producer's request definition.
@@ -1164,8 +1165,10 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     else {
         panic!("the receiver must compile its real runner and answer bindings");
     };
-    assert!(runner.asks.is_empty());
-    assert!(runner.prepared.sites().is_empty());
+    assert!(
+        runner.asks.iter().all(|row| row.site != site),
+        "the independent receiver did not issue the producer's receive site"
+    );
     assert!(matches!(
         receiver
             .run_projected_bind_with_sites(
@@ -1199,7 +1202,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
                 .definition_facts()
                 .sites
                 .iter()
-                .any(|row| row.site == site.site && row.delivery == site.delivery)
+                .any(|row| row.site == site && row.delivery == SiteDelivery::LiveReentry)
         })
         .count();
     // This census observes the production exporter. An Eff continuation or
@@ -1231,9 +1234,9 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
             )
             .expect("the production custody importer admits the original typed request"),
     );
-    assert_eq!(parked_site(&mut receiver, &hole), site.site);
+    assert_eq!(parked_site(&mut receiver, &hole), site);
     let parked = receiver.parked_program_provenance(&hole).unwrap();
-    assert!(parked.sites[&site.site].same_metadata(&original.sites[&site.site]));
+    assert!(parked.sites[&site].same_metadata(&original.sites[&site]));
     assert_eq!(receiver.parked_count(), 1);
     assert_eq!(receiver.stowed_roots_count(), 1);
     assert!(matches!(
