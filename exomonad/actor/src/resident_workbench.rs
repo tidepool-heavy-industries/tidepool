@@ -15998,6 +15998,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor() {
+        with_test_compiler_owner(
+            spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor_with_compiler_owner(),
+        ).await;
+    }
+
+    async fn spec_reload_installation_fence_refuses_changed_dispatch_and_retired_actor_with_compiler_owner(
+    ) {
         struct NeverCommitted(crate::CheckpointSourceLayer);
         impl crate::StagedActorSourceReload for NeverCommitted {
             fn source(&self) -> &crate::CheckpointSourceLayer {
