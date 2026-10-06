@@ -2389,7 +2389,14 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     drop(preview);
     drop(reservation);
     drop(checked);
-    drop(fixture);
+    let InputFixture {
+        root: _source_root,
+        producer,
+        recipe: producer_recipe,
+        ..
+    } = fixture;
+    drop(producer);
+    drop(producer_recipe);
     drop(producer_execution);
     drop(activation_execution);
     resident.retire_scope(producer_scope);
