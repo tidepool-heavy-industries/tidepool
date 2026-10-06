@@ -4426,8 +4426,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         case fromException failure of
                           Just CompilerTransactionPoisoned -> throwIO failure
                           _ -> pure ()
-                        -- The failed attempt owns cloned EPS, finder, HPT and
-                        -- memo cells. No completed context is reset or rebound.
+                        -- Failed home/finder/memo choices remain private.
+                        -- Demand-loaded fixed package facts survive on the
+                        -- same owner used by lazy completed interfaces.
                         clearRecovery
                         writeIORef active Nothing
                         mutation <- readIORef interpreterAttempt

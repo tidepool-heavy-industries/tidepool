@@ -40,7 +40,7 @@ import Data.Maybe (isJust, isNothing, catMaybes)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateHPT_lazy, hptSomeThingsBelowUs, hsc_home_unit, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
+  ( HscEnv(..), hscUpdateHPT_lazy, hptSomeThingsBelowUs, hsc_home_unit, hsc_home_unit_maybe, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
 import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..), PluginRecompile(..), defaultPlugin )
 import GHC.Tc.Types (TcGblEnv(..), ImportAvails(..))
@@ -563,9 +563,10 @@ forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env 
   unless (ghcMode (hsc_dflags env) == CompManager) $
     throwIO ExactContextRequiresCompilationManager
   let homeUnits = Set.union packageHomes (hsc_all_home_unit_ids env)
-      home = hsc_home_unit env
       eps = ue_eps (hsc_unit_env env)
-  unless (isHomeUnitDefinite home && homeUnits == Set.singleton (homeUnitId home)) $
+  unless (case hsc_home_unit_maybe env of
+      Just home -> isHomeUnitDefinite home && homeUnits == Set.singleton (homeUnitId home)
+      Nothing -> False) $
     throwIO ExactContextRequiresSingleDefiniteHomeUnit
   cleared <- atomicModifyIORef' (euc_eps eps) $ \external ->
     let homeOwner owner = toUnitId (moduleUnit owner) `Set.member` homeUnits
