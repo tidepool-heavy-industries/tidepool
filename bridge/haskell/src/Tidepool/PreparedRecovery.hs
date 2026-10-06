@@ -96,10 +96,9 @@ data PreparedRecovery = PreparedRecovery
   , growPreparedRecovery :: [Id] -> IO PreparedRecovery
   }
 
--- | Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
--- rounds): per-module fact computation, the reachability walk, reference
--- collection, body lookup, and defining-module preparation, plus the round
--- and preparation counts.
+-- | Coordinator elapsed work is summed over demand updates. Preparation
+-- service sums independent task elapsed times and may exceed request elapsed
+-- time under overlap; it is never an additive request-phase breakdown.
 data Spent = Spent
   { spentFacts :: !Integer
   , spentReach :: !Integer
@@ -136,7 +135,7 @@ newPreparedRecovery :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> IO (SymbolIdentity -> IO RecoveredClosure)
 newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
   recover <- newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache
-    Set.empty baseContext home []
+    baseContext home []
   pure (fmap preparedRecoveryClosure . recover)
 
 -- | Share immutable facts between targets; continue only within one target.
@@ -145,21 +144,21 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
 -- Certified homes come only from admitted original products; package roots
 -- come from the emitted-global demand of those exact original groups.
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
-  -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
+  -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
 newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing Nothing
 
 -- | All recovery jobs use the request's existing allowance. Module contexts
 -- are acquired by its coordinator before lowering tasks enter the executor.
 newPreparedRecoveryWithExecutor :: CompilerExecutor -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
-  -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
+  -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
 newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing (Just executor)
 
 newPreparedRecoveryUsing :: Maybe CompilerExecutor -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
-  -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
+  -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryUsing executor env cache ownerCache bodyCache _certifiedHomes baseContext home initialRoots = do
+newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext home initialRoots = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -297,8 +296,12 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache _certifiedHomes
                   , spentReach = spentReach cost + reachMs
                   , spentRefs = spentRefs cost + refsMs
                   , spentRounds = spentRounds cost + 1 })
-                (_, lookupMs) <- timeSection $ runJobs lookupNeeded
-                  (\_ found -> maybe (pure ()) recordLookup found) pending
+                -- Interface/finder hydration is a compiler-context operation,
+                -- not an independently acquired lowering input. Keep it on the
+                -- coordinator while other immutable STG tasks may continue.
+                (_, lookupMs) <- timeSection $ mapM (\binder -> do
+                  found <- lookupNeeded binder
+                  maybe (pure ()) recordLookup found) pending
                 charge (\cost -> cost { spentLookup = spentLookup cost + lookupMs })
                 selected <- readIORef state
                 let dirty = Set.toAscList (recoveryDirty selected)
@@ -328,7 +331,7 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache _certifiedHomes
           emitDetailPhase timing "prepared_recover" "prepared_recover_reach" reachTotal
           emitDetailPhase timing "prepared_recover" "prepared_recover_refs" refsTotal
           emitDetailPhase timing "prepared_recover" "prepared_recover_lookup" lookupTotal
-          emitDetailPhase timing "prepared_recover" "prepared_recover_prepare" prepareTotal
+          emitDetailPhase timing "prepared_recover" "prepared_recover_prepare_service" prepareTotal
           emitCount timing "prepared_recover_rounds" rounds
           emitCount timing "prepared_recover_module_preparations" preparations
           hits <- readIORef factHits

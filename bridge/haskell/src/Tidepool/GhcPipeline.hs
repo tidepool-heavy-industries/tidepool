@@ -2700,7 +2700,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   env <- getSession
                   interfaces <- liftIO (readIORef productInterfacesRef)
                   liftIO (factory env interfaces targetOwner (pvExactScope variant))
-              lowerTasks observer tasks = liftIO $ do
+              lowerTasks observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
                 let lower input = do
                       prepared <- either runPreparedModuleTask pure (snd input)
                       observePreparedModule observer prepared
