@@ -1506,6 +1506,23 @@ impl CacheOfferDiagnostics {
     }
 }
 
+/// Deployment packages remain all-or-nothing through shared record validation.
+/// Ordinary cache rows are optional and can be omitted independently.
+fn omit_or_refuse_candidate(
+    origin: &CandidateOrigin,
+    diagnostics: &mut CacheOfferDiagnostics,
+    unit: &str,
+    module: &str,
+    reason: CacheOfferOmission,
+) -> bool {
+    if matches!(origin, CandidateOrigin::Deployment { .. }) {
+        true
+    } else {
+        diagnostics.omit(unit, module, reason);
+        false
+    }
+}
+
 impl CacheOffer {
     fn omit(&mut self, owner: &(String, String), reason: CacheOfferOmission) {
         self.diagnostics.omit(&owner.0, &owner.1, reason);
@@ -1532,6 +1549,18 @@ fn operation_parse_budget_error(
     )
 }
 
+fn recovery_operation_budget_error(
+    error: &crate::recovery_artifacts::RecoveryArtifactError,
+) -> bool {
+    matches!(
+        error,
+        crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(
+            tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
+                | tidepool_repr::execution_schema::ParseError::InventoryByteLimit { .. }
+        )
+    )
+}
+
 fn ordinary_records_with_limits(
     endpoint_identity: &[u8],
     include: &[PathBuf],
@@ -1544,6 +1573,10 @@ fn ordinary_records_with_limits(
     let roots = include.iter().cloned().collect::<BTreeSet<_>>();
     let mut headers_read = 0_u64;
     let mut header_bytes = 0_u64;
+    let mut offer = CacheOffer {
+        records: Vec::new(),
+        diagnostics: CacheOfferDiagnostics::default(),
+    };
     let mut selected: BTreeMap<(String, String), (RecordHeader, fs::File, PathBuf)> =
         BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
@@ -1562,7 +1595,15 @@ fn ordinary_records_with_limits(
                         continue;
                     };
                     headers_read += 1;
-                    header_bytes += file.stream_position().ok()?;
+                    let owner = (header.unit.clone(), header.module.clone());
+                    let position = match file.stream_position() {
+                        Ok(position) => position,
+                        Err(_) => {
+                            offer.omit(&owner, CacheOfferOmission::InvalidRecord);
+                            continue;
+                        }
+                    };
+                    header_bytes += position;
                     if header.endpoint != endpoint_identity
                         || (!exact_context && header.include != include)
                         || (exact_context
@@ -1599,10 +1640,6 @@ fn ordinary_records_with_limits(
     }
     let mut record_bytes = 0_u64;
     let mut budget = shared_evidence::ReadBudget::default();
-    let mut offer = CacheOffer {
-        records: Vec::new(),
-        diagnostics: CacheOfferDiagnostics::default(),
-    };
     for (owner, (header, mut file, _)) in selected {
         if offer.records.len() >= limits.owners {
             offer.omit(&owner, CacheOfferOmission::OwnerLimit);
@@ -1617,7 +1654,21 @@ fn ordinary_records_with_limits(
         };
         // The header was authenticated against the file length by read_header;
         // recheck before allocating the payload in case the file changed.
-        if file.metadata().ok()?.len() != file.stream_position().ok()? + header.payload_len {
+        let metadata_len = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                offer.omit(&owner, CacheOfferOmission::InvalidRecord);
+                continue;
+            }
+        };
+        let payload_position = match file.stream_position() {
+            Ok(position) => position,
+            Err(_) => {
+                offer.omit(&owner, CacheOfferOmission::InvalidRecord);
+                continue;
+            }
+        };
+        if metadata_len != payload_position + header.payload_len {
             offer.omit(&owner, CacheOfferOmission::InvalidRecord);
             continue;
         }
@@ -1821,15 +1872,20 @@ fn select_records_inner(
         ) {
             Ok(bytes) => bytes,
             Err(error) => {
-                selection_omissions.omit(
+                let reason = if operation_budget_error(&error) {
+                    CacheOfferOmission::OperationBudget
+                } else {
+                    CacheOfferOmission::InvalidRecord
+                };
+                if omit_or_refuse_candidate(
+                    &origin,
+                    &mut selection_omissions,
                     &record.unit,
                     &record.module,
-                    if operation_budget_error(&error) {
-                        CacheOfferOmission::OperationBudget
-                    } else {
-                        CacheOfferOmission::InvalidRecord
-                    },
-                );
+                    reason,
+                ) {
+                    return None;
+                }
                 continue;
             }
         };
@@ -1866,15 +1922,17 @@ fn select_records_inner(
                 continue;
             }
             Err(error) => {
-                selection_omissions.omit(
-                    &record.unit,
-                    &record.module,
-                    if operation_parse_budget_error(&error) {
-                        CacheOfferOmission::OperationBudget
-                    } else {
-                        CacheOfferOmission::InvalidRecord
-                    },
-                );
+                let reason = if operation_parse_budget_error(&error) {
+                    CacheOfferOmission::OperationBudget
+                } else {
+                    CacheOfferOmission::InvalidRecord
+                };
+                if reason == CacheOfferOmission::OperationBudget
+                    && matches!(origin, CandidateOrigin::Deployment { .. })
+                {
+                    return None;
+                }
+                selection_omissions.omit(&record.unit, &record.module, reason);
                 continue;
             }
         };
@@ -1929,15 +1987,17 @@ fn select_records_inner(
         let package_roots = match package_roots {
             Ok(roots) => roots,
             Err(error) => {
-                selection_omissions.omit(
-                    &record.unit,
-                    &record.module,
-                    if operation_budget_error(&error) {
-                        CacheOfferOmission::OperationBudget
-                    } else {
-                        CacheOfferOmission::InvalidRecord
-                    },
-                );
+                let reason = if recovery_operation_budget_error(&error) {
+                    CacheOfferOmission::OperationBudget
+                } else {
+                    CacheOfferOmission::InvalidRecord
+                };
+                if reason == CacheOfferOmission::OperationBudget
+                    && matches!(origin, CandidateOrigin::Deployment { .. })
+                {
+                    return None;
+                }
+                selection_omissions.omit(&record.unit, &record.module, reason);
                 continue;
             }
         };
@@ -1956,60 +2016,180 @@ fn select_records_inner(
                 Some(Arc::clone(graph))
             } else {
                 let path = graph_path(&record_dir(endpoint_identity), &digest);
-                let recovered = (|| {
-                    let mut file = fs::File::open(path).ok()?;
-                    if file.metadata().ok()?.len()
-                        > crate::execution_source::GRAPH_BYTES_LIMIT as u64
-                    {
+                let metadata_len = match fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => metadata.len(),
+                    _ => {
+                        if omit_or_refuse_candidate(
+                            &origin,
+                            &mut selection_omissions,
+                            &record.unit,
+                            &record.module,
+                            CacheOfferOmission::InvalidRecord,
+                        ) {
+                            return None;
+                        }
+                        continue;
+                    }
+                };
+                let Some(metadata_bytes) = usize::try_from(metadata_len).ok() else {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::ReadBudget,
+                    ) {
                         return None;
                     }
-                    let mut bytes = Vec::new();
-                    (&mut file)
-                        .take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1)
-                        .read_to_end(&mut bytes)
-                        .ok()?;
-                    let next_bytes = graph_bytes.checked_add(bytes.len())?;
-                    if next_bytes > crate::execution_source::GRAPH_BYTES_LIMIT
-                        || bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT
-                        || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest
-                    {
+                    continue;
+                };
+                let Some(next_graph_bytes) = graph_bytes
+                    .checked_add(metadata_bytes)
+                    .filter(|bytes| *bytes <= crate::execution_source::GRAPH_BYTES_LIMIT)
+                else {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::ReadBudget,
+                    ) {
                         return None;
                     }
-                    let graph = crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
-                        bytes, digest,
-                    )
-                    .ok()?;
-                    graph_bytes = next_bytes;
-                    Some(graph)
-                })();
-                recovered
+                    continue;
+                };
+                let bytes = match crate::certified_products::read_bounded_with_operation(
+                    &path,
+                    crate::execution_source::GRAPH_BYTES_LIMIT as u64,
+                    &package_validation.inventory,
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let reason = if operation_budget_error(&error) {
+                            CacheOfferOmission::OperationBudget
+                        } else {
+                            CacheOfferOmission::ReadBudget
+                        };
+                        if omit_or_refuse_candidate(
+                            &origin,
+                            &mut selection_omissions,
+                            &record.unit,
+                            &record.module,
+                            reason,
+                        ) {
+                            return None;
+                        }
+                        continue;
+                    }
+                };
+                if bytes.len() as u64 != metadata_len {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::InvalidRecord,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+                let Some(recovery_work) = bytes.len().checked_mul(32) else {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::OperationBudget,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                };
+                if package_validation
+                    .inventory
+                    .charge(recovery_work)
+                    .is_err()
+                {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::OperationBudget,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::InvalidRecord,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+                let graph = match crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(bytes, digest) {
+                    Ok(graph) => graph,
+                    Err(_) => {
+                        if omit_or_refuse_candidate(
+                            &origin,
+                            &mut selection_omissions,
+                            &record.unit,
+                            &record.module,
+                            CacheOfferOmission::InvalidRecord,
+                        ) {
+                            return None;
+                        }
+                        continue;
+                    }
+                };
+                graph_bytes = next_graph_bytes;
+                Some(graph)
             };
             let Some(graph) = recovered else {
-                selection_omissions.omit(
+                if omit_or_refuse_candidate(
+                    &origin,
+                    &mut selection_omissions,
                     &record.unit,
                     &record.module,
                     CacheOfferOmission::ReadBudget,
-                );
+                ) {
+                    return None;
+                }
                 continue;
             };
             if validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
                 .is_none()
             {
-                selection_omissions.omit(
+                if omit_or_refuse_candidate(
+                    &origin,
+                    &mut selection_omissions,
                     &record.unit,
                     &record.module,
                     CacheOfferOmission::InvalidRecord,
-                );
+                ) {
+                    return None;
+                }
                 continue;
             }
             recovered_graphs.insert(digest, Arc::clone(&graph));
             record.execution_source = Some(graph);
         } else if record.execution_source.is_some() {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         }
         let canonical = match (&record.module_interface_proof, &record.module_interface) {
@@ -2021,22 +2201,30 @@ fn select_records_inner(
             ) {
                 Ok(interface) => interface,
                 Err(_) => {
-                    selection_omissions.omit(
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
                         &record.unit,
                         &record.module,
                         CacheOfferOmission::InvalidRecord,
-                    );
+                    ) {
+                        return None;
+                    }
                     continue;
                 }
             },
             (None, None) => continue,
         };
         let Some(source_sha256) = parse_sha(&record.source_sha256) else {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         };
         if let Err(error) = crate::certified_products::validate_canonical_native_bytes_with_operation(
@@ -2048,24 +2236,33 @@ fn select_records_inner(
             &canonical,
             &package_validation.inventory,
         ) {
-            selection_omissions.omit(
+            let reason = if operation_budget_error(&error) {
+                CacheOfferOmission::OperationBudget
+            } else {
+                CacheOfferOmission::InvalidRecord
+            };
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
-                if operation_budget_error(&error) {
-                    CacheOfferOmission::OperationBudget
-                } else {
-                    CacheOfferOmission::InvalidRecord
-                },
-            );
+                reason,
+            ) {
+                return None;
+            }
             continue;
         }
         let owner_key = (record.unit.clone(), record.module.clone());
         let Some(record) = ValidatedRecord::admit(record, canonical) else {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &owner_key.0,
                 &owner_key.1,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         };
         if generation_dependent(&product) {
@@ -4066,11 +4263,17 @@ mod tests {
             offer
                 .records
                 .iter()
-                .map(|record| record.module.as_str())
+                .map(|record| record.module.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(&first), ["A", "B"]);
-        assert_eq!(names(&second), ["A", "B"]);
+        assert_eq!(
+            names(&first),
+            vec!["A".to_owned(), "B".to_owned()]
+        );
+        assert_eq!(
+            names(&second),
+            vec!["A".to_owned(), "B".to_owned()]
+        );
         assert_eq!(first.diagnostics.count(CacheOfferOmission::OwnerLimit), 1);
 
         let selected = select_records_inner(
@@ -4215,7 +4418,7 @@ mod tests {
                 .iter()
                 .map(|record| record.module.as_str())
                 .collect::<Vec<_>>(),
-            ["A", "B"]
+            vec!["A", "B"]
         );
         let selected = select_records_inner(
             b"endpoint",
@@ -4239,6 +4442,33 @@ mod tests {
                 .bytes(),
             independent.products
         );
+    }
+
+    #[test]
+    fn corrupt_canonical_candidate_remains_a_hard_deployment_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        record.module_interface_proof = None;
+        record
+            .module_interface
+            .as_mut()
+            .unwrap()
+            .certificate_path = PathBuf::from("../invalid-certificate");
+        let selected = select_records_inner(
+            b"endpoint",
+            &record.include,
+            scratch.path(),
+            vec![(
+                record,
+                CandidateOrigin::Deployment {
+                    interface: root.path().join("Library.hi"),
+                    packages: root.path().join("Library.packages"),
+                },
+            )],
+            None,
+        );
+        assert!(selected.is_none());
     }
 
     #[test]
