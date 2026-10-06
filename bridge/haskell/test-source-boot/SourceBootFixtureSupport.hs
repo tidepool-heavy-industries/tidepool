@@ -58,10 +58,14 @@ capturePreparedFixture work prepared = do
 -- filesystem, process and cancellation failures keep their original exception.
 requireOriginalSourceRejection :: String -> ExecutionSourceFailure -> IO a -> IO ()
 requireOriginalSourceRejection label expected action = do
-  result <- try (void action)
+  result <- try (void action) :: IO (Either SomeException ())
   case result of
-    Left (OriginalSourceSelectionRejected actual) | actual == expected -> pure ()
-    Left failure -> throwIO failure
+    Left failure
+      | Just (OriginalSourceSelectionRejected actual) <- fromException failure
+      , actual == expected -> pure ()
+      | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
+      | otherwise -> throwIO (RefusalControlFailure
+          (label ++ ": expected original source refusal " ++ show expected) failure)
     Right () -> fail (label ++ ": expected original source refusal " ++ show expected)
 
 requireOriginalSourceBytesChanged :: String -> (String,String) -> FilePath -> String -> IO a -> IO ()
@@ -94,11 +98,14 @@ instance Exception RefusalControlFailure where
 
 requireUserError :: String -> String -> IO a -> IO ()
 requireUserError label diagnostic action = do
-  result <- try (void action)
+  result <- try (void action) :: IO (Either SomeException ())
   case result of
-    Left (failure :: IOException)
-      | isUserError failure && ioeGetErrorString failure == diagnostic -> pure ()
-      | otherwise -> throwIO failure
+    Left failure
+      | Just (ioFailure :: IOException) <- fromException failure
+      , isUserError ioFailure && ioeGetErrorString ioFailure == diagnostic -> pure ()
+      | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
+      | otherwise -> throwIO (RefusalControlFailure
+          (label ++ ": expected owner diagnostic " ++ diagnostic) failure)
     Right () -> fail (label ++ ": expected owner diagnostic " ++ diagnostic)
 
 requireFailedCompilerTransaction :: String -> IO a -> IO ()
