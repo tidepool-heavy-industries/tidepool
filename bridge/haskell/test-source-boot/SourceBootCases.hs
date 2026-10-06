@@ -27,7 +27,7 @@ import Data.IntMap.Strict qualified as IntMap
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word32, Word64)
-import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
