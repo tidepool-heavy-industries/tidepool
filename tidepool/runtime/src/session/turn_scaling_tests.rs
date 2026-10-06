@@ -1748,7 +1748,7 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
         let source = if declaration {
             "memoDeclared :: Int\nmemoDeclared = SessionBodyDemandSupport.retainedFunction memoSeed"
         } else {
-            "_ <- if SessionBodyDemandSupport.retainedFunction memoSeed == 42 then pure () else error \"checked/native value mismatch\""
+            "memoChecked <- if SessionBodyDemandSupport.retainedFunction memoSeed == 42 then pure () else error \"checked/native value mismatch\""
         };
         try_execute_cell_with_template_imports(
             &mut resident,
@@ -1768,6 +1768,9 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
             &imports,
         )
         .expect("the admitted checked/native pair must preserve its retained value");
+        if !declaration {
+            assert!(resident.current_binding_in(public, "memoChecked").is_some());
+        }
         let transactions = std::fs::read_dir(diagnostics.path().join("compiler-transactions"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1828,10 +1831,13 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
                 &images,
                 (0, 0),
                 "memo_policy_declaration_value",
-                "_ <- if memoDeclared == 42 then pure () else error \"retained declaration value mismatch\"",
+                "memoDeclarationChecked <- if memoDeclared == 42 then pure () else error \"retained declaration value mismatch\"",
                 0,
                 &ScalePublication::Ephemeral,
             );
+            assert!(resident
+                .current_binding_in(public, "memoDeclarationChecked")
+                .is_some());
         }
     }
 }

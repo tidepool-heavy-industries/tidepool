@@ -2715,9 +2715,12 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
       let accepted = map candidateModule (pprAcceptedCandidates reused)
           required = if expected == 42 then 1 :: Int else 0
           fresh = preparedNames reused
+          helperFrontends = length (filter (==
+            "tidepool-canonical-frontend module=MetadataQuoteSupport") (lines diagnostics))
           result = pprPipelineResult reused
       unless (accepted == (if expected == 42 then ["MetadataQuoteSupport"] else [])
-          && ("MetadataQuoteSupport" `elem` fresh) == (expected /= 42)
+          && fresh == ["MetadataQuotedTarget"]
+          && helperFrontends == (if expected == 42 then 0 else 1)
           && counterValues "candidate_executable_required" diagnostics == [fromIntegral required]
           && hasIntResultLiteral expected (prBinds result)) $
         fail ("native candidate reuse skipped GHC execution or retained an old quoted helper body: "
@@ -2730,8 +2733,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
       putStrLn ("candidate GHC load evidence: expected=" ++ show expected
         ++ " accepted=" ++ show accepted ++ " fresh=" ++ show fresh
         ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" diagnostics)
-        ++ " helper_frontends=" ++ show (length (filter (==
-          "tidepool-canonical-frontend module=MetadataQuoteSupport") (lines diagnostics))))
+        ++ " helper_frontends=" ++ show helperFrontends)
   putStrLn "candidate GHC load: original native reuse, actual quoter execution and source A/B/A passed"
 
 -- Pure issuer and scope-budget controls; the runtime suite separately drives

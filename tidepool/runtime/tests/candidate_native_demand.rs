@@ -1,9 +1,9 @@
 //! Optional originals satisfy native demand without expanding fresh work.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::compiler_test_support::{selected_lexical_closure, OwnedEnvironment};
-use tidepool_testing::eval_harness::EvalHarness;
+use tidepool_testing::eval_harness::{prelude_path, EvalHarness};
 use tidepool_toolchain::artifacts::{
     compile_invocation, compile_invocation_in_context, CompileInvocation, CompiledArtifacts,
 };
@@ -35,7 +35,7 @@ fn require_validation_only(artifacts: &CompiledArtifacts, name: &str) {
         .any(|product| product.module == name));
 }
 
-fn ghc_result(root: &Path, name: &str, source: &str) -> serde_json::Value {
+fn ghc_result(root: &Path, include: &[PathBuf], name: &str, source: &str) -> serde_json::Value {
     let source_path = root.join(format!("{name}.hs"));
     std::fs::write(&source_path, source).unwrap();
     let libdir = std::env::var("TIDEPOOL_GHC_LIBDIR")
@@ -47,7 +47,7 @@ fn ghc_result(root: &Path, name: &str, source: &str) -> serde_json::Value {
     let oracle = std::process::Command::new("ghc")
         .current_dir(root)
         .arg(format!("-B{libdir}"))
-        .arg(format!("-i{}", root.display()))
+        .args(include.iter().map(|path| format!("-i{}", path.display())))
         .arg(&source_path)
         .args(["-v0", "-e", &format!("print {name}.result")])
         .output()
@@ -88,12 +88,12 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     ] {
         std::fs::write(work.path().join(format!("{name}.hs")), source).unwrap();
     }
-    let include = [work.path().to_path_buf()];
+    let include = [work.path().to_path_buf(), prelude_path()];
     let compile = |source, name| {
         compile_invocation(
             &CompileInvocation {
                 source,
-                targets: &["result"],
+                targets: &["__prepared"],
                 include: &include,
                 fallback_module_name: name,
             },
@@ -102,8 +102,8 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         .expect("compile through the production candidate issuer and consumer")
     };
     let evaluator = EvalHarness::new();
-    let expected = ghc_result(work.path(), "CandidateDemandConsumer", CONSUMER);
-    let sibling_expected = ghc_result(work.path(), "CandidateDemandSibling", SIBLING);
+    let expected = ghc_result(work.path(), &include, "CandidateDemandConsumer", CONSUMER);
+    let sibling_expected = ghc_result(work.path(), &include, "CandidateDemandSibling", SIBLING);
     assert_eq!(expected, serde_json::json!(42));
     assert_eq!(sibling_expected, serde_json::json!(42));
 
@@ -115,7 +115,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         .filter(|group| group.owner().module.starts_with("CandidateDemand"))
         .all(|group| group.origin() == ProductOrigin::Fresh));
     assert_eq!(
-        evaluator.run_target(&cold, "result", frunk::HNil).json(),
+        evaluator.run_target(&cold, "__prepared", frunk::HNil).json(),
         expected
     );
 
@@ -125,9 +125,9 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     require_validation_only(&original, "OptionalSupport");
     assert_eq!(
         evaluator
-            .run_target(&original, "result", frunk::HNil)
+            .run_target(&original, "__prepared", frunk::HNil)
             .json(),
-        ghc_result(work.path(), "CandidateDemandWarmer", WARMER)
+        ghc_result(work.path(), &include, "CandidateDemandWarmer", WARMER)
     );
     assert!(
         original.certified_groups.iter().any(|group| {
@@ -164,7 +164,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     }
     require_validation_only(&warm, "OptionalSupport");
     assert_eq!(
-        evaluator.run_target(&warm, "result", frunk::HNil).json(),
+        evaluator.run_target(&warm, "__prepared", frunk::HNil).json(),
         expected
     );
 
@@ -211,7 +211,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     let later = compile_invocation_in_context(
         &CompileInvocation {
             source: SIBLING,
-            targets: &["result"],
+            targets: &["__prepared"],
             include: &include,
             fallback_module_name: "CandidateDemandSibling",
         },
@@ -227,7 +227,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         "the issued native sibling must not need Core recovery"
     );
     assert_eq!(
-        evaluator.run_target(&later, "result", frunk::HNil).json(),
+        evaluator.run_target(&later, "__prepared", frunk::HNil).json(),
         sibling_expected
     );
 }
