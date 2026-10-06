@@ -101,11 +101,7 @@ impl ProductionEntrySources {
         match self {
             Self::NativeCatalog(selection) => {
                 if NativeCatalogSourceSelection::capture(&selection.snapshot_root)? != *selection
-                    || !selection.contains_source(source)
-                    || !selection
-                        .source_files
-                        .iter()
-                        .any(|file| selection.snapshot_root.join(&file.path) == source)
+                    || !selected_native_entry_source(selection, source)
                 {
                     return Err(invalid("retained original source selection changed"));
                 }
@@ -119,6 +115,24 @@ impl ProductionEntrySources {
         }
         Ok(())
     }
+}
+
+// A direct entry target may live beside the library roots. Its original bytes
+// must be an exact member of the retained manifest; this does not add that
+// directory to the import search order or widen native catalog module admission.
+fn selected_native_entry_source(selection: &NativeCatalogSourceSelection, source: &Path) -> bool {
+    source.is_absolute()
+        && source.starts_with(&selection.snapshot_root)
+        && !source.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+        && selection
+            .source_files
+            .iter()
+            .any(|file| selection.snapshot_root.join(&file.path) == source)
 }
 
 /// Owned decoded program and complete original compiler custody. Opening this
@@ -238,12 +252,7 @@ pub fn build_production_entry(
     output: &Path,
 ) -> Result<(), CompileError> {
     let selection = module_candidates::deployment::prepare_build_roots(source_root, output)?;
-    if !selection.contains_source(source)
-        || !selection
-            .source_files
-            .iter()
-            .any(|file| selection.snapshot_root.join(&file.path) == source)
-    {
+    if !selected_native_entry_source(&selection, source) {
         return Err(invalid(
             "entry source is outside the retained original source selection",
         ));
@@ -613,4 +622,52 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod source_selection_tests {
+    use super::*;
+    use crate::toolchain::NativeSourceRole;
+
+    #[test]
+    fn direct_entry_source_remains_outside_library_import_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        for role in NativeSourceRole::ORDERED {
+            std::fs::create_dir_all(root.join(role.relative_root())).unwrap();
+        }
+        let direct = root.join("Entry.hs");
+        let library = root.join("actors/Actor.hs");
+        std::fs::write(&direct, "module Entry where\n").unwrap();
+        std::fs::write(&library, "module Actor where\n").unwrap();
+        let selection = NativeCatalogSourceSelection {
+            source_files: NativeCatalogSourceSelection::source_manifest(&root).unwrap(),
+            snapshot_root: root.clone(),
+            roles: NativeSourceRole::ORDERED,
+        };
+        assert!(selected_native_entry_source(&selection, &direct));
+        assert!(selected_native_entry_source(&selection, &library));
+        assert!(!selection.contains_source(&direct));
+        assert!(selection.contains_source(&library));
+        assert_eq!(
+            selection.include_roots(),
+            NativeSourceRole::ORDERED.map(|role| root.join(role.relative_root()))
+        );
+        let unselected = root.join("Unselected.hs");
+        std::fs::write(&unselected, "module Unselected where\n").unwrap();
+        assert!(!selected_native_entry_source(&selection, &unselected));
+        assert!(!selected_native_entry_source(
+            &selection,
+            &root.join("actors/../Entry.hs")
+        ));
+        assert!(!selected_native_entry_source(
+            &selection,
+            &root.with_file_name("sibling").join("Entry.hs")
+        ));
+        let mut incomplete = selection;
+        incomplete
+            .source_files
+            .retain(|file| file.path != Path::new("Entry.hs"));
+        assert!(!selected_native_entry_source(&incomplete, &direct));
+    }
 }

@@ -24,7 +24,8 @@ Orchestrate modules are excluded. `Tidepool.Effects` is a stable authored
 facade and belongs to the generated support selection. Production catalog admission still checks the actual compiler's
 complete closure; direct import selection alone is not passing evidence.
 
-The snapshot also includes `actors/TidepoolPreparedDriver.hs`, produced from
+The snapshot also includes `TidepoolPreparedDriver.hs` beside the catalog probe,
+outside the library roots, produced from
 the runtime's existing settled-entry renderer. Its fixed entry and effect row
 name `Tidepool.Actors.Internal.ExomonadDriver.rootDriver` and `RootEffects`.
 That source joins the same complete source inventory and Nix retention as the

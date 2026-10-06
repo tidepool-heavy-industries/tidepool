@@ -365,7 +365,11 @@ class NativeQualificationTests(unittest.TestCase):
             subprocess.run(['git', '-C', str(source), 'add', 'bridge'], check=True)
             generated = root_entry_source_fixture(original, {'Library': 'lib/Library.hs', 'Actor': 'actors/Actor.hs'})
             evidence = qualification.declared_haskell_sources(source, root, original, generated)
-            self.assertEqual(evidence['actors']['TidepoolPreparedDriver.hs'], generated['sha256'])
+            self.assertEqual(evidence['actors'], {'Actor.hs': qualification.sha256(original / 'actors/Actor.hs')})
+            self.assertEqual(generated['path'], 'TidepoolPreparedDriver.hs')
+            self.assertEqual(qualification.catalog_source_inventory(original)[generated['path']]['sha256'],
+                             generated['sha256'])
+            self.assertFalse((original / 'actors/TidepoolPreparedDriver.hs').exists())
             with self.assertRaisesRegex(ValueError, 'absent from the owning native build contract'):
                 qualification.declared_haskell_sources(source, root, original)
             extra = original / 'actors/Unexpected.hs'
@@ -517,6 +521,15 @@ class CatalogSourceTests(unittest.TestCase):
                          (self.effects / 'Tidepool/Effects/Core.hs').read_bytes())
         self.assertFalse((self.snapshot / 'effects/Tidepool/Effects.hs').exists())
         self.assertEqual((self.snapshot / 'TidepoolCatalog.hs').read_text().count('import '), 5)
+        self.assertEqual((self.snapshot / qualification.ROOT_ENTRY_SOURCE).read_bytes(),
+                         self.root_entry_source.read_bytes())
+        for relative in ('lib', 'actors'):
+            inventories = [
+                {path.relative_to(root).as_posix(): qualification.sha256(path)
+                 for path in root.rglob('*') if path.is_file()}
+                for root in (self.snapshot / relative, self.sources / relative)]
+            self.assertEqual(*inventories)
+        self.assertFalse((self.snapshot / 'actors/TidepoolPreparedDriver.hs').exists())
         original.write_text('changed after source action')
         self.assertNotEqual((self.snapshot / 'lib/Library.hs').read_bytes(), original.read_bytes())
 
@@ -722,6 +735,11 @@ class CatalogSourceTests(unittest.TestCase):
         path = bundle / 'share/exomonad/root-entry/entry.json'
         self.assertEqual(qualification.root_entry_selection(path, original), self.selection(original))
         manifest = json.loads(path.read_text())
+        manifest['source'] = str(original / 'actors/TidepoolPreparedDriver.hs')
+        qualification.write_json(path, manifest)
+        with self.assertRaisesRegex(ValueError, 'declared original settled driver'):
+            qualification.root_entry_selection(path, original)
+        manifest['source'] = str(original / qualification.ROOT_ENTRY_SOURCE)
         manifest['schema'] = 1
         qualification.write_json(path, manifest)
         with self.assertRaisesRegex(ValueError, 'declared original settled driver'):
@@ -825,6 +843,25 @@ class CatalogSourceTests(unittest.TestCase):
         return SimpleNamespace(runtime_tools=tools, retention_record=record, snapshot=self.snapshot,
             retention_record_origin=record, source_root=original, declared_source_root=original,
             ghc_libdir=tools, libraries=tools, output=output, timeout=900, **paths)
+
+    def test_root_entry_producer_selects_retained_direct_target_outside_library_roots(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'entry-products')
+        commands = []
+        def execute(command, **kwargs):
+            if '--verify-path' not in command:
+                commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+            self.assertEqual(qualification.invoke_retained_catalog_producer(
+                args, qualification.CatalogProducerOperation.ENTRY), original)
+        target = original / qualification.ROOT_ENTRY_SOURCE
+        self.assertEqual(commands, [[str(args.producer), 'entry', '--source', str(target),
+            '--target', '__prepared', '--source-root', str(original), '--output-root', str(args.output)]])
+        self.assertTrue(target.is_file())
+        self.assertTrue(all(not target.is_relative_to(original / relative)
+                            for relative in qualification.CATALOG_SOURCE_ROOTS.values()))
+        self.assertIn(qualification.ROOT_ENTRY_SOURCE, qualification.catalog_source_inventory(original))
 
     def test_build_producer_refusal_still_rechecks_complete_retention(self):
         original, tools, record, pin, nar = self.retained_fixture()

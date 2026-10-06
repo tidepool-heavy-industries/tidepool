@@ -56,7 +56,7 @@ RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
 NATIVE_CATALOG_BUILD = "native-catalog-build.json"
 NATIVE_ROOT_ENTRY_BUILD = "native-root-entry-build.json"
 NATIVE_SOURCE_ROLES = ["stable_effects", "stdlib", "actors", "jev"]
-ROOT_ENTRY_SOURCE = "actors/TidepoolPreparedDriver.hs"
+ROOT_ENTRY_SOURCE = "TidepoolPreparedDriver.hs"
 ROOT_ENTRY_SOURCE_OWNER = "//tidepool/runtime:tidepool-entry-source"
 ROOT_ENTRY_GENERATOR_SOURCE = "tidepool/runtime/src/bin/tidepool-entry-source.rs"
 CATALOG_TEST = "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs"
@@ -427,7 +427,7 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
         "PATH": str(tools / "bin"),
     }
     environment = execution_environment({"environment": declared_environment})
-    probe, target = (("actors/TidepoolPreparedDriver.hs", "__prepared")
+    probe, target = ((ROOT_ENTRY_SOURCE, "__prepared")
                      if operation is CatalogProducerOperation.ENTRY else ("TidepoolCatalog.hs", "catalogSentinel"))
     command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / probe),
                "--target", target, "--source-root", str(original), "--output-root", str(output)]
@@ -517,7 +517,7 @@ def root_entry_selection(entry: Path, original: Path) -> dict:
     manifest = json.loads(entry.read_text())
     if (manifest.get("schema") != 2 or manifest.get("purpose") != "original_source"
             or manifest.get("target") != "__prepared"
-            or manifest.get("source") != str(original / "actors/TidepoolPreparedDriver.hs")):
+            or manifest.get("source") != str(original / ROOT_ENTRY_SOURCE)):
         raise ValueError("root entry does not retain the declared original settled driver")
     sources = manifest.get("sources")
     if not isinstance(sources, dict) or set(sources) != {"kind", "selection"} or sources["kind"] != "native_catalog":
@@ -570,17 +570,16 @@ def declared_haskell_sources(source: Path, bundle: Path, original_sources: Path 
         "bridge/haskell/lib", "bridge/haskell/actors",
     ]).decode().split("\0")
     evidence = {}
+    if original_sources is not None:
+        declared = catalog_source_metadata(original_sources)["root_entry"]
+        if generated_source != declared:
+            raise ValueError("generated root source is absent from the owning native build contract")
     for relative, packaged in (("bridge/haskell/lib", "stdlib"), ("bridge/haskell/actors", "actors")):
         expected = {
             Path(path).relative_to(relative).as_posix(): sha256(source / path)
             for path in tracked if path.startswith(relative + "/") and path.endswith(".hs")
             and "/Prelude_cbor/" not in path
         }
-        if packaged == "actors" and original_sources is not None:
-            declared = catalog_source_metadata(original_sources)["root_entry"]
-            if generated_source != declared:
-                raise ValueError("generated root source is absent from the owning native build contract")
-            expected[Path(ROOT_ENTRY_SOURCE).name] = declared["sha256"]
         actual_root = (original_sources / Path(relative).name if original_sources is not None
                        else bundle / "share/exomonad" / packaged)
         actual = {path.relative_to(actual_root).as_posix(): sha256(path)
