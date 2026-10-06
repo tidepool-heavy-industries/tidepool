@@ -15987,6 +15987,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
             &first._prepared,
         ));
+        let original_identity = proof.original_input_identity().to_owned();
+        let original_source = proof.original_source().to_owned();
+        let original_owner = tidepool_toolchain::extract_module_name(&original_source)
+            .expect("completed original source has its actual compiler owner");
 
         // A new ordinary source request must execute the untracked quoter again.
         std::fs::write(&quotation_input, "42").unwrap();
@@ -16028,14 +16032,37 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 retained_imports: &[],
             })
             .unwrap();
-        let tidepool_runtime::session::TurnResult::Bind { compiled, .. } = ordinary else {
+        let tidepool_runtime::session::TurnResult::Bind {
+            compiled,
+            wrapped_source,
+            ..
+        } = ordinary
+        else {
             panic!("ordinary quotation request must complete its actual discarded bind")
         };
         let compiled = Arc::new(compiled);
         let successor = compiled.original_compile_input().unwrap();
+        assert_eq!(successor.original_source(), wrapped_source);
+        // The independent scratch scope belongs to a different generated
+        // scaffold. Exact input continuity includes that owner and its source;
+        // it is separate from the shared logical installer recipe.
+        let successor_owner = tidepool_toolchain::extract_module_name(successor.original_source())
+            .expect("fresh quotation source has its actual compiler owner");
+        assert_ne!(original_owner, successor_owner);
+        assert_ne!(original_source, successor.original_source());
+        assert_ne!(original_identity, successor.original_input_identity());
+        let retained = second
+            ._prepared
+            .entry
+            .compiled()
+            .original_compile_input()
+            .unwrap();
+        assert!(Arc::ptr_eq(proof, retained));
+        assert_eq!(retained.original_source(), original_source);
         assert_eq!(
-            proof.original_input_identity(),
-            successor.original_input_identity()
+            retained.original_input_identity(),
+            original_identity,
+            "a fresh quotation cannot replace the selected completed original proof"
         );
         assert!(successor.replay_eligible_identity().is_none());
         let ordinary_executions =
