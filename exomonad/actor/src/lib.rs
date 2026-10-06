@@ -178,7 +178,8 @@ pub use start::{
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,
-    ActorTerminal, RetainedActorExit,
+    ActorTerminal, CompilerPreparationCleanup, CompilerPreparationCleanupObservation,
+    CompilerPreparationOutcome, CompilerPreparationOwner, CompilerWorkClose, RetainedActorExit,
 };
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};

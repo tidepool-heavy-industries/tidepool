@@ -153,7 +153,7 @@ pub struct ActorExitAlreadyPublished {
 
 /// A pending close is recorded by the lifecycle owner before native work starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CompilerWorkClose {
+pub enum CompilerWorkClose {
     Pending,
     Settled(tidepool_runtime::CompilerTransactionClose),
     Abandoned,
@@ -253,8 +253,132 @@ impl Drop for CompilerWorkTicket {
     }
 }
 
+/// A compiler preparation lifetime before any actor is admitted. Retain this
+/// owner independently of its cancelable operation future.
+#[derive(Default)]
+pub struct CompilerPreparationOwner {
+    retained: RetainedActorExit,
+}
+
+impl CompilerPreparationOwner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cleanup(&self) -> CompilerPreparationCleanup {
+        CompilerPreparationCleanup {
+            retained: self.retained.clone(),
+        }
+    }
+
+    /// The action and compiler cleanup are independent. Normal completion or
+    /// dropping this future closes admission, including before its first poll.
+    pub fn scope<'a, T: 'a>(
+        &'a mut self,
+        operation: impl std::future::Future<Output = T> + 'a,
+    ) -> impl std::future::Future<Output = CompilerPreparationOutcome<T>> + 'a {
+        let admission = PreparationAdmissionGuard(self.retained.clone());
+        let cleanup = self.cleanup();
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
+        async move {
+            let action = owner.scope(operation).await;
+            drop(admission);
+            CompilerPreparationOutcome { action, cleanup }
+        }
+    }
+}
+
+struct PreparationAdmissionGuard(RetainedActorExit);
+impl Drop for PreparationAdmissionGuard {
+    fn drop(&mut self) {
+        self.0.close_compiler_admission();
+    }
+}
+
+#[must_use]
+pub struct CompilerPreparationOutcome<T> {
+    pub action: T,
+    pub cleanup: CompilerPreparationCleanup,
+}
+
+/// Repeatable observation retaining the same receipts and native child custody.
+#[derive(Clone)]
+pub struct CompilerPreparationCleanup {
+    retained: RetainedActorExit,
+}
+
+impl std::fmt::Debug for CompilerPreparationCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CompilerPreparationCleanup")
+            .field(&self.observation())
+            .finish()
+    }
+}
+
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerPreparationCleanupObservation {
+    pub admission_closed: bool,
+    pub work: Vec<CompilerWorkClose>,
+}
+
+impl CompilerPreparationCleanupObservation {
+    pub fn is_confirmed(&self) -> bool {
+        self.admission_closed && self.work.iter().all(CompilerWorkClose::is_confirmed)
+    }
+
+    fn is_settled(&self) -> bool {
+        self.admission_closed
+            && !self
+                .work
+                .iter()
+                .any(|work| matches!(work, CompilerWorkClose::Pending))
+    }
+}
+
+impl CompilerPreparationCleanup {
+    pub fn observation(&self) -> CompilerPreparationCleanupObservation {
+        let state = self.retained.state.cleanup.lock();
+        CompilerPreparationCleanupObservation {
+            admission_closed: state.compiler_admission_closed,
+            work: state
+                .compilers
+                .iter()
+                .map(CompilerWorkReceipt::observation)
+                .collect(),
+        }
+    }
+
+    /// The deadline bounds observation, not native retirement. Timeout retains
+    /// Pending and exact custody; it cannot manufacture confirmed cleanup.
+    pub async fn wait_for_settlement(
+        &self,
+        timeout: std::time::Duration,
+    ) -> CompilerPreparationCleanupObservation {
+        let mut changed = self.retained.state.changed.subscribe();
+        let waiting = async {
+            loop {
+                let observation = self.observation();
+                if observation.is_settled() {
+                    return observation;
+                }
+                if changed.changed().await.is_err() {
+                    return self.observation();
+                }
+            }
+        };
+        match tokio::time::timeout(timeout, waiting).await {
+            Ok(observation) => observation,
+            Err(_) => self.observation(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct RetainedCleanupState {
+    compiler_admission_closed: bool,
     outcome: Option<crate::ResidentCleanupOutcome>,
     compilers: Vec<CompilerWorkReceipt>,
 }
@@ -349,23 +473,34 @@ impl RetainedActorExit {
     }
 
     pub(crate) fn retain_cleanup(&self, outcome: crate::ResidentCleanupOutcome) {
-        self.state.cleanup.lock().outcome.get_or_insert(outcome);
+        let mut state = self.state.cleanup.lock();
+        state.compiler_admission_closed = true;
+        state.outcome.get_or_insert(outcome);
     }
 
     pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkReceipt) -> bool {
         let mut state = self.state.cleanup.lock();
-        if state.outcome.is_some() {
+        if state.compiler_admission_closed {
             return false;
         }
         state.compilers.push(receipt);
         true
     }
 
+    fn close_compiler_admission(&self) {
+        let mut state = self.state.cleanup.lock();
+        let changed = !state.compiler_admission_closed;
+        state.compiler_admission_closed = true;
+        drop(state);
+        if changed {
+            self.notify_compiler_close();
+        }
+    }
+
     pub(crate) fn notify_compiler_close(&self) {
         self.state.changed.send_modify(|revision| *revision += 1);
     }
 
-    #[cfg(test)]
     pub(crate) fn compiler_close_observations(&self) -> Vec<CompilerWorkClose> {
         self.state
             .cleanup
@@ -505,6 +640,146 @@ impl RetainedActorExit {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn source_preparation_scope_preserves_action_and_confirms_no_native_work() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        assert!(!owner.cleanup().observation().is_confirmed());
+        let outcome = owner.scope(async { Ok::<_, &str>(42) }).await;
+        assert_eq!(outcome.action, Ok(42));
+        assert!(outcome.cleanup.observation().is_confirmed());
+        assert!(outcome.cleanup.observation().work.is_empty());
+    }
+
+    async fn abandoned_source_action<T>(action: T) -> super::CompilerPreparationOutcome<T> {
+        let mut owner = super::CompilerPreparationOwner::new();
+        owner
+            .scope(async move {
+                let ticket = crate::resident_workbench::CompilerCloseOwner::current()
+                    .unwrap()
+                    .register_work()
+                    .unwrap();
+                drop(ticket);
+                action
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn source_preparation_success_survives_abandoned_compiler_obligation() {
+        let outcome = abandoned_source_action(Ok::<_, &str>(42)).await;
+        assert_eq!(outcome.action, Ok(42));
+        assert!(!outcome.cleanup.observation().is_confirmed());
+        assert_eq!(
+            outcome.cleanup.observation().work,
+            vec![super::CompilerWorkClose::Abandoned]
+        );
+    }
+
+    #[tokio::test]
+    async fn source_preparation_primary_failure_survives_abandoned_compiler_obligation() {
+        let outcome = abandoned_source_action(Err::<(), _>("primary source refusal")).await;
+        assert_eq!(outcome.action, Err("primary source refusal"));
+        assert!(!outcome.cleanup.observation().is_confirmed());
+        assert_eq!(
+            outcome.cleanup.observation().work,
+            vec![super::CompilerWorkClose::Abandoned]
+        );
+    }
+
+    #[test]
+    fn dropping_unpolled_source_scope_closes_admission_without_fabricated_actor() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let captured =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(owner.retained.clone());
+        let observation = owner.cleanup();
+        let operation = owner.scope(async {
+            panic!("unpolled action cannot execute");
+        });
+        drop(operation);
+        assert!(observation.observation().is_confirmed());
+        assert!(captured.register_work().is_err());
+        assert!(owner.retained.get().is_none());
+        assert!(owner.retained.cleanup().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_source_scope_retains_abandonment_and_closes_late_admission() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let captured =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(owner.retained.clone());
+        let observation = owner.cleanup();
+        let mut operation = Box::pin(owner.scope(async {
+            let _ticket = crate::resident_workbench::CompilerCloseOwner::current()
+                .unwrap()
+                .register_work()
+                .unwrap();
+            std::future::pending::<()>().await;
+        }));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(operation.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            observation.observation().work,
+            vec![super::CompilerWorkClose::Pending]
+        );
+        drop(operation);
+        assert!(observation.observation().admission_closed);
+        assert_eq!(
+            observation.observation().work,
+            vec![super::CompilerWorkClose::Abandoned]
+        );
+        assert!(!observation.observation().is_confirmed());
+        assert!(captured.register_work().is_err());
+    }
+
+    #[tokio::test]
+    async fn source_cleanup_deadline_retains_pending_until_actual_late_scope_finish() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let outcome = owner
+            .scope(async {
+                let ticket = crate::resident_workbench::CompilerCloseOwner::current()
+                    .unwrap()
+                    .register_work()
+                    .unwrap();
+                let _native = tidepool_runtime::spawn_blocking_in_span(move || {
+                    ticket.run_for_workload(
+                        tidepool_toolchain::artifacts::CompileWorkload::Preparation,
+                        tidepool_runtime::CompilerTransactionCancellation::new(),
+                        || {
+                            proceed
+                                .recv_timeout(std::time::Duration::from_secs(5))
+                                .unwrap()
+                        },
+                    );
+                });
+                42
+            })
+            .await;
+        assert_eq!(outcome.action, 42);
+        let pending = outcome
+            .cleanup
+            .wait_for_settlement(std::time::Duration::ZERO)
+            .await;
+        assert!(pending.admission_closed);
+        assert_eq!(pending.work, vec![super::CompilerWorkClose::Pending]);
+        assert!(!pending.is_confirmed());
+        release.send(()).unwrap();
+        let settled = outcome
+            .cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(5))
+            .await;
+        assert!(settled.is_confirmed());
+        assert_eq!(
+            settled.work,
+            vec![super::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        );
+    }
+
     use std::time::Duration;
 
     use super::*;

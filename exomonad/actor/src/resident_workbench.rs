@@ -15595,18 +15595,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             }))
         };
         let mut source = source.with_spec("QuotedAgentSpec.agentSpec");
-        let fresh = with_test_compiler_owner(source.prepare_source_toolset(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            snapshot(crate::SourceEntryStorage::FreshCompilation {
-                directory: storage.path().to_owned(),
-                preparation: uuid::Uuid::new_v4(),
-            }),
-            &[],
-            &[],
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        ))
-        .await
-        .unwrap();
+        let mut compiler_owner = crate::CompilerPreparationOwner::new();
+        let fresh = compiler_owner
+            .scope(source.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                snapshot(crate::SourceEntryStorage::FreshCompilation {
+                    directory: storage.path().to_owned(),
+                    preparation: uuid::Uuid::new_v4(),
+                }),
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            ))
+            .await;
+        assert!(fresh.cleanup.observation().is_confirmed());
+        let fresh = fresh.action.unwrap();
         assert!(fresh
             .prepared
             .entry
