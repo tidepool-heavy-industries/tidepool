@@ -810,7 +810,9 @@ impl HostedTestRuntime {
         let diagnostic_root = match diagnostics_root_override {
             Some(root) => {
                 if !root.is_absolute() {
-                    return Err("hosted test diagnostics root must be absolute".into());
+                    return Err("hosted test diagnostics root must be absolute"
+                        .to_owned()
+                        .into());
                 }
                 std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
                 Some(root)
