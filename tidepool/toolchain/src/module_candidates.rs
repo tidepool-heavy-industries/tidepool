@@ -850,6 +850,7 @@ pub(crate) struct PreparedPublication<'a> {
     endpoint_identity: &'a [u8],
     include: &'a [PathBuf],
     evidence: &'a DependencyEvidence,
+    pub(super) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     records: Vec<Record>,
     group_counts: BTreeMap<(String, String), usize>,
     graphs: BTreeMap<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
@@ -867,6 +868,7 @@ pub(crate) fn prepare_publication<'a>(
     let start = std::time::Instant::now();
     let bytes = products.aggregate_bytes_len();
     let owners = products.products().len();
+    let inventory = Arc::clone(products.operation());
     let mut diagnostics = PublicationDiagnostics::new();
     let (products, records) = eligible_records_with_report(
         endpoint_identity,
@@ -906,6 +908,7 @@ pub(crate) fn prepare_publication<'a>(
             endpoint_identity,
             include,
             evidence,
+            inventory,
             records,
             group_counts,
             graphs,
@@ -923,7 +926,8 @@ fn eligible_records_with_report(
     certified: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     report: &mut impl FnMut(&RawModuleProduct, Option<usize>, PublicationDisposition),
 ) -> (Vec<RawModuleProduct>, Vec<Record>) {
-    let (products, per_module_bytes, package_imports) = parsed.into_publication_parts();
+    let (inventory, products, per_module_bytes, package_imports) =
+        parsed.into_publication_parts();
     macro_rules! reject_all {
         ($disposition:expr) => {{
             for product in products.iter().take(CANDIDATE_LIMIT) {
@@ -944,7 +948,7 @@ fn eligible_records_with_report(
     }
     if per_module_bytes
         .iter()
-        .any(|bytes| bytes.len() > RECORD_LIMIT)
+        .any(|bytes| bytes.len() > inventory.limits().max_module_bytes)
     {
         reject_all!(PublicationDisposition::ProductSplitRejected);
     }
@@ -1743,13 +1747,14 @@ fn select_records_inner(
             .ok()?,
             (None, None) => continue,
         };
-        crate::certified_products::validate_canonical_native_bytes(
+        crate::certified_products::validate_canonical_native_bytes_with_operation(
             &computed_owner(&record),
             &record.original_certification,
             &record.interface,
             &record.package_imports,
             Some(parse_sha(&record.source_sha256)?),
             &canonical,
+            &package_validation.inventory,
         )
         .ok()?;
         let record = ValidatedRecord::admit(record, canonical)?;
