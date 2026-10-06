@@ -2710,15 +2710,7 @@ pub struct ResidentKernelBehavior<H, O> {
     /// rendered preview when the request was presented.
     assignment_base: Option<String>,
     #[cfg(test)]
-    activation_preview_observer: Option<
-        Arc<
-            dyn Fn(
-                    &tidepool_runtime::session::MountedActivationInput,
-                ) -> Result<(), ResidentActorWorkbenchError>
-                + Send
-                + Sync,
-        >,
-    >,
+    activation_preview_observer: Option<crate::resident_workbench::ActivationPublicationObserver>,
 }
 
 /// One admitted call owns its authority and cursor until final settlement.
@@ -8169,6 +8161,14 @@ where
             "agent spec preparation"
         );
         let compiled_tools = Arc::new(compiled_tools?);
+        #[cfg(test)]
+        if let Some(observer) = &self.activation_preview_observer {
+            observer(
+                crate::resident_workbench::ActivationPublicationObservation::prepared_tools(
+                    &compiled_tools,
+                ),
+            )?;
+        }
         let declarations = compiled_tools.declarations.clone();
         let prepared_tools =
             crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools));

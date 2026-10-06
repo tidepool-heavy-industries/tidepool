@@ -1417,6 +1417,36 @@ where
     }
 }
 
+#[cfg(test)]
+pub(crate) enum ActivationPublicationObservation<'a> {
+    InputMounted(&'a tidepool_runtime::session::MountedActivationInput),
+    ToolsPrepared {
+        tools: std::sync::Weak<ResidentWorkbenchTools>,
+        dispatch: std::sync::Weak<RootCustody>,
+        lexical: std::sync::Weak<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        scope: ScopeId,
+    },
+}
+
+#[cfg(test)]
+impl ActivationPublicationObservation<'_> {
+    pub(crate) fn prepared_tools(tools: &Arc<ResidentWorkbenchTools>) -> Self {
+        Self::ToolsPrepared {
+            tools: Arc::downgrade(tools),
+            dispatch: Arc::downgrade(&tools.dispatch),
+            lexical: Arc::downgrade(&tools._installation_scope),
+            scope: tools._installation_scope.scope(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) type ActivationPublicationObserver = Arc<
+    dyn for<'a> Fn(ActivationPublicationObservation<'a>) -> Result<(), ResidentActorWorkbenchError>
+        + Send
+        + Sync,
+>;
+
 /// Concrete resident workbench for one typed agent-session obligation.
 pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
@@ -1425,15 +1455,7 @@ pub struct ResidentActorWorkbench<H, O> {
     compilation_authority: Option<Arc<crate::resident_actor::WorkbenchCompilationAuthority>>,
     private_execution: Option<Arc<ExecutionPrivateScope>>,
     #[cfg(test)]
-    pub(crate) activation_preview_observer: Option<
-        Arc<
-            dyn Fn(
-                    &tidepool_runtime::session::MountedActivationInput,
-                ) -> Result<(), ResidentActorWorkbenchError>
-                + Send
-                + Sync,
-        >,
-    >,
+    pub(crate) activation_preview_observer: Option<ActivationPublicationObserver>,
 }
 
 enum OwnedHostPayload {
@@ -4497,7 +4519,8 @@ where
                 };
                 #[cfg(test)]
                 if let Some(observer) = preview_observer {
-                    observer(&mounted).map_err(committed)?;
+                    observer(ActivationPublicationObservation::InputMounted(&mounted))
+                        .map_err(committed)?;
                 }
                 let view = actor_compile_view(session, context, &source).map_err(committed)?;
                 let prepared = source.prepare(&view);

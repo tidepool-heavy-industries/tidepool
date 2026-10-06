@@ -47,6 +47,7 @@ async fn interrupt_during_preview(
         drop(unused_input);
     }
     let roots = resident.persistent_roots_count();
+    let handles = resident.value_handle_count();
     context.actor = fixture.actor.identity();
     let machines = Arc::new(ActorMachineRegistry::new());
     machines.insert_idle(context.placement.session, Box::new(resident));
@@ -96,6 +97,51 @@ async fn interrupt_during_preview(
             displays: Default::default(),
         },
     );
+    let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let staged_tools = Arc::new(Mutex::new(None));
+    let observed_tools = Arc::clone(&staged_tools);
+    behavior.activation_preview_observer = Some(Arc::new(move |observation| {
+        use crate::resident_workbench::ActivationPublicationObservation;
+        let mounted = match observation {
+            ActivationPublicationObservation::InputMounted(mounted) => mounted,
+            ActivationPublicationObservation::ToolsPrepared {
+                tools,
+                dispatch,
+                lexical,
+                scope,
+            } => {
+                assert!(observed_tools
+                    .lock()
+                    .replace((tools, dispatch, lexical, scope))
+                    .is_none());
+                return Ok(());
+            }
+        };
+        let certificate = mounted.interface().value_interface_certificate();
+        entered
+            .send((
+                mounted.binding(),
+                certificate.owner(),
+                Arc::downgrade(&certificate),
+                Arc::downgrade(mounted.interface()),
+            ))
+            .unwrap();
+        release_rx
+            .lock()
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("test must release original preview");
+        if matches!(interruption, Interruption::FatalPreview) {
+            return Err(ResidentActorWorkbenchError::InputCompilation {
+                stage: crate::resident_workbench::ActivationCompileStage::Preview,
+                error: tidepool_runtime::CompileError::ExtractFailed(
+                    "injected fatal preview boundary".into(),
+                ),
+            });
+        }
+        Ok(())
+    }));
     let genuine_installation = if matches!(interruption, Interruption::FatalPreview) {
         Some(
             behavior
@@ -142,33 +188,6 @@ async fn interrupt_during_preview(
                 },
             })
         });
-    let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (release, release_rx) = std::sync::mpsc::channel();
-    let release_rx = Mutex::new(release_rx);
-    behavior.activation_preview_observer = Some(Arc::new(move |mounted| {
-        let certificate = mounted.interface().value_interface_certificate();
-        entered
-            .send((
-                mounted.binding(),
-                certificate.owner(),
-                Arc::downgrade(&certificate),
-                Arc::downgrade(mounted.interface()),
-            ))
-            .unwrap();
-        release_rx
-            .lock()
-            .recv_timeout(std::time::Duration::from_secs(60))
-            .expect("test must release original preview");
-        if matches!(interruption, Interruption::FatalPreview) {
-            return Err(ResidentActorWorkbenchError::InputCompilation {
-                stage: crate::resident_workbench::ActivationCompileStage::Preview,
-                error: tidepool_runtime::CompileError::ExtractFailed(
-                    "injected fatal preview boundary".into(),
-                ),
-            });
-        }
-        Ok(())
-    }));
     let cancellation = async {
         let mounted = entered_rx.recv().await.expect("original input mounted");
         match interruption {
@@ -293,13 +312,43 @@ async fn interrupt_during_preview(
         "cancelled input releases its checked interface"
     );
     assert!(interface.upgrade().is_none());
-    assert_eq!(resident.persistent_roots_count(), roots);
+    // Installed program root blocks persist until collection. The actual
+    // install's affine dispatcher and lexical scope must expire at refusal.
+    if genuine_preparation {
+        let (tools, dispatch, lexical, scope) = staged_tools
+            .lock()
+            .take()
+            .expect("genuine preparation exposes its exact installation custody");
+        assert!(tools.upgrade().is_none(), "refusal drops the staged tools");
+        assert!(
+            dispatch.upgrade().is_none(),
+            "refusal drops the rooted dispatcher"
+        );
+        assert!(
+            lexical.upgrade().is_none(),
+            "refusal drops the exact lexical lease"
+        );
+        assert!(
+            resident.compile_view_in(scope).is_none(),
+            "dropped installer scope is retired"
+        );
+    } else {
+        assert!(staged_tools.lock().is_none());
+        assert_eq!(resident.persistent_roots_count(), roots);
+    }
+    assert_eq!(
+        resident.value_handle_count(),
+        handles - 1,
+        "refusal releases the adopted input handle and every temporary installer handle"
+    );
+    let cleanup_roots = resident.persistent_roots_count();
     resident.retire_binding_owner(binding);
     assert_eq!(
         resident.persistent_roots_count(),
-        roots,
+        cleanup_roots,
         "exact cleanup is idempotent"
     );
+    assert_eq!(resident.value_handle_count(), handles - 1);
     resident.close_realm(context.placement.resource_scope);
     assert_eq!(resident.parked_count(), 0);
     assert_eq!(resident.outstanding_custody(), 0);
