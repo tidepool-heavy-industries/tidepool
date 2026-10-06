@@ -15395,6 +15395,124 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     }
 
     #[tokio::test]
+    async fn source_preparation_retains_actual_close_after_waiter_cancel_and_actor_retirement() {
+        let (_, _, source, _session_root) = host_mount_fixture();
+        let retained = crate::RetainedActorExit::new();
+        let owner = CompilerCloseOwner::Initialization(retained.clone());
+        let source_layer = crate::CheckpointSourceLayer::default();
+        let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, proceed) = std::sync::mpsc::channel();
+        let proceed = parking_lot::Mutex::new(proceed);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        source.toolset_preparation.observe_fresh_launch(Arc::new({
+            let entered = Arc::clone(&entered);
+            let calls = Arc::clone(&calls);
+            move || {
+                assert_eq!(calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
+                entered.notify_one();
+                proceed
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                    .unwrap();
+            }
+        }));
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let first = tokio::spawn({
+            let source = source.clone();
+            let source_layer = source_layer.clone();
+            let registry = Arc::clone(&registry);
+            async move {
+                owner
+                    .scope(source.prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Preparation,
+                        source_layer,
+                        &[],
+                        &[],
+                        registry,
+                    ))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), entered.notified())
+            .await
+            .unwrap();
+        assert!(matches!(
+            retained.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        let remaining = tokio::spawn({
+            let source = source.clone();
+            let source_layer = source_layer.clone();
+            let registry = Arc::clone(&registry);
+            async move {
+                // This waiter has no task-local owner; it borrows the admitted
+                // source task instead of registering a replacement compiler.
+                assert!(CompilerCloseOwner::current().is_err());
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Preparation,
+                        source_layer,
+                        &[],
+                        &[],
+                        registry,
+                    )
+                    .await
+            }
+        });
+        first.abort();
+        match first.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("the first source waiter must be cancelled"),
+        }
+        retained.retain_cleanup(crate::ResidentCleanupOutcome {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            hook: crate::CleanupComponentOutcome::Confirmed,
+            realm: crate::CleanupComponentOutcome::Confirmed,
+            children: crate::CleanupComponentOutcome::Confirmed,
+        });
+        retained
+            .publish(crate::ActorTerminal {
+                kind: crate::ActorExitKind::Cancelled,
+                summary: "retired while shared source preparation remains owned".into(),
+                diagnostic: None,
+            })
+            .unwrap();
+        assert!(!retained.cleanup().unwrap().is_confirmed());
+        release.send(()).unwrap();
+        let prepared = remaining.await.unwrap().unwrap();
+        assert!(
+            tidepool_extract_cmd::extract_spawn_count() > before,
+            "the retained source task must execute the actual compiler"
+        );
+        assert!(matches!(
+            retained.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            )]
+        ));
+        assert!(retained.cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            retained.get().unwrap().kind,
+            crate::ActorExitKind::Cancelled
+        );
+        let after = tidepool_extract_cmd::extract_spawn_count();
+        let cached = source
+            .prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Preparation,
+                source_layer,
+                &[],
+                &[],
+                registry,
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&prepared.prepared, &cached.prepared));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), after);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn retained_quoted_toolset_loads_selected_original_without_compiler_replay() {
         struct Snapshot {
             _owner: Arc<tempfile::TempDir>,

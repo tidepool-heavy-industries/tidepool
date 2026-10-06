@@ -114,6 +114,8 @@ impl PreparationTask {
 #[derive(Default)]
 pub(crate) struct ToolsetPreparation {
     state: Mutex<PreparationState>,
+    #[cfg(test)]
+    fresh_launch_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -131,6 +133,14 @@ enum OriginalAcquisition {
 }
 
 impl ToolsetPreparation {
+    /// Delay only a winning real compile; the hook grants no compiler authority.
+    #[cfg(test)]
+    pub(crate) fn observe_fresh_launch(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        let mut slot = self.fresh_launch_observer.lock();
+        assert!(slot.is_none(), "fresh launch observer already installed");
+        *slot = Some(observer);
+    }
+
     fn lookup(&self, recipe: &InstallerRecipe) -> (Arc<PreparationTask>, bool) {
         let mut state = self.state.lock();
         match state.tasks.get(recipe).cloned() {
@@ -194,6 +204,12 @@ impl ToolsetPreparation {
             } else {
                 OriginalAcquisition::CompileIfAbsent
             };
+            #[cfg(test)]
+            let fresh_launch_observer = if compiler_work.is_some() {
+                self.fresh_launch_observer.lock().take()
+            } else {
+                None
+            };
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
             let key = recipe.clone();
@@ -203,6 +219,10 @@ impl ToolsetPreparation {
                 let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
                     if let Some((ticket, cancellation)) = compiler_work {
                         ticket.run_for_workload(workload, cancellation, || {
+                            #[cfg(test)]
+                            if let Some(observer) = fresh_launch_observer {
+                                observer();
+                            }
                             compile_installer(recipe, resolved, source, registry, acquisition)
                         })
                     } else {
