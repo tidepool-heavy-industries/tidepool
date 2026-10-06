@@ -2,7 +2,7 @@ module Tidepool.Resolve
   ( ExactBodyLookup(..), recoverExactBody
   ) where
 
-import GHC.Core (CoreBind, Bind(..))
+import GHC.Core (CoreBind, CoreExpr, Bind(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (Type)
 import GHC.Core.Utils (exprType)
