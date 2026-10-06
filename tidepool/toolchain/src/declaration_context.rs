@@ -2019,7 +2019,7 @@ impl ExactCompilationRequest {
                 EXACT_SCOPE_BYTES_LIMIT as u64,
                 &validation.inventory,
             )
-            .map_err(failure)?,
+            .map_err(compiler_evidence_failure)?,
         ) != self.request_sha256
         {
             return Err(failure("scope request changed during compilation"));
@@ -2044,12 +2044,12 @@ impl ExactCompilationRequest {
                 validation
                     .inventory
                     .reserve::<PathBuf>(1)
-                    .map_err(failure)?;
+                    .map_err(|error| compiler_evidence_failure(error.into()))?;
                 let path = entry?.path();
                 validation
                     .inventory
                     .charge(path.as_os_str().len())
-                    .map_err(failure)?;
+                    .map_err(|error| compiler_evidence_failure(error.into()))?;
                 Ok::<_, CompileError>(path)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -2392,10 +2392,19 @@ fn decode_exact_compilation_receipt_with_operation(
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<DecodedExactCompilationReceipt, CompileError> {
     use sha2::Digest;
-    let bytes = crate::certified_products::read_bounded_with_operation(path, 4 << 20, operation)
-        .map_err(failure)?;
-    let value = operation.decode_value(&bytes, 4 << 20).map_err(failure)?;
-    operation.charge_value_copies(&value, 3).map_err(failure)?;
+    // A receipt retains complete fresh and source-selected dependency
+    // inventories, rather than the exact scope's bounded owner descriptors.
+    let limit =
+        crate::certified_products::COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
+    let bytes =
+        crate::certified_products::read_bounded_with_operation(path, limit as u64, operation)
+            .map_err(compiler_evidence_failure)?;
+    let value = operation
+        .decode_value(&bytes, limit)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    operation
+        .charge_value_copies(&value, 3)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
     let header = row(&value, 10)?;
     if string(&header[0])? != "TPEXACTCOMPILE" || string(&header[1])? != "3" {
         return Err(failure(
@@ -2426,8 +2435,10 @@ fn decode_exact_compilation_receipt_with_operation(
     }
     let source_bytes =
         crate::certified_products::read_bounded_with_operation(&snapshot, 32 << 20, operation)
-            .map_err(failure)?;
-    operation.charge(source_bytes.len()).map_err(failure)?;
+            .map_err(compiler_evidence_failure)?;
+    operation
+        .charge(source_bytes.len())
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
     let source_sha256: [u8; 32] = sha2::Sha256::digest(&source_bytes).into();
     if string(&header[5])? != hex(&source_sha256) {
         return Err(failure("compile source snapshot changed"));
@@ -2443,7 +2454,7 @@ fn decode_exact_compilation_receipt_with_operation(
                 .checked_mul(32)
                 .ok_or_else(|| failure("source evidence accounting overflow"))?,
         )
-        .map_err(failure)?;
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
     let evidence: crate::cache::DependencyEvidence =
         serde_json::from_slice(&evidence_bytes).map_err(failure)?;
     if evidence.version != 4 {
@@ -2505,7 +2516,7 @@ fn decode_exact_compilation_receipt_with_operation(
                     .checked_mul(32)
                     .ok_or_else(|| failure("selection evidence accounting overflow"))?,
             )
-            .map_err(failure)?;
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
         Some(serde_json::from_str(json).map_err(failure)?)
     };
     Ok(DecodedExactCompilationReceipt {
@@ -2675,6 +2686,10 @@ fn scope_interface_evidence(
 
 fn failure(message: impl std::fmt::Display) -> CompileError {
     CompileError::ExtractFailed(format!("exact declaration context: {message}"))
+}
+
+fn compiler_evidence_failure(error: crate::certified_products::CertificationError) -> CompileError {
+    CompileError::CompilerEvidence(Box::new(error))
 }
 
 fn identity(unit: &str, module: &str) -> ExactModuleIdentity {
@@ -6006,6 +6021,133 @@ mod tests {
     }
 
     #[test]
+    fn exact_receipt_admits_complete_inventories_above_scope_descriptor_bound() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (request, context, receipt) = source_selected_receipt(directory.path(), false, None);
+        let mut include = (0..512)
+            .map(|index| {
+                let mut root = directory.path().join(format!("absent-{index}"));
+                for _ in 0..8 {
+                    root.push("p".repeat(128));
+                }
+                root
+            })
+            .collect::<Vec<_>>();
+        include.push(directory.path().to_path_buf());
+        let request = request.with_source_search_context(&include);
+        let candidates = |module: &str| {
+            include
+                .iter()
+                .flat_map(|root| {
+                    ["hs", "lhs", "hsig", "lhsig"]
+                        .map(|extension| root.join(format!("{module}.{extension}")))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut value = read_receipt(&receipt);
+        let fields = value.as_array_mut().unwrap();
+        let mut fresh: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        let source = "module Consumer where\nimport A\nimport Data.List\n";
+        let source_path = PathBuf::from(fields[4].as_text().unwrap());
+        std::fs::write(&source_path, source).unwrap();
+        std::fs::write(receipt.parent().unwrap().join("source.hs"), source).unwrap();
+        fields[5] = text(sha256(source.as_bytes()));
+        fresh.sources[0].sha256 = sha256(source.as_bytes());
+        fresh.modules[0]
+            .imports
+            .push(crate::cache::ModuleImportEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: "Data.List".into(),
+                boot: false,
+                selected: None,
+            });
+        fresh.packages.push("Data.List".into());
+        fresh.resolutions.push(crate::cache::ResolutionEvidence {
+            qualifier: crate::cache::ImportQualifier::Unqualified,
+            module: "Data.List".into(),
+            boot: false,
+            selected: None,
+            candidates: candidates("Data/List"),
+        });
+        fields[7] = text(serde_json::to_string(&fresh).unwrap());
+        let selection = fields[9].as_array_mut().unwrap();
+        let mut selected: crate::cache::DependencyEvidence =
+            serde_json::from_str(selection[1].as_text().unwrap()).unwrap();
+        let mut selected_candidates = candidates("A");
+        selected_candidates.truncate(selected_candidates.len() - 3);
+        selected.resolutions[0].candidates = selected_candidates;
+        selection[1] = text(serde_json::to_string(&selected).unwrap());
+        write_receipt(&receipt, &value);
+        let bytes = std::fs::read(&receipt).unwrap();
+        assert!(bytes.len() > EXACT_SCOPE_BYTES_LIMIT);
+        assert!(bytes.len() < crate::certified_products::COMPILER_RECEIPT_BYTES_LIMIT);
+        let admission = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert_eq!(admission.selected_originals.len(), 1);
+        assert_eq!(admission.evidence.resolutions[0].candidates.len(), 2052);
+
+        let restricted = InventoryOperation::new(InventoryDecodeLimits {
+            max_bytes: bytes.len() - 1,
+            ..Default::default()
+        });
+        assert!(matches!(
+            decode_exact_compilation_receipt_with_operation(&receipt, None, &restricted),
+            Err(CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), crate::certified_products::CertificationError::EvidenceRead {
+                    path,
+                    failure: crate::certified_products::EvidenceReadFailure::SizeLimit { actual, limit },
+                } if path == &receipt && *actual == bytes.len() as u64 && *limit == bytes.len() as u64 - 1)
+        ));
+        let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 128 << 20,
+            ..Default::default()
+        });
+        assert!(matches!(
+            decode_exact_compilation_receipt_with_operation(&receipt, None, &exhausted),
+            Err(CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), crate::certified_products::CertificationError::Product(
+                    tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+                ))
+        ));
+        let mut wrong_request = request.clone();
+        wrong_request.request_sha256 = hex(&[99; 32]);
+        assert!(wrong_request
+            .validate_receipt(&receipt, None, &context)
+            .is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        std::fs::write(&receipt, trailing).unwrap();
+        assert!(read_exact_compilation_receipt(&receipt).is_err());
+        std::fs::write(&receipt, &bytes).unwrap();
+        std::fs::write(receipt.parent().unwrap().join("source.hs"), b"changed").unwrap();
+        assert!(read_exact_compilation_receipt(&receipt).is_err());
+        std::fs::write(receipt.parent().unwrap().join("source.hs"), source).unwrap();
+        std::fs::write(directory.path().join("A.hs"), b"changed original").unwrap();
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+    }
+
+    #[test]
+    fn exact_receipt_refuses_records_above_compiler_receipt_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let receipt = directory.path().join("receipt.cbor");
+        let limit = crate::certified_products::COMPILER_RECEIPT_BYTES_LIMIT;
+        std::fs::File::create(&receipt)
+            .unwrap()
+            .set_len(limit as u64 + 1)
+            .unwrap();
+        assert!(matches!(
+            read_exact_compilation_receipt(&receipt),
+            Err(CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), crate::certified_products::CertificationError::EvidenceRead {
+                    path,
+                    failure: crate::certified_products::EvidenceReadFailure::SizeLimit { actual, limit: bound },
+                } if path == &receipt && *actual == limit as u64 + 1 && *bound == limit as u64)
+        ));
+    }
+
+    #[test]
     fn completed_receipt_preserves_replay_refusal_and_exact_import_authority() {
         let directory = tempfile::tempdir().unwrap();
         let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
@@ -6064,7 +6206,10 @@ mod tests {
         trailing.push(0);
         std::fs::write(&receipt, trailing).unwrap();
         assert!(matches!(read_exact_compilation_receipt(&receipt),
-            Err(CompileError::ExtractFailed(detail)) if detail.contains("trailing bytes")));
+        Err(CompileError::CompilerEvidence(error))
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::TrailingBytes
+            ))));
         std::fs::write(&receipt, expected).unwrap();
         assert!(read_exact_compilation_receipt(&receipt).is_ok());
     }

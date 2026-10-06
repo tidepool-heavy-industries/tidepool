@@ -82,6 +82,10 @@ pub enum CompileError {
     /// variant therefore denotes an extractor/runtime contract mismatch.
     #[error("extractor contract failure: {0}")]
     ExtractFailed(String),
+    /// Retained compiler evidence could not be read or decoded. Keep its
+    /// resource and filesystem causes distinct from a compiler contract skew.
+    #[error("compiler evidence rejected: {0}")]
+    CompilerEvidence(#[source] Box<crate::certified_products::CertificationError>),
     #[error("artifact inventory: {0}")]
     ArtifactInventory(#[from] crate::artifact_inventory::ArtifactInventoryError),
     #[error("compiler input proof: {0}")]

@@ -28,7 +28,10 @@ use crate::cache::{CompletedSourceEvidence, DependencyEvidence, ProductAvailabil
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 
-const RECEIPT_LIMIT: usize = 32 << 20;
+/// Durable compiler records have an independent bound from scope descriptors
+/// and canonical per-module certificates. Their reads and decoding still share
+/// the inventory operation's cumulative accounting.
+pub(crate) const COMPILER_RECEIPT_BYTES_LIMIT: usize = 32 << 20;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
 const SOURCE_LIMIT: u64 = 32 << 20;
@@ -404,6 +407,32 @@ pub enum CertificationFormat {
     CanonicalModuleCertificate,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceReadOperation {
+    Metadata,
+    Open,
+    Read,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EvidenceReadFailure {
+    #[error("path is not absolute")]
+    NonAbsolutePath,
+    #[error("path is not a regular file")]
+    NotFile,
+    #[error("size {actual} exceeds {limit} bytes")]
+    SizeLimit { actual: u64, limit: u64 },
+    #[error("{operation:?} failed: {error}")]
+    Io {
+        operation: EvidenceReadOperation,
+        #[source]
+        error: std::io::Error,
+    },
+    #[error("length changed during read: expected {expected}, read {actual} bytes")]
+    LengthChanged { expected: u64, actual: u64 },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
     #[error("unsupported {format:?} version {found}; expected {expected}")]
@@ -442,6 +471,12 @@ pub enum CertificationError {
     },
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
+    #[error("compiler evidence read {}: {failure}", path.display())]
+    EvidenceRead {
+        path: PathBuf,
+        #[source]
+        failure: EvidenceReadFailure,
+    },
     #[error("original candidate evidence for {unit}:{module} failed: {failure:?}")]
     CandidateEvidence {
         unit: String,
@@ -1247,21 +1282,49 @@ pub(crate) fn read_bounded_with_operation(
     operation: &InventoryOperation,
 ) -> CertResult<Vec<u8>> {
     use std::io::Read;
+    let failure = |failure| CertificationError::EvidenceRead {
+        path: path.to_path_buf(),
+        failure,
+    };
     if !path.is_absolute() {
-        return Err(CertificationError::StaleEvidence);
+        return Err(failure(EvidenceReadFailure::NonAbsolutePath));
     }
-    let metadata = std::fs::metadata(path).map_err(|_| CertificationError::StaleEvidence)?;
-    if !metadata.is_file() || metadata.len() > limit {
-        return Err(CertificationError::StaleEvidence);
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        failure(EvidenceReadFailure::Io {
+            operation: EvidenceReadOperation::Metadata,
+            error,
+        })
+    })?;
+    if !metadata.is_file() {
+        return Err(failure(EvidenceReadFailure::NotFile));
+    }
+    if metadata.len() > limit {
+        return Err(failure(EvidenceReadFailure::SizeLimit {
+            actual: metadata.len(),
+            limit,
+        }));
     }
     operation.charge(metadata.len() as usize + 1)?;
-    let file = std::fs::File::open(path).map_err(|_| CertificationError::StaleEvidence)?;
+    let file = std::fs::File::open(path).map_err(|error| {
+        failure(EvidenceReadFailure::Io {
+            operation: EvidenceReadOperation::Open,
+            error,
+        })
+    })?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
     file.take(metadata.len() + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| CertificationError::StaleEvidence)?;
+        .map_err(|error| {
+            failure(EvidenceReadFailure::Io {
+                operation: EvidenceReadOperation::Read,
+                error,
+            })
+        })?;
     if bytes.len() as u64 != metadata.len() {
-        return Err(CertificationError::StaleEvidence);
+        return Err(failure(EvidenceReadFailure::LengthChanged {
+            expected: metadata.len(),
+            actual: bytes.len() as u64,
+        }));
     }
     Ok(bytes)
 }
@@ -1981,7 +2044,7 @@ fn encode_home_witness_with_operation(
     encode_value_with_operation(
         &value,
         CertificationFormat::HomeOwners,
-        RECEIPT_LIMIT.min(operation.limits().max_module_bytes),
+        COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_module_bytes),
         operation,
     )
 }
@@ -1995,7 +2058,7 @@ fn decode_home_witness_with_operation(
 ) -> CertResult<HomeCertification> {
     #[cfg(test)]
     HOME_CERTIFICATION_DECODES.with(|count| count.set(count.get() + 1));
-    let limit = RECEIPT_LIMIT.min(operation.limits().max_module_bytes);
+    let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_module_bytes);
     if bytes.len() > limit {
         return Err(CertificationError::SizeLimit {
             format: CertificationFormat::HomeOwners,
@@ -5397,6 +5460,64 @@ pub(crate) mod tests {
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use tidepool_repr::execution_schema::testing;
     use tidepool_repr::execution_schema::{DecodeLimits, InventoryDecodeLimits};
+
+    #[test]
+    fn bounded_evidence_read_preserves_path_reason_and_operation_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt.cbor");
+        let operation = InventoryOperation::new(Default::default());
+        assert!(matches!(
+            read_bounded_with_operation(Path::new("relative"), 4, &operation),
+            Err(CertificationError::EvidenceRead {
+                failure: EvidenceReadFailure::NonAbsolutePath,
+                ..
+            })
+        ));
+        assert!(matches!(
+            read_bounded_with_operation(&path, 4, &operation),
+            Err(CertificationError::EvidenceRead {
+                path: failed,
+                failure: EvidenceReadFailure::Io {
+                    operation: EvidenceReadOperation::Metadata,
+                    error,
+                },
+            }) if failed == path && error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(matches!(
+            read_bounded_with_operation(directory.path(), 4, &operation),
+            Err(CertificationError::EvidenceRead {
+                failure: EvidenceReadFailure::NotFile,
+                ..
+            })
+        ));
+        std::fs::write(&path, b"proof").unwrap();
+        let error = read_bounded_with_operation(&path, 4, &operation).unwrap_err();
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        assert!(matches!(
+            error,
+            CertificationError::EvidenceRead {
+                failure: EvidenceReadFailure::SizeLimit {
+                    actual: 5,
+                    limit: 4
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            read_bounded_with_operation(&path, 5, &operation).unwrap(),
+            b"proof"
+        );
+        let restricted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 5,
+            ..Default::default()
+        });
+        assert!(matches!(
+            read_bounded_with_operation(&path, 5, &restricted),
+            Err(CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+            ))
+        ));
+    }
 
     fn recovery_native_fixture(
         root: &Path,
@@ -9433,10 +9554,13 @@ pub(crate) mod tests {
                 .expect("explicit retained production receipt path"),
         );
         let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.len() > RECEIPT_LIMIT, "actual bounded size refusal");
+        assert!(
+            bytes.len() > COMPILER_RECEIPT_BYTES_LIMIT,
+            "actual bounded size refusal"
+        );
         assert!(
             matches!(decode_receipt(&bytes), Err(CertificationError::SizeLimit {
-            format: CertificationFormat::ProductReceipt, actual, limit: RECEIPT_LIMIT,
+            format: CertificationFormat::ProductReceipt, actual, limit: COMPILER_RECEIPT_BYTES_LIMIT,
         }) if actual == bytes.len())
         );
         let full: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
@@ -9490,7 +9614,7 @@ pub(crate) mod tests {
             let raw = array(raw).unwrap();
             assert_eq!(admitted.targets[string(&raw[0]).unwrap()], expand(&raw[1]));
         }
-        assert!(encoded.len() <= RECEIPT_LIMIT);
+        assert!(encoded.len() <= COMPILER_RECEIPT_BYTES_LIMIT);
         eprintln!(
             "retained-product-receipt original_bytes={} compact_bytes={} globals={} coordinates={}",
             bytes.len(),

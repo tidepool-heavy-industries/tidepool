@@ -129,6 +129,9 @@ pub enum CompileFailureCause {
     TypedSites,
     UnsupportedIo,
     ConstructorIdentity,
+    CompilerEvidence {
+        failure: CompilerEvidenceFailure,
+    },
     ArtifactInventory {
         failure: crate::artifact_inventory::ArtifactInventoryFailure,
     },
@@ -138,6 +141,112 @@ pub enum CompileFailureCause {
     ModulePackage {
         failure: ModulePackageFailure,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompilerEvidenceFailure {
+    Read {
+        path: std::path::PathBuf,
+        failure: EvidenceReadCause,
+    },
+    ByteLimit {
+        owner: EvidenceByteLimitOwner,
+        actual: usize,
+        limit: usize,
+    },
+    Budget {
+        resource: String,
+    },
+    Contract,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceByteLimitOwner {
+    Inventory,
+    Module,
+    Decode,
+    Certificate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvidenceReadCause {
+    NonAbsolutePath,
+    NotFile,
+    SizeLimit {
+        actual: u64,
+        limit: u64,
+    },
+    Io {
+        operation: crate::certified_products::EvidenceReadOperation,
+    },
+    LengthChanged {
+        expected: u64,
+        actual: u64,
+    },
+}
+
+impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFailure {
+    fn from(error: &crate::certified_products::CertificationError) -> Self {
+        use crate::certified_products::{CertificationError, EvidenceReadFailure};
+        use tidepool_repr::execution_schema::ParseError;
+        match error {
+            CertificationError::EvidenceRead { path, failure } => Self::Read {
+                path: path.clone(),
+                failure: match failure {
+                    EvidenceReadFailure::NonAbsolutePath => EvidenceReadCause::NonAbsolutePath,
+                    EvidenceReadFailure::NotFile => EvidenceReadCause::NotFile,
+                    EvidenceReadFailure::SizeLimit { actual, limit } => {
+                        EvidenceReadCause::SizeLimit {
+                            actual: *actual,
+                            limit: *limit,
+                        }
+                    }
+                    EvidenceReadFailure::Io { operation, .. } => EvidenceReadCause::Io {
+                        operation: *operation,
+                    },
+                    EvidenceReadFailure::LengthChanged { expected, actual } => {
+                        EvidenceReadCause::LengthChanged {
+                            expected: *expected,
+                            actual: *actual,
+                        }
+                    }
+                },
+            },
+            CertificationError::SizeLimit { actual, limit, .. } => Self::ByteLimit {
+                owner: EvidenceByteLimitOwner::Certificate,
+                actual: *actual,
+                limit: *limit,
+            },
+            CertificationError::Product(ParseError::InventoryByteLimit { actual, limit }) => {
+                Self::ByteLimit {
+                    owner: EvidenceByteLimitOwner::Inventory,
+                    actual: *actual,
+                    limit: *limit,
+                }
+            }
+            CertificationError::Product(ParseError::ModuleByteLimit { actual, limit }) => {
+                Self::ByteLimit {
+                    owner: EvidenceByteLimitOwner::Module,
+                    actual: *actual,
+                    limit: *limit,
+                }
+            }
+            CertificationError::Product(ParseError::ByteLimit { actual, limit }) => {
+                Self::ByteLimit {
+                    owner: EvidenceByteLimitOwner::Decode,
+                    actual: *actual,
+                    limit: *limit,
+                }
+            }
+            CertificationError::Product(ParseError::LimitExceeded(resource)) => Self::Budget {
+                resource: (*resource).to_owned(),
+            },
+            _ => Self::Contract,
+        }
+    }
 }
 
 /// Structured projection of the package owner's refusal. I/O details remain
@@ -241,6 +350,18 @@ impl FailureEnvelope {
 #[must_use]
 pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
     let mut envelope = match err {
+        CompileError::CompilerEvidence(error) => {
+            let failure = CompilerEvidenceFailure::from(error.as_ref());
+            let class = match failure {
+                CompilerEvidenceFailure::Read {
+                    failure: EvidenceReadCause::NonAbsolutePath,
+                    ..
+                }
+                | CompilerEvidenceFailure::Contract => FailureClass::VersionSkew,
+                _ => FailureClass::Infra,
+            };
+            FailureEnvelope::new(class, Phase::Compile, err.to_string())
+        }
         // Real GHC rejections carry `Diagnostics`. This arm is reserved for a
         // malformed extractor artifact or impossible internal request shape.
         CompileError::ExtractFailed(_)
@@ -330,6 +451,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => CompileFailureCause::Io,
         CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
+        CompileError::CompilerEvidence(error) => CompileFailureCause::CompilerEvidence {
+            failure: error.as_ref().into(),
+        },
         CompileError::ArtifactInventory(error) => CompileFailureCause::ArtifactInventory {
             failure: error.failure.clone(),
         },
@@ -376,6 +500,79 @@ fn version_skew_message(re: &ReadError) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn compiler_evidence_read_and_resource_causes_keep_infra_classification() {
+        use crate::certified_products::{
+            CertificationError, EvidenceReadFailure, EvidenceReadOperation,
+        };
+        use tidepool_repr::execution_schema::ParseError;
+        let path = PathBuf::from("/retained/receipt.cbor");
+        for failure in [
+            EvidenceReadFailure::SizeLimit {
+                actual: 4208296,
+                limit: 4194304,
+            },
+            EvidenceReadFailure::NotFile,
+            EvidenceReadFailure::LengthChanged {
+                expected: 5,
+                actual: 6,
+            },
+            EvidenceReadFailure::Io {
+                operation: EvidenceReadOperation::Metadata,
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+        ] {
+            let error =
+                CompileError::CompilerEvidence(Box::new(CertificationError::EvidenceRead {
+                    path: path.clone(),
+                    failure,
+                }));
+            let envelope = classify_compile(&error);
+            assert_eq!(
+                (envelope.class, envelope.phase),
+                (FailureClass::Infra, Phase::Compile)
+            );
+            assert!(envelope.message.contains(path.to_str().unwrap()));
+            let json = serde_json::to_value(envelope).unwrap();
+            assert_eq!(json["cause"]["kind"], "compiler_evidence");
+            assert_eq!(json["cause"]["failure"]["path"], path.to_str().unwrap());
+        }
+        for failure in [
+            ParseError::InventoryByteLimit {
+                limit: 4,
+                actual: 5,
+            },
+            ParseError::ModuleByteLimit {
+                limit: 4,
+                actual: 5,
+            },
+            ParseError::ByteLimit {
+                limit: 4,
+                actual: 5,
+            },
+            ParseError::LimitExceeded("work"),
+        ] {
+            let error =
+                CompileError::CompilerEvidence(Box::new(CertificationError::Product(failure)));
+            let envelope = classify_compile(&error);
+            assert_eq!(envelope.class, FailureClass::Infra);
+            let json = serde_json::to_value(envelope).unwrap();
+            assert_eq!(json["cause"]["kind"], "compiler_evidence");
+            assert_ne!(json["cause"]["failure"]["kind"], "contract");
+        }
+        for failure in [
+            CertificationError::Product(ParseError::TrailingBytes),
+            CertificationError::Receipt("receipt shape"),
+            CertificationError::EvidenceRead {
+                path,
+                failure: EvidenceReadFailure::NonAbsolutePath,
+            },
+        ] {
+            let error = CompileError::CompilerEvidence(Box::new(failure));
+            assert_eq!(classify_compile(&error).class, FailureClass::VersionSkew);
+        }
+    }
 
     #[test]
     fn input_and_package_proof_failures_keep_structured_owners() {
