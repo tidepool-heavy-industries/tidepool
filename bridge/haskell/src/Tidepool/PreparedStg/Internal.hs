@@ -12,7 +12,7 @@ import GHC.Types.Var (Id)
 import GHC.Types.Var.Set (IdSet)
 import GHC.Unit.Types (Module)
 import Tidepool.EffectSchema (YieldSite)
-import Tidepool.PreparedSites (PreparedSite, SiteRejection)
+import Tidepool.PreparedSites (PreparedSite, SiteRejection, PreparedSiteDependencies)
 import Tidepool.TypePolicy (TypeGraph)
 
 -- | A missing top in a complete source module is a producer defect. A package
@@ -37,9 +37,9 @@ data PreparedModule = PreparedModule
   , preparedSiteRejections :: [SiteRejection]
   , preparedRequestSiteTyCon :: Maybe TyCon
   , preparedAuthorityDependent :: Bool
+  , preparedSiteDependencies :: Maybe PreparedSiteDependencies
   , preparedIntrinsicNames :: Set Name
   -- | Exact package declaring Ids, separate from provisional STG shapes.
   -- Recovery uses the latter to discover dependencies before final emission.
   , preparedExpectedEntries :: Map Name Id
   }
-

@@ -8,6 +8,8 @@ module Tidepool.PreparedStg
   , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule, PreparedModuleTask, acquirePreparedModule, runPreparedModuleTask
+  , PreparedSiteEnvironment, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch
+  , acquirePreparedModuleWithSiteEnvironment, prepareModuleWithSiteEnvironment
   , RecoveredModuleInput(..)
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
@@ -69,8 +71,9 @@ import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites
   ( PreparedSite, SiteRejection, IntrinsicCensus
   , censusPreparedIntrinsics, intrinsicFree, intrinsicNames
-  , elaboratePreparedSites, resolvePreparedSiblings, resolvePreparedInterfaceSiblings
-  , resolveRecoveredSiblings, resolveSiteAuthority, requestSiteAuthority )
+  , resolvePreparedSiblings, PreparedSiteEnvironment, PreparedSiteDependencies
+  , resolvePreparedSiteEnvironment, elaboratePreparedSitesWithDependencies )
+import Tidepool.PreparedSites qualified as Sites
 import Tidepool.PreparedStg.Internal
 import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
 import Tidepool.ExactScope (ExactScope)
@@ -144,10 +147,23 @@ preparedExpectedEntry prepared identifier =
 preparedUsesSiteAuthority :: PreparedModule -> Bool
 preparedUsesSiteAuthority = preparedAuthorityDependent
 
+-- | All prepared-body caches use the same evidence check. No proof, or a
+-- failed authority lookup, cannot authorize a dependent prepared-product hit.
+preparedSiteDependenciesMatch :: PreparedSiteEnvironment -> Map String Id -> PreparedModule -> Bool
+preparedSiteDependenciesMatch environment siblings prepared =
+  not (preparedAuthorityDependent prepared)
+    || maybe False (Sites.preparedSiteDependenciesMatch environment siblings)
+         (preparedSiteDependencies prepared)
+
 -- | Complete fresh and admitted retained originals share this preparation owner.
 prepareModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModule -> IO PreparedModule
 prepareModule env location siblings finalized =
   acquirePreparedModule env location siblings finalized >>= runPreparedModuleTask
+
+prepareModuleWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv -> ModLocation
+  -> Map String Id -> FinalizedModule -> IO PreparedModule
+prepareModuleWithSiteEnvironment environment env location siblings finalized =
+  acquirePreparedModuleWithSiteEnvironment environment env location siblings finalized >>= runPreparedModuleTask
 
 -- | Acquired under the selected compiler context. The task retains typed
 -- lowering inputs; running it does not consult or replace the live Session.
@@ -162,6 +178,13 @@ acquirePreparedModule env location siblings finalized =
   let guts = finalizedTidyGuts finalized
   in acquireTypedBindings CompleteSourceModule env (cg_module guts) location
        (cg_tycons guts) siblings (cg_binds guts)
+
+acquirePreparedModuleWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv -> ModLocation
+  -> Map String Id -> FinalizedModule -> IO PreparedModuleTask
+acquirePreparedModuleWithSiteEnvironment environment env location siblings finalized =
+  let guts = finalizedTidyGuts finalized
+  in acquireTypedBindingsWithSiteEnvironment (Just environment) CompleteSourceModule env
+       (cg_module guts) location (cg_tycons guts) siblings (cg_binds guts)
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -233,24 +256,27 @@ restoreRecoveredEntries entries binding = case binding of
 acquireTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
   -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
 acquireTypedBindings coverage env owner location tycons imported bindings = do
+  acquireTypedBindingsWithSiteEnvironment Nothing coverage env owner location tycons imported bindings
+
+acquireTypedBindingsWithSiteEnvironment :: Maybe PreparedSiteEnvironment -> PreparedCoverage
+  -> HscEnv -> Module -> ModLocation -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModuleTask
+acquireTypedBindingsWithSiteEnvironment selected coverage env owner location tycons imported bindings = do
   timing <- readTimingEnabled
   let census = censusPreparedIntrinsics tycons bindings
       ownedSiblings = resolvePreparedSiblings bindings
-  (rewritten, sites, preparedSites, graph, rejections, carrier) <-
-    if intrinsicFree census then pure (bindings, [], [], emptyTypeGraph, [], Nothing)
+  (rewritten, sites, preparedSites, graph, rejections, carrier, dependencies) <-
+    if intrinsicFree census then pure (bindings, [], [], emptyTypeGraph, [], Nothing, Nothing)
     else do
-      recovered <- resolveRecoveredSiblings env bindings
-      let siblings = Map.unions
-            [ownedSiblings, imported, resolvePreparedInterfaceSiblings env, recovered]
-      authority <- timePhase timing "prepared_site_authority" (resolveSiteAuthority env)
-      (bodies, yields, issued, types, failures) <- timePhase timing "prepared_sites"
-        (elaboratePreparedSites env authority siblings bindings)
-      pure (bodies, yields, issued, types, failures, requestSiteAuthority authority)
+      environment <- maybe (timePhase timing "prepared_site_authority" (resolvePreparedSiteEnvironment env))
+        pure selected
+      (bodies, yields, issued, types, failures, evidence) <- timePhase timing "prepared_sites"
+        (elaboratePreparedSitesWithDependencies env environment ownedSiblings imported bindings)
+      pure (bodies, yields, issued, types, failures, Sites.preparedSiteRequestAuthority environment, Just evidence)
   let subset = case coverage of
         CompleteSourceModule -> []
         ExactBodySubset -> recoveredSubsetScope owner rewritten
   acquireBindingsWithScope timing subset env owner location tycons
-    rewritten coverage ownedSiblings sites preparedSites graph rejections carrier census
+    rewritten coverage ownedSiblings sites preparedSites graph rejections carrier dependencies census
 
 -- | An exact subset can reference other external tops in its defining module.
 -- Admit only those free Ids to GHC's preparation scope; they remain dependency
@@ -472,9 +498,9 @@ trySynchronous action = do
 
 acquireBindingsWithScope :: Bool -> [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
-  -> [SiteRejection] -> Maybe TyCon -> IntrinsicCensus -> IO PreparedModuleTask
+  -> [SiteRejection] -> Maybe TyCon -> Maybe PreparedSiteDependencies -> IntrinsicCensus -> IO PreparedModuleTask
 acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons optimizedCore coverage
-    siblings yieldSites sites graph rejections carrierTyCon census = do
+    siblings yieldSites sites graph rejections carrierTyCon dependencies census = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
         gopt_set
@@ -516,6 +542,7 @@ acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons op
           , preparedSiteRejections = rejections
           , preparedRequestSiteTyCon = carrierTyCon
           , preparedAuthorityDependent = not (intrinsicFree census)
+          , preparedSiteDependencies = dependencies
           , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
           , preparedExpectedEntries = Map.empty
           }

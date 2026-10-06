@@ -3,6 +3,10 @@ module Tidepool.PreparedSites
   , PreparedSite(..)
   , SiteAuthority
   , resolveSiteAuthority
+  , PreparedSiteEnvironment, resolvePreparedSiteEnvironment
+  , preparedSiteRequestAuthority
+  , PreparedSiteDependencies, preparedSiteDependenciesMatch
+  , elaboratePreparedSitesWithDependencies
   , resolveRequestSiteTyCon
   , SiteRejection(..)
   , elaboratePreparedSites
@@ -46,13 +50,13 @@ import GHC.Core.TyCon (TyCon, isNewTyCon, newTyConCo, tyConArity, tyConDataCons,
 import GHC.Core.DataCon
   ( DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe
   , dataConInstOrigArgTys, dataConUnivTyVars, isVanillaDataCon )
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit, lookupType)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit, hscEPS, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Literal (LitNumType (..), Literal (..))
 import GHC.Types.Name (Name, isSystemName, nameModule_maybe, nameOccName, nameUnique)
-import GHC.Types.Name.Occurrence (mkTcOcc, mkVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (OccName, mkTcOcc, mkVarOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Types.Var (varType)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
@@ -61,12 +65,15 @@ import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
-import GHC.Unit.Home (isHomeUnit)
-import GHC.Unit.Finder (FindResult(Found), findImportedModule)
-import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt, lookupHpt)
+import GHC.Unit.Home (isHomeUnit, mkHomeModule)
+import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.ModDetails (md_types)
-import GHC.Unit.Module.ModIface (mi_module)
+import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts, mi_decls)
+import GHC.Unit.External (ExternalPackageState(eps_PIT))
+import GHC.Unit.Module.Env (moduleEnvToList)
+import GHC.Iface.Syntax (IfaceDecl(..), ifaceDeclImplicitBndrs)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
@@ -171,97 +178,261 @@ data SiteAuthority = SiteAuthority
   , trustedProgressOwners :: Set.Set Word64
   }
 
+-- These keys describe the resolver's closed authority vocabulary. A Name in
+-- a dependency query is the original GHC identity, not a printed spelling.
+data ProgressAuthority
+  = ReportProgress | PollProgress | AwaitProgressAfter | AwaitAnyProgress | ProgressSource
+  deriving (Eq, Ord)
+
+data AuthorityDeclaration
+  = RequestCarrier | ResponseWrapper | ProgressWrapper | ReplyConstructors | WatchConstructors
+  | ProgressHelper ProgressAuthority | InstallSource | AttachSource
+  deriving (Eq, Ord)
+
+data DeclarationIdentity
+  = NominalIdentity TyCon
+  | ValueIdentity Id
+
+data DependencyFact
+  = MissingModule ModuleName
+  | MissingDeclaration Module Fingerprint Name
+  | KnownDeclaration Module Fingerprint DeclarationIdentity
+  | MembershipFact Bool [DependencyFact]
+  | SignatureOwnerFact Module
+  | NoSelectedSibling
+  | UnverifiableDependency
+
+sameDependencyFact :: DependencyFact -> DependencyFact -> Bool
+sameDependencyFact (MissingModule a) (MissingModule b) = a == b
+sameDependencyFact (MissingDeclaration a version name) (MissingDeclaration b version' name') =
+    a == b && version == version' && name == name'
+sameDependencyFact (KnownDeclaration a version identity) (KnownDeclaration b version' identity') =
+    a == b && version == version' && sameIdentity identity identity'
+    where
+      sameIdentity (NominalIdentity x) (NominalIdentity y) = tyConName x == tyConName y
+      sameIdentity (ValueIdentity x) (ValueIdentity y) = idName x == idName y
+        && eqType (varType x) (varType y)
+      sameIdentity _ _ = False
+sameDependencyFact (MembershipFact value facts) (MembershipFact value' facts') =
+    value == value' && length facts == length facts'
+      && and (zipWith sameDependencyFact facts facts')
+sameDependencyFact (SignatureOwnerFact a) (SignatureOwnerFact b) = a == b
+sameDependencyFact NoSelectedSibling NoSelectedSibling = True
+  -- A failed declaration load is not evidence that authority is absent.
+sameDependencyFact UnverifiableDependency _ = False
+sameDependencyFact _ UnverifiableDependency = False
+sameDependencyFact _ _ = False
+
+data DependencyQuery
+  = NominalQuery AuthorityDeclaration
+  | ProtectedQuery Name
+  | TrustedQuery Name
+  | SiblingQuery Name
+  | SignatureOwnerQuery
+  deriving (Eq, Ord)
+
+-- | One coordinator-owned resolved interface context. Its lookup tables are
+-- acquired once after interface publication; only queries actually consumed
+-- by elaboration are retained in a module's dependency witness.
+data PreparedSiteEnvironment = PreparedSiteEnvironment
+  { environmentAuthority :: SiteAuthority
+  , environmentDeclarations :: Map AuthorityDeclaration (Maybe TyThing, DependencyFact)
+  , environmentRecoveredSiblings :: Map String (Maybe Id, DependencyFact)
+  , environmentInterfaceSiblings :: Map String Id
+  , environmentVersions :: Map Module Fingerprint
+  , environmentSignatureOwner :: Module
+  }
+
+-- | An immutable query recipe and its exact observations. Keeping original
+-- owned siblings preserves the existing owned/imported/HPT/recovered order.
+data PreparedSiteDependencies = PreparedSiteDependencies
+  (Map String Id) (Map DependencyQuery DependencyFact)
+
+preparedSiteRequestAuthority :: PreparedSiteEnvironment -> Maybe TyCon
+preparedSiteRequestAuthority = requestSiteAuthority . environmentAuthority
+
+preparedSiteDependenciesMatch :: PreparedSiteEnvironment -> Map String Id
+  -> PreparedSiteDependencies -> Bool
+preparedSiteDependenciesMatch environment imported (PreparedSiteDependencies owned facts) =
+  Map.foldrWithKey (\query previous rest -> rest
+    && sameDependencyFact previous (observeDependency environment owned imported query)) True facts
+
+resolvePreparedSiteEnvironment :: HscEnv -> IO PreparedSiteEnvironment
+resolvePreparedSiteEnvironment env = do
+  declarations <- Map.fromList <$> traverse resolveAuthority authorityDeclarations
+  recovered <- Map.fromList <$> traverse resolveSibling sitedVerbs
+  external <- hscEPS env
+  let versionsOf interfaces = Map.fromList
+        [(mi_module interface, mi_iface_hash (mi_final_exts interface)) | interface <- interfaces]
+      versions = Map.union (versionsOf (map hm_iface (eltsHpt (hsc_HPT env))))
+        (versionsOf (map snd (moduleEnvToList (eps_PIT external))))
+      tycon role = case fst (declarations Map.! role) of
+        Just (ATyCon original) -> Just original
+        _ -> Nothing
+      identifier role = case fst (declarations Map.! role) of
+        Just (AnId original) -> [original]
+        _ -> []
+      constructors original =
+        [ identifier'
+        | tycon' <- maybe [] (:[]) original
+        , constructor <- tyConDataCons tycon'
+        , occNameString (nameOccName (dataConName constructor)) `elem` rawProgressOccurrences
+        , identifier' <- dataConWorkId constructor : maybe [] (:[]) (dataConWrapId_maybe constructor)
+        ]
+      raw = constructors (tycon ReplyConstructors) ++ constructors (tycon WatchConstructors)
+      sited = concatMap (identifier . ProgressHelper) progressAuthorities
+      sources = identifier InstallSource ++ identifier AttachSource
+      key = getKey . nameUnique . idName
+      authority = SiteAuthority (tycon RequestCarrier) (tycon ResponseWrapper) (tycon ProgressWrapper)
+        (Set.fromList (map key (raw ++ sited))) (Set.fromList (map key (raw ++ sited ++ sources)))
+  pure (PreparedSiteEnvironment authority declarations recovered
+    (resolvePreparedInterfaceSiblings env) versions
+    (mkHomeModule (hsc_home_unit env) (mkModuleName "Tidepool.CheckedAnnotation")))
+  where
+    resolveAuthority role = do
+      let (owner, occurrence, nominal) = authorityDeclaration role
+      result <- resolveDeclaration env owner occurrence nominal
+      pure (role, result)
+    resolveSibling spec = do
+      (thing, fact) <- resolveDeclaration env (vsSitedModule spec) (mkVarOcc (vsSitedName spec)) False
+      let sibling = case thing of
+            Just (AnId original) -> Just original
+            _ -> Nothing
+      pure (vsName spec, (sibling, fact))
+
+authorityDeclarations :: [AuthorityDeclaration]
+authorityDeclarations = [RequestCarrier, ResponseWrapper, ProgressWrapper, ReplyConstructors,
+  WatchConstructors] ++ map ProgressHelper progressAuthorities ++ [InstallSource, AttachSource]
+
+progressAuthorities :: [ProgressAuthority]
+progressAuthorities = [ReportProgress, PollProgress, AwaitProgressAfter, AwaitAnyProgress, ProgressSource]
+
+progressVerb :: ProgressAuthority -> String
+progressVerb role = case role of
+  ReportProgress -> "reportRequestProgress"
+  PollProgress -> "pollProgress"
+  AwaitProgressAfter -> "awaitProgressAfter"
+  AwaitAnyProgress -> "awaitAnyProgress"
+  ProgressSource -> "progressSource"
+
+rawProgressOccurrences :: [String]
+rawProgressOccurrences = ["PublishProgressWith", "ObserveProgressWith", "ObserveWatchProgressWith"]
+
+authorityDeclaration :: AuthorityDeclaration -> (String, OccName, Bool)
+authorityDeclaration role = case role of
+  RequestCarrier -> nominal "Tidepool.Internal.RequestSite" "RequestSite"
+  ResponseWrapper -> nominal "Tidepool.Agent.Reply.Internal" "ResponseResult"
+  ProgressWrapper -> nominal "Tidepool.Agent.Reply.Internal" "ProgressState"
+  ReplyConstructors -> nominal "Tidepool.Agent.Reply.Internal" "Replies"
+  WatchConstructors -> nominal "Tidepool.Agent.Watch.Internal" "Watches"
+  InstallSource -> value "Tidepool.Actor.Source" "installSource"
+  AttachSource -> value "Tidepool.Actor.Source" "attachSource"
+  ProgressHelper progress -> case find ((== progressVerb progress) . vsName) sitedVerbs of
+    Just spec -> value (vsSitedModule spec) (vsSitedName spec)
+    Nothing -> error "progress authority is absent from the site registry"
+  where
+    nominal owner occurrence = (owner, mkTcOcc occurrence, True)
+    value owner occurrence = (owner, mkVarOcc occurrence, False)
+
+resolveDeclaration :: HscEnv -> String -> OccName -> Bool
+  -> IO (Maybe TyThing, DependencyFact)
+resolveDeclaration env spelling occurrence nominal = do
+  found <- findImportedModule env (mkModuleName spelling) NoPkgQual
+  case found of
+    Found _ owner -> do
+      name <- initIfaceLoad env (lookupOrig owner occurrence)
+      existing <- lookupType env name
+      loaded <- case existing of
+        Just thing -> pure (Succeeded thing)
+        Nothing -> initIfaceLoad env (importDecl name)
+      external <- hscEPS env
+      let home = lookupHpt (hsc_HPT env) (moduleName owner)
+          interfaces = [hm_iface entry | entry <- maybe [] (:[]) home]
+            ++ [interface | (actual, interface) <- moduleEnvToList (eps_PIT external), actual == owner]
+          selected = find ((== owner) . mi_module) interfaces
+          version = mi_iface_hash . mi_final_exts <$> selected
+          declared interface = any (\(_, declaration) -> occurrence `elem`
+            (nameOccName (ifName declaration) : ifaceDeclImplicitBndrs declaration)) (mi_decls interface)
+          absent = case home of
+            Just entry | mi_module (hm_iface entry) == owner, not (declared (hm_iface entry)) -> True
+            _ -> False
+          missing = case version of
+            Just fingerprint | absent -> MissingDeclaration owner fingerprint name
+            _ -> UnverifiableDependency
+          result thing identity = case version of
+            Just fingerprint -> (Just thing, KnownDeclaration owner fingerprint identity)
+            Nothing -> (Just thing, UnverifiableDependency)
+      pure $ case loaded of
+        Succeeded thing@(ATyCon tycon) | nominal, tyConName tycon == name ->
+          result thing (NominalIdentity tycon)
+        Succeeded thing@(AnId identifier) | not nominal, idName identifier == name ->
+          result thing (ValueIdentity identifier)
+        Succeeded _ -> (Nothing, missing)
+        Failed _ -> (Nothing, missing)
+    NotFound { fr_pkg = Nothing, fr_unusables = [] } ->
+      pure (Nothing, MissingModule (mkModuleName spelling))
+    _ -> pure (Nothing, UnverifiableDependency)
+
+observeDependency :: PreparedSiteEnvironment -> Map String Id -> Map String Id
+  -> DependencyQuery -> DependencyFact
+observeDependency environment owned imported query = case query of
+  SignatureOwnerQuery -> SignatureOwnerFact (environmentSignatureOwner environment)
+  NominalQuery declaration -> snd (environmentDeclarations environment Map.! declaration)
+  ProtectedQuery name -> membership (protectedProgressIds authority) name
+    progressDeclarations
+  TrustedQuery name -> membership (trustedProgressOwners authority) name
+    (progressDeclarations ++ [InstallSource, AttachSource])
+  SiblingQuery surface -> case lookupPreparedVerbName surface of
+    Nothing -> UnverifiableDependency
+    Just spec ->
+      let recovered = case Map.lookup (vsName spec) (environmentRecoveredSiblings environment) of
+            Just (Just sibling, _) | Just surfaceOwner <- nameModule_maybe surface
+              , Just siblingOwner <- nameModule_maybe (idName sibling)
+              , moduleUnit surfaceOwner == moduleUnit siblingOwner -> Just sibling
+            _ -> Nothing
+          selected = Map.lookup (vsName spec) owned `orElse`
+            Map.lookup (vsName spec) imported `orElse`
+            Map.lookup (vsName spec) (environmentInterfaceSiblings environment) `orElse` recovered
+      in case selected of
+        Just sibling -> identityFact sibling
+        Nothing -> case Map.lookup (vsName spec) (environmentRecoveredSiblings environment) of
+          Just (_, UnverifiableDependency) -> UnverifiableDependency
+          Just (_, fact) -> MembershipFact False [fact]
+          Nothing -> NoSelectedSibling
+  where
+    authority = environmentAuthority environment
+    progressDeclarations = [ReplyConstructors, WatchConstructors]
+      ++ map ProgressHelper progressAuthorities
+    identityFact identifier = case nameModule_maybe (idName identifier) >>= \owner ->
+      (owner,) <$> Map.lookup owner (environmentVersions environment) of
+        Just (owner, version) -> KnownDeclaration owner version (ValueIdentity identifier)
+        Nothing -> UnverifiableDependency
+    membership identifiers name declarations =
+      let present = getKey (nameUnique name) `Set.member` identifiers
+          relevant = [fact | declaration <- declarations
+            , let (spelling, _, _) = authorityDeclaration declaration
+            , maybe False ((== spelling) . moduleNameString . moduleName) (nameModule_maybe name)
+            , let fact = snd (environmentDeclarations environment Map.! declaration)]
+      in MembershipFact present relevant
+    orElse (Just value) _ = Just value
+    orElse Nothing alternative = alternative
+
 requestSiteAuthority :: SiteAuthority -> Maybe TyCon
 requestSiteAuthority = requestSiteTyCon
 
 -- | Resolve wrapper authority from each type's defining module. The real GHC
 -- TyCon crosses into evidence; rendered spelling never carries authority.
 resolveSiteAuthority :: HscEnv -> IO SiteAuthority
-resolveSiteAuthority env = do
-  requestSite <- resolveRequestSiteTyCon env
-  responseResult <- exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
-  progressState <- exactTyCon "Tidepool.Agent.Reply.Internal" "ProgressState"
-  replies <- exactTyCon "Tidepool.Agent.Reply.Internal" "Replies"
-  watches <- exactTyCon "Tidepool.Agent.Watch.Internal" "Watches"
-  let rawIds = concatMap protectedConstructors [replies, watches]
-      helpers =
-        [ (vsSitedModule spec, vsSitedName spec)
-        | spec <- sitedVerbs, vsName spec `elem` progressVerbs ]
-  sited <- traverse (uncurry exactId) helpers
-  sourceOwners <- traverse (exactId "Tidepool.Actor.Source") ["installSource", "attachSource"]
-  pure SiteAuthority
-    { requestSiteTyCon = requestSite
-    , responseResultTyCon = responseResult
-    , progressStateTyCon = progressState
-    , protectedProgressIds = Set.fromList (map idKey (rawIds ++ [i | Just i <- sited]))
-    , trustedProgressOwners = Set.fromList
-        (map idKey (rawIds ++ [i | Just i <- sited ++ sourceOwners]))
-    }
- where
-  -- Resolve the defining module's interface and ask its declaration loader
-  -- for the real TyCon. This follows neither re-export spellings nor names
-  -- declared by the cell.
-  exactTyCon moduleName occurrence = do
-    found <- findImportedModule env (mkModuleName moduleName) NoPkgQual
-    case found of
-      Found _ owner -> do
-        name <- initIfaceLoad env (lookupOrig owner (mkTcOcc occurrence))
-        loaded <- lookupType env name
-        case loaded of
-          Just (ATyCon tycon) -> pure (Just tycon)
-          Just _ -> pure Nothing
-          Nothing -> do
-            thing <- initIfaceLoad env (importDecl name)
-            pure $ case thing of
-              Succeeded (ATyCon tycon) -> Just tycon
-              Succeeded _ -> Nothing
-              Failed _ -> Nothing
-      _ -> pure Nothing
-
-  idKey = getKey . nameUnique . idName
-  progressVerbs = ["reportRequestProgress", "pollProgress", "awaitProgressAfter", "awaitAnyProgress", "progressSource"]
-  protectedConstructors Nothing = []
-  protectedConstructors (Just tycon) =
-    [ identifier
-    | constructor <- tyConDataCons tycon
-    , occNameString (nameOccName (dataConName constructor)) `elem`
-        ["PublishProgressWith", "ObserveProgressWith", "ObserveWatchProgressWith"]
-    , identifier <- dataConWorkId constructor : maybe [] (:[]) (dataConWrapId_maybe constructor)
-    ]
-  exactId moduleName occurrence = do
-    found <- findImportedModule env (mkModuleName moduleName) NoPkgQual
-    case found of
-      Found _ owner -> do
-        name <- initIfaceLoad env (lookupOrig owner (mkVarOcc occurrence))
-        loaded <- lookupType env name
-        case loaded of
-          Just (AnId identifier) -> pure (Just identifier)
-          Just _ -> pure Nothing
-          Nothing -> do
-            thing <- initIfaceLoad env (importDecl name)
-            pure $ case thing of
-              Succeeded (AnId identifier) -> Just identifier
-              _ -> Nothing
-      _ -> pure Nothing
+resolveSiteAuthority env = environmentAuthority <$> resolvePreparedSiteEnvironment env
 
 -- Resolve the defining declaration through GHC's module/interface authority.
 -- Projection compares this exact TyCon, never its rendered module spelling.
 resolveRequestSiteTyCon :: HscEnv -> IO (Maybe TyCon)
 resolveRequestSiteTyCon env = do
-  found <- findImportedModule env (mkModuleName "Tidepool.Internal.RequestSite") NoPkgQual
-  case found of
-    Found _ owner -> do
-      name <- initIfaceLoad env (lookupOrig owner (mkTcOcc "RequestSite"))
-      loaded <- lookupType env name
-      case loaded of
-        Just (ATyCon tycon) -> pure (Just tycon)
-        Just _ -> pure Nothing
-        Nothing -> do
-          imported <- initIfaceLoad env (importDecl name)
-          pure $ case imported of
-            Succeeded (ATyCon tycon) -> Just tycon
-            _ -> Nothing
-    _ -> pure Nothing
+  (thing, _) <- resolveDeclaration env "Tidepool.Internal.RequestSite" (mkTcOcc "RequestSite") True
+  pure $ case thing of
+    Just (ATyCon tycon) -> Just tycon
+    _ -> Nothing
 
 data PreparedSite = PreparedSite
   { psOwner :: Id
@@ -278,6 +449,7 @@ data ElaborationState = ElaborationState
   , esPreparedSites :: ![PreparedSite]
   , esTypeGraph :: !TypeGraphBuilder
   , esRejections :: ![SiteRejection]
+  , esDependencyQueries :: !(Set.Set DependencyQuery)
   }
 
 -- | A typed site that cannot carry concrete evidence, attached to the top
@@ -312,16 +484,62 @@ data SiteRejection = SiteRejection
 elaboratePreparedSites :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
   -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection])
 elaboratePreparedSites env authority siblings bindings = do
+  (rewritten, yields, issued, graph, failures, _) <-
+    elaboratePreparedSitesTracked env authority siblings bindings
+  pure (rewritten, yields, issued, graph, failures)
+
+-- | The queried objects and this witness come from the same elaboration. The
+-- caller cannot supply a dependency census or replace the resolved authority.
+elaboratePreparedSitesWithDependencies :: HscEnv -> PreparedSiteEnvironment
+  -> Map String Id -> Map String Id -> [CoreBind]
+  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection], PreparedSiteDependencies)
+elaboratePreparedSitesWithDependencies env environment owned imported bindings = do
+  let IntrinsicCensus _ _ surfaces = censusPreparedIntrinsics [] bindings
+      recovered = Map.fromList
+        [(vsName spec, sibling)
+        | surface <- surfaces, Just spec <- [lookupPreparedVerb surface]
+        , Just surfaceOwner <- [nameModule_maybe (idName surface)]
+        , Just (Just sibling, _) <- [Map.lookup (vsName spec) (environmentRecoveredSiblings environment)]
+        , Just siblingOwner <- [nameModule_maybe (idName sibling)]
+        , moduleUnit surfaceOwner == moduleUnit siblingOwner]
+      siblings = Map.unions [owned, imported, environmentInterfaceSiblings environment, recovered]
+  (rewritten, yields, issued, graph, failures, queries) <-
+    elaboratePreparedSitesTracked env (environmentAuthority environment) siblings bindings
+  let facts = Map.fromSet (observeDependency environment owned imported) queries
+  pure (rewritten, yields, issued, graph, failures, PreparedSiteDependencies owned facts)
+
+elaboratePreparedSitesTracked :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
+  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection], Set.Set DependencyQuery)
+elaboratePreparedSitesTracked env authority siblings bindings = do
   uniques <- mkSplitUniqSupply 's'
   (bindings', final) <- runStateT (traverse rewriteBind bindings)
-        (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder [])
+        (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder []
+          (Set.singleton (NominalQuery RequestCarrier)))
   graph <- either throwIO pure (finishTypeGraph (esTypeGraph final))
   pure ( bindings'
        , reverse (esSites final)
        , reverse (esPreparedSites final)
        , graph
-       , reverse (esRejections final))
+       , reverse (esRejections final)
+       , esDependencyQueries final)
   where
+    recordQuery :: DependencyQuery -> StateT ElaborationState IO ()
+    recordQuery query = modify' (\state -> state
+      { esDependencyQueries = Set.insert query (esDependencyQueries state) })
+    recordWireQuery spec = case vsWireSource spec of
+      ResponseResultEvidence -> recordQuery (NominalQuery ResponseWrapper)
+      ProgressStateEvidence -> recordQuery (NominalQuery ProgressWrapper)
+      _ -> pure ()
+    mayBeProtected name = case nameModule_maybe name of
+      Nothing -> False
+      Just owner ->
+        let spelling = moduleNameString (moduleName owner)
+            occurrence = occNameString (nameOccName name)
+            raw = rawProgressOccurrences ++ map ("$W" ++) rawProgressOccurrences
+        in (spelling `elem` ["Tidepool.Agent.Reply.Internal", "Tidepool.Agent.Watch.Internal"]
+              && occurrence `elem` raw)
+           || any (\progress -> let (provider, sibling, _) = authorityDeclaration (ProgressHelper progress)
+                  in spelling == provider && occurrence == occNameString sibling) progressAuthorities
     rewriteBind (NonRec binder rhs) =
       NonRec binder <$> rewriteExpr (binder, binderQualName binder) rhs
     rewriteBind (Rec pairs) = Rec <$> traverse (\(binder, rhs) ->
@@ -329,15 +547,16 @@ elaboratePreparedSites env authority siblings bindings = do
 
     rewriteExpr origin expression = case expression of
       Var surface | Just _ <- lookupPreparedVerb surface -> rewriteApplication origin expression
-      Var identifier
-        | getKey (nameUnique (idName identifier)) `Set.member` protectedProgressIds authority
-        , not (getKey (nameUnique (idName (fst origin))) `Set.member` trustedProgressOwners authority) -> do
+      Var identifier -> do
+        when (mayBeProtected (idName identifier)) (recordQuery (ProtectedQuery (idName identifier)))
+        when (getKey (nameUnique (idName identifier)) `Set.member` protectedProgressIds authority) $ do
+          recordQuery (TrustedQuery (idName (fst origin)))
+          unless (getKey (nameUnique (idName (fst origin))) `Set.member` trustedProgressOwners authority) $
             modify' (\current -> current
               { esRejections = SiteRejection (fst origin)
                   ("raw or site-aware progress operations require compiler-issued typed helper evidence: " ++ T.unpack (snd origin))
                   : esRejections current })
-            pure expression
-      Var{} -> pure expression
+        pure expression
       Lit{} -> pure expression
       Type{} -> pure expression
       Coercion{} -> pure expression
@@ -361,6 +580,7 @@ elaboratePreparedSites env authority siblings bindings = do
       rewrittenArguments <- traverse (rewriteExpr origin) arguments
       case headExpr of
         Var surface | Just spec <- lookupPreparedVerb surface -> do
+          recordQuery (SiblingQuery (idName surface))
           let (topBinder, originName) = origin
           case classifySiteOccurrence siblings spec surface rewrittenArguments of
             Left failure -> do
@@ -369,6 +589,8 @@ elaboratePreparedSites env authority siblings bindings = do
                   (renderSiteFailure (T.unpack originName) spec failure) : esRejections current})
               pure (mkApps headExpr rewrittenArguments)
             Right plan -> do
+              recordWireQuery spec
+              forM_ (vsDerivedInput spec) $ \(_, source) -> recordWireQuery (spec { vsWireSource = source })
               case do
                 wire <- siteWireType authority spec (spAnswer plan)
                 derived <- case vsDerivedInput spec of
@@ -428,6 +650,8 @@ elaboratePreparedSites env authority siblings bindings = do
                 Right (wireType, siteInputs, requestTypes, carrierTyCon, carrierReply) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
+                  when (not (null siteInputs) || maybe False (const True) requestTypes)
+                    (recordQuery SignatureOwnerQuery)
                   witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
                   signatures <- liftIO (traverse (\(reply, progress) ->
                     captureRequestTypeSignatures env reply progress) requestTypes)
@@ -548,11 +772,14 @@ resolvePreparedSiblingIds identifiers = Map.fromList
           Nothing -> False
 
 lookupPreparedVerb :: Id -> Maybe VerbSpec
-lookupPreparedVerb binder = find matches sitedVerbs
+lookupPreparedVerb = lookupPreparedVerbName . idName
+
+lookupPreparedVerbName :: Name -> Maybe VerbSpec
+lookupPreparedVerbName name = find matches sitedVerbs
   where
     matches spec =
-      occNameString (nameOccName (idName binder)) == vsName spec
-        && case nameModule_maybe (idName binder) of
+      occNameString (nameOccName name) == vsName spec
+        && case nameModule_maybe name of
           Just modul -> moduleNameString (moduleName modul) == vsModule spec
           Nothing -> False
 

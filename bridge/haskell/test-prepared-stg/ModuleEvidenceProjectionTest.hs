@@ -150,6 +150,7 @@ verifyModuleEvidenceProjection = do
     , preparedSiteRejections = []
     , preparedRequestSiteTyCon = Nothing
     , preparedAuthorityDependent = False
+    , preparedSiteDependencies = Nothing
     , preparedIntrinsicNames = Set.empty
     , preparedExpectedEntries = Map.empty
     }
