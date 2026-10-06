@@ -133,17 +133,21 @@ general guarantee about arbitrary Template Haskell or plugin execution.
 
 ## Matched cell observation migration
 
-Cell observations use `TPCELLOBSERVATIONS` version 2: the five-section payload
-retains diagnostic types, nominal heads, expression lift/presentation and the
-authored prologue. Binder rows have three fields; expression rows have five.
+Cell observations use `TPCELLOBSERVATIONS` version 3: the five-section payload
+retains diagnostic types, nominal heads, expression lifting and the authored
+prologue. Binder rows have three fields; expression rows have four.
 Neither carries imports reconstructed from type presentation. Native checked
 signatures supply the exact type authority.
 
-`TPEXACTCHECK` and `TPEXACTPROGRAM` use version 2; parser receipts use
+`TPEXACTCHECK` and `TPEXACTPROGRAM` use version 3; parser receipts use
 `TPCELLPLAN2`. The matched Rust/Haskell release rejects older observations and
 receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
 and rejected explicitly. Original live inputs use a compiler-issued thin value
-interface; execution uses admitted item recipes.
+interface; execution uses admitted item recipes. Exact scope purposes are
+`cell-check3`, `cell-program2` and `checked-item4`. Expressions reserve one
+capture generation and observation name, with no auxiliary display recipe or
+presentation admission. Authored display operations and activation previews
+retain their separate compiler and runtime paths.
 
 Canonical `TPFINALMODULE` version 3 certificates have thirteen fields. The final
 field is `["source-original", imports]` or `["native-authored-declaration", generation]`;

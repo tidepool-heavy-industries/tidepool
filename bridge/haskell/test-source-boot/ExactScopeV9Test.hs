@@ -22,7 +22,7 @@ import System.Directory (doesFileExist, removeFile)
 import System.FilePath (takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
 import Tidepool.CheckedCell
-  ( CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), encodeCellExpressionPlan )
+  ( CellExpressionPlan(..), ExpressionLiftPlan(..), encodeCellExpressionPlan )
 import Tidepool.EffectSchema (NominalHead(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
@@ -161,49 +161,46 @@ checkedPurposeCases manifest fields = do
         _ -> fail "production purpose encoder returned another record"
   cell <- readPurpose CodecCellPurpose
   item <- readPurpose CodecItemPurpose
-  display <- readPurpose CodecDisplayPurpose
   inspection <- readPurpose CodecInspectionPurpose
   let empty = TList []
       acceptsCell purpose = case purpose of ExactCellPurpose _ _ -> True; _ -> False
       acceptsItem purpose = case purpose of ExactItemPurpose _ _ -> True; _ -> False
-      acceptsDisplay purpose = case purpose of ExactDisplayPurpose _ _ -> True; _ -> False
       acceptsInspection purpose = case purpose of ExactInspectionPurpose _ _ -> True; _ -> False
       envelope purpose = TList (replace 8 purpose fields)
-  forM_ [("checked-item2",item),("checked-display2",display),("host-activation-input1",item)] $
+  forM_ [("cell-check2",cell),("cell-program1",cell),("checked-item3",item),("checked-display3",item),("host-activation-input1",item)] $
     \(legacy,purpose) -> refuse manifest "" (envelope (TList (TString legacy : tail purpose)))
   noPurpose <- readCandidate manifest (envelope TNull) >>= either fail pure
   unless (scopePurpose noPurpose == NoCheckedPurpose && scopeIncludePaths noPurpose == Nothing
       && null (scopeValueInterfaces noPurpose))
     (fail "null checked purpose acquired stage or search-input authority")
-  forM_ [(cell,acceptsCell),(item,acceptsItem),(display,acceptsDisplay),(inspection,acceptsInspection)] $
+  forM_ [(cell,acceptsCell),(item,acceptsItem),(inspection,acceptsInspection)] $
     \(purpose,accepts) -> do
       accepted <- readCandidate manifest (envelope (TList purpose)) >>= either fail pure
       unless (accepts (scopePurpose accepted) && scopeIncludePaths accepted == Just paths)
         (fail "checked purpose lost its exclusive stage or ordered search inputs")
       refuse manifest "" (envelope (TList (purpose ++ [TList inspection])))
       refuse manifest "" (envelope (TList (take (length purpose - 1) purpose)))
-  forM_ [(ExpressionPure,"pure"),(ExpressionEffectful,"effectful")] $ \(liftPlan,liftName) ->
-    forM_ [(ExpressionRendered,"rendered"),(ExpressionOpaque,"opaque")] $ \(presentation,presentationName) -> do
-      let plan = CellExpressionPlan "__tidepool_cell_expr_0" liftPlan presentation "Int"
-            [NominalHead "ghc-prim" "GHC.Types" "Int"]
-      let expressionBytes = toStrictByteString (encodeCellExpressionPlan plan)
-      encoded <- decode expressionBytes
-      issuedExpression <- readExpressionItemCodecFixture (takeDirectory manifest) paths expressionBytes
-      issuedExpressionFields <- row 20 issuedExpression
-      let expressionPurpose value = TList (replace 10 value issuedExpressionFields)
-      accepted <- readCandidate manifest (envelope issuedExpression) >>= either fail pure
-      case scopeCheckedItem accepted of
-        Just admitted | itemExpressionLift admitted == Just liftName
-            && itemExpressionPresentation admitted == Just presentationName -> pure ()
-        _ -> fail "compiler expression encoder and exact-item consumer disagree"
-      expressionFields <- row 5 encoded
-      forM_ [TList (expressionFields ++ [empty]),TList (take 4 expressionFields)
-        ,TList (replace 0 (TString "") expressionFields)
-        ,TList (replace 1 (TString "unknown") expressionFields)
-        ,TList (replace 2 (TString "unknown") expressionFields)
-        ,TList (replace 4 (TList [TList [TString "ghc-prim",TString "GHC.Types"]]) expressionFields)] $ \malformed ->
-          refuse manifest "" (envelope (expressionPurpose malformed))
-      refuse manifest "" (envelope (TList (replace 10 encoded item)))
+  forM_ [(ExpressionPure,"pure"),(ExpressionEffectful,"effectful")] $ \(liftPlan,liftName) -> do
+    let plan = CellExpressionPlan "__tidepool_cell_expr_0" liftPlan "Int"
+          [NominalHead "ghc-prim" "GHC.Types" "Int"]
+        expressionBytes = toStrictByteString (encodeCellExpressionPlan plan)
+    encoded <- decode expressionBytes
+    issuedExpression <- readExpressionItemCodecFixture (takeDirectory manifest) paths expressionBytes
+    issuedExpressionFields <- row 20 issuedExpression
+    let expressionPurpose value = TList (replace 10 value issuedExpressionFields)
+    accepted <- readCandidate manifest (envelope issuedExpression) >>= either fail pure
+    case scopeCheckedItem accepted of
+      Just admitted | itemExpressionLift admitted == Just liftName -> pure ()
+      _ -> fail "compiler expression encoder and exact-item consumer disagree"
+    expressionFields <- row 4 encoded
+    forM_ [TList (expressionFields ++ [empty]),TList (take 3 expressionFields)
+      ,TList (take 2 expressionFields ++ [TString "opaque"] ++ drop 2 expressionFields)
+      ,TList (replace 0 (TString "") expressionFields)
+      ,TList (replace 1 (TString "unknown") expressionFields)
+      ,TList (replace 2 (TString "") expressionFields)
+      ,TList (replace 3 (TList [TList [TString "ghc-prim",TString "GHC.Types"]]) expressionFields)] $ \malformed ->
+        refuse manifest "" (envelope (expressionPurpose malformed))
+    refuse manifest "" (envelope (TList (replace 10 encoded item)))
   refuse manifest "" (envelope (TList [TList cell,TList inspection]))
 
 -- The positive native origin must come from the protected authored producer,

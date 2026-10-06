@@ -1,89 +1,24 @@
 module Tidepool.CheckedRecipe
-  ( checkedDisplayRecipe, checkedProgramDisplayRecipe, writeCheckedDisplayReceipt
-  , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt
+  ( checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt
   ) where
 
 import Codec.CBOR.Encoding (encodeListLen, encodeString, encodeWord64)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
-import Data.List (intercalate, isInfixOf, stripPrefix)
+import Data.List (intercalate, isInfixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import GHC (ModuleName, mkModuleName, moduleUnit, moduleName, moduleNameString)
-import GHC.Builtin.Types (intTyConName)
-import GHC.Types.Name (nameModule)
-import GHC.Unit.Types (unitString)
+import GHC (ModuleName)
 import System.FilePath ((</>))
-import Tidepool.CheckedAdmission (checkedDisplayBinders)
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
+  ( ExactScope(..), CheckedItemAdmission(..) )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.TurnSource
-  ( spliceTemplate, replaceTemplateMarker, renderImportBinder
-  , CompilerDefaultRecipe, qualifyCompilerDefault, preambleImportMarker )
-
-checkedDisplayRecipe :: CompilerDefaultRecipe -> [ModuleName] -> CheckedDisplayAdmission -> String -> IO String
-checkedDisplayRecipe = checkedDisplayRecipeWithInputs False
-
-checkedProgramDisplayRecipe :: CompilerDefaultRecipe -> [ModuleName] -> CheckedDisplayAdmission -> String -> IO String
-checkedProgramDisplayRecipe = checkedDisplayRecipeWithInputs True
-
-checkedDisplayRecipeWithInputs :: Bool -> CompilerDefaultRecipe -> [ModuleName] -> CheckedDisplayAdmission -> String -> IO String
-checkedDisplayRecipeWithInputs generic defaults namespaces admission template = do
-  let rowPrefix = "{{TURN_STMT}} ; _ <- (pure () :: Eff "
-      rows = [suffix | line <- lines template, Just suffix <- [stripPrefix rowPrefix line]]
-  effectRow <- case rows of
-    [suffix] -> do
-      case T.stripSuffix " ())" (T.pack suffix) of
-        Just row | not (T.null row) -> pure (T.unpack row)
-        _ -> fail "display requires the canonical bind effect-row pin"
-    _ -> fail "display requires one exact bind effect-row pin"
-  withImports <- replaceRecipeMarker preambleImportMarker
-    ("import qualified Tidepool.Inspection as TidepoolInspection\n"
-      ++ (if generic then "import qualified " ++ show (unitString (moduleUnit (nameModule intTyConName)))
-        ++ " " ++ moduleNameString (moduleName (nameModule intTyConName))
-        ++ " as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
-      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " (map renderImportBinder binders) ++ ")\n")
-        (displayValueImports admission) ++ preambleImportMarker) template
-  unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
-    (fail "display requires canonical bind recipe version one")
-  (page,metadata,alias) <- case checkedDisplayBinders admission of
-    [page,metadata,alias] -> pure (page,metadata,alias)
-    _ -> fail "display requires its three canonical binders"
-  let keys = intercalate "," ["T.pack " ++ show key | key <- displayPresented admission]
-      budget = if generic then "(__tidepoolBudget :: TidepoolProgramTypes.Int)" else show (displayBudget admission)
-      presented = if generic then "(__tidepoolPresented :: [TidepoolProgramText.Text])" else "[" ++ keys ++ "]"
-      rendering = if displayPresentation admission == "rendered"
-        then "TidepoolInspection.displayPageWithout " ++ presented ++ " " ++ budget
-          ++ " (" ++ displayObservationName admission ++ " ())"
-        else "TidepoolInspection.pageWithContinuation " ++ budget
-          ++ " (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing"
-      statement = "(" ++ intercalate ", " [page,metadata,alias] ++ ") <- do {\n"
-        ++ page ++ " <- pure ((" ++ rendering ++ ") :: TidepoolInspection.DisplayPage " ++ effectRow ++ ");\n"
-        ++ metadata ++ " <- pure (T.copy (TidepoolInspection.text " ++ page ++ "), TidepoolInspection.pageHasMore "
-        ++ page ++ ", TidepoolInspection.pageUnavailable " ++ page ++ ");\n"
-        ++ alias ++ " <- pure " ++ page ++ ";\npure (" ++ intercalate ", " [page,metadata,alias] ++ ")\n}"
-  preparedTemplate <- either fail pure (qualifyCompilerDefault defaults
-    (namespaces ++ map mkModuleName ["TidepoolInspection", "TidepoolProgramTypes", "TidepoolProgramText"]
-      ++ map (mkModuleName . fst) (displayValueImports admission)) withImports)
-  let spliced = (if generic then ("{-# LANGUAGE PackageImports, ScopedTypeVariables #-}\n" ++) else id) (spliceTemplate preparedTemplate statement (intercalate ", " [page,metadata,alias]))
-  if generic then do
-    withArgument <- replaceRecipeMarker "__result = do {" "__result ((__tidepoolBudget :: TidepoolProgramTypes.Int), (__tidepoolPresented :: [TidepoolProgramText.Text])) = do {" spliced
-    prepared <- replaceRecipeMarker "__prepared = TidepoolResume.settle __result" "__prepared input = TidepoolResume.settle (__result input)" withArgument
-    pure prepared
-  else pure spliced
-
-writeCheckedDisplayReceipt :: FilePath -> ExactScope -> CheckedDisplayAdmission -> String -> IO ()
-writeCheckedDisplayReceipt root scope admission source = do
-  let text = encodeString . T.pack
-      receipt = encodeListLen 8 <> text "TPEXACTDISPLAY" <> text "1"
-        <> text (scopeRequestSha256 scope) <> text (displayCellReceiptDigest admission)
-        <> encodeWord64 (displayItemIndex admission) <> text (displayPrefixDigest admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-display-recipe-1"
-  BS.writeFile (root </> "checked-display.cbor") (toStrictByteString receipt)
+  ( spliceTemplate, replaceTemplateMarker
+  , CompilerDefaultRecipe, qualifyCompilerDefault )
 
 checkedRecipeAnnotations :: CheckedItemAdmission -> [(String,CheckedSignature)]
 checkedRecipeAnnotations admission =

@@ -29,7 +29,6 @@ import Tidepool.CheckedCell (RequestHelperRecipe(..))
 data PurposeCodecCase
   = CodecCellPurpose
   | CodecItemPurpose
-  | CodecDisplayPurpose
   | CodecInspectionPurpose
 
 readPurposeCodecFixture :: FilePath -> [FilePath] -> PurposeCodecCase -> IO Term
@@ -37,7 +36,6 @@ readPurposeCodecFixture work includes purpose = do
   let (name, signature) = case purpose of
         CodecCellPurpose -> ("cell", TNull)
         CodecItemPurpose -> ("item", TNull)
-        CodecDisplayPurpose -> ("display", TNull)
         CodecInspectionPurpose -> ("inspection", TNull)
   packet <- codecRequest work "purpose" [text name,TList (map text includes),signature]
   readCodecTerm (packet </> "purpose.cbor")
