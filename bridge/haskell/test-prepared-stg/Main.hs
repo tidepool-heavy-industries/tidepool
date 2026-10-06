@@ -8,16 +8,22 @@ import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
 import Data.IntMap.Strict qualified as IntMap
+import Data.IORef (modifyIORef')
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC (moduleNameString, mkModuleName, ModSummary(ms_location), ms_mod_name)
-import GHC.Driver.Env (hsc_mod_graph)
+import GHC.Driver.Env (HscEnv(..), hsc_mod_graph, hscUpdateHPT)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Unit.Module.ModGuts (CgGuts(..))
-import GHC.Unit.Home.ModInfo (HomeModInfo(hm_iface))
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), addToHpt)
+import GHC.Unit.Env (UnitEnv(..))
+import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(..))
+import GHC.Unit.Module.ModDetails (ModDetails(..))
+import GHC.Unit.Module.Env (extendModuleEnv)
+import GHC.Types.TypeEnv (emptyTypeEnv, plusTypeEnv)
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, bindersOfBinds, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
@@ -57,6 +63,7 @@ import Tidepool.PreparedStg
   , preparedUsesSiteAuthority, filterPreparedBindings, preparedRejectsIntrinsic
   , resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent )
 import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.FatIface
   ( OwnerInterfaceContext(..), newOwnerInterfaceCache, cacheOwnerInterface )
 import qualified Data.Map.Strict as Map
@@ -1036,6 +1043,25 @@ verifySiteDependencyHistories dir = do
     assertMatch "globally queried nominal owner replacement" changedCarrier original False
     assert (length (pmYieldSites (preparedFixtureOwner "TypedPreparationOwner" changedCarrier)) == 1)
       "changed nominal owner was refused instead of being freshly prepared"
+    -- Keep authentic old EPS declarations beside the authentic new home
+    -- interface, but withhold that home's typed details. This is missing load
+    -- evidence, not evidence of absence and not authority for the old object.
+    fork <- forkExactContext (prHscEnv (pprPipelineResult changedCarrier))
+    let originalHome = finalizedHomeModInfo (finalizedFixtureOwner "Tidepool.Internal.RequestSite" first)
+        currentHome = finalizedHomeModInfo (finalizedFixtureOwner "Tidepool.Internal.RequestSite" changedCarrier)
+        carrierOwner = pmModule (preparedFixtureOwner "Tidepool.Internal.RequestSite" first)
+        ExternalUnitCache externalCell = ue_eps (hsc_unit_env fork)
+        partialHome = currentHome
+          { hm_details = (hm_details currentHome) { md_types = emptyTypeEnv } }
+    modifyIORef' externalCell $ \external -> external
+      { eps_PTE = plusTypeEnv (md_types (hm_details originalHome)) (eps_PTE external)
+      , eps_PIT = extendModuleEnv (eps_PIT external) carrierOwner (hm_iface originalHome) }
+    let partial = hscUpdateHPT (\homes -> addToHpt homes (moduleName carrierOwner) partialHome) fork
+    unavailable <- prepareRecoveredModule partial (recoveredFixtureInput "TypedPreparationOwner" changedCarrier)
+    environment <- resolvePreparedSiteEnvironment partial
+    assert (not (preparedSiteDependenciesMatch environment Map.empty unavailable)
+        && not (preparedSiteDependenciesEquivalent unavailable unavailable))
+      "partial current home details authorized an older imported declaration"
   absentSource <- writeTypedPreparationFixture absentDir
   readFile "test-prepared-stg/site-fixtures/TypedPreparationActorWithoutSibling.hs" >>=
     writeFile (absentDir </> "Tidepool" </> "Actor.hs")
