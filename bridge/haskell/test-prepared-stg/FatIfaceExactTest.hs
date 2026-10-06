@@ -25,7 +25,7 @@ import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccNa
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.Unique (mkUnique)
-import GHC.Types.Var (varName, isLocalId)
+import GHC.Types.Var (varName, isLocalId, isId)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import System.Directory
   ( createDirectoryIfMissing
@@ -505,10 +505,12 @@ verifyCacheMerges = guardTime $ do
       assert (indexedFound == expected) ("owner-indexed cache selection disagreed with first-match oracle: "
         ++ show (key,selections,indexedFound,expected))
   empty <- mergeLoadCaches []
+  emptyCompleted <- lookupCompletedLoadCache empty (0 :: Int)
+  assert (emptyCompleted == Nothing) "completed-cache lookup issued a missing value"
   absent <- lookupLoadCache empty (0 :: Int) (pure NoExtra)
   assert (absent == NoExtra) "empty selection unexpectedly issued an entry"
-  emptyCompleted <- lookupCompletedLoadCache empty 0
-  assert (emptyCompleted == Nothing) "completed-cache lookup issued a missing value"
+  completedAfterLoad <- lookupCompletedLoadCache empty 0
+  assert (completedAfterLoad == Just NoExtra) "completed-cache lookup lost a newly settled absence"
 
   pending <- newLoadCache
   complete <- newLoadCache
@@ -625,6 +627,8 @@ assertPrivateScope requested result = case result of
       "private closure omitted its selected exported body"
     assert (length helpers == 1 && all (not . isExternalName . varName) helpers)
       "private closure did not retain exactly its genuine internal top helper"
+    assert (all (not . isLocalId) helpers)
+      "private helper control no longer exercises fat-interface GlobalId scope"
     assert (not (any ((== "fatIdentity") . occNameString . nameOccName . varName) identifiers))
       "private closure admitted an unrelated exported group"
   other -> fail ("private defining scope was unavailable: " ++ showLookup other)
@@ -648,7 +652,9 @@ demandedOriginalGroups requested groups = Set.size (walk Set.empty roots)
     edges = [(ordinal, target)
       | (ordinal, binding) <- groups
       , rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-      , free <- nonDetEltsUniqSet (exprSomeFreeVars isLocalId rhs)
+      , free <- nonDetEltsUniqSet (exprSomeFreeVars
+          (\identifier -> isLocalId identifier ||
+            (isId identifier && not (isExternalName (varName identifier)))) rhs)
       , Just target <- [lookup (varName free) owners]]
     walk seen [] = seen
     walk seen (ordinal:pending)

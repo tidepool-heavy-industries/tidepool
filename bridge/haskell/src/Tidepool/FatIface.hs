@@ -341,14 +341,19 @@ indexOriginalBindings version coreBinds =
     privateId identifier = isId identifier && not (isExternalName (varName identifier))
     dependencies = IntMap.map Set.toAscList legacyDependencySets
     localDependencySets = IntMap.mapWithKey localDependencies groups
+    -- Fat-interface decoding constructs GlobalIds even for internal Names.
+    -- Those private tops still require their defining original scope: an
+    -- external recovery request cannot name them. Resolve both representations
+    -- through the full actual-Id census rather than discarding a private edge.
+    needsOriginalScope identifier = isLocalId identifier || privateId identifier
     localDependencies _ binding = Set.fromList
       [ dependency
       | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isLocalId rhs)
+      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars needsOriginalScope rhs)
       , Just dependency <- [localBinderOrdinal identifier] ]
     localBinderOrdinal identifier = case lookupVarEnv ordinalByIdentifier identifier of
       Just ordinal -> Just ordinal
-      Nothing -> error "fat interface contains an actual-local free Id outside its original binder census"
+      Nothing -> error "fat interface contains a private free Id outside its original binder census"
     privateDependencies = IntMap.map Set.toAscList localDependencySets
     rosters = map Set.toAscList $ Shared.privateComponents
       (Map.fromList (IntMap.toAscList localDependencySets))
