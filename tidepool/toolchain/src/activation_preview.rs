@@ -14,6 +14,8 @@ use crate::checked_cell::{
 use crate::declaration_context::ExactDeclarationContext;
 use crate::CompileError;
 
+pub(crate) const ACTIVATION_PREVIEW_PURPOSE: &str = "host-activation-preview3";
+
 #[derive(Clone, Debug)]
 pub struct ActivationPreviewSpecification {
     pub admission_digest: [u8; 32],
@@ -80,7 +82,7 @@ impl ActivationPreviewOffer {
         let baseline = self.values.baseline_authorization();
         let baseline = row(&baseline, 1)?;
         Ok(array([
-            text("host-activation-preview3"),
+            text(ACTIVATION_PREVIEW_PURPOSE),
             text(hex(&self.specification.admission_digest)),
             Value::Integer(self.specification.generation.into()),
             Value::Integer(self.specification.budget.into()),

@@ -558,7 +558,9 @@ pub(crate) fn checked_search_authorization(
             CheckedPurpose::Cell => "cell-check2",
             CheckedPurpose::Item => "checked-item3",
             CheckedPurpose::Display => "checked-display3",
-            CheckedPurpose::ActivationPreview => "host-activation-preview2",
+            CheckedPurpose::ActivationPreview => {
+                crate::activation_preview::ACTIVATION_PREVIEW_PURPOSE
+            }
         }
         .into(),
     );
