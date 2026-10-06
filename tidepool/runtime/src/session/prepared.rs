@@ -5001,9 +5001,9 @@ impl PreparedEngine {
         // A live-payload policy names one field of THIS request Con (the
         // convention's field 1) as the value crossing the runtime boundary
         // by reference. Classify first so a rejected request cannot strand a
-        // newly tenured root without a frame to own it; then mirror the field
+        // newly tenured handle without a frame to own it; then mirror the field
         // before releasing `payload`. `PreparedMachine::park` consumes the
-        // root on both success and refusal.
+        // handle on both success and refusal.
         let live_payload_root =
             match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
                 Ok(root) => root,
@@ -5043,9 +5043,8 @@ impl PreparedEngine {
     /// primitives this layer actually has above the JIT boundary:
     /// `payload`'s OWN fields are read through `PreparedMachine::inspect_outer`
     /// (which mints a fresh handle per managed field), the policy's chosen
-    /// field's handle is adopted into a bare root via
-    /// [`PreparedMachine::take_handle_root`], and every other minted field
-    /// handle is released immediately (`inspect_outer` is non-consuming and
+    /// field's handle stays ledger-owned until atomic parking, and every other
+    /// minted field handle is released immediately (`inspect_outer` is non-consuming and
     /// re-mints on every call, so nothing here is `payload`'s own retained
     /// registration).
     ///
@@ -5063,7 +5062,7 @@ impl PreparedEngine {
         realm: RealmId,
         policy: LivePayloadPolicy,
         request: &HaskellValue,
-    ) -> Result<Option<tidepool_codegen::prepared_program::OwnedManagedRoot>, ExecutionError> {
+    ) -> Result<Option<PreparedHandle>, ExecutionError> {
         let field = match policy {
             LivePayloadPolicy::None => None,
             LivePayloadPolicy::ClosureField(field) => {
@@ -5084,7 +5083,7 @@ impl PreparedEngine {
         for (index, value) in fields.into_iter().enumerate() {
             match value {
                 PreparedResult::Managed(handle) if index == field => {
-                    root = self.machine.take_handle_root(handle)?;
+                    root = Some(handle);
                 }
                 PreparedResult::Managed(handle) => {
                     self.machine.release(handle);

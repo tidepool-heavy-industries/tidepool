@@ -64,7 +64,7 @@ use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
-    ContinuationFrame, HandleClass, OwnedManagedRoot, PreparedFrameEvidence, ResourceLedger,
+    ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger,
 };
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
 use std::cell::RefCell;
@@ -2122,31 +2122,45 @@ impl<'code> PreparedMachine<'code> {
     /// [`ContinuationId`] is the only token that names a successful frame
     /// afterwards; no [`PreparedHandle`] ever is.
     ///
-    /// `live_payload_root` is the frame's already-tenured live payload, if
-    /// any -- callers compute it (`PreparedEngine::tenure_live_payload`
-    /// mirrors `PreparedMachine`'s own pre-park tenure) since minting it
-    /// needs a handle inspection this method has no reason to also know how
-    /// to do. This call consumes that root on every outcome: a successful
-    /// frame stows it, while refusal deregisters it before returning.
+    /// `live_payload` is an already-tenured retained value. Its original
+    /// handle remains in the ledger until this call transfers its slot and
+    /// exact representation into the frame. This call consumes a local
+    /// payload handle on every outcome, settling it on refusal.
     pub fn park(
         &mut self,
         continuation: PreparedHandle,
         realm: RealmId,
-        live_payload_root: Option<OwnedManagedRoot>,
+        live_payload: Option<PreparedHandle>,
         request: ParkRequest,
     ) -> Result<ContinuationId, ExecutionError> {
         let ParkRequest { evidence, .. } = request;
         if let Err(error) = self.ensure_handle_access() {
             self.release(continuation);
+            if let Some(payload) = live_payload {
+                self.release(payload);
+            }
             return Err(error);
         }
-        if live_payload_root
-            .as_ref()
-            .is_some_and(|root| !root.belongs_to(&self.machine))
-        {
+        if live_payload.is_some_and(|payload| payload.raw == continuation.raw) {
             self.release(continuation);
             return Err(ExecutionError::UnknownPreparedHandle);
         }
+        // The payload stays in the handle ledger until this atomic transfer.
+        // No generated call or collection can run before the frame owns it.
+        let live_payload_root = match live_payload {
+            Some(payload) => {
+                let Some(root) =
+                    self.handles
+                        .take_managed_root(payload.raw, payload.rep, &self.machine)
+                else {
+                    self.release(continuation);
+                    self.release(payload);
+                    return Err(ExecutionError::UnknownPreparedHandle);
+                };
+                Some(root)
+            }
+            None => None,
+        };
         let owned_here = self
             .handles
             .handle(continuation.raw)
@@ -2734,25 +2748,6 @@ impl<'code> PreparedMachine<'code> {
     #[must_use]
     pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
         self.handles.handle(handle).map(|entry| entry.slot)
-    }
-
-    /// Detach a handle's rooted slot and exact representation into exclusive custody: the
-    /// handle is removed from this machine's ledger atomically and its
-    /// persistent-root registration remains active. Mirrors
-    /// `PreparedMachine::take_handle_root`; the caller must install the
-    /// returned receipt in a root-owning structure (a parked frame's own
-    /// `live_payload_root` stash, at present -- see
-    /// `PreparedEngine::tenure_live_payload`). Unknown or already-released
-    /// handles return `Ok(None)`. Dropping the receipt releases its persistent
-    /// registration; parking accepts it only on the issuing machine.
-    pub fn take_handle_root(
-        &mut self,
-        handle: PreparedHandle,
-    ) -> Result<Option<OwnedManagedRoot>, ExecutionError> {
-        self.ensure_handle_access()?;
-        Ok(self
-            .handles
-            .take_managed_root(handle.raw, handle.rep, &self.machine))
     }
 
     /// Move a retained handle into the machine's own ROOT scope, so closing
@@ -4450,7 +4445,10 @@ mod tests {
         let bytes = builder.finish(RealmId::ROOT, bytes).unwrap();
         // The generic host builder publishes lifted roots; native ByteArray#
         // results carry the unlifted representation in this same ledger.
-        let root = machine.take_handle_root(bytes).unwrap().unwrap();
+        let root = machine
+            .handles
+            .take_managed_root(bytes.raw(), bytes.rep(), &machine.machine)
+            .unwrap();
         let (root, _) = root.into_parts();
         let bytes = PreparedHandle {
             raw: machine
@@ -9034,13 +9032,11 @@ mod tests {
     ) -> ContinuationId {
         let continuation = machine.retain_top(program, ValueId(2)).unwrap();
         assert!(machine.rehome_handle(continuation.raw(), realm));
-        let root = machine.take_handle_root(payload).unwrap().unwrap();
-        assert!(!machine.release(payload));
-        machine
+        let id = machine
             .park(
                 continuation,
                 realm,
-                Some(root),
+                Some(payload),
                 ParkRequest {
                     principal: PrincipalId::SYSTEM,
                     effect_policy: EffectRunPolicy::SuspendAll,
@@ -9056,7 +9052,9 @@ mod tests {
                     },
                 },
             )
-            .unwrap()
+            .unwrap();
+        assert!(!machine.release(payload));
+        id
     }
 
     #[test]
@@ -9116,7 +9114,74 @@ mod tests {
     }
 
     #[test]
-    fn owned_payload_receipt_settles_abandonment_resume_close_and_foreign_refusal() {
+    fn payload_code_stays_live_before_and_after_atomic_parking() {
+        let (mut machine, producer) = PreparedMachine::new_shared(
+            Arc::new(scalar_returning_function_program()),
+            PreparedMachineOptions { nursery_bytes: 64 },
+        )
+        .unwrap();
+        let runner = install_linked(
+            &mut machine,
+            &scalar_dynamic_caller_program(),
+            ImportBindings::new(),
+        )
+        .unwrap();
+        let payload = machine.retain_top(producer, ValueId(0)).unwrap();
+        let continuation = machine.retain_top(runner, ValueId(0)).unwrap();
+        let realm = RealmId::fresh();
+        assert!(machine.rehome_handle(continuation.raw(), realm));
+        // The payload is the only owner of P; Q's continuation and evidence
+        // cannot keep P alive accidentally. Delay parking across a real GC.
+        let receipt = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(receipt.programs.is_empty());
+        let id = machine
+            .park(
+                continuation,
+                realm,
+                Some(payload),
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::ValueField(0),
+                    evidence: PreparedFrameEvidence {
+                        reply: crate::resource_ledger::PreparedReplyEvidence::AtSite {
+                            owner: runner,
+                            row: 0,
+                        },
+                        runner,
+                        resume_entry: ValueId(0),
+                        continuation_rep: continuation.rep(),
+                    },
+                },
+            )
+            .unwrap();
+        assert!(!machine.release(payload));
+        let receipt = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(receipt.programs.is_empty());
+        let raw = machine.take_live_payload_handle(id).unwrap().unwrap();
+        let claimed = machine.prepared_handle_of(raw).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let result = machine
+            .run_entry_retained(
+                runner,
+                ValueId(0),
+                &[PreparedInput::Managed(claimed)],
+                call,
+                realm,
+            )
+            .unwrap();
+        assert_eq!(result.values, vec![PreparedResult::Scalar(7)]);
+        assert_eq!(machine.close_realm(realm), (1, 1));
+        assert_eq!(machine.total_persistent_roots(), 0);
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs.len(), 2);
+    }
+
+    #[test]
+    fn parked_payload_custody_settles_resume_close_and_foreign_refusal() {
         let code = Arc::new(unlifted_parcel_program());
         let options = PreparedMachineOptions { nursery_bytes: 64 };
         let (mut machine, program) =
@@ -9135,8 +9200,34 @@ mod tests {
         assert!(machine.release(continuation));
         assert_eq!(machine.total_persistent_roots(), 0);
 
-        let abandoned = machine.retain_top(program, ValueId(2)).unwrap();
-        drop(machine.take_handle_root(abandoned).unwrap().unwrap());
+        let evidence = PreparedFrameEvidence {
+            reply: crate::resource_ledger::PreparedReplyEvidence::AtSite {
+                owner: program,
+                row: 0,
+            },
+            runner: program,
+            resume_entry: ValueId(2),
+            continuation_rep: RuntimeRep::LiftedRef,
+        };
+        let request = || ParkRequest {
+            principal: PrincipalId::SYSTEM,
+            effect_policy: EffectRunPolicy::SuspendAll,
+            live_payload: LivePayloadPolicy::None,
+            evidence,
+        };
+        let same = machine.retain_top(program, ValueId(2)).unwrap();
+        assert!(matches!(
+            machine.park(same, RealmId::ROOT, Some(same), request()),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        assert_eq!(machine.total_persistent_roots(), 0);
+        let continuation = machine.retain_top(program, ValueId(2)).unwrap();
+        let mut wrong_rep = machine.retain_top(program, ValueId(2)).unwrap();
+        wrong_rep.rep = RuntimeRep::UnliftedRef;
+        assert!(matches!(
+            machine.park(continuation, RealmId::ROOT, Some(wrong_rep), request()),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
         assert_eq!(machine.total_persistent_roots(), 0);
         for close in [false, true] {
             let payload = machine.retain_top(program, ValueId(2)).unwrap();
@@ -9154,7 +9245,6 @@ mod tests {
             assert_eq!(machine.stowed_roots_count(), 0);
         }
         let payload = machine.retain_top(program, ValueId(2)).unwrap();
-        let root = machine.take_handle_root(payload).unwrap().unwrap();
         let continuation = foreign.retain_top(foreign_program, ValueId(2)).unwrap();
         let evidence = PreparedFrameEvidence {
             reply: crate::resource_ledger::PreparedReplyEvidence::AtSite {
@@ -9169,7 +9259,7 @@ mod tests {
             foreign.park(
                 continuation,
                 RealmId::ROOT,
-                Some(root),
+                Some(payload),
                 ParkRequest {
                     principal: PrincipalId::SYSTEM,
                     effect_policy: EffectRunPolicy::SuspendAll,
@@ -9179,6 +9269,8 @@ mod tests {
             ),
             Err(ExecutionError::UnknownPreparedHandle)
         ));
+        assert_eq!(machine.total_persistent_roots(), 1);
+        assert!(machine.release(payload));
         assert_eq!(machine.total_persistent_roots(), 0);
         assert_eq!(foreign.total_persistent_roots(), 0);
         assert_eq!(foreign.parked_count(), 0);
@@ -9236,16 +9328,12 @@ mod tests {
             panic!("the CAF entry returns one managed payload");
         };
         let payload = *payload;
-        let payload_root = machine
-            .take_handle_root(payload)
-            .expect("the payload handle is accessible")
-            .expect("the payload handle owns a root");
         let other = RealmId::fresh();
         assert!(matches!(
             machine.park(
                 rejected,
                 other,
-                Some(payload_root),
+                Some(payload),
                 ParkRequest {
                     principal: PrincipalId::SYSTEM,
                     effect_policy: EffectRunPolicy::SuspendAll,

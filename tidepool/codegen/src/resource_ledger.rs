@@ -3,7 +3,7 @@
 //! This module owns identities and scope membership for parked continuations,
 //! live value handles, and scope-local cancellation flags. It deliberately
 //! registers identities separately from GC roots. A detached managed-root
-//! receipt retains the issuing machine and settles its registration unless
+//! receipt settles its registration unless
 //! another ledger entry takes custody. Scope closure removes matching entries
 //! first and hands their rooted payloads back to the JIT boundary.
 
@@ -59,10 +59,10 @@ impl PreparedReplyEvidence {
 
 pub(crate) type FrameEvidence = PreparedFrameEvidence;
 
-/// Exclusive custody of a detached persistent root and its exact representation.
-/// Only the issuing machine can park or remint it. Dropping an unclaimed
-/// receipt releases its registration; it never frees the physical root cell.
-pub struct OwnedManagedRoot {
+/// Frame custody of a persistent root and its exact representation. Issued
+/// only during atomic parking; dropping an unclaimed receipt releases its
+/// registration, without freeing the physical root cell.
+pub(crate) struct OwnedManagedRoot {
     slot: Option<RootSlot>,
     rep: RuntimeRep,
     machine: Weak<MachineState>,
@@ -73,10 +73,6 @@ impl OwnedManagedRoot {
         self.slot
             .expect("an owned root has not been consumed")
             .addr()
-    }
-
-    pub(crate) fn belongs_to(&self, machine: &Rc<MachineState>) -> bool {
-        self.machine.ptr_eq(&Rc::downgrade(machine))
     }
 
     pub(crate) fn into_parts(mut self) -> (RootSlot, RuntimeRep) {

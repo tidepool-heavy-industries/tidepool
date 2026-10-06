@@ -61,7 +61,7 @@ pub(crate) use interner::ExternalDescriptors;
 mod answer;
 mod construction;
 mod run;
-pub use crate::resource_ledger::{OwnedManagedRoot, PreparedFrameEvidence, PreparedReplyEvidence};
+pub use crate::resource_ledger::{PreparedFrameEvidence, PreparedReplyEvidence};
 pub use answer::{AnswerBuildError, MAX_ANSWER_DEPTH};
 
 struct ActiveIntrinsicScope<'a> {
