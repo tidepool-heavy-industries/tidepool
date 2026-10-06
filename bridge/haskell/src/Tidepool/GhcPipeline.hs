@@ -197,7 +197,7 @@ import Tidepool.Timing
 import Tidepool.PreparedStg (PreparedModule, pmSitedSiblings, preparedUsesSiteAuthority, prepareModule)
 import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
-import Tidepool.ExecutionSchema (SymbolIdentity)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
   , installRetainedUnfoldingsPlugin, retainedDefinedBy
@@ -235,10 +235,11 @@ import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot, encodePackageImports )
 import Tidepool.ModuleCandidates
-  ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
+  ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
   , readCapturedModuleCandidatesWithGraphs, readModuleCandidatesWithGraphs
   , candidateExecutionSources, candidateOriginalIdentity )
+import Tidepool.OriginalProductRoots (candidateOriginalGlobalDemand)
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -936,12 +937,11 @@ candidateManifestFor _ = Nothing
 -- Body demand is a property of the request, not of whether its environment
 -- came from a session. GHC still loads and finalizes the complete selected
 -- source graph for both tiers; only the native STG handoff is demand-driven.
-nativeBodyTier :: CompilePurpose -> PipelineSelection result -> Map.Map ModuleName candidate -> TierPolicy
-nativeBodyTier purpose selection candidates
-  -- Certification and admitted candidate products promise complete native
-  -- bodies. Ordinary execution needs only the target's Core reference closure.
+nativeBodyTier :: CompilePurpose -> TierPolicy
+nativeBodyTier purpose
+  -- Explicit certification prepares the complete source cohort. Optional
+  -- native originals satisfy ordinary demand without expanding fresh work.
   | originalPurpose purpose == CertifyHomeProductsCompile = OptimizeEveryModule
-  | isJust (candidateManifestFor selection) && not (Map.null candidates) = OptimizeEveryModule
   | otherwise = OptimizeCoreReachable
 
 compilerProducerFor :: PipelineVariant -> Maybe String
@@ -1580,7 +1580,7 @@ data GutsMemoEntry = GutsMemoEntry
 data ModuleObservation
   = CachedObservation ModSummary GutsMemoEntry
   | LoadedObservation LoadedModule
-  | HydratedObservation ModSummary HomeModInfo PackageImportEvidence
+  | HydratedObservation ModSummary HomeModInfo AdmittedSourceCandidate
 
 observationSummary :: ModuleObservation -> ModSummary
 observationSummary (CachedObservation summary _) = summary
@@ -1590,7 +1590,20 @@ observationSummary (HydratedObservation summary _ _) = summary
 observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
 observationFacts (LoadedObservation loaded) = pure (loadedFacts loaded)
-observationFacts (HydratedObservation _ hmi roots) = pure ModuleFacts
+observationFacts (HydratedObservation _ hmi admitted) = pure
+  (hydratedModuleFacts hmi (admittedCandidateRoots admitted))
+    { moduleFactReferences = Set.fromList
+        [ mkModule (stringToUnit (Text.unpack (symbolUnit identity)))
+            (mkModuleName (Text.unpack (symbolModule identity)))
+        | group <- candidateGroups (admittedCandidateOriginal admitted)
+        , global <- candidateGroupGlobals group
+        , let (identity, required) = candidateOriginalGlobalDemand global
+        , required ] }
+
+-- Checked HPT metadata alone has no admitted native outline. Executable
+-- observations add their already authenticated candidate demand above.
+hydratedModuleFacts :: HomeModInfo -> PackageImportEvidence -> ModuleFacts
+hydratedModuleFacts hmi roots = ModuleFacts
   { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
   , moduleFactReferences = Set.empty
   , moduleFactPackageImports = roots
@@ -2088,7 +2101,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw path
-    let bodyTier = nativeBodyTier (pvPurpose variant) selection acceptedCandidates
+    let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
     -- includes its session bootstrap because 'runCompile' captures
@@ -2609,6 +2622,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   || gmePreparationCycle entry == preparationCycle
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
+              observeCandidate modSum candidate = do
+                let name = ms_mod_name modSum
+                hmi <- case lookupHpt (hsc_HPT certifiedEnv) name of
+                  Just value -> pure value
+                  Nothing -> liftIO $ ioError $ userError
+                    "certified candidate interface absent during module loop"
+                recordValidity modSum True
+                when captureProducts $ liftIO $
+                  modifyIORef' productInterfacesRef (Map.insert name (hm_iface hmi))
+                pure (HydratedObservation modSum hmi candidate)
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case bodyTier of
             OptimizeEveryModule -> do
@@ -2617,15 +2640,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 let mn = ms_mod_name modSum
                 case Map.lookup mn acceptedCandidates of
                   Just candidate -> do
-                    hmi <- case lookupHpt (hsc_HPT certifiedEnv) mn of
-                      Just value -> pure value
-                      Nothing -> liftIO $ ioError $ userError
-                        "certified candidate interface absent during module loop"
-                    recordValidity modSum True
+                    observation <- observeCandidate modSum candidate
                     recordExecutableValidity modSum True
-                    when captureProducts $ liftIO $
-                      modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
-                    pure (HydratedObservation modSum hmi (admittedCandidateRoots candidate), Nothing, Nothing)
+                    pure (observation, Nothing, Nothing)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -2684,26 +2701,29 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               -- unprepared owners retain their same interface/Core pair.
               observations' <- forM (zip summaries interfaceUses) $ \(modSum, interfaceUse) -> do
                 cpBeforeModule plan modSum
-                cached <- lookupValidMemo modSum
-                case cached of
-                  Just entry
-                    | interfaceReady interfaceUse modSum entry -> do
-                    let loaded = payloadLoaded modSum (gmePayload entry)
-                    recordValidity modSum True
-                    rememberFinalized loaded
-                    when (needsPreparedInterface interfaceUse) $
-                      installPreparedInterface (ms_mod_name modSum)
-                        (finalizedHomeModInfo (loadedFinalized loaded))
-                    pure (CachedObservation modSum entry)
-                  _ -> do
-                    recordValidity modSum False
-                    loaded <- finalizeCurrent interfaceUse modSum
-                    rememberFinalized loaded
-                    pure (LoadedObservation loaded)
+                case Map.lookup (ms_mod_name modSum) acceptedCandidates of
+                  Just candidate -> observeCandidate modSum candidate
+                  Nothing -> do
+                    cached <- lookupValidMemo modSum
+                    case cached of
+                      Just entry
+                        | interfaceReady interfaceUse modSum entry -> do
+                        let loaded = payloadLoaded modSum (gmePayload entry)
+                        recordValidity modSum True
+                        rememberFinalized loaded
+                        when (needsPreparedInterface interfaceUse) $
+                          installPreparedInterface (ms_mod_name modSum)
+                            (finalizedHomeModInfo (loadedFinalized loaded))
+                        pure (CachedObservation modSum entry)
+                      _ -> do
+                        recordValidity modSum False
+                        loaded <- finalizeCurrent interfaceUse modSum
+                        rememberFinalized loaded
+                        pure (LoadedObservation loaded)
               facts <- liftIO (mapM observationFacts observations')
-              -- Desugared Core captures resolved dictionaries and therefore
-              -- includes instance-only dependencies in the selected closure.
-              -- All owners are already finalized; this only selects STG work.
+              -- Fresh Core and admitted native outlines retain defining owners,
+              -- including dictionaries and reexports. All source owners have
+              -- been checked; this closure selects only fresh STG work.
               forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
               let referencesByMod = Map.fromList
                     [ (ms_mod_name (observationSummary observation), Set.fromList
@@ -2744,24 +2764,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             requestIdentity preparationCycle
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
-                  compileReachable _interfaceUse observation moduleFacts = do
-                    let modSum = observationSummary observation
-                    loaded <- case observation of
-                      LoadedObservation captured -> pure captured
-                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
-                      HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
+                  compileReachable loaded moduleFacts = do
+                    let modSum = loadedSummary loaded
                     rememberFinalized loaded
                     let r = loadedOutput loaded
                         finalized = loadedFinalized loaded
                     prepared <- prepareFinalized loaded
                     rememberExecutable modSum r prepared finalized moduleFacts
                     pure [(r, prepared)]
-                  validationOnly observation moduleFacts = do
-                    let modSum = observationSummary observation
-                    loaded <- case observation of
-                      LoadedObservation value -> pure value
-                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
-                      HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
+                  validationOnly loaded moduleFacts = do
+                    let modSum = loadedSummary loaded
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert (ms_mod_name modSum)
@@ -2809,9 +2821,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
                       memoMissTrace modSum reason (Just entry)
-                      compileReachable interfaceUse observation moduleFacts
-                    LoadedObservation _ -> compileReachable interfaceUse observation moduleFacts
-                    HydratedObservation _ _ _ -> compileReachable interfaceUse observation moduleFacts
+                      compileReachable (payloadLoaded modSum (gmePayload entry)) moduleFacts
+                    LoadedObservation loaded -> compileReachable loaded moduleFacts
+                    HydratedObservation _ _ _ -> do
+                      recordExecutableValidity modSum True
+                      pure []
                   -- Keep an existing executable only while its dependencies
                   -- and required interface still match. An unreachable source
                   -- needs validation facts, so preparing a new body here would
@@ -2827,7 +2841,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         when (needsPreparedInterface interfaceUse) $
                           forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
                         pure []
-                    _ -> validationOnly observation moduleFacts >> pure []
+                    CachedObservation _ entry ->
+                      validationOnly (payloadLoaded modSum (gmePayload entry)) moduleFacts >> pure []
+                    LoadedObservation loaded -> validationOnly loaded moduleFacts >> pure []
+                    HydratedObservation _ _ _ -> do
+                      recordExecutableValidity modSum True
+                      pure []
               pure (observations', map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
           totalTcMs   <- liftIO (readIORef tcMsRef)
           totalLoweringMs <- liftIO (readIORef loweringMsRef)
@@ -2976,7 +2995,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
                 then do
                   forM_ loaded $ \hmi -> do
-                    facts <- liftIO (observationFacts (HydratedObservation summary hmi (maybe emptyPackageImports admittedCandidateRoots (Map.lookup (ms_mod_name summary) acceptedCandidates))))
+                    let facts = hydratedModuleFacts hmi (maybe emptyPackageImports admittedCandidateRoots
+                          (Map.lookup (ms_mod_name summary) acceptedCandidates))
                     liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
                   pure Nothing
                 else do

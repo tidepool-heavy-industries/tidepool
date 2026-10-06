@@ -1,9 +1,10 @@
 //! The real parser, whole-program worker, and sequential Rust certifier share
 //! fresh originals across slots before any native effect can execute.
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+
+use super::compiler_test_support::OwnedEnvironment;
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
@@ -16,37 +17,6 @@ use tidepool_runtime::session::{
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_toolchain::checked_cell::CheckedCellSpecification;
-
-struct OwnedEnvironment {
-    name: &'static str,
-    previous: Option<OsString>,
-}
-
-impl OwnedEnvironment {
-    fn set(name: &'static str, value: Option<&Path>) -> Self {
-        let previous = std::env::var_os(name);
-        // This test is serial and owns these compiler environment inputs.
-        unsafe {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-        Self { name, previous }
-    }
-}
-
-impl Drop for OwnedEnvironment {
-    fn drop(&mut self) {
-        // Restore the same serial test's original compiler environment.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-}
 
 #[test]
 #[serial_test::serial]

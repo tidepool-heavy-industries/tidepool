@@ -3,6 +3,10 @@
     clippy::expect_used,
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
+#[path = "../candidate_native_demand.rs"]
+mod candidate_native_demand;
+#[path = "../compiler_test_support.rs"]
+mod compiler_test_support;
 #[path = "../checked_quoter_program.rs"]
 mod checked_quoter_program;
 #[path = "../prepared_execution.rs"]

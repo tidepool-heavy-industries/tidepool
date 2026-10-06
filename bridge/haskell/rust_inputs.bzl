@@ -17,3 +17,4 @@ def declare_rust_test_inputs():
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_Old_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/Old.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_Public_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/Public.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_prepared_stg_FreerResumeExpectations_json", src = "test-prepared-stg/FreerResumeExpectations.json", visibility = ["PUBLIC"])
+    export_file(name = "rust_input_test_source_boot_fixtures_OptionalSupport_hs", src = "test-source-boot/fixtures/OptionalSupport.hs", visibility = ["PUBLIC"])

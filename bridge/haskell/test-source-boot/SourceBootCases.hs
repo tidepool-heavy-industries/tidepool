@@ -3867,8 +3867,7 @@ exactBashMetadata effects = withTiming $ withScratch $ \work -> do
       fail "exact bash native compilation lost its quote or authorized ordinary source reuse"
   putStrLn "exact bash: GHC metadata parity, retained bytecode, native compilation and ordinary source reuse refusal passed"
 
--- Input identity follows checked imports even when authenticated candidates
--- cause the same source request to produce additional unused native products.
+-- Checked inputs and fresh native demand are independent of optional offers.
 packageInputs :: IO ()
 packageInputs = withScratch $ \work -> do
   forM_ ["OptionalRoot", "OptionalSupport", "OptionalAnchor", "OptionalWarmer", "OptionalWiredRoot", "OptionalWiredSupport", "OptionalPrimExt"] $ \name ->
@@ -3876,8 +3875,9 @@ packageInputs = withScratch $ \work -> do
   withResidentPipelineSelected [work] $ \compile -> do
     let root selection = compile selection Set.empty GeneralCompile Nothing
           (work </> "OptionalRoot.hs") [] Nothing
-    cold <- root (PreparedProducts Nothing)
-    unless ("OptionalSupport" `notElem` preparedNames cold) $
+    (cold, coldLog) <- captureDiagnostics $ root (PreparedProducts Nothing)
+    unless ("OptionalSupport" `notElem` preparedNames cold
+        && " prepared_compiles=1 " `isInfixOf` coldLog) $
       fail "cold input fixture did not leave its unused support validation-only"
     warmer <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "OptionalWarmer.hs") [] Nothing
@@ -3888,11 +3888,38 @@ packageInputs = withScratch $ \work -> do
       fail "warmer input fixture lacks both fresh finalized candidate owners"
     warmerFixture <- capturePreparedFixture work warmer
     writeGenuineCandidateManifestFor ["OptionalAnchor"] work warmerFixture
-    warm <- root (PreparedProducts (Just (manifest work)))
+    (warm, warmLog) <- captureDiagnostics $ root (PreparedProducts (Just (manifest work)))
     unless (map candidateModule (pprAcceptedCandidates warm) == ["OptionalAnchor"]) $
       fail "warm input fixture did not admit its authenticated anchor candidate"
-    unless ("OptionalSupport" `elem` preparedNames warm) $
-      fail "warm input fixture did not retain the executable support product"
+    unless (preparedNames warm == ["OptionalRoot"]
+        && " prepared_compiles=1 " `isInfixOf` warmLog
+        && not ("tidepool-canonical-frontend module=OptionalAnchor" `isInfixOf` warmLog)
+        && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules warm)) $
+      fail "accepted unrelated candidate expanded native demand or skipped source finalization"
+    let anchorPath = work </> "OptionalAnchor.hs"
+    anchorSource <- BS.readFile anchorPath
+    BS.writeFile anchorPath (anchorSource <> BSC.pack "\n-- changed current source refuses the original offer\n")
+    (refused, refusedLog) <- captureDiagnostics (root (PreparedProducts (Just (manifest work))))
+      `finally` BS.writeFile anchorPath anchorSource
+    unless (null (pprAcceptedCandidates refused)
+        && preparedNames refused == ["OptionalRoot"]
+        && " prepared_compiles=1 " `isInfixOf` refusedLog
+        && all (`Map.member` pprFinalizedModules refused)
+          (map mkModuleName ["OptionalAnchor", "OptionalSupport"])) $
+      fail "refused candidate expanded native demand or skipped source checking"
+    (demanded, demandLog) <- captureDiagnostics $
+      compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile Nothing
+        (work </> "OptionalWarmer.hs") [] Nothing
+    unless (map candidateModule (pprAcceptedCandidates demanded) == ["OptionalAnchor"]
+        && Set.fromList (preparedNames demanded) == Set.fromList ["OptionalSupport", "OptionalWarmer"]
+        && not ("tidepool-canonical-frontend module=OptionalAnchor" `isInfixOf` demandLog)
+        && Map.member (mkModuleName "OptionalAnchor") (pprProductInterfaces demanded)) $
+      fail "demanded candidate was ignored or replayed through its source/native frontend"
+    certified <- compile (PreparedProducts (Just (manifest work))) Set.empty CertifyHomeProductsCompile Nothing
+      (work </> "OptionalRoot.hs") [] Nothing
+    unless (map candidateModule (pprAcceptedCandidates certified) == ["OptionalAnchor"]
+        && Set.fromList (preparedNames certified) == Set.fromList ["OptionalSupport", "OptionalRoot"]) $
+      fail "explicit certification failed to prepare the complete fresh source cohort"
     coldBody <- proof work "cold" cold
     warmBody <- proof work "warm" warm
     verifyCollectivePackageProof work cold
@@ -3962,7 +3989,7 @@ packageInputs = withScratch $ \work -> do
     proof work "primitive-extension" primExt >>= \case
       (CodecCheckedInputs _ _,_) -> pure ()
       _ -> fail "real primitive-extension interface did not retain a complete input proof"
-  putStrLn "package inputs: cold/warm native divergence, identical checked closure, candidate roots, omission refusal and wired fresh/candidate refusal passed"
+  putStrLn "package inputs: absent/accepted/refused offers preserve native demand and checked closure; demanded candidate, explicit certification, package roots and omission refusals passed"
   where
     normalized result = renderDependencyEvidence ((preparedFreshDependencies result)
       { dependencyModules = sortOn (\node -> (dependencyModuleUnit node, dependencyModuleName node))
@@ -3982,6 +4009,10 @@ sessionNativeBodyDemand :: IO ()
 sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
   forM_ ["OptionalRoot", "OptionalSupport", "OptionalAnchor", "OptionalWarmer"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
+  candidateProducer <- runPipelineSelected (PreparedProducts Nothing)
+    (work </> "OptionalWarmer.hs") [work]
+  candidateFixture <- capturePreparedFixture work candidateProducer
+  writeGenuineCandidateManifestFor ["OptionalAnchor"] work candidateFixture
   writeFile (work </> "OptionalRoot.hs") $ unlines
     [ "module OptionalRoot where"
     , "import OptionalSupport ()"
@@ -4012,12 +4043,12 @@ sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
     QuietBinIFace NormalCompression (sessionHiPath work valueOwner) valueIface
   renameFile valueSource (valueSource ++ ".retained-source")
   let scope = emptySessionScope {ssRoot=work, ssValIfaces=[valueOwner]}
-      compileTarget compile name = compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      compileTarget compile offer name = compile (PreparedProducts offer) Set.empty GeneralCompile
         (Just scope) (work </> name) [work] Nothing
       injectedValueOwner result = isJust (lookupHpt
         (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "Tidepool.Session.Val.G2"))
   withResidentPipelineSelected [work] $ \compile -> do
-    first <- compileTarget compile "OptionalRoot.hs"
+    first <- compileTarget compile Nothing "OptionalRoot.hs"
     unless (preparedNames first == ["OptionalRoot"]
         && injectedValueOwner first
         && fmap renderType (prResultType (pprPipelineResult first)) == Just "Int"
@@ -4025,19 +4056,26 @@ sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
           (map mkModuleName ["OptionalSupport", "OptionalAnchor"])) $
       fail ("session request prepared unrelated native bodies or skipped source finalization: "
         ++ show (preparedNames first))
-    later <- compileTarget compile "OptionalWarmer.hs"
-    unless (all (`elem` preparedNames later) ["OptionalWarmer", "OptionalSupport", "OptionalAnchor"]
+    offered <- compileTarget compile (Just (manifest work)) "OptionalRoot.hs"
+    unless (preparedNames offered == ["OptionalRoot"]
+        && map candidateModule (pprAcceptedCandidates offered) == ["OptionalAnchor"]
+        && injectedValueOwner offered
+        && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules offered)) $
+      fail "session candidate expanded native demand or lost checked source/value owners"
+    later <- compileTarget compile (Just (manifest work)) "OptionalWarmer.hs"
+    unless (Set.fromList (preparedNames later) == Set.fromList ["OptionalWarmer", "OptionalSupport"]
+        && map candidateModule (pprAcceptedCandidates later) == ["OptionalAnchor"]
         && injectedValueOwner later
         && fmap renderType (prResultType (pprPipelineResult later)) == Just "Int"
         && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules later)) $
       fail ("later session request did not activate its newly demanded source bodies: "
         ++ show (preparedNames later))
     writeFile (work </> "OptionalSupport.hs") "module OptionalSupport where\noptional ::\n"
-    refused <- try (compileTarget compile "OptionalRoot.hs")
+    refused <- try (compileTarget compile (Just (manifest work)) "OptionalRoot.hs")
       :: IO (Either SomeException PreparedPipelineResult)
     unless (case refused of Left _ -> True; Right _ -> False) $
       fail "session demand skipped invalid source in an unused imported module"
-  putStrLn "session native bodies: unused imports stay validation-only, then prepare when a later target demands them"
+  putStrLn "session native bodies: absent/accepted offers keep unused imports checked and validation-only; later demand prepares complete source bodies; malformed unused source refuses"
 
 -- Reuse real compiled owner bytes and real installed roots. Copies plus an
 -- isolated finder make mutation tests local without changing the Nix packages.

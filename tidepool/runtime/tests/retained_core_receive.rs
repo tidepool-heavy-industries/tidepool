@@ -1,6 +1,7 @@
 //! Genuine source-only originals gain native groups through exact consumption.
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+use super::compiler_test_support::selected_lexical_closure;
 
 use tidepool_repr::execution_schema::Group;
 use tidepool_toolchain::artifact_inventory::ArtifactKind;
@@ -9,9 +10,7 @@ use tidepool_toolchain::artifacts::{
 };
 use tidepool_toolchain::cache::ProductAvailability;
 use tidepool_toolchain::certified_products::ProductOrigin;
-use tidepool_toolchain::declaration_join::{
-    ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
-};
+use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
 use tidepool_toolchain::CompileError;
 
 #[test]
@@ -82,48 +81,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     // Retain the original consumed home-import graph. A lexical selection is
     // separate from native demand, and its complete interface closure is
     // admitted by the production inventory owner.
-    let mut pending = vec![owner.clone()];
-    let mut lexical = BTreeMap::new();
-    while let Some(selected) = pending.pop() {
-        if lexical.contains_key(&selected) {
-            continue;
-        }
-        let module = inventory
-            .iter()
-            .find(|module| {
-                !module.boot && module.unit == selected.unit && module.module == selected.module
-            })
-            .expect("selected original has consumed compiler evidence");
-        let imports = module
-            .imports
-            .iter()
-            .filter_map(|import| {
-                let path = import.selected.as_ref()?;
-                let imported = inventory
-                    .iter()
-                    .find(|candidate| {
-                        candidate.source == *path
-                            && candidate.module == import.module
-                            && candidate.boot == import.boot
-                    })
-                    .expect("selected home import has an exact consumed owner");
-                Some(ExactModuleIdentity {
-                    unit: imported.unit.clone(),
-                    module: imported.module.clone(),
-                })
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        pending.extend(imports.iter().cloned());
-        lexical.insert(
-            selected.clone(),
-            ExactLexicalNode {
-                owner: selected,
-                imports,
-            },
-        );
-    }
+    let lexical = selected_lexical_closure(&original, vec![owner.clone()]);
     assert!(lexical[&owner].imports.contains(&support));
     let roots = lexical.keys().cloned().collect::<Vec<_>>();
     let interfaces = original
