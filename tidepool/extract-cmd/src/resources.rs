@@ -71,7 +71,12 @@ fn cgroup_directory() -> Option<(PathBuf, PathBuf)> {
         let fields: Vec<_> = details.split_whitespace().collect();
         let root = PathBuf::from(unescape_mount(fields.get(3)?));
         let mount = PathBuf::from(unescape_mount(fields.get(4)?));
-        let suffix = Path::new(member).strip_prefix(root).ok()?;
+        // Membership is relative to a cgroup namespace. A mount can retain
+        // its host-side root while /proc/self/cgroup names the namespace root.
+        let suffix = Path::new(member)
+            .strip_prefix(&root)
+            .or_else(|_| Path::new(member).strip_prefix("/"))
+            .ok()?;
         Some((mount.clone(), mount.join(suffix)))
     })
 }
@@ -136,6 +141,42 @@ fn cpuset_count(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cgroup_mount_roots_and_namespace_membership_select_actual_ancestors() {
+        let host_mount = "31 25 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n";
+        let (mount, current) =
+            cgroup_directory_from("0::/user.slice/worker\n", host_mount).unwrap();
+        assert_eq!(mount, Path::new("/sys/fs/cgroup"));
+        assert_eq!(current, Path::new("/sys/fs/cgroup/user.slice/worker"));
+        let ancestors: Vec<_> = current
+            .ancestors()
+            .take_while(|path| path.starts_with(&mount))
+            .collect();
+        assert_eq!(
+            ancestors,
+            [
+                Path::new("/sys/fs/cgroup/user.slice/worker"),
+                Path::new("/sys/fs/cgroup/user.slice"),
+                Path::new("/sys/fs/cgroup")
+            ]
+        );
+        let namespace_mount = "31 25 0:27 /docker/owner /sys/fs/cgroup rw - cgroup2 cgroup rw\n";
+        assert_eq!(
+            cgroup_directory_from("0::/task\n", namespace_mount)
+                .unwrap()
+                .1,
+            Path::new("/sys/fs/cgroup/task")
+        );
+        let escaped_mount = r"31 25 0:27 /owner /some\040path rw - cgroup2 cgroup rw";
+        assert_eq!(
+            cgroup_directory_from("0::/owner/task\n", escaped_mount)
+                .unwrap()
+                .1,
+            Path::new("/some path/task")
+        );
+        assert!(cgroup_directory_from("0::/../outside\n", host_mount).is_none());
+    }
+
     #[test]
     fn limits_preserve_zero_and_reject_malformed_evidence() {
         assert_eq!(finite_limit("max"), None);

@@ -710,6 +710,8 @@ pub(crate) struct DaemonConfig {
     /// unset). Only `--persistent` runs more than one; see that constant's
     /// doc comment.
     pub workers: Option<usize>,
+    pub foreground_jobs: Option<usize>,
+    pub preparation_jobs: Option<usize>,
 }
 
 fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
@@ -722,6 +724,8 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
     let mut run_id = None;
     let mut log_path = None;
     let mut workers = None;
+    let mut foreground_jobs = None;
+    let mut preparation_jobs = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let option = arg
@@ -743,6 +747,21 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
                 )
             }
             "--log-path" => log_path = Some(PathBuf::from(next(&mut args, option)?)),
+            "--foreground-jobs" | "--preparation-jobs" => {
+                let count = number(&mut args, option)?;
+                if count == 0 || count > u64::from(u32::MAX) {
+                    return Err(FrontendError::Usage(format!(
+                        "{option} requires a positive 32-bit job count"
+                    )));
+                }
+                let count = usize::try_from(count)
+                    .map_err(|_| FrontendError::Usage(format!("{option} is too large")))?;
+                if option == "--foreground-jobs" {
+                    foreground_jobs = Some(count);
+                } else {
+                    preparation_jobs = Some(count);
+                }
+            }
             "--workers" => {
                 let count = number(&mut args, option)?;
                 let count = usize::try_from(count)
@@ -771,6 +790,8 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
         run_id,
         log_path,
         workers,
+        foreground_jobs,
+        preparation_jobs,
     })
 }
 
@@ -953,6 +974,8 @@ mod tests {
             run_id: None,
             log_path: None,
             workers: None,
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1020,6 +1043,8 @@ mod tests {
             run_id: None,
             log_path: None,
             workers: None,
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1094,6 +1119,30 @@ mod tests {
         assert!(configuration.persistent);
         assert_eq!(configuration.workers, Some(1));
         assert_eq!(configuration.rss_ceiling_mb, Some(7168));
+    }
+
+    #[test]
+    fn compiler_job_limits_are_explicit_positive_allowances() {
+        for count in [2, 4, 8, 16] {
+            let config = parse_daemon(&[
+                "--socket".into(),
+                "/tmp/compiler.sock".into(),
+                "--foreground-jobs".into(),
+                count.to_string().into(),
+                "--preparation-jobs".into(),
+                count.to_string().into(),
+            ])
+            .unwrap();
+            assert_eq!(config.foreground_jobs, Some(count));
+            assert_eq!(config.preparation_jobs, Some(count));
+        }
+        assert!(parse_daemon(&[
+            "--socket".into(),
+            "/tmp/compiler.sock".into(),
+            "--preparation-jobs".into(),
+            "0".into()
+        ])
+        .is_err());
     }
 
     #[test]

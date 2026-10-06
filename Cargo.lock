@@ -3598,6 +3598,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "libc",
+ "proptest",
  "serde_json",
  "tempfile",
  "tidepool-atomic-write",

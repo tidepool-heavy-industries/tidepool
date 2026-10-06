@@ -1123,6 +1123,9 @@ impl CompilerEndpoint {
                     if matches!(error, daemon::DaemonError::Busy) {
                         return SpawnError::capacity(socket.as_os_str());
                     }
+                    if matches!(error, daemon::DaemonError::CapacityRefusal(_)) {
+                        return SpawnError::capacity_refusal(socket.as_os_str(), error.to_string());
+                    }
                     let permits_rebind = error.permits_rebind();
                     let source = io::Error::other(error);
                     if permits_rebind {
@@ -1247,6 +1250,12 @@ impl CompilerEndpoint {
                         }
                         if matches!(error, daemon::DaemonError::Busy) {
                             return Err(SpawnError::capacity(socket.as_os_str()));
+                        }
+                        if matches!(error, daemon::DaemonError::CapacityRefusal(_)) {
+                            return Err(SpawnError::capacity_refusal(
+                                socket.as_os_str(),
+                                error.to_string(),
+                            ));
                         }
                         let source = io::Error::other(error.to_string());
                         if error.permits_rebind() {
@@ -2383,6 +2392,23 @@ mod tests {
             "stale exit0 alone is not close evidence"
         );
         assert!(retirement.worker_report.is_none());
+    }
+
+    #[test]
+    fn nested_default_transaction_keeps_explicit_outer_workload() {
+        with_compiler_transaction_for_workload(CompileWorkload::Preparation, || {
+            with_compiler_transaction(|| {
+                assert_eq!(
+                    TRANSACTION_SCOPE.with(|scope| scope.borrow().as_ref().unwrap().workload),
+                    CompileWorkload::Preparation
+                );
+            });
+            assert!(TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()));
+        });
+        assert!(TRANSACTION_SCOPE.with(|scope| scope.borrow().is_none()));
+        let error = SpawnError::capacity_refusal("daemon.sock", "no background capacity".into());
+        assert!(!error.permits_rebind());
+        assert_eq!(error.source.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]

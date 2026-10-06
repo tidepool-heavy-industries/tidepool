@@ -258,6 +258,31 @@ const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
 /// Capacity is transient and never permits rebinding to a direct worker.
 const BUSY: u8 = 2;
+const CAPACITY_REFUSAL: u8 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapacityRefusal {
+    PreparationUnsupported,
+    MemoryUnavailable,
+}
+
+impl CapacityRefusal {
+    fn wire_tag(self) -> u8 {
+        match self {
+            Self::PreparationUnsupported => 0,
+            Self::MemoryUnavailable => 1,
+        }
+    }
+    fn read(reader: &mut impl Read) -> Result<Self, DaemonError> {
+        match read_exact_or_crash(reader, 1)?[0] {
+            0 => Ok(Self::PreparationUnsupported),
+            1 => Ok(Self::MemoryUnavailable),
+            other => Err(DaemonError::Protocol(format!(
+                "unknown resource refusal {other}"
+            ))),
+        }
+    }
+}
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
 type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
 
@@ -442,6 +467,7 @@ pub(crate) enum DaemonError {
     NotAccepted(String),
     /// No work was admitted before the caller's admission deadline.
     Busy,
+    CapacityRefusal(CapacityRefusal),
     /// The caller stopped waiting; acceptance may have raced cancellation.
     Cancelled,
     /// The daemon acknowledged acceptance before the enclosed response error.
@@ -456,7 +482,10 @@ pub(crate) enum DaemonError {
 impl DaemonError {
     #[cfg(test)]
     pub(crate) fn is_not_accepted(&self) -> bool {
-        matches!(self, Self::Connect(_) | Self::NotAccepted(_) | Self::Busy)
+        matches!(
+            self,
+            Self::Connect(_) | Self::NotAccepted(_) | Self::Busy | Self::CapacityRefusal(_)
+        )
     }
 
     pub(crate) fn permits_rebind(&self) -> bool {
@@ -480,6 +509,8 @@ impl std::fmt::Display for DaemonError {
             DaemonError::Busy => {
                 write!(f, "compiler daemon remained busy until admission deadline")
             }
+            DaemonError::CapacityRefusal(CapacityRefusal::PreparationUnsupported) => write!(f, "compiler daemon has no separate preparation capacity; foreground work remains available"),
+            DaemonError::CapacityRefusal(CapacityRefusal::MemoryUnavailable) => write!(f, "compiler daemon cannot admit the retained worker footprint within current memory headroom"),
             DaemonError::Cancelled => write!(f, "compiler daemon admission was cancelled"),
             DaemonError::AfterAcceptance(error) => {
                 write!(f, "daemon response failed after acceptance: {error}")
@@ -596,6 +627,9 @@ fn execute_once(
             Err(DaemonError::NotAccepted(message))
         }
         BUSY => Err(DaemonError::Busy),
+        CAPACITY_REFUSAL => Err(DaemonError::CapacityRefusal(CapacityRefusal::read(
+            &mut stream,
+        )?)),
         other => Err(DaemonError::Protocol(format!(
             "unknown acceptance marker {other}"
         ))),
@@ -737,6 +771,9 @@ fn begin_transaction_once(
             Err(DaemonError::NotAccepted(message))
         }
         BUSY => Err(DaemonError::Busy),
+        CAPACITY_REFUSAL => Err(DaemonError::CapacityRefusal(CapacityRefusal::read(
+            &mut stream,
+        )?)),
         other => Err(DaemonError::Protocol(format!(
             "unknown transaction acceptance marker {other}"
         ))),
@@ -806,6 +843,9 @@ fn explicit_refusal(stream: &mut UnixStream) -> Option<DaemonError> {
     let marker = read_exact_or_crash(stream, 1).ok()?;
     match marker[0] {
         BUSY => Some(DaemonError::Busy),
+        CAPACITY_REFUSAL => CapacityRefusal::read(stream)
+            .ok()
+            .map(DaemonError::CapacityRefusal),
         REJECTED => read_frame(stream)
             .ok()
             .map(|frame| DaemonError::NotAccepted(String::from_utf8_lossy(&frame).into_owned())),
@@ -1239,6 +1279,15 @@ fn service_transaction(
     Ok(ConnectionOutcome::Continue)
 }
 
+fn validate_worker_footprint(workers: usize, budget_mb: u64) -> Result<(), FrontendError> {
+    let footprint = (workers as u64).saturating_mul(WARM_WORKER_MB);
+    if footprint > budget_mb {
+        return Err(FrontendError::Daemon(format!(
+            "configured compiler pool needs {footprint} MiB of retained worker capacity; actual admitted memory budget is {budget_mb} MiB")));
+    }
+    Ok(())
+}
+
 pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
     let epoch = boot_epoch()?;
@@ -1253,7 +1302,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         .map_err(FrontendError::Io)?;
     let rotate_after = config.rotate_after.unwrap_or(DEFAULT_ROTATE_AFTER);
     let available_mb = available_memory_mb();
-    let budget_mb = default_memory_budget_mb();
+    let capacity = crate::resources::capacity();
+    let budget_mb = default_memory_budget_mb().min(capacity.memory_mb);
     let sizing = worker_sizing_from_budget(budget_mb);
     // Ordinary (non-`--persistent`) daemon mode always runs a single worker
     // and ignores `--workers` — see `DEFAULT_WORKER_COUNT`'s doc comment for
@@ -1264,6 +1314,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
     } else {
         1
     };
+    validate_worker_footprint(worker_count, budget_mb)?;
     // `--rss-ceiling-mb` keeps its historical per-worker meaning; only its
     // *default* changes, from a fixed figure divided by worker count to the
     // ceiling `worker_sizing_from_budget` derives alongside that count (see
@@ -1390,6 +1441,8 @@ struct ResourceAdmission {
     worker_rss: Vec<AtomicU64>,
     alive: Vec<AtomicBool>,
     memory_budget_mb: u64,
+    foreground_jobs: usize,
+    preparation_jobs: usize,
 }
 
 struct ResourcePermit {
@@ -1413,7 +1466,17 @@ impl Drop for ResourcePermit {
 }
 
 impl ResourceAdmission {
+    #[cfg(test)]
     fn new(workers: usize, memory_budget_mb: u64) -> std::sync::Arc<Self> {
+        Self::with_limits(workers, memory_budget_mb, 2, 4)
+    }
+
+    fn with_limits(
+        workers: usize,
+        memory_budget_mb: u64,
+        foreground_jobs: usize,
+        preparation_jobs: usize,
+    ) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             usage: Mutex::new(ResourceUsage {
                 slots: vec![0; workers],
@@ -1422,7 +1485,44 @@ impl ResourceAdmission {
             worker_rss: (0..workers).map(|_| AtomicU64::new(0)).collect(),
             alive: (0..workers).map(|_| AtomicBool::new(true)).collect(),
             memory_budget_mb,
+            foreground_jobs,
+            preparation_jobs,
         })
+    }
+
+    fn refusal(
+        &self,
+        workload: CompileWorkload,
+        capacity: crate::resources::ResourceCapacity,
+    ) -> Option<CapacityRefusal> {
+        let live_workers = self
+            .alive
+            .iter()
+            .filter(|alive| alive.load(Ordering::Acquire))
+            .count();
+        if workload == CompileWorkload::Preparation
+            && (live_workers < 2 || capacity.cpus <= capacity.cpus.min(self.foreground_jobs))
+        {
+            return Some(CapacityRefusal::PreparationUnsupported);
+        }
+        let resident: u64 = self
+            .worker_rss
+            .iter()
+            .map(|rss| rss.load(Ordering::Acquire))
+            .sum();
+        let projected: u64 = self
+            .worker_rss
+            .iter()
+            .zip(&self.alive)
+            .filter(|(_, alive)| alive.load(Ordering::Acquire))
+            .map(|(rss, _)| rss.load(Ordering::Acquire).max(WARM_WORKER_MB))
+            .sum();
+        if projected > self.memory_budget_mb
+            || projected > capacity.memory_mb.saturating_add(resident)
+        {
+            return Some(CapacityRefusal::MemoryUnavailable);
+        }
+        None
     }
 
     fn acquire_with_capacity(
@@ -1481,7 +1581,7 @@ impl ResourceAdmission {
         {
             return None;
         }
-        let foreground_cpus = capacity.cpus.min(2);
+        let foreground_cpus = capacity.cpus.min(self.foreground_jobs);
         let reserved =
             if workload == CompileWorkload::Preparation && usage.slots[reserved_slot] == 0 {
                 foreground_cpus
@@ -1493,8 +1593,8 @@ impl ResourceAdmission {
             .saturating_sub(usage.cpus)
             .saturating_sub(reserved);
         let cpus = available.min(match workload {
-            CompileWorkload::Foreground => 2,
-            CompileWorkload::Preparation => 16,
+            CompileWorkload::Foreground => self.foreground_jobs,
+            CompileWorkload::Preparation => self.preparation_jobs,
         });
         if cpus == 0 {
             return None;
@@ -1581,6 +1681,12 @@ fn admit_job_observed(
     next_admission_id: &mut AdmissionId,
     capacity: crate::resources::ResourceCapacity,
 ) -> Admission {
+    if let Some(reason) = resources.refusal(workload, capacity) {
+        connection
+            .write_all(&[CAPACITY_REFUSAL, reason.wire_tag()])
+            .ok();
+        return Admission::Continue;
+    }
     let permit = if let Some(busy) = ordinary_busy {
         if busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1673,9 +1779,11 @@ fn serve_workers(
         .unzip();
     let ordinary_busy = (!config.persistent).then(|| std::sync::Arc::new(AtomicBool::new(false)));
     let retire = AtomicBool::new(false);
-    let resources = ResourceAdmission::new(
+    let resources = ResourceAdmission::with_limits(
         worker_count,
-        (worker_count as u64).saturating_mul(rss_ceiling_mb.max(WARM_WORKER_MB)),
+        default_memory_budget_mb().min(crate::resources::capacity().memory_mb),
+        config.foreground_jobs.unwrap_or(2),
+        config.preparation_jobs.unwrap_or(4),
     );
     std::thread::scope(|scope| -> Result<u8, FrontendError> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -2961,8 +3069,103 @@ mod tests {
     }
 
     #[test]
+    fn serial_configuration_progresses_foreground_and_refuses_preparation_immediately() {
+        let resources = ResourceAdmission::new(1, WARM_WORKER_MB);
+        let capacity = admission_capacity(1, WARM_WORKER_MB);
+        assert_eq!(
+            resources.refusal(CompileWorkload::Preparation, capacity),
+            Some(CapacityRefusal::PreparationUnsupported)
+        );
+        assert_eq!(
+            resources.refusal(CompileWorkload::Foreground, capacity),
+            None
+        );
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(
+            foreground.grant,
+            ExecutionGrant {
+                jobs: 1,
+                capabilities: 1
+            }
+        );
+        drop(foreground);
+        assert!(resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .is_some());
+        let two_workers = ResourceAdmission::new(2, 2 * WARM_WORKER_MB);
+        assert_eq!(
+            two_workers.refusal(
+                CompileWorkload::Preparation,
+                admission_capacity(1, 2 * WARM_WORKER_MB)
+            ),
+            Some(CapacityRefusal::PreparationUnsupported)
+        );
+        assert!(validate_worker_footprint(1, WARM_WORKER_MB).is_ok());
+        assert!(validate_worker_footprint(1, WARM_WORKER_MB - 1).is_err());
+        assert!(validate_worker_footprint(3, 2 * WARM_WORKER_MB).is_err());
+    }
+
+    #[test]
+    fn typed_resource_refusal_is_known_unsubmitted_without_retry_or_rebind() {
+        let dir = tempfile::tempdir().unwrap();
+        for transaction in [false, true] {
+            let socket = dir.path().join(if transaction {
+                "transaction.sock"
+            } else {
+                "request.sock"
+            });
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut header = [0; 40];
+                connection.read_exact(&mut header).unwrap();
+                if transaction {
+                    assert_eq!(&header[..8], TRANSACTION);
+                    assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [1]);
+                } else {
+                    assert_eq!(&header[..8], REQUEST);
+                    read_request(&mut connection).unwrap();
+                }
+                connection
+                    .write_all(&[
+                        CAPACITY_REFUSAL,
+                        CapacityRefusal::PreparationUnsupported.wire_tag(),
+                    ])
+                    .unwrap();
+            });
+            let error = if transaction {
+                begin_transaction_for_workload(
+                    &socket,
+                    &[7; 32],
+                    CompileWorkload::Preparation,
+                    None,
+                )
+                .unwrap_err()
+            } else {
+                execute(
+                    &socket,
+                    &[7; 32],
+                    Path::new("/tmp"),
+                    &ExtractRequest::default().worker_argv(),
+                )
+                .unwrap_err()
+            };
+            server.join().unwrap();
+            assert!(matches!(
+                error,
+                DaemonError::CapacityRefusal(CapacityRefusal::PreparationUnsupported)
+            ));
+            assert!(error.is_not_accepted());
+            assert!(!error.permits_rebind());
+            assert!(!error.was_accepted());
+        }
+    }
+
+    #[test]
     fn preparation_reserves_stable_warm_foreground_slot_and_aggregate_cpus() {
-        let resources = ResourceAdmission::new(3, 3 * WARM_WORKER_MB);
+        let resources = ResourceAdmission::with_limits(3, 3 * WARM_WORKER_MB, 2, 16);
         let capacity = admission_capacity(32, 3 * WARM_WORKER_MB);
         let first = resources
             .acquire_with_capacity(CompileWorkload::Preparation, capacity)
@@ -3026,51 +3229,36 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn admission_histories_never_loan_foreground_or_exceed_cpu_capacity() {
-        // Independent history oracle derives usage from live permit values,
-        // rather than from the admission owner's mutable counters.
-        for cpus in 1..=32 {
-            for seed in 0..16u64 {
-                let resources = ResourceAdmission::new(4, 4 * WARM_WORKER_MB);
-                let capacity = admission_capacity(cpus, 4 * WARM_WORKER_MB);
-                let mut held: Vec<ResourcePermit> = Vec::new();
-                let mut choice = seed;
-                for _ in 0..100 {
-                    choice = choice.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    if choice % 3 == 0 && !held.is_empty() {
-                        let index = (choice as usize) % held.len();
-                        held.remove(index);
-                    } else {
-                        let workload = if choice % 2 == 0 {
-                            CompileWorkload::Foreground
-                        } else {
-                            CompileWorkload::Preparation
-                        };
-                        if let Some(permit) = resources.acquire_with_capacity(workload, capacity) {
-                            held.push(permit);
-                        }
+    proptest::proptest! {
+        #[test]
+        fn admission_histories_never_loan_foreground_or_exceed_cpu_capacity(
+            cpus in 1usize..=32,
+            history in proptest::collection::vec((0u8..3, 0usize..12), 1..100)
+        ) {
+            // The oracle recomputes occupancy/CPU from live permits. Shrinking
+            // preserves explicit acquisition/release operations and logical handles.
+            let resources = ResourceAdmission::new(4, 4 * WARM_WORKER_MB);
+            let capacity = admission_capacity(cpus, 4 * WARM_WORKER_MB);
+            let mut held: Vec<ResourcePermit> = Vec::new();
+            for (operation, index) in history {
+                match operation {
+                    0 if !held.is_empty() => { held.remove(index % held.len()); },
+                    1 | 2 => {
+                        let workload = if operation == 1 { CompileWorkload::Foreground } else { CompileWorkload::Preparation };
+                        if let Some(permit) = resources.acquire_with_capacity(workload, capacity) { held.push(permit); }
                     }
-                    let used: usize = held
-                        .iter()
-                        .map(|permit| permit.grant.capabilities as usize)
-                        .sum();
-                    assert!(used <= cpus);
-                    assert!(held
-                        .iter()
-                        .filter(|permit| permit.workload == CompileWorkload::Preparation)
-                        .all(|permit| permit.slot != 0));
-                    if !held.iter().any(|permit| permit.slot == 0) {
-                        assert!(
-                            used <= cpus.saturating_sub(cpus.min(2)),
-                            "background consumed foreground capacity"
-                        );
-                    }
-                    let actual = resources.usage.lock().unwrap();
-                    assert_eq!(actual.cpus, used);
-                    assert_eq!(actual.jobs, held.len());
-                    assert_eq!(actual.slots.iter().sum::<usize>(), held.len());
+                    _ => {},
                 }
+                let used: usize = held.iter().map(|permit| permit.grant.capabilities as usize).sum();
+                proptest::prop_assert!(used <= cpus);
+                proptest::prop_assert!(held.iter().filter(|permit| permit.workload == CompileWorkload::Preparation).all(|permit| permit.slot != 0));
+                if !held.iter().any(|permit| permit.slot == 0) {
+                    proptest::prop_assert!(used <= cpus.saturating_sub(cpus.min(2)));
+                }
+                let actual = resources.usage.lock().unwrap();
+                proptest::prop_assert_eq!(actual.cpus, used);
+                proptest::prop_assert_eq!(actual.jobs, held.len());
+                proptest::prop_assert_eq!(actual.slots.iter().sum::<usize>(), held.len());
             }
         }
     }
@@ -4310,6 +4498,8 @@ tidepool-target phase=desugar module=Execute\n",
             run_id: None,
             log_path: None,
             workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let trace = CapturedWriter::default();
         let subscriber = tracing_subscriber(
@@ -4804,6 +4994,8 @@ tidepool-target phase=desugar module=Execute\n",
                 run_id: None,
                 log_path: None,
                 workers: Some(1),
+                foreground_jobs: None,
+                preparation_jobs: None,
             };
             let (settled_tx, settled_rx) = std::sync::mpsc::channel();
             let server = std::thread::spawn(move || {
@@ -4914,6 +5106,8 @@ tidepool-target phase=desugar module=Execute\n",
                 run_id: None,
                 log_path: None,
                 workers: Some(1),
+                foreground_jobs: None,
+                preparation_jobs: None,
             };
             let (settled_tx, settled_rx) = std::sync::mpsc::channel();
             let server = std::thread::spawn(move || {
@@ -5123,6 +5317,8 @@ fn main() {{
             // worker's sentinel-file trick to deterministically hang on its
             // first invocation and answer on its second.
             workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -5278,6 +5474,8 @@ fn main() {{
             run_id: None,
             log_path: None,
             workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -5434,6 +5632,8 @@ fn main() {{
             // queued requests in a specific order relative to `STOP` and
             // relies on there being exactly one worker to serve them.
             workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -5603,6 +5803,8 @@ fn main() {{
             run_id: None,
             log_path: None,
             workers: Some(2),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5655,6 +5857,8 @@ fn main() {{
             run_id: None,
             log_path: None,
             workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5718,6 +5922,8 @@ fn main() {{
             run_id: None,
             log_path: None,
             workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || serve(&config, prepared));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5799,6 +6005,8 @@ fn main() {{
             run_id: None,
             log_path: None,
             workers: Some(2),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -5919,6 +6127,8 @@ fn main() {
             run_id: None,
             log_path: None,
             workers: Some(2),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -5986,6 +6196,8 @@ fn main() {
             run_id: None,
             log_path: None,
             workers: Some(2),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);
@@ -6139,6 +6351,8 @@ fn main() {{
             run_id: None,
             log_path: None,
             workers: Some(2),
+            foreground_jobs: None,
+            preparation_jobs: None,
         };
         let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
         let ready_deadline = Instant::now() + Duration::from_secs(10);

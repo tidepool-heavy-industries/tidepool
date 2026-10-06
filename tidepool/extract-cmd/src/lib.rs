@@ -357,6 +357,14 @@ impl SpawnError {
         }
     }
 
+    fn capacity_refusal(bin: impl AsRef<OsStr>, message: String) -> Self {
+        Self {
+            bin: bin.as_ref().to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::WouldBlock, message),
+            settlement: Settlement::Capacity,
+        }
+    }
+
     fn indeterminate(bin: impl AsRef<OsStr>, source: std::io::Error) -> Self {
         Self {
             bin: bin.as_ref().to_owned(),

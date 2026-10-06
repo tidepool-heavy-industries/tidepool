@@ -18,6 +18,10 @@ pub use crate::turn_observations::{decode_turn_nominal_heads, decode_turn_yield_
 use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
+pub use tidepool_extract_cmd::{
+    with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
+    CompileWorkload,
+};
 use tidepool_repr::execution_schema::DecodeLimits;
 use tidepool_repr::execution_schema::{PreparedProgram, RawModuleProduct};
 use tidepool_repr::serial::{read_metadata, MetaWarnings};
