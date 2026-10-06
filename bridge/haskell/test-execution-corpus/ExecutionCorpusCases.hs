@@ -49,7 +49,7 @@ import Tidepool.PreparedFormatting
 import Tidepool.PreparedTime (TimeAuthority, resolveTimeAuthority)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Metadata
-  (collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO, wiredInDataCons)
+  (metadataForConstructors, targetBindingHasIO)
 import Tidepool.CborEncode (encodeMetadata)
 import Tidepool.Json (jsonString)
 import Tidepool.DependencyEvidence
@@ -149,9 +149,8 @@ runProbe compile rawArguments = do
               _ | not (null metadataTargets) -> fail ("metadata target missing or ambiguous: " ++ name)
               _ -> pure []
           let result = pprPipelineResult prepared
-              metadata = mergeMetaPreserving
-                [wiredInDataCons, collectDataCons (prTyCons result), map dcToMeta constructors]
-              hasIO = any (targetBindingHasIO (prBinds result)) metadataNames
+          metadata <- either (fail . show) pure (metadataForConstructors (prTyCons result) constructors)
+          let hasIO = any (targetBindingHasIO (prBinds result)) metadataNames
           BS.writeFile (outputDir </> "meta.cbor")
             (encodeMetadata metadata hasIO (Text.pack <$> prCapturedType result)
               (map Text.pack (prWarnings result)))

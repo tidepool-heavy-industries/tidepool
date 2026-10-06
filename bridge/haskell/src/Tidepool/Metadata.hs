@@ -1,12 +1,11 @@
 module Tidepool.Metadata
   ( DCMeta(..)
-  , collectDataCons
-  , dcToMeta
-  , mergeMetaPreserving
+  , MetadataConflict(..), metadataForConstructors
   , targetBindingHasIO
   , wiredInDataCons
   ) where
 
+import Control.Monad (foldM)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
@@ -30,7 +29,7 @@ import GHC.Data.FastString (unpackFS)
 import GHC (HsBang(..), HsSrcBang(..), SrcStrictness(..), SrcUnpackedness(..))
 import GHC.Types.FieldLabel (flLabel)
 import GHC.Types.Id (idName, idType)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var.Env (emptyTidyEnv)
@@ -50,7 +49,12 @@ data DCMeta = DCMeta
   , dcmFieldLabels :: ![Text]
   , dcmTypeName    :: !Text
   , dcmFieldTypes  :: ![Text]
-  }
+  } deriving (Eq, Show)
+
+data MetadataConflict
+  = MetadataNominalConflict Word64 Text Text
+  | MetadataFieldConflict DCMeta DCMeta
+  deriving (Eq, Show)
 
 dcToMeta :: DataCon -> DCMeta
 dcToMeta dc = DCMeta
@@ -102,13 +106,22 @@ renderMetaType = T.pack . renderWithContext (defaultSDocContext { sdocSuppressUn
 renderFieldType :: Type -> Text
 renderFieldType ft = renderMetaType (ppr (tidyOpenType emptyTidyEnv ft))
 
-mergeMetaPreserving :: [[DCMeta]] -> [DCMeta]
-mergeMetaPreserving sources = Map.elems $ Map.fromList
-  [ ((dcmId e, dcmQualName e), e) | e <- reverse (concat sources) ]
-
-collectDataCons :: [TyCon] -> [DCMeta]
-collectDataCons tycons =
-  [ dcToMeta dc | tc <- tycons, isAlgTyCon tc, dc <- tyConDataCons tc ]
+-- Metadata is issued from the same compiler constructors as executable
+-- projection. Distinct nominal owners or conflicting rows never overwrite one
+-- another, even when their runtime id or public qualified spelling collides.
+metadataForConstructors :: [TyCon] -> [DataCon] -> Either MetadataConflict [DCMeta]
+metadataForConstructors tycons native = map snd . Map.elems <$> foldM step Map.empty allConstructors
+ where
+  allConstructors = wiredInConstructors ++ [dc | tc <- tycons, isAlgTyCon tc, dc <- tyConDataCons tc] ++ native
+  step known dc =
+    let row = dcToMeta dc
+        name = dataConName dc
+        nominal = (nameModule_maybe name, nameOccName name)
+    in case Map.lookup (dcmId row) known of
+      Just (oldNominal,_) | oldNominal /= nominal ->
+        Left (MetadataNominalConflict (dcmId row) (renderMetaType (ppr oldNominal)) (renderMetaType (ppr nominal)))
+      Just (_,old) | old /= row -> Left (MetadataFieldConflict old row)
+      _ -> Right (Map.insert (dcmId row) (nominal,row) known)
 
 targetBindingHasIO :: [CoreBind] -> String -> Bool
 targetBindingHasIO binds name = case filter isTarget (concatMap binders binds) of
@@ -123,7 +136,10 @@ targetBindingHasIO binds name = case filter isTarget (concatMap binders binds) o
       _ -> maybe False (\(_, _, _, result) -> hasIOType result) (splitFunTy_maybe ty)
 
 wiredInDataCons :: [DCMeta]
-wiredInDataCons = map dcToMeta $
+wiredInDataCons = map dcToMeta wiredInConstructors
+
+wiredInConstructors :: [DataCon]
+wiredInConstructors =
   [ consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon, unitDataCon
   , intDataCon, wordDataCon, doubleDataCon, floatDataCon
   ] ++ map (tupleDataCon Boxed) [2 .. 5]

@@ -23,6 +23,7 @@ tests = testGroup "source-boot"
   , testCase "execution source decode" $ executionSourceDecodeChecks
   , testCase "execution source resolution budget" $ executionSourceResolutionBudgetChecks
   , testCase "exact scope binders" $ exactScopeBinders
+  , testCase "original constructor metadata closure" $ withEffects originalConstructorMetadataClosure
   , testCase "original package projection" $ originalPackageProjection
   , testCase "original product projection" $ originalProjectionProducts
   , testCase "native graph scheduling equality" nativeGraphSchedulingEquality

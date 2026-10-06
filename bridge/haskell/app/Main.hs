@@ -71,7 +71,7 @@ import Tidepool.CompilerProducts
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedRootIdentity)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
@@ -144,9 +144,7 @@ import Tidepool.FatIface
 import Tidepool.SessionArtifacts
   ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
   , emitHostBindingInterface )
-import Tidepool.Metadata
-  ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
-  , wiredInDataCons )
+import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 import Tidepool.TurnSource
@@ -659,6 +657,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
   productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
   inventory <- maybe (fail "current original admission did not issue its inventory") pure
     (preparedCurrentOriginalInventory productContext)
+  originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
   let products = preparedProductInventory productContext
       roots = Set.fromList (map (projectionEntry . contextFor) targets
         ++ projectionAuxiliaryRoots firstContext)
@@ -732,7 +731,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
       witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
         maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
       pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
-    pure (PreparedArtifact target program bytes constructors sealedSites)
+    pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites)
   pure (artifacts, Just productContext)
 
 -- The pure preview boundary preserves only this chosen executable-demand
@@ -791,9 +790,8 @@ writePreparedSidecars
   -> [PreparedArtifact] -> IO ()
 writePreparedSidecars delivery outDir binds tycons capturedType warnings artifacts = do
   let constructors = concatMap paConstructors artifacts
-      metadata = mergeMetaPreserving
-        [ wiredInDataCons, collectDataCons tycons, map dcToMeta constructors ]
-      hasIO = any (targetBindingHasIO binds . paTarget) artifacts
+  metadata <- either (ioError . userError . show) pure (metadataForConstructors tycons constructors)
+  let hasIO = any (targetBindingHasIO binds . paTarget) artifacts
       metaBytes = encodeMetadata metadata hasIO capturedType warnings
   BS.writeFile (outDir </> "meta.cbor") metaBytes
   case delivery of

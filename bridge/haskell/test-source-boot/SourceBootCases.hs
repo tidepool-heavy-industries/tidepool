@@ -49,7 +49,7 @@ import GHC.Types.SrcLoc (noSrcSpan)
 import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
 import GHC.Types.Id (idName, idType, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
-import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
+import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, nameUnique, mkExternalName, mkInternalName)
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
@@ -103,7 +103,7 @@ import Tidepool.CompilerProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
   , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
-  , preparedProductInventory
+  , preparedProductInventory, preparedProductModules
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
@@ -112,7 +112,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts)
@@ -134,6 +134,9 @@ import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
 import GHC.Driver.Env (hsc_home_unit)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
+import GHC.Core.DataCon qualified as DC
+import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
+import Tidepool.Metadata (DCMeta(..), MetadataConflict(..), metadataForConstructors, wiredInDataCons)
 import GHC.Core.TyCon (tyConDataCons)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import GHC.Types.Name (nameModule_maybe)
@@ -2250,6 +2253,84 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
     ranAfterRetry <- doesFileExist marker
     when ranAfterRetry (fail "extension-only metadata retry executed its unused quoter")
   putStrLn "execution values: protected value quoter refuses missing execution capability before GHC load"
+
+-- The effect sends a Text request but never observes its Text answer. Native
+-- originals, rather than incidental target use, own the constructor census.
+originalConstructorMetadataClosure :: FilePath -> IO ()
+originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work -> do
+  forM_ ["OriginalTextRequest.hs", "OriginalTextConsumer.hs"] $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  produced <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "OriginalTextConsumer.hs") [work,effects,"lib"] Nothing
+  let env = prHscEnv (pprPipelineResult produced)
+      interfaces = pprProductInterfaces produced
+      entryOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextConsumer")
+      requestOwner = mkModule (stringToUnit "main") (mkModuleName "OriginalTextRequest")
+  context <- prepareCompilerProjectionContext produced Map.empty entryOwner "result" [] Nothing
+  (_, completed) <- prepareOriginalProducts env Nothing interfaces context Set.empty (pprModules produced)
+  let modules = preparedProductModules completed
+  cache <- newOriginalProjectionCollector
+  cold <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
+  warm <- forM modules (projectCachedOriginalHomeModuleProducts cache env interfaces context)
+  unless (not (null cold) && all (not . fst) cold && all fst warm) $
+    fail "original constructor control did not exercise fresh lowering and every warm cache hit"
+  let settled rows withdrawn = fst (settleOriginalHomeModuleProductsWithoutOwners env Set.empty withdrawn (map snd rows))
+      coldProducts = settled cold Set.empty
+      warmProducts = settled warm Set.empty
+      check label products = do
+        cons <- either (fail . show) pure (preparedModuleProductConstructors products)
+        rows <- either (fail . show) pure (metadataForConstructors [] cons)
+        let declared = Set.fromList [constructorHostId con
+              | (_,Right groups) <- preparedModuleProductOutcomes products
+              , group <- groups, con <- projectedConstructors (projectedBody group)]
+            issued = Set.fromList (map dcmId rows)
+        unless (Set.union declared (Set.fromList (map dcmId wiredInDataCons)) == issued) $
+          fail (label ++ " metadata omitted an actual executable original constructor")
+        pure (cons,rows)
+  (cons,coldRows) <- check "cold" coldProducts
+  (_,warmRows) <- check "warm" warmProducts
+  unless (coldRows == warmRows) $ fail "warm original projection lost compiler constructor provenance"
+  let textRows = [row | row <- coldRows, dcmQualName row == "Data.Text.Text"]
+  case textRows of
+    [row] | dcmArity row == 3 && dcmFieldTypes row == ["Array","Int","Int"] -> pure ()
+    _ -> fail "effect-only original request lacks the native Text decoder's exact metadata"
+  case [row | row <- coldRows, dcmQualName row == "Data.Either.Right"] of
+    [row] | dcmArity row == 1 -> pure ()
+    _ -> fail "ignored Either effect answer lost its native Right constructor metadata"
+  (_,withdrawnRows) <- check "withdrawn" (settled warm (Set.singleton requestOwner))
+  unless (case lookup requestOwner (preparedModuleProductOutcomes (settled warm (Set.singleton requestOwner))) of
+      Just (Left _) -> True
+      _ -> False) $ fail "withdrawn original owner was admitted through its cached constructor census"
+  duplicateRows <- either (fail . show) pure (metadataForConstructors [] (cons ++ cons))
+  unless (duplicateRows == coldRows) $ fail "equal actual constructor provenance changed metadata"
+  text <- case [con | con <- cons, getOccString (DC.dataConName con) == "Text",
+          maybe False ((== "Data.Text.Internal") . moduleNameString . moduleName) (nameModule_maybe (DC.dataConName con))] of
+    con : _ -> pure con
+    [] -> fail "successful native Text metadata lost its compiler declaration"
+  let name = DC.dataConName text
+      clone incomingName tag = DC.mkDataCon incomingName False incomingName (DC.dataConSrcBangs text)
+        [] [] [] (DC.dataConConcreteTyVars text) [] [] [] (DC.dataConOrigArgTys text)
+        (DC.dataConOrigResTy text) NoPromInfo (DC.dataConTyCon text)
+        tag [] (DC.dataConWorkId text)
+        (case DC.dataConBoxer text of
+          Nothing -> DC.NoDataConRep
+          Just boxer -> DC.DCR (DC.dataConWrapId text) boxer (DC.dataConRepArgTys text)
+            (DC.dataConRepStrictness text) (DC.dataConImplBangs text))
+      conflict = clone name (DC.dataConTag text + 1)
+      foreignName = mkExternalName (nameUnique name)
+        (mkModule (stringToUnit "wrong-text-unit") (mkModuleName "Data.Text.Internal"))
+        (nameOccName name) (nameSrcSpan name)
+      foreignOwner = clone foreignName (DC.dataConTag text)
+  forM_ [[text,conflict],[conflict,text]] $ \incoming ->
+    case metadataForConstructors [] incoming of
+      Left (MetadataFieldConflict _ _) -> pure ()
+      failure -> fail ("conflicting actual constructor metadata did not refuse: " ++ show failure)
+  forM_ [[text,foreignOwner],[foreignOwner,text]] $ \incoming ->
+    case metadataForConstructors [] incoming of
+      Left (MetadataNominalConflict _ _ _) -> pure ()
+      failure -> fail ("distinct exact constructor owners did not refuse their shared host id: " ++ show failure)
+  unless (Set.fromList (map dcmId withdrawnRows) `Set.isSubsetOf` Set.fromList (map dcmId coldRows)) $
+    fail "withdrawing an original introduced unrelated constructor metadata"
 
 originalPackageProjection :: IO ()
 originalPackageProjection = withScratch $ \work -> do
