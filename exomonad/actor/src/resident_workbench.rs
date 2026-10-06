@@ -381,6 +381,8 @@ pub struct ActorWorkbenchSource {
     request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
     request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     toolset_support: Arc<[PathBuf]>,
+    toolset_support_manifests:
+        Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
     toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
     preparation_rows: Arc<[Vec<crate::ActorEffectKey>]>,
 }
@@ -444,9 +446,42 @@ impl ActorWorkbenchSource {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let resolved = crate::agent_spec::resolve(roots.clone(), self.spec.as_deref());
-        let source_revision = resolved
-            .source_closure_revision()
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let source_revision = if let Some(manifests) = source.source_manifests() {
+            if manifests.len() != source.include_paths().len() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "source owner's ordered manifest count differs from its roots".into(),
+                ));
+            }
+            if self.toolset_support_manifests.get().is_none() {
+                let captured = self
+                    .toolset_support
+                    .iter()
+                    .map(|root| {
+                        let files = tidepool_toolchain::cache::source_root_manifest(root)
+                            .map_err(|error| error.to_string())?;
+                        tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                // A failed acquisition is retryable. Concurrent successful
+                // acquisitions observe the same immutable deployment roots.
+                let _ = self.toolset_support_manifests.set(captured);
+            }
+            let support = self
+                .toolset_support_manifests
+                .get()
+                .expect("support acquired");
+            let ordered = support.iter().chain(manifests).cloned().collect::<Vec<_>>();
+            tidepool_toolchain::cache::source_manifests_identity(
+                b"exomonad-agent-spec-ordered-source-closure-v1",
+                &ordered,
+            )
+        } else {
+            resolved
+                .source_closure_revision()
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+        };
         let entry = resolved.entry.clone().unwrap_or_else(|| {
             if supported_effects.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
                 "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
@@ -509,6 +544,7 @@ impl ActorWorkbenchSource {
         Self {
             preamble: preamble.into(),
             toolset_support: base_include.clone().into(),
+            toolset_support_manifests: Default::default(),
             base_include: base_include.into(),
             workbench_imports: SourceImports::from_specs([
                 "qualified Data.Set as Set",
@@ -531,6 +567,7 @@ impl ActorWorkbenchSource {
     #[must_use]
     pub fn with_toolset_support_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.toolset_support = roots.into();
+        self.toolset_support_manifests = Default::default();
         self
     }
 

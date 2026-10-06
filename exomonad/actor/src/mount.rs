@@ -72,6 +72,12 @@ impl Eq for ActorSourceImports {}
 pub trait RetainedSourceLayer: Send + Sync {
     fn identities(&self) -> &[String];
     fn include_paths(&self) -> &[PathBuf];
+
+    /// Complete ordered manifests acquired by the immutable source owner.
+    /// Unprepared/developer owners may omit them and retain fresh inspection.
+    fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+        None
+    }
 }
 
 /// Issuing authority belonging to one configured host source service.
@@ -142,6 +148,11 @@ impl CheckpointSourceLayer {
         self.retained
             .as_ref()
             .map_or(&[], |source| &source.include_paths)
+    }
+
+    #[must_use]
+    pub fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
+        self.retained.as_ref()?._owner.source_manifests()
     }
 
     #[must_use]
