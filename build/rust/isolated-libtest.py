@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -637,6 +638,63 @@ def diagnostic_summaries(artifact_root):
     return summaries
 
 
+def launch_file_identity(path):
+    """Hash the selected file before launch, fencing replacement during capture."""
+    selected = Path(path).absolute()
+    with selected.open('rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(f'launch input is not a regular file: {selected}')
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        after = os.fstat(stream.fileno())
+    current = selected.stat()
+    def stamp(value):
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    if stamp(before) != stamp(after) or stamp(after) != stamp(current):
+        raise RuntimeError(f'launch input changed during hash capture: {selected}')
+    return {'status': 'captured_before_execution', 'path': str(selected),
+            'sha256': digest, 'bytes': before.st_size, 'device': before.st_dev,
+            'inode': before.st_ino, 'mtime_ns': before.st_mtime_ns, 'ctime_ns': before.st_ctime_ns}
+
+
+def capture_launch_inputs(binary, environment, declared_resources):
+    started = time.monotonic_ns()
+    resources = {}
+    result = {'schema': 1, 'capture_started_ns': started, 'executable': None,
+              'resources': resources, 'status': 'UNKNOWN',
+              'resource_selection': 'declared resource environment plus explicitly bound frontend/worker'}
+    try:
+        result['executable'] = launch_file_identity(binary)
+        names = set(declared_resources).union(
+            name for name in ('TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER') if environment.get(name))
+        for name in sorted(names):
+            value = environment.get(name)
+            if not value:
+                raise RuntimeError(f'declared launch input is missing: {name}')
+            path = Path(value).absolute()
+            if path.is_dir():
+                resources[name] = {'path': str(path), 'status': 'UNKNOWN',
+                                   'reason': 'directory contents require their owning resource manifest'}
+            else:
+                resources[name] = launch_file_identity(path)
+        for reference in [result['executable'], *resources.values()]:
+            if reference['status'] == 'UNKNOWN':
+                continue
+            current = Path(reference['path']).stat()
+            observed = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+            captured = tuple(reference[key] for key in ('device', 'inode', 'bytes', 'mtime_ns', 'ctime_ns'))
+            if observed != captured:
+                raise RuntimeError(f"launch input changed before capture completed: {reference['path']}")
+        result['status'] = 'captured_before_execution'
+        result['resource_hashes_complete'] = all(value['status'] != 'UNKNOWN' for value in resources.values())
+    except (OSError, RuntimeError) as error:
+        result['error'] = str(error)
+    result['capture_finished_ns'] = time.monotonic_ns()
+    result['compiler_bindings'] = {name: resources.get(name, {}).get('status', 'UNKNOWN')
+                                   for name in ('TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER')}
+    return result
+
+
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             artifact_root=None, compiler_mode='direct', declared_resources=()):
     args = [binary, '--exact', name, '--nocapture']
@@ -672,7 +730,18 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     service_record = {} if service_slice is not None else None
     if record is not None and service_record is not None:
         record['delegated_service'] = service_record
+    launch_inputs = capture_launch_inputs(binary, environment or os.environ, declared_resources)
+    if record is not None:
+        record['launch_inputs'] = launch_inputs
+    if artifact_root is not None:
+        (artifact_root / 'launch-inputs.json').write_text(json.dumps(launch_inputs, indent=2) + '\n')
+    if launch_inputs['status'] == 'UNKNOWN':
+        if record is not None:
+            record.update(status='launch_identity_failed', elapsed_ns=time.monotonic_ns() - started)
+        return False, f"could not capture launch inputs: {launch_inputs['error']}", ''
     try:
+        if record is not None:
+            record['execution_started_ns'] = time.monotonic_ns()
         execution_kwargs = {'environment': environment} if environment is not None else {}
         if service_slice is not None and declared_resources:
             execution_kwargs['declared_resources'] = declared_resources

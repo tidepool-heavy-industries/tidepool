@@ -79,19 +79,93 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_owned_compiler_receives_case_root_without_changing_libtest_selection(self):
         root = Path(self.tmp.name) / 'resident-artifacts'
+        frontend = Path(self.tmp.name) / 'declared-frontend'
+        frontend.write_text('declared compiler frontend')
         def run(args, timeout, environment=None):
-            self.assertEqual(args, ['/declared/frontend', '--owned-daemon-run',
+            self.assertEqual(args, [str(frontend), '--owned-daemon-run',
                 str(root / 'compiler'), '--', str(self.binary), '--exact', 'suite::works', '--nocapture'])
             self.assertEqual(environment['TIDEPOOL_TEST_ARTIFACT_ROOT'], str(root))
             (root / 'compiler').mkdir()
             (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
             return completed_process(args, 0,
                 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
-        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': '/declared/frontend'}), \
+        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
              patch.object(runner, 'execute', side_effect=run):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, artifact_root=root, compiler_mode='owned-resident')
         self.assertTrue(passed)
+
+    def test_launch_hashes_capture_actual_binary_and_compiler_files_before_execution(self):
+        frontend, worker = [Path(self.tmp.name) / name for name in ('frontend', 'worker')]
+        frontend.write_bytes(b'frontend at launch')
+        worker.write_bytes(b'worker at launch')
+        record = {}
+        def run(args, timeout):
+            captured = record['launch_inputs']
+            self.assertEqual(captured['executable']['sha256'], hashlib.sha256(self.binary.read_bytes()).hexdigest())
+            self.assertEqual(captured['resources']['TIDEPOOL_EXTRACT']['sha256'], hashlib.sha256(frontend.read_bytes()).hexdigest())
+            self.assertEqual(captured['resources']['TIDEPOOL_EXTRACT_WORKER']['sha256'], hashlib.sha256(worker.read_bytes()).hexdigest())
+            # A later relink cannot replace the already captured launch identity.
+            self.binary.write_bytes(b'new link after launch')
+            return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        launch_hash = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend), 'TIDEPOOL_EXTRACT_WORKER': str(worker)}), \
+             patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record)
+        self.assertTrue(passed)
+        self.assertEqual(record['launch_inputs']['executable']['sha256'], launch_hash)
+        self.assertTrue(record['launch_inputs']['resource_hashes_complete'])
+
+    def test_launch_input_disappearance_or_replacement_refuses_execution(self):
+        digest = runner.hashlib.file_digest
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement):
+                self.binary.write_bytes(b'before launch')
+                record = {}
+                def change(stream, algorithm):
+                    result = digest(stream, algorithm)
+                    self.binary.unlink()
+                    if replacement:
+                        self.binary.write_bytes(b'replaced before launch')
+                    return result
+                with patch.object(runner.hashlib, 'file_digest', side_effect=change), \
+                     patch.object(runner, 'execute') as execute:
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record)
+                self.assertFalse(passed)
+                execute.assert_not_called()
+                self.assertEqual(record['status'], 'launch_identity_failed')
+                self.assertEqual(record['launch_inputs']['status'], 'UNKNOWN')
+                self.assertEqual(record['process_execution_count'], 0)
+
+    def test_missing_declared_file_refuses_and_directory_resource_is_explicitly_unknown(self):
+        directory = Path(self.tmp.name) / 'resources'
+        directory.mkdir()
+        record = {}
+        with patch.dict(os.environ, {'DECLARED': str(directory)}), patch.object(runner, 'execute',
+                return_value=completed_process([], 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record, declared_resources=('DECLARED',))
+        self.assertTrue(passed)
+        self.assertEqual(record['launch_inputs']['resources']['DECLARED']['status'], 'UNKNOWN')
+        self.assertFalse(record['launch_inputs']['resource_hashes_complete'])
+        with patch.dict(os.environ, {'DECLARED': str(directory / 'missing')}), patch.object(runner, 'execute') as execute:
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, {}, declared_resources=('DECLARED',))
+        self.assertFalse(passed)
+        execute.assert_not_called()
+
+    def test_binary_change_during_compiler_hash_capture_is_refused(self):
+        worker = Path(self.tmp.name) / 'worker'
+        worker.write_bytes(b'worker')
+        digest = runner.hashlib.file_digest
+        def change(stream, algorithm):
+            result = digest(stream, algorithm)
+            if Path(stream.name) == worker:
+                self.binary.write_bytes(b'changed while hashing worker')
+            return result
+        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT_WORKER': str(worker)}), \
+             patch.object(runner.hashlib, 'file_digest', side_effect=change), patch.object(runner, 'execute') as execute:
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, {})
+        self.assertFalse(passed)
+        execute.assert_not_called()
 
     def test_passing_diagnostic_startup_retains_marked_campaign_evidence(self):
         root = Path(self.tmp.name) / 'diagnostic-startup'
