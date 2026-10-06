@@ -1129,6 +1129,8 @@ fn service_transaction(
     epoch: &[u8; 32],
     queue_wait: Duration,
     admission_id: AdmissionId,
+    workload: CompileWorkload,
+    grant: ExecutionGrant,
     request_deadline: Duration,
     rotate_after: u64,
     rss_ceiling_mb: u64,
@@ -1138,6 +1140,10 @@ fn service_transaction(
     early_replacements: &mut u64,
     mut next_request: impl FnMut(&mut UnixStream) -> RequestStep,
 ) -> Result<ConnectionOutcome, FrontendError> {
+    let compiler_workload = match workload {
+        CompileWorkload::Foreground => "foreground",
+        CompileWorkload::Preparation => "preparation",
+    };
     tracing::info!(
         run_id,
         daemon_pid = std::process::id(),
@@ -1145,6 +1151,9 @@ fn service_transaction(
         worker_pid = worker.child.id(),
         worker_slot,
         admission_id = admission_id.0,
+        compiler_workload,
+        compiler_jobs = grant.jobs,
+        compiler_capabilities = grant.capabilities,
         transaction,
         queue_ms = u64::try_from(queue_wait.as_millis()).unwrap_or(u64::MAX),
         phase = "compiler_queue",
@@ -1180,6 +1189,9 @@ fn service_transaction(
                     physical_execution = %format!("{}:{}:{}", hex(epoch), admission_id.0, request_ordinal.0),
                     request_mode = request_mode.map(|mode| mode.to_string()).as_deref(),
                     admission_id = admission_id.0,
+                    compiler_workload,
+                    compiler_jobs = grant.jobs,
+                    compiler_capabilities = grant.capabilities,
                     request_ordinal = request_ordinal.0,
                     followed_rotation = *followed_rotation,
                     served = *served,
@@ -1905,6 +1917,8 @@ fn serve_workers(
                         epoch,
                         pending.queued_at.elapsed(),
                         pending.admission_id,
+                        workload,
+                        grant,
                         request_deadline,
                         rotate_after,
                         rss_ceiling_mb,
@@ -4754,6 +4768,11 @@ tidepool-target phase=desugar module=Execute\n",
                     &[9; 32],
                     Duration::from_millis(17),
                     AdmissionId(admission),
+                    CompileWorkload::Foreground,
+                    ExecutionGrant {
+                        jobs: 2,
+                        capabilities: 2,
+                    },
                     Duration::from_secs(10),
                     100,
                     u64::MAX,
@@ -4794,6 +4813,9 @@ tidepool-target phase=desugar module=Execute\n",
         for (row, admission) in queued.iter().zip([41, 42]) {
             assert_eq!(row["fields"]["admission_id"], admission);
             assert_eq!(row["fields"]["queue_ms"], 17);
+            assert_eq!(row["fields"]["compiler_workload"], "foreground");
+            assert_eq!(row["fields"]["compiler_jobs"], 2);
+            assert_eq!(row["fields"]["compiler_capabilities"], 2);
             assert!(row["fields"].get("request_ordinal").is_none());
         }
         let finished: Vec<_> = events
@@ -4805,6 +4827,9 @@ tidepool-target phase=desugar module=Execute\n",
             assert_eq!(row["span"]["admission_id"], 41);
             assert_eq!(row["span"]["request_ordinal"], ordinal);
             assert_eq!(row["span"]["daemon_epoch"], hex(&[9; 32]));
+            assert_eq!(row["span"]["compiler_workload"], "foreground");
+            assert_eq!(row["span"]["compiler_jobs"], 2);
+            assert_eq!(row["span"]["compiler_capabilities"], 2);
         }
         assert_eq!(
             finished[0]["fields"]["compile_request"],
