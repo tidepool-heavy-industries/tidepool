@@ -30,4 +30,4 @@ privateDiamond value = privateCaller value + privateSecond value
 
 -- GHC decodes the call operation as an internal-name FCallId, without an
 -- original top-level binder. Its wrapper still belongs to this real producer.
-foreign import ccall unsafe "abs" foreignAbs :: Int -> IO Int
+foreign import ccall unsafe "labs" foreignAbs :: Int -> IO Int
