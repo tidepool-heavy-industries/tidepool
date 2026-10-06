@@ -860,6 +860,7 @@ decodeCanonicalModuleCertificate payloadBytes = do
   homes <- bounded payloadBytes nonempty
   unless (not (null homes) && and (zipWith (<) homes (drop 1 homes)))
     (fail "invalid complete home unit inventory")
+  let homeSet = Set.fromDistinctAscList homes
   key@(unit,_) <- (,) <$> nonempty <*> nonempty
   source <- canonicalDigest
   interface <- canonicalDigest
@@ -868,7 +869,7 @@ decodeCanonicalModuleCertificate payloadBytes = do
   core <- if token == TypeNull then decodeNull >> pure Nothing else Just <$> canonicalDigest
   requirements <- bounded payloadBytes (array 3 >> ((,) <$> ((,) <$> nonempty <*> nonempty) <*> canonicalDigest))
   unless (and (zipWith (<) (map fst requirements) (drop 1 (map fst requirements)))
-      && unit `elem` homes && all ((`elem` homes) . fst . fst) requirements
+      && unit `Set.member` homeSet && all ((`Set.member` homeSet) . fst . fst) requirements
       && key `notElem` map fst requirements)
     (fail "invalid canonical module requirement inventory")
   originCount <- decodeListLen
@@ -887,7 +888,7 @@ decodeCanonicalModuleCertificate payloadBytes = do
           Nothing -> case qualifier of
             DependencyThisUnit _ -> False
             _ -> True
-          Just importedUnit -> importedUnit `elem` homes && case qualifier of
+          Just importedUnit -> importedUnit `Set.member` homeSet && case qualifier of
             DependencyUnqualified -> True
             DependencyThisUnit selectedUnit -> selectedUnit == importedUnit
             DependencyOtherUnit _ -> False) (fail "invalid canonical source owner")
