@@ -152,6 +152,53 @@ fn owned_timing_command(program: impl AsRef<OsStr>, timing: Option<&OsStr>) -> C
     command
 }
 
+fn worker_count(count: u64) -> Result<usize, FrontendError> {
+    let count = usize::try_from(count)
+        .map_err(|_| FrontendError::Usage("--workers is too large".to_owned()))?;
+    if count == 0 {
+        return Err(FrontendError::Usage(
+            "--workers must be at least 1".to_owned(),
+        ));
+    }
+    Ok(count)
+}
+
+struct OwnedInvocation<'a> {
+    root: &'a OsStr,
+    workers: usize,
+    program: &'a OsStr,
+    child_args: &'a [OsString],
+}
+
+fn parse_owned_invocation(args: &[OsString]) -> Result<OwnedInvocation<'_>, FrontendError> {
+    let usage =
+        || FrontendError::Usage("--owned-daemon-run ROOT [--workers N] -- PROGRAM [ARGS]".into());
+    let (root, remaining) = args.split_first().ok_or_else(usage)?;
+    let (workers, remaining) = if remaining.first().is_some_and(|arg| arg == "--workers") {
+        let [_, count, rest @ ..] = remaining else {
+            return Err(usage());
+        };
+        let mut count = std::iter::once(count.clone());
+        (worker_count(number(&mut count, "--workers")?)?, rest)
+    } else {
+        (1, remaining)
+    };
+    let [separator, program, child_args @ ..] = remaining else {
+        return Err(usage());
+    };
+    if separator != "--" {
+        return Err(FrontendError::Usage(
+            "owned daemon requires an explicit command separator".into(),
+        ));
+    }
+    Ok(OwnedInvocation {
+        root,
+        workers,
+        program,
+        child_args,
+    })
+}
+
 /// Qualify one isolated process against its own exact persistent compiler.
 /// The frontend owns all process edges; test helpers do not launch compilers.
 #[allow(
@@ -159,16 +206,12 @@ fn owned_timing_command(program: impl AsRef<OsStr>, timing: Option<&OsStr>) -> C
     reason = "bounded synchronous owned compiler readiness and acknowledged shutdown"
 )]
 fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
-    let [root, separator, program, child_args @ ..] = args else {
-        return Err(FrontendError::Usage(
-            "--owned-daemon-run ROOT -- PROGRAM [ARGS]".into(),
-        ));
-    };
-    if separator != "--" {
-        return Err(FrontendError::Usage(
-            "owned daemon requires an explicit command separator".into(),
-        ));
-    }
+    let OwnedInvocation {
+        root,
+        workers,
+        program,
+        child_args,
+    } = parse_owned_invocation(args)?;
     let timing = std::env::var_os("TIDEPOOL_TIMING");
     for key in [
         crate::DAEMON_SOCKET_ENV,
@@ -225,7 +268,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         &socket,
         &root.join("compiler.log"),
         "isolated-qualification",
-        1,
+        workers,
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
     );
     let mut command = owned_timing_command(&frontend, timing.as_deref());
@@ -778,14 +821,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
             }
             "--workers" => {
                 let count = number(&mut args, option)?;
-                let count = usize::try_from(count)
-                    .map_err(|_| FrontendError::Usage("--workers is too large".to_owned()))?;
-                if count == 0 {
-                    return Err(FrontendError::Usage(
-                        "--workers must be at least 1".to_owned(),
-                    ));
-                }
-                workers = Some(count);
+                workers = Some(worker_count(count)?);
             }
             _ => {
                 return Err(FrontendError::Usage(format!(
@@ -1118,6 +1154,50 @@ mod tests {
             owned_daemon_run(&["/tmp/fresh".into(), "--other".into(), "test".into()]),
             Err(FrontendError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn owned_compiler_workers_flow_to_existing_admission_command() {
+        for (options, expected) in [
+            (vec![], 1),
+            (vec!["--workers", "1"], 1),
+            (vec!["--workers", "2"], 2),
+        ] {
+            let mut args = vec![OsString::from("/tmp/owned")];
+            args.extend(options.into_iter().map(OsString::from));
+            args.extend(["--", "/selected/child", "--child-option"].map(OsString::from));
+            let invocation = parse_owned_invocation(&args).unwrap();
+            assert_eq!(invocation.root, OsStr::new("/tmp/owned"));
+            assert_eq!(invocation.program, OsStr::new("/selected/child"));
+            assert_eq!(invocation.child_args, &[OsString::from("--child-option")]);
+            let arguments = crate::persistent_daemon_arguments(
+                Path::new("/tmp/owned.sock"),
+                Path::new("/tmp/compiler.jsonl"),
+                "isolated-qualification",
+                invocation.workers,
+                Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+            );
+            let config = parse_daemon(&arguments[1..]).unwrap();
+            assert_eq!(config.workers, Some(expected));
+            assert!(config.persistent);
+            assert_eq!(
+                config.rss_ceiling_mb,
+                Some(crate::SESSION_WORKER_RSS_CEILING_MB)
+            );
+        }
+        for options in [
+            vec!["--workers", "0", "--", "child"],
+            vec!["--workers", "-1", "--", "child"],
+            vec!["--workers", "18446744073709551616", "--", "child"],
+            vec!["--workers", "invalid", "--", "child"],
+            vec!["--workers"],
+            vec!["--workers", "2", "--"],
+            vec!["--workers", "2", "--workers", "2", "--", "child"],
+        ] {
+            let mut args = vec![OsString::from("/tmp/owned")];
+            args.extend(options.into_iter().map(OsString::from));
+            assert!(parse_owned_invocation(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]
