@@ -11,7 +11,8 @@ import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
-import GHC.Types.Id (idArity, idType, idTagSig_maybe, localiseId, setIdArity)
+import GHC.Types.Id (idArity, idType, idTagSig_maybe, isDeadEndId, localiseId, setIdArity, setIdDmdSig)
+import GHC.Types.Demand (nopSig)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Env (lookupNameEnv)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -114,14 +115,29 @@ nativeEntries = do
         assertEntry (entry "strictLeaf") paired
         -- GlobalId occurrences are replaced directly for this metadata fault:
         -- GHC.Core.Subst intentionally ignores GlobalIds.
-        strictFunction <- getOriginal "strictFunction"
         let stripped = Map.singleton (varName (entry "taggedFunction"))
               (setIdArity (entry "taggedFunction") 0)
-        strippedPrepared <- lower (map (mapBindingReferences stripped) strictFunction)
-        assertEntry (entry "strictFunction") strippedPrepared
-        assert (lookupNameEnv (pmTagSigs strippedPrepared) (varName (entry "strictFunction"))
-          == idTagSig_maybe (entry "strictFunction"))
-          "stripped occurrence arity lost its canonical result tag"
+        -- ordinaryCall makes the saturated call whose result inference needs
+        -- canonical arity; a held function field alone would not exercise it.
+        forM_ ["strictFunction", "ordinaryCall"] $ \wanted -> do
+          original <- getOriginal wanted
+          strippedPrepared <- lower (map (mapBindingReferences stripped) original)
+          assertEntry (entry wanted) strippedPrepared
+          assert (lookupNameEnv (pmTagSigs strippedPrepared) (varName (entry wanted))
+            == idTagSig_maybe (entry wanted))
+            ("stripped occurrence arity lost its canonical result tag: " ++ wanted)
+        assert (isDeadEndId (entry "bottomFunction"))
+          "bottoming control lacks a genuine canonical dead-end demand"
+        assert (case importedIdLFInfo (entry "bottomStrictFunction") of LFThunk{} -> True; _ -> False)
+          "bottoming strict field control lacks its canonical LFThunk"
+        bottom <- getOriginal "bottomStrictFunction"
+        let strippedDemand = Map.singleton (varName (entry "bottomFunction"))
+              (setIdDmdSig (entry "bottomFunction") nopSig)
+        bottomPrepared <- lower (map (mapBindingReferences strippedDemand) bottom)
+        assertEntry (entry "bottomStrictFunction") bottomPrepared
+        assert (lookupNameEnv (pmTagSigs bottomPrepared) (varName (entry "bottomStrictFunction"))
+          == idTagSig_maybe (entry "bottomStrictFunction"))
+          "stripped bottoming occurrence changed its canonical result tag"
         -- Supplied actual bodies dominate the old declaring-interface scope.
         -- Replace only the genuine leaf body with a same-typed genuine thunk.
         unknownLeaf <- getOriginal "unknownLeaf"

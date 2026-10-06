@@ -46,3 +46,9 @@ unknownLeafIdentity x = x
 unknownLeaf :: Leaf
 unknownLeaf = unknownLeafIdentity Leaf
 {-# NOINLINE unknownLeaf #-}
+bottomFunction :: Int -> Maybe Int
+bottomFunction _ = error "strict bottom field control"
+{-# NOINLINE bottomFunction #-}
+bottomStrictFunction :: StrictFunction
+bottomStrictFunction = StrictFunction bottomFunction
+{-# NOINLINE bottomStrictFunction #-}
