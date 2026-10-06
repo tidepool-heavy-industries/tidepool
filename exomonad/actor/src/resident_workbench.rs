@@ -15860,6 +15860,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
+        with_test_compiler_owner(
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(),
+        ).await;
+    }
+
+    async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+    ) {
         let (session, context, source, _session_root) = host_mount_fixture();
         let authored = tempfile::tempdir().unwrap();
         let quotation_input = authored.path().join("external-input");

@@ -401,6 +401,7 @@ def source_inputs(package, target, features=(), test_target=False):
         "Cargo.lock": "//:workspace_cargo_lock",
         "bridge/handlers/src/lib.rs": "//bridge/handlers:handler_library_source",
         "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
+        "exomonad/actor/src/fixtures/quoted-agent-provider.hs": "//exomonad/actor:quoted_agent_provider_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:activation_input_function_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:activation_input_receiver_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs": "//tidepool/runtime:activation_input_resident_original_fixture",
@@ -1240,6 +1241,13 @@ tidepool_buildscript_run(
         rules.append('''export_file(
     name = "handler_library_source",
     src = "src/lib.rs",
+    visibility = ["PUBLIC"],
+)
+''')
+    if package_name == "exomonad-actor":
+        rules.append('''export_file(
+    name = "quoted_agent_provider_fixture",
+    src = "src/fixtures/quoted-agent-provider.hs",
     visibility = ["PUBLIC"],
 )
 ''')
