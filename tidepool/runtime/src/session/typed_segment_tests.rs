@@ -128,6 +128,28 @@ impl SemanticSession {
         self.trace.lock().clone()
     }
 
+    fn execute_history(
+        &mut self,
+        label: &str,
+        history: &RenderedHistory,
+    ) -> Result<Duration, ResidentError> {
+        try_execute_cell_with_template_imports_expectation(
+            &mut self.resident,
+            self.public,
+            &self.effects,
+            &self.images,
+            (0, 0),
+            label,
+            &history.cell,
+            CellDeclarationExpectation::CapturedAt(history.declaration_line),
+            &ScalePublication::Ephemeral,
+            AuthorityChecks::Configured,
+            &SourceImports::new(),
+            None,
+        )
+        .map(|(elapsed, _)| elapsed)
+    }
+
     fn assert_no_compiler_since_last_effect(&self) {
         assert_eq!(
             self.compiler_counts.lock().last().copied(),
@@ -501,6 +523,7 @@ struct HistoryCoverage {
 
 struct RenderedHistory {
     cell: String,
+    declaration_line: usize,
     oracle: String,
     mutated_expected: Vec<i64>,
     expected: Vec<i64>,
@@ -521,6 +544,7 @@ fn render_history(seed: i8, operations: &[HistoryOperation], no_mr: bool) -> Ren
         "MonomorphismRestriction"
     };
     let mut cell = format!("{{-# LANGUAGE {language} #-}}\n{initial}");
+    let mut declaration_line = None;
     let mut oracle = initial;
     let mut mutated_expected = Vec::new();
     let mut expected = Vec::new();
@@ -565,6 +589,10 @@ fn render_history(seed: i8, operations: &[HistoryOperation], no_mr: bool) -> Ren
             HistoryOperation::Capture => {
                 captured = value;
                 coverage.captures += 1;
+                assert!(
+                    declaration_line.replace(cell.lines().count() + 1).is_none(),
+                    "a generated history retains one authored capture declaration"
+                );
                 cell.push_str(&format!(
                     "historyCaptured :: Int\nhistoryCaptured = {current}\n"
                 ));
@@ -593,6 +621,7 @@ fn render_history(seed: i8, operations: &[HistoryOperation], no_mr: bool) -> Ren
     }
     RenderedHistory {
         cell,
+        declaration_line: declaration_line.expect("history capture declaration"),
         oracle,
         mutated_expected,
         expected,
@@ -664,9 +693,9 @@ proptest::proptest! {
             && history.coverage.unused_bottoms > 0 && history.coverage.captures > 0
             && history.coverage.shadows > 0 && history.coverage.captured_uses > 0);
         let mut session = SemanticSession::new();
-        session.execute("generated_cold", &history.cell, 1).unwrap();
+        session.execute_history("generated_cold", &history).unwrap();
         proptest::prop_assert_eq!(session.observed(), history.expected.clone());
-        session.execute("generated_warm", &history.cell, 1).unwrap();
+        session.execute_history("generated_warm", &history).unwrap();
         let mut expected = history.expected.repeat(2);
         proptest::prop_assert_eq!(session.observed(), expected.clone());
         let before = session.resident.public_visibility_snapshot_in(session.public).unwrap();
@@ -747,7 +776,7 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
     );
     assert_eq!(ghc_trace(&history.oracle), [23]);
     session
-        .execute("produced_types_across_declaration", &history.cell, 1)
+        .execute_history("produced_types_across_declaration", &history)
         .unwrap();
     assert_eq!(session.observed(), [23]);
     session.assert_no_compiler_since_last_effect();
