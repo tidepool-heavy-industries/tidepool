@@ -1058,15 +1058,7 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         context.clone(),
                         &specification.template_sources(),
-                    )?
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    ),
+                    )?,
             ),
             checked_cell: Some(specification),
             planned_cell: None,
@@ -1146,6 +1138,14 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
+                    .with_generated_scaffold_imports(
+                        std::iter::once(specification.template_source.as_str()).chain(
+                            specification
+                                .turn_templates
+                                .iter()
+                                .map(|(_, source)| source.as_str()),
+                        ),
+                    )?
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -1156,15 +1156,7 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         context.clone(),
                         &specification.template_sources(),
-                    )?
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    ),
+                    )?,
             ),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
@@ -1213,6 +1205,24 @@ impl ModuleCandidateOffer {
         checked_item.validate_include(include)?;
         let mut selected = None;
         let exact = compile_context_with_declarations(compile_context, context.clone())
+            .with_generated_scaffold_imports(
+                checked_item
+                    .item
+                    .turn_templates()
+                    .iter()
+                    .map(|(_, source)| source.as_str()),
+            )?
+            .with_generated_planned_imports(
+                checked_item
+                    .prefix
+                    .planned_declaration_proof()
+                    .map(|proof| &proof.certificate),
+                checked_item
+                    .item
+                    .turn_templates()
+                    .iter()
+                    .map(|(_, source)| source.as_str()),
+            )?
             .prepare_compilation_authorizing(
                 &scratch.join("exact-scope"),
                 producer,
@@ -1253,27 +1263,9 @@ impl ModuleCandidateOffer {
                 exact
                     .with_source_search_context(include)
                     .with_checked_value_imports(checked_item.prefix.import_authority()?)
-                    .with_generated_scaffold_imports(
-                        checked_item
-                            .item
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
-                    )
                     .with_initial_template_interfaces(
                         checked_item.item.template_context(),
                         &checked_item.item.template_sources(),
-                    )?
-                    .with_generated_planned_imports(
-                        checked_item
-                            .prefix
-                            .planned_declaration_proof()
-                            .map(|proof| &proof.certificate),
-                        checked_item
-                            .item
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
                     )?,
             ),
             checked_cell: None,
@@ -1370,14 +1362,14 @@ impl ModuleCandidateOffer {
         let exact = (*context)
             .clone()
             .with_declarations(declarations)
+            .with_generated_scaffold_imports(templates.iter().map(String::as_str))?
             .prepare_compilation_with_authorization(
                 &scratch.join("exact-scope"),
                 producer,
                 Some(authorization),
             )?
             .with_source_search_context(include)
-            .with_checked_value_imports(values.import_authority())
-            .with_generated_scaffold_imports(templates.iter().map(String::as_str));
+            .with_checked_value_imports(values.import_authority());
         Ok(ActivationPreviewSelection::Ready(Self {
             selected: None,
             producer: producer.to_vec(),
@@ -1491,10 +1483,7 @@ impl ModuleCandidateOffer {
             self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
-            exact.validate_outputs_with_planned(
-                root,
-                planned.as_ref().map(|planned| planned.certificate.as_ref()),
-            )?,
+            exact.validate_outputs_with_planned(root, planned.as_ref())?,
             &self.include,
             planned,
             self.checked_values.clone().ok_or_else(|| {
@@ -1661,6 +1650,11 @@ impl ModuleCandidateOffer {
                             .collect(),
                     )?,
                 );
+                program_request = program_request.in_program_context_with_private_input(
+                    &root.join("program-inputs"),
+                    context.clone(),
+                    &original.compiler_input,
+                )?;
                 declarations.insert(index, original);
                 index += 1;
             } else {
@@ -1915,7 +1909,22 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             &generated,
         )?;
-        request.admit_program_segment_support_with_selection(
+        let sealed = output.products.as_ref().expect("program output was sealed");
+        let private = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &sealed.source_selection,
+            &sealed.artifact_view,
+        )?
+        .for_program_continuation(
+            &support,
+            source_segment.admissions(),
+            &output.source,
+        )?;
+        let mut continued = request.in_program_context_with_private_input(
+            &output.directory.join("private-compiler-inputs"),
+            context.clone(),
+            &private,
+        )?;
+        let published = continued.admit_program_segment_support_with_selection(
             context,
             &support,
             source_segment,
@@ -1925,7 +1934,9 @@ impl ModuleCandidateOffer {
                 .as_ref()
                 .expect("program output was sealed")
                 .source_selection,
-        )
+        )?;
+        *request = continued;
+        Ok(published)
     }
 
     fn admit_program_value(
@@ -2090,6 +2101,10 @@ impl ModuleCandidateOffer {
             interface_fingerprint,
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
+            compiler_input: crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &sealed.source_selection,
+                &sealed.artifact_view,
+            )?,
         }))
     }
 
@@ -2709,6 +2724,11 @@ fn seal_turn_outputs_with_validation(
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(imports)
         }
     };
+    let compiler_inputs = offer
+        .exact
+        .as_ref()
+        .map(|request| request.compiler_inputs())
+        .transpose()?;
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -2718,7 +2738,7 @@ fn seal_turn_outputs_with_validation(
             &certified.recovery_products,
             &certified.module_interfaces,
             &certified.value_interfaces,
-            offer.exact.as_ref().map(|request| request.context.as_ref()),
+            compiler_inputs.as_ref().map(|input| &input.artifacts),
             demand,
             validation,
         )?;
@@ -2793,7 +2813,12 @@ fn seal_turn_outputs_with_validation(
             None
         };
     let original_execution = match exact.as_ref() {
-        Some(admission) => Some(admission.original_execution_context(&artifact_view)?),
+        Some(admission) => Some(admission.original_execution_context(
+            &crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &certified.source_selection,
+                &artifact_view,
+            )?,
+        )?),
         None => original_compile_input
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
@@ -4057,6 +4082,10 @@ fn compile_invocation_inner(
                 );
             }
         }
+        let compiler_inputs = exact_request
+            .as_ref()
+            .map(|request| request.compiler_inputs())
+            .transpose()?;
         artifacts.artifact_view =
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -4066,9 +4095,7 @@ fn compile_invocation_inner(
                 &certified.recovery_products,
                 &certified.module_interfaces,
                 &certified.value_interfaces,
-                exact_request
-                    .as_ref()
-                    .map(|request| request.context.as_ref()),
+                compiler_inputs.as_ref().map(|input| &input.artifacts),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                     &target_imports,
                 ),
@@ -6725,7 +6752,7 @@ mod module_product_tests {
                     request: &request,
                     source: admission,
                 }
-                .original_execution_context(&compiled.artifact_view)
+                .original_execution_fixture(&compiled.artifact_view)
                 .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(

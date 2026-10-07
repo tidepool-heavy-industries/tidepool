@@ -2136,6 +2136,9 @@ pub(crate) struct PlannedCheckedDeclaration {
     pub(crate) interface_fingerprint: String,
     pub(crate) certificate: Arc<crate::declaration_join::CertifiedAuthoredDeclaration>,
     pub(crate) receipt_digest: [u8; 32],
+    // Complete same-offer compiler inputs belong to this checked receipt;
+    // the public authored certificate retains only publication roles.
+    pub(crate) compiler_input: crate::declaration_context::OriginalCompilerInputs,
 }
 
 impl ExactCheckedCell {
@@ -4989,6 +4992,18 @@ mod tests {
             planned_declaration: Some(PlannedCheckedDeclaration {
                 source: source.into(),
                 interface_fingerprint: "fixture".into(),
+                compiler_input: crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        certificate.compiler_input_projection(),
+                        &certificate.artifact_view().metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(
+                            Default::default(),
+                        ),
+                    )
+                    .unwrap(),
+                    certificate.artifact_view(),
+                )
+                .unwrap(),
                 certificate,
                 receipt_digest: [10; 32],
             }),

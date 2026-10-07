@@ -1559,6 +1559,39 @@ impl CertifiedSourceSelection {
         self.owners.values().map(|selected| &selected.owner)
     }
 
+    /// Convert this transaction's issued complete owner identities to exact
+    /// artifact roles. Native availability alone cannot issue this selection.
+    pub(crate) fn compiler_projection(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+    ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
+        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
+        let metadata = view.metadata_snapshot();
+        let mut originals = Vec::new();
+        for owner in self.selected_original_owners() {
+            let matching = metadata.artifacts.values().filter(|entry| {
+                matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
+            }).collect::<Vec<_>>();
+            let [entry] = matching.as_slice() else {
+                return Err(CertificationError::Mismatch(
+                    "issued compiler original artifact",
+                ));
+            };
+            originals.push(Arc::clone(entry));
+        }
+        let projection = CompilerInputProjection::from_interface_view(view)
+            .and_then(|interfaces| {
+                interfaces.merge(&CompilerInputProjection::from_issued_entries(&originals)?)
+            })
+            .map_err(|_| CertificationError::Mismatch("issued compiler original projection"))?;
+        Self::from_compiler_projection(
+            &projection,
+            &metadata,
+            &InventoryOperation::new(Default::default()),
+        )?;
+        Ok(projection)
+    }
+
     fn from_projected_originals(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         operation: &InventoryOperation,
@@ -5256,10 +5289,11 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let projected_metadata = exact
-        .map(|admission| admission.request.context.compiler_metadata_snapshot())
+    let compiler_inputs = exact
+        .map(|admission| admission.request.compiler_inputs())
         .transpose()
         .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
+    let projected_metadata = compiler_inputs.as_ref().map(|inputs| &inputs.metadata);
     let inherited_module_interfaces =
         projected_metadata
             .as_ref()
@@ -5856,8 +5890,11 @@ pub(crate) fn certify_products_with_validation(
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut source_selection = match exact {
-        Some(admission) => CertifiedSourceSelection::from_compiler_projection(
-            admission.request.context.compiler_input_projection(),
+        Some(_) => CertifiedSourceSelection::from_compiler_projection(
+            &compiler_inputs
+                .as_ref()
+                .ok_or(CertificationError::Mismatch("compiler original projection"))?
+                .projection,
             projected_metadata
                 .as_ref()
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?,
