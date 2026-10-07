@@ -50,8 +50,9 @@ import Tidepool.Agent.Ref.Internal
   ( AgentRef (..), AgentProtocol (..), agentIdentity, agentBoundWorktree, internalAgentRef )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Agent.Session (requestSessionSited)
+import Tidepool.View.Types (View(..))
 import Tidepool.Inspection
-  ( Display (..), DisplayRoot (..), DisplayTree (..), PageDisplay (..)
+  ( Display (..), DisplayTree (..), PageDisplay (..)
   , opaqueHandle, pageWithContinuation )
 import Tidepool.Effects.Core
   ( AgentControl (..), AgentInspection (..), AgentTools, Notifications (..)
@@ -343,17 +344,16 @@ newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Tex
 
 -- | Nested in another value: which notification, to whom.
 instance Display NotificationReceipt where
+  displayView = Inspection . TextLeaf . notificationAccepted
   displayTree receipt =
     opaqueHandle ("notification " <> notificationSummary receipt)
 
--- | Explicit top-level output describes admission, never model presentation.
-instance DisplayRoot NotificationReceipt where
-  displayRoot = TextLeaf . notificationAccepted
-
-instance DisplayRoot (Either NotificationError NotificationReceipt) where
-  displayRoot (Right receipt) = displayRoot receipt
-  displayRoot (Left failure) =
-    Concat [TextLeaf "notification not accepted: ", StringLeaf (show failure)]
+-- | Explicit output reports admission while preserving nested result structure.
+instance {-# OVERLAPPING #-} Display (Either NotificationError NotificationReceipt) where
+  displayTree (Right receipt) = Concat [TextLeaf "Right ", displayTree receipt]
+  displayTree (Left failure) = Concat [TextLeaf "Left ", StringLeaf (show failure)]
+  displayView (Right receipt) = displayView receipt
+  displayView (Left failure) = Inspection (Concat [TextLeaf "notification not accepted: ", StringLeaf (show failure)])
 
 -- | A retained pure page uses the same admission description.
 instance PageDisplay effects NotificationReceipt where

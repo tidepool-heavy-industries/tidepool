@@ -31,6 +31,7 @@ import Data.Kind (Type)
 import GHC.Generics
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Tidepool.View.Types (View(..), viewTree)
 import Tidepool.Inspection.Tree
 import Prelude
 
@@ -63,12 +64,14 @@ class Display a where
     in (rendered, maybe False (const True) remaining || unavailable)
 
   -- | Structural renderers retain the unconsumed tree. Existing custom
-  -- displayWith instances remain bounded, but must implement this method to
+  -- displayWith instances remain bounded, but implement this method to
   -- offer resumable detail rather than an explicitly unavailable remainder.
   displayTree :: a -> DisplayTree
-  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
+  displayTree _ = TextLeaf "<opaque>"
 
-  {-# MINIMAL displayWith | displayTree #-}
+  -- | Rich layout defaults to structural inspection; this dependency is acyclic.
+  displayView :: a -> View
+  displayView = Inspection . displayTree
 
   -- | The tree at a 'showsPrec' precedence, so a constructor application is
   -- parenthesized exactly where derived 'Show' would parenthesize it. Instances
@@ -152,6 +155,7 @@ instance Display Text where
   displayTree = literalText
   displayTreePrec _ = literalText
   displayWith = rawText
+  displayView = Inspection . TextLeaf
 
 -- | A 'String' is text, and renders as 'Text' does. Without this the list
 -- instance answers for @[Char]@ and the result of 'show' displays as a list of
@@ -160,6 +164,7 @@ instance {-# OVERLAPPING #-} Display [Char] where
   displayTree = literalString
   displayTreePrec _ = literalString
   displayWith = rawString
+  displayView = Inspection . StringLeaf
 
 instance Display (a -> b) where
   displayTree _ = TextLeaf "<function>"
@@ -230,3 +235,7 @@ instance WorkbenchDisplay [Char] where
   workbenchDisplay = rawString 512
   workbenchActivationDisplay = rawString
   workbenchReplyDisplay = rawString
+
+instance Display View where
+  displayTree = viewTree
+  displayView = id

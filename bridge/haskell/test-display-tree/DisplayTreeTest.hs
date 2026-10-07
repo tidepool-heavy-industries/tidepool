@@ -6,6 +6,7 @@
 
 module Main where
 
+import FormViewTest (formViewTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (evaluate)
@@ -21,7 +22,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "display-tree"
-  [ testCase "punctuationAndChildrenRespectBudget" punctuationAndChildrenRespectBudget
+  [ formViewTests
+  , testCase "punctuationAndChildrenRespectBudget" punctuationAndChildrenRespectBudget
   , testCase "pagesCoverTheExactTree" pagesCoverTheExactTree
   , testCase "infiniteLeavesAreProductive" infiniteLeavesAreProductive
   , testCase "exhaustedBudgetDoesNotForceTheNextField" exhaustedBudgetDoesNotForceTheNextField

@@ -543,6 +543,7 @@ instance WorkbenchDisplay StreamCapture where
 -- | A capture renders its outcome first, then each stream separately, and an
 -- incomplete stream says so before any of its text is shown.
 instance Display Capture where
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
   displayWith budget capture =
     let heading = resultHeading (capturedResult capture) <> "\n"
         remaining = max 0 (budget - T.length heading)
@@ -552,6 +553,7 @@ instance Display Capture where
      in (text, omittedOut || omittedErr || clipped)
 
 instance Display StreamCapture where
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
   displayWith = captureDisplay "output"
 
 captureDisplay :: Text -> Int -> StreamCapture -> (Text, Bool)
@@ -662,6 +664,7 @@ outputMetadata stream page =
     number = T.pack . show
 
 instance Display OutputIssue where
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
   displayWith budget issue = rawText budget $ case issue of
     IncompleteStdout retained ->
       "Command finished; this capture is incomplete. Awaiting again does not enlarge it. Use Cmd.readStdout with your existing job binding, or Cmd.job applied to your result; Cmd.output navigates retained output. Retention gaps are explicit. Job: " <> T.pack (show retained)

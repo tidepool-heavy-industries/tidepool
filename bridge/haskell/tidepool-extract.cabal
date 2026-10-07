@@ -243,11 +243,28 @@ test-suite display-tree-test
   type:             exitcode-stdio-1.0
   main-is:          DisplayTreeTest.hs
   hs-source-dirs:   lib test-display-tree
-  other-modules:    Tidepool.Inspection.Tree
-                   Tidepool.Inspection.Display
+  other-modules:
+    FormViewTest
+    Tidepool.Inspection.Tree
+    Tidepool.Inspection.Display
+    Tidepool.View
+    Tidepool.View.Types
+    Tidepool.View.Wire
+    Tidepool.Form.Algebra
+    Tidepool.Form.Check
+    Tidepool.Form.GForm
+    Tidepool.Form.Wire
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Aeson.FromJSON
+    Tidepool.Data.Text
+    Tidepool.Double
   build-depends:
     base >= 4.20 && < 5,
-    text
+    text,
+    containers,
+    tasty-quickcheck,
+    QuickCheck >= 2.14 && < 2.16
   default-language: GHC2024
   ghc-options:      -Wall
 
@@ -766,8 +783,10 @@ test-suite model-turn-test
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.ModelControl
@@ -909,8 +928,10 @@ test-suite automation-helper-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
@@ -971,8 +992,10 @@ test-suite browser-scenario-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
@@ -1030,8 +1053,10 @@ test-suite command-tools-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
@@ -1086,8 +1111,10 @@ test-suite tool-profiles-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
