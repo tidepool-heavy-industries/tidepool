@@ -870,7 +870,7 @@ impl RetainedArtifactMaterialization {
         metadata: &ArtifactMetadataSnapshot,
     ) -> Vec<&'a PendingCertifiedGroup> {
         let available = metadata
-            .entries
+            .artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => Some((product.owner(), entry.descriptor.id)),
@@ -887,14 +887,15 @@ impl RetainedArtifactMaterialization {
                     if available
                         .iter()
                         .find_map(|(selected, artifact)| {
-                            (**selected == *native).then_some(NativeGroupKey {
+                            let key = NativeGroupKey {
                                 artifact: *artifact,
                                 original_ordinal: group.group().original_ordinal(),
-                            })
+                            };
+                            (**selected == *native
+                                && metadata.selected_native_groups.contains(&key))
+                            .then_some(key)
                         })
-                        .is_some_and(|key| {
-                            metadata.selected_native_groups.contains(&key) && seen.insert(key)
-                        })
+                        .is_some_and(|key| seen.insert(key))
                     {
                         groups.push(group);
                     }
@@ -2037,7 +2038,7 @@ impl ExactCompilationRequest {
                 .cloned(),
         );
         let certify_start = std::time::Instant::now();
-        let current_entries = current.entries.values().cloned().collect::<Vec<_>>();
+        let current_entries = current.artifacts.values().cloned().collect::<Vec<_>>();
         let available = original_products_by_id(&current_entries);
         let additional = certify_selected_owned_products_in_context_with_validation(
             &available,
@@ -4460,7 +4461,8 @@ impl ExactDeclarationContext {
             start.elapsed(),
             context_bytes,
         );
-        let available = original_products_by_id(&entries);
+        let available_entries = metadata.artifacts.values().cloned().collect::<Vec<_>>();
+        let available = original_products_by_id(&available_entries);
         let inherited_groups = RetainedArtifactMaterialization::selected_group_refs(
             parents.iter().map(Arc::as_ref),
             metadata,
