@@ -96,7 +96,7 @@ import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.TypedSegment.Types
-  ( TypedSegmentPlan, typedSegmentPlan, typedSegmentPlanDigest
+  ( TypedSegmentPlan, typedSegmentPlan, typedSegmentPlanDigest, GeneratedSegmentOperations(..)
   , TypedItemPlan(..), TypedItemBody(..) )
 import Tidepool.CheckedCell
   ( renderCheckedTypeWitness, renderRequestTypeSignatures
@@ -887,6 +887,7 @@ data PreparedTypedSegmentSource = PreparedTypedSegmentSource
   , preparedTypedSegmentSource :: String
   , preparedTypedSegmentTemplate :: String
   , preparedTypedSegmentLineOffset :: Int
+  , preparedTypedSegmentOperations :: GeneratedSegmentOperations
   }
 
 prepareTypedSegmentSource :: String -> CellSourcePlan -> String
@@ -898,6 +899,12 @@ prepareTypedSegmentSource template sourcePlan reservation slots = do
                       | otherwise = candidate
       root = fresh "__tidepool_segment_check"
       reserve role ordinal = fresh ("__tidepool_segment_" ++ role ++ "_" ++ show ordinal)
+      namespaces = concatMap locatedImportNamespaces (prologueImports (cellPlanPrologue sourcePlan))
+      freshQualifier candidate
+        | mkModuleName candidate `elem` namespaces || candidate `isInfixOf` template =
+            freshQualifier (candidate ++ "X")
+        | otherwise = mkModuleName candidate
+      qualifier = freshQualifier "TidepoolResume"
   if length slots /= length items || any ((== KDecl) . sbKind . cellAnalysisVerdict) items
     then Left "typed segment reservations do not cover one executable parser segment"
     else pure ()
@@ -919,12 +926,12 @@ prepareTypedSegmentSource template sourcePlan reservation slots = do
   -- This exact private import is the existing generated-scaffold support edge.
   -- Its source/certificate owner is authenticated before Core extraction.
   protected <- replaceOnce "{{CELL_IMPORTS}}"
-    "import qualified Tidepool.Internal.Resume as TidepoolResume\n{{CELL_IMPORTS}}" template
+    ("import qualified Tidepool.Internal.Resume as " ++ moduleNameString qualifier ++ "\n{{CELL_IMPORTS}}") template
   (rendered, generatedLineOffset) <- renderCellSourceWithLineOffset False protected sourcePlan
   renamedRoot <- replaceOnce "__tidepool_cell_check ::" (root ++ " ::") rendered
     >>= replaceOnce "__tidepool_cell_check =" (root ++ " =")
   let sealed = renamedRoot ++ "\n-- tidepool-typed-segment-plan-v1 " ++ typedSegmentPlanDigest plan ++ "\n"
-  pure (PreparedTypedSegmentSource plan sealed protected generatedLineOffset)
+  pure (PreparedTypedSegmentSource plan sealed protected generatedLineOffset (GeneratedSegmentOperations qualifier))
 
 renderCellCheckSource :: String -> CellSourcePlan -> Either String String
 renderCellCheckSource template plan = fst <$> renderCellCheckSourceWithLineOffset template plan
