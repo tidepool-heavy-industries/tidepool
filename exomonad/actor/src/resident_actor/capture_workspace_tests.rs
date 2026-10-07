@@ -10,7 +10,7 @@ use tidepool_bridge_effects::{
     WtBranchName, WtGitOid, WtWorktreeHandle, WtWorktreeId, WtWorktreeReceipt,
 };
 use tidepool_runtime::session::{
-    insert_preamble_imports, ContextCheckpointBoundary, ModuleEnv, SessionLib,
+    insert_preamble_imports, ContextCheckpointBoundary, ModuleEnv, SessionLib, WorkbenchRequest,
 };
 use tidepool_testing::eval_harness;
 
@@ -81,17 +81,12 @@ async fn run_cell_with_context(
 ) -> serde_json::Value {
     tokio::time::timeout(
         std::time::Duration::from_secs(240),
-        crate::ResidentInteractivePolicy::local(actor).dispatch_boxed(ToolInvocation {
-            context,
-            name: crate::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(text),
-        }),
+        crate::resident_tools::ResidentToolClient::local(actor)
+            .dispatch_workbench(WorkbenchRequest::from_cell_input(&text), context),
     )
     .await
-    .expect("production Haskell endpoint bounded")
-    .expect("production Haskell endpoint")
-    .into_json()
-    .expect("structured resident response")
+    .expect("production notebook admission bounded")
+    .expect("production notebook admission")
 }
 
 fn assert_committed(reply: &serde_json::Value) {
@@ -344,10 +339,15 @@ async fn assert_captured_reader(child: &LocalResidentInstallation) {
     .await
     .expect("handler request bounded")
     .expect("captured handler request");
-    assert!(
-        matches!(&reply, crate::ResidentToolResponse::Value(value) if *value == serde_json::json!(52)),
-        "{reply:?}"
-    );
+    let crate::ResidentToolResponse::Workbench(reply) = reply else {
+        panic!("installed handler retains a typed workbench receipt: {reply:?}");
+    };
+    assert_eq!(reply.status, WorkbenchRunStatus::Committed, "{reply:?}");
+    let [item] = reply.items.as_slice() else {
+        panic!("one captured handler result: {reply:?}");
+    };
+    assert_eq!(item.status, WorkbenchItemStatus::Committed, "{reply:?}");
+    assert_eq!(item.output.trim(), "52", "{reply:?}");
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(240),
         child.policy.dispatch_boxed(ToolInvocation {
@@ -480,14 +480,10 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
             ("failure-barrier", "Core.ActorOwned"),
         ],
     );
-    let endpoint = crate::ResidentInteractivePolicy::local(parent.clone());
+    let client = crate::resident_tools::ResidentToolClient::local(parent.clone());
     let call = tokio::spawn(async move {
-        endpoint
-            .dispatch_boxed(ToolInvocation {
-                context: None,
-                name: crate::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw(source),
-            })
+        client
+            .dispatch_workbench(WorkbenchRequest::from_cell_input(&source), None)
             .await
     });
     let first = fixture.child("first").await;
@@ -574,14 +570,10 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
             ("partial-second", "Core.InvocationOwned"),
         ],
     );
-    let endpoint = crate::ResidentInteractivePolicy::local(parent.clone());
+    let client = crate::resident_tools::ResidentToolClient::local(parent.clone());
     let call = tokio::spawn(async move {
-        endpoint
-            .dispatch_boxed(ToolInvocation {
-                context: None,
-                name: crate::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw(source),
-            })
+        client
+            .dispatch_workbench(WorkbenchRequest::from_cell_input(&source), None)
             .await
     });
     let first = fixture.child("partial-first").await;
@@ -691,15 +683,14 @@ async fn checkpoint_issuer_source_authority_is_checked_before_workspace_effects(
     let (token, scope) = fixture.checkpoint(&parent, foreign).await;
     let failure = tokio::time::timeout(
         std::time::Duration::from_secs(240),
-        crate::ResidentInteractivePolicy::local(parent).dispatch_boxed(ToolInvocation {
-            context: None,
-            name: crate::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(reader_source(
+        crate::resident_tools::ResidentToolClient::local(parent).dispatch_workbench(
+            WorkbenchRequest::from_cell_input(&reader_source(
                 &token,
                 "foreign-source-reader",
                 "Core.ActorOwned",
             )),
-        }),
+            None,
+        ),
     )
     .await
     .expect("checkpoint source refusal settles without child readiness")
