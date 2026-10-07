@@ -82,7 +82,7 @@ import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, unpackFS)
 import GHC.Types.PkgQual (RawPkgQual(..))
-import GHC.Types.SrcLoc (mkRealSrcLoc, advanceSrcLoc, srcSpanStart, srcSpanEnd, srcLocLine)
+import GHC.Types.SrcLoc (mkRealSrcLoc, advanceSrcLoc, realSrcSpanStart, realSrcSpanEnd, srcLocLine)
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString, isSymOcc)
 import GHC.Types.Error (errorsFound)
@@ -800,12 +800,12 @@ refineExecutableSourceItems flags item
     terminalLocation = foldl' advanceSrcLoc
       sourceLocation (source ++ "\n; ")
     isSyntheticTerminal statement = case getLocA statement of
-      RealSrcSpan span' _ -> srcSpanStart span' == terminalLocation
+      RealSrcSpan span' _ -> realSrcSpanStart span' == terminalLocation
       _ -> False
     refine parsedState statement = case getLocA statement of
       RealSrcSpan span' _ -> do
-        start <- sourceOffset (srcSpanStart span')
-        end <- sourceOffset (srcSpanEnd span')
+        start <- sourceOffset (realSrcSpanStart span')
+        end <- sourceOffset (realSrcSpanEnd span')
         let baseLine = cellStartLine (cellSourceSpan item) - srcLocLine sourceLocation
             authored = ParsedStatementSpan
                 (CellSourceSpan
