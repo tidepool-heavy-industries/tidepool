@@ -443,9 +443,13 @@ pub(super) fn validate_recovery_native_markers(
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
 ) -> Result<(), String> {
     let roots = match node.kind {
-        recovery::RecoveryNodeKind::Authored => vec![context
-            .authored_native_root(node.id.0)
-            .map_err(|error| error.to_string())?],
+        recovery::RecoveryNodeKind::Authored => vec![
+            tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
+                context
+                    .authored_native_root(node.id.0)
+                    .map_err(|error| error.to_string())?,
+            ),
+        ],
         recovery::RecoveryNodeKind::Join => {
             let owners = node
                 .exports
@@ -467,7 +471,11 @@ pub(super) fn validate_recovery_native_markers(
                         == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
                         && owners.contains(&descriptor.owner)
                 })
-                .map(|descriptor| descriptor.id)
+                .map(|descriptor| {
+                    tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
+                        descriptor.id,
+                    )
+                })
                 .collect::<Vec<_>>()
         }
     };

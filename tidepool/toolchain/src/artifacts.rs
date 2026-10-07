@@ -1764,6 +1764,13 @@ impl ModuleCandidateOffer {
                             "program output lacks original execution evidence".into(),
                         )
                     })?,
+                Some(
+                    &output
+                        .products
+                        .as_ref()
+                        .expect("program output was sealed")
+                        .certified_groups,
+                ),
             )?;
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
@@ -2680,6 +2687,7 @@ fn seal_turn_outputs_with_validation(
                         original_execution
                             .clone()
                             .expect("checked output has full original execution evidence"),
+                        None,
                     )?,
                 )
             }

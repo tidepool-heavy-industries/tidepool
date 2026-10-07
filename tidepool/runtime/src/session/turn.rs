@@ -2625,6 +2625,71 @@ pub fn compile_cell_program_admitted(
     ),
     CellCheckFailure,
 > {
+    compile_cell_program_admitted_inner(
+        req,
+        admission,
+        templates,
+        #[cfg(test)]
+        CellProgramAudit::None,
+    )
+}
+
+#[cfg(test)]
+fn compile_cell_program_admitted_receipt_controls(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    compile_cell_program_admitted_inner(req, admission, templates, CellProgramAudit::Receipts)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum CellProgramAudit {
+    None,
+    Receipts,
+    WorkCounts(Option<usize>),
+}
+
+#[cfg(test)]
+fn compile_cell_program_admitted_work_controls(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+    expected_items: Option<usize>,
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    compile_cell_program_admitted_inner(
+        req,
+        admission,
+        templates,
+        CellProgramAudit::WorkCounts(expected_items),
+    )
+}
+
+fn compile_cell_program_admitted_inner(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+    #[cfg(test)] audit: CellProgramAudit,
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
     validate_cell_admitted_request(&req, &admission)?;
     let planned = admission.plan_reservation().ok_or_else(|| {
         CompileError::ExtractFailed(
@@ -2719,9 +2784,17 @@ pub fn compile_cell_program_admitted(
             .map_err(|error| {
             offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
         })?;
+    #[cfg(test)]
+    if matches!(audit, CellProgramAudit::Receipts) {
+        audit_compiler_issued_item_receipts(&offer, scratch.path());
+    }
     let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
         offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
     })?;
+    #[cfg(test)]
+    if let CellProgramAudit::WorkCounts(expected_items) = audit {
+        scaling_tests::assert_compiler_work(&program, &run.output.stderr, expected_items);
+    }
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
         req.cell_text,
@@ -3024,6 +3097,216 @@ fn decode_cell_program_turn(
             "complete native cell output has another item kind".into(),
         )),
     }
+}
+
+#[cfg(test)]
+fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path) {
+    use sha2::{Digest, Sha256};
+    use tidepool_toolchain::certified_products::CertificationError;
+    struct RestoreReceipt {
+        path: PathBuf,
+        original: Vec<u8>,
+    }
+    impl Drop for RestoreReceipt {
+        fn drop(&mut self) {
+            std::fs::write(&self.path, &self.original).expect("restore original compiler receipt");
+        }
+    }
+    let before = tidepool_extract_cmd::extract_spawn_count();
+    let valid = offer
+        .admit_cell_program(root)
+        .expect("unchanged original worker receipts must admit");
+    let index = valid
+        .items()
+        .iter()
+        .find(|item| item.native().is_some())
+        .expect("witness controls require a real native entry")
+        .checked_item()
+        .index();
+    let path = root.join(format!("item-{index}")).join("checked-item.cbor");
+    let original = std::fs::read(&path).unwrap();
+    let receipt: CborValue = ciborium::de::from_reader(original.as_slice()).unwrap();
+    let fields = receipt.as_array().unwrap();
+    assert_eq!(fields.len(), 9);
+    assert_eq!(fields[0].as_text(), Some("TPEXACTITEM"));
+    assert_eq!(fields[1].as_text(), Some("2"));
+    assert_eq!(fields[8].as_array().unwrap().len(), 4);
+    for field in 0..4 {
+        let restore = RestoreReceipt {
+            path: path.clone(),
+            original: original.clone(),
+        };
+        let mut changed = receipt.clone();
+        let proof = changed.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        match field {
+            0 => proof[0] = CborValue::Text("0".repeat(64)),
+            1 | 2 => {
+                let identity = proof[field].as_array_mut().unwrap();
+                let occurrence = identity[2].as_text().unwrap();
+                identity[2] = CborValue::Text(format!("{occurrence}_substituted"));
+            }
+            3 => {
+                let ordinal = u32::try_from(proof[3].as_integer().unwrap()).unwrap();
+                proof[3] = CborValue::Integer((u64::from(ordinal ^ 1)).into());
+            }
+            _ => unreachable!(),
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
+        assert_ne!(bytes, original);
+        std::fs::write(&path, bytes).unwrap();
+        let refusal = offer
+            .admit_cell_program(root)
+            .expect_err("a substituted ITEM2 witness must refuse");
+        assert!(
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), CertificationError::Mismatch(_))),
+            "field {field} must reach the typed native-entry seal guard: {refusal:?}"
+        );
+        drop(restore);
+        offer
+            .admit_cell_program(root)
+            .expect("restored actual worker bytes must admit independently");
+    }
+    let cell_path = root.join("checked-cell.cbor");
+    let observations_path = root.join("cell.cbor");
+    let cell_original = std::fs::read(&cell_path).unwrap();
+    let observations_original = std::fs::read(&observations_path).unwrap();
+    let cell: CborValue = ciborium::de::from_reader(cell_original.as_slice()).unwrap();
+    let observations: CborValue =
+        ciborium::de::from_reader(observations_original.as_slice()).unwrap();
+    assert_eq!(cell.as_array().unwrap().len(), 12);
+    assert_eq!(cell.as_array().unwrap()[1].as_text(), Some("4"));
+    let first_signature = cell.as_array().unwrap()[8]
+        .as_array()
+        .unwrap()
+        .first()
+        .expect("the real cell must publish descriptor-derived capture types")
+        .clone();
+    let payload = observations.as_array().unwrap()[2].as_array().unwrap();
+    assert!(
+        payload[1].as_array().unwrap().is_empty(),
+        "PROGRAM4 must not recreate synthetic pins"
+    );
+    let first_observation = payload[4]
+        .as_array()
+        .unwrap()
+        .first()
+        .expect("the actual final expression must publish its typed observation descriptor")
+        .clone();
+    for mutation in 0..9 {
+        let restore_cell = RestoreReceipt {
+            path: cell_path.clone(),
+            original: cell_original.clone(),
+        };
+        let restore_observations = RestoreReceipt {
+            path: observations_path.clone(),
+            original: observations_original.clone(),
+        };
+        let mut changed_cell = cell.clone();
+        let mut changed_observations = observations.clone();
+        match mutation {
+            0..=2 => {
+                let signatures = changed_cell.as_array_mut().unwrap()[8]
+                    .as_array_mut()
+                    .unwrap();
+                match mutation {
+                    0 => {
+                        signatures.remove(0);
+                    }
+                    1 => signatures.push(first_signature.clone()),
+                    2 => {
+                        let mut extra = first_signature.clone();
+                        extra.as_array_mut().unwrap()[1] =
+                            CborValue::Text("unowned:capture".into());
+                        signatures.push(extra);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            3 => {
+                changed_observations.as_array_mut().unwrap()[2]
+                    .as_array_mut()
+                    .unwrap()[1]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(CborValue::Array(vec![
+                        CborValue::Text("obsolete_pin".into()),
+                        CborValue::Text("unused".into()),
+                        CborValue::Array(Vec::new()),
+                    ]));
+            }
+            4..=8 => {
+                let expressions = changed_observations.as_array_mut().unwrap()[2]
+                    .as_array_mut()
+                    .unwrap()[4]
+                    .as_array_mut()
+                    .unwrap();
+                match mutation {
+                    4 => {
+                        expressions.remove(0);
+                    }
+                    5 => expressions.push(first_observation.clone()),
+                    6 => {
+                        let mut extra = first_observation.clone();
+                        extra.as_array_mut().unwrap()[0] = CborValue::Text("unowned_entry".into());
+                        expressions.push(extra);
+                    }
+                    7 => {
+                        expressions[0].as_array_mut().unwrap()[0] = CborValue::Text(
+                            valid.items()[index]
+                                .native()
+                                .unwrap()
+                                .typed_entry()
+                                .unwrap()
+                                .entry()
+                                .occurrence
+                                .clone(),
+                        )
+                    }
+                    8 => {
+                        expressions[0].as_array_mut().unwrap()[1] =
+                            CborValue::Text("unknown_lift".into())
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+        let mut observation_bytes = Vec::new();
+        ciborium::ser::into_writer(&changed_observations, &mut observation_bytes).unwrap();
+        // Keep the ordinary byte seal consistent so observation corruption
+        // reaches the new typed metadata ownership guard.
+        changed_cell.as_array_mut().unwrap()[6] = CborValue::Text(
+            Sha256::digest(&observation_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        );
+        let mut cell_bytes = Vec::new();
+        ciborium::ser::into_writer(&changed_cell, &mut cell_bytes).unwrap();
+        assert!(cell_bytes != cell_original || observation_bytes != observations_original);
+        std::fs::write(&observations_path, observation_bytes).unwrap();
+        std::fs::write(&cell_path, cell_bytes).unwrap();
+        let refusal = offer
+            .admit_cell_program(root)
+            .expect_err("unowned typed metadata must refuse");
+        assert!(
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), CertificationError::Mismatch("typed segment metadata"))),
+            "mutation {mutation} must reach the typed metadata ownership guard: {refusal:?}"
+        );
+        drop(restore_observations);
+        drop(restore_cell);
+        offer
+            .admit_cell_program(root)
+            .expect("restored genuine typed metadata must admit");
+    }
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        before,
+        "receipt controls revalidate original outputs without another compiler request"
+    );
 }
 
 /// Compile only the next item of a runtime-owned completed prefix. Body,

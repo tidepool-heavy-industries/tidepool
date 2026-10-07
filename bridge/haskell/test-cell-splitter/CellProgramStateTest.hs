@@ -1,85 +1,68 @@
 module CellProgramStateTest (cellProgramStateChecks) where
 
 import Control.Monad (unless)
-import Codec.CBOR.Read (deserialiseFromBytes)
-import Codec.CBOR.Term (Term(..), decodeTerm)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Data.Text as T
 import Tidepool.Binders
 import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (CheckedSignature(..))
-import Tidepool.CborEncode (encodeCellOut)
 import Tidepool.ExactScope (ExactScope(..), emptyScopeInputs, ExactScopePurpose(..))
+import Tidepool.TypedSegment
+  ( TypedItemPlan(..), TypedItemBody(..), typedSegmentPlan )
 
+-- Component accumulation only: these inert signature bytes are never given
+-- to a compiler decoder or used to issue capture/execution authority.
 cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
   let prologue = SourcePrologue [] [] emptyCompilerDefaultRecipe
       exact = ExactScope "" "" "" "" emptyScopeInputs [] [] [] []
         NoCheckedPurpose Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty
-      item index kind = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
-        (StmtBinders kind [] []) [] False
+      item index kind names form = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
+        (StmtBinders kind names []) [] False form
       plan items = CellSourcePlan prologue items [] "" "" [] ""
-      firstPlan = plan [item 1 KBind,item 2 KExpr]
-      declaration = plan [item 3 KDecl,item 4 KDecl]
-      lastPlan = plan [item 5 KExpr]
-      pin key = CheckedBinderPin key "Int" []
-      expression key = CellExpressionPlan key ExpressionPure "Int" []
+      firstPlan = plan [item 1 KBind ["value"] (Just ActionBinding), item 2 KExpr [] Nothing]
+      declaration = plan [item 3 KDecl [] Nothing, item 4 KDecl [] Nothing]
+      lastPlan = plan [item 5 KExpr [] Nothing]
+      expression key ty lift = CellExpressionPlan key lift ty []
       signature key ty = CheckedSignature key ty (BS.singleton 0) []
-      signatures1 = [signature "pin-0" "Int",signature "expr-1" "Bool"]
-      signatures2 = [signature "expr-4" "Char",signature "pin-0" "Duplicate"]
-      expressions1 = [expression "expr-1"]
-      expressions2 = [(expression "expr-4") { expressionPlanLift = ExpressionEffectful }]
-      first = recordCheckedSegment firstPlan [pin "pin-0"] expressions1 signatures1 "checked-1" initial
-      middle = recordDeclarationSegment declaration "declared" "receipt-2" first
-      final = recordCheckedSegment lastPlan [pin "pin-4"] expressions2 signatures2 "checked-3" middle
+      signatures1 = [signature "entry0:value" "Int", signature "entry1:observation1" "() -> Bool"]
+      signatures2 = [signature "entry4:observation4" "() -> Char"]
+      observations1 = [expression "entry1" "Bool" ExpressionPure]
+      observations2 = [expression "entry4" "Char" ExpressionEffectful]
       assert label ok = unless ok (fail ("cell accumulation: " ++ label))
-  assert "item offsets count items rather than segments"
+  typedFirst <- either (fail . show) pure $ typedSegmentPlan (replicate 64 'a') "rootFirst"
+    [ TypedItemPlan 0 "entry0" 1 (ActionItem "step0" "probe0" "marker0" ["value"])
+    , TypedItemPlan 1 "entry1" 2 (ObservationItem "probe1" "observation1") ]
+  typedLast <- either (fail . show) pure $ typedSegmentPlan (replicate 64 'b') "rootLast"
+    [TypedItemPlan 4 "entry4" 3 (ObservationItem "probe4" "observation4")]
+  let first = recordTypedSegment firstPlan typedFirst observations1 signatures1 "typed-1" initial
+      middle = recordDeclarationSegment declaration "declared" "receipt-2" first
+      final = recordTypedSegment lastPlan typedLast observations2 signatures2 "typed-3" middle
+  assert "initial histories are empty"
+    (null (programTypedPlans initial) && null (programObservations initial)
+      && null (programCaptureSignatures initial))
+  assert "item offsets count lexical items rather than segments"
     (map programItemOffset [initial,first,middle,final] == [0,2,4,5])
   assert "declaration receipt uses its starting ordinal"
     (programDeclarations final == [(2,"receipt-2")])
-  assert "plan and checked-source chronology"
+  assert "source plans and rendered source retain chronology"
     (programPlans final == [firstPlan,declaration,lastPlan]
-      && concat (programSources final) == "checked-1declaredchecked-3")
-  assert "native compilation sees current segment evidence and keeps duplicate keys"
-    (programCheckedSignatures first == signatures1
-      && programExpressions middle == expressions1
-      && programCheckedSignatures final == signatures1 ++ signatures2
-      && [signaturePresentation value | value <- programCheckedSignatures final, signatureKey value == "pin-0"]
-        == ["Int","Duplicate"])
-  assert "observations preserve ordered segment accumulation"
-    (encodeCellOut (plan (cellPlanItems firstPlan ++ cellPlanItems declaration ++ cellPlanItems lastPlan))
-      ([pin "pin-0"] ++ [pin "pin-4"]) (expressions1 ++ expressions2) "checked-1declaredchecked-3"
-      == encodeCellOut (plan (concatMap cellPlanItems (programPlans final)))
-        (programPins final) (programExpressions final) (concat (programSources final)))
-  let bytes = encodeCellOut (plan (concatMap cellPlanItems (programPlans final)))
-        (programPins final) (programExpressions final) (concat (programSources final))
-  case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
-    Right (remaining, TList [TString magic, TInt 3, TList [_, _, _, _, TList rows]])
-      | BSL.null remaining && magic == T.pack "TPCELLOBSERVATIONS" -> case rows of
-          [TList [_, TString pureLift, _, _], TList [_, TString effectLift, _, _]]
-            | pureLift == T.pack "pure" && effectLift == T.pack "effectful" -> pure ()
-          _ -> fail "expression observations retained obsolete presentation fields"
-    _ -> fail "cell observations did not retain the matched version-three envelope"
-  assert "native authority is unchanged by output accumulation"
+      && concat (programSources final) == "typed-1declaredtyped-3")
+  assert "typed reservations survive the declaration boundary in original order"
+    (programTypedPlans first == [typedFirst] && programTypedPlans middle == [typedFirst]
+      && programTypedPlans final == [typedFirst,typedLast])
+  assert "actual capture-signature keys and observation chunks retain chronology"
+    (programCaptureSignatures final == signatures1 ++ signatures2
+      && programObservations final == observations1 ++ observations2)
+  assert "adding a later segment leaves prior snapshots unchanged"
+    (programCaptureSignatures first == signatures1 && programCaptureSignatures middle == signatures1
+      && programObservations first == observations1 && programObservations middle == observations1)
+  assert "accumulation does not modify native authority"
     (programExact final == exact && programPrologue final == prologue
       && null (programValues final) && null (programOriginals final)
       && programOriginal final == Nothing && Map.null (programRetained final)
       && programSourceImports final == Nothing)
-  assert "signature queries retain requested key order, duplicate evidence, and repeated keys"
-    (signaturesFor ["expr-4","missing","pin-0","pin-0"] final
-      == [signature "expr-4" "Char",signature "pin-0" "Int",signature "pin-0" "Duplicate"
-         ,signature "pin-0" "Int",signature "pin-0" "Duplicate"]
-      && null (signaturesFor [] final) && null (signaturesFor ["missing"] final))
-  let duplicateExpression = (expression "expr-1") { expressionPlanType = "Bool" }
-      ambiguous = recordCheckedSegment (plan []) [] [duplicateExpression] [] "" final
-  assert "expression queries retain chronology and ambiguity regardless of requested key order"
-    (expressionsFor ["expr-4","missing","expr-1","expr-1"] ambiguous
-      == expressions1 ++ expressions2 ++ [duplicateExpression]
-      && expressionsFor ["expr-1"] ambiguous == expressions1 ++ [duplicateExpression]
-      && null (expressionsFor [] ambiguous) && null (expressionsFor ["missing"] ambiguous))
-  putStrLn "cell accumulation: 9 checks passed"
+  putStrLn "cell accumulation: 8 checks passed"

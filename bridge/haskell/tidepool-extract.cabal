@@ -32,6 +32,10 @@ extra-source-files:
   test-prepared-stg/RecoveredBaseCaller.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
+  test-cell-splitter/fixtures/sigma-retention/*.hs
+  test-cell-splitter/fixtures/typed-segment-native/*.hs
+  test-cell-splitter/fixtures/typed-segment-oracle/*.hs
+  test-cell-splitter/fixtures/typed-session/*.hs
   test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
   test-cell-splitter/fixtures/quasiquote-reuse/*.hs
   test-cell-splitter/fixtures/unreachable-compile-time/*.hs
@@ -117,8 +121,11 @@ library tidepool-extract-internal
     Tidepool.SessionArtifacts
     Tidepool.Timing
     Tidepool.TypePolicy
+    Tidepool.TypedSegment
+    Tidepool.TypedSegment.Source
     Tidepool.TurnSource
   other-modules:   Tidepool.LocalNativeDeclaration
+                   Tidepool.TypedSegment.Types
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
@@ -168,6 +175,8 @@ test-suite cell-splitter-test
   main-is:          CellSplitterTest.hs
   hs-source-dirs:   test-cell-splitter
   other-modules:    CellSplitterCases
+                    TypedSegmentCases
+                    TypedSessionCases
                     UnreachableCompileTimeTest
                     CellProgramStateTest
                     CheckedAdmissionTest

@@ -491,7 +491,12 @@ fn observe(
         );
         prop_assert_eq!(
             actual
-                .native_requirements_from_roots(&ids.iter().copied().collect::<Vec<_>>())
+                .native_requirements_from_roots(
+                    &ids.iter()
+                        .copied()
+                        .map(NativeRequirementRoot::AllGroups)
+                        .collect::<Vec<_>>(),
+                )
                 .unwrap(),
             NativeRequirements::default()
         );
@@ -619,7 +624,12 @@ fn run_history(
                     let valid = roots.iter().all(|id| owned.contains(id));
                     let selected = actual.select_roots(roots.clone());
                     prop_assert_eq!(selected.is_ok(), valid, "step {} {:?}", step, op);
-                    let native = actual.native_requirements_from_roots(&roots);
+                    let native_roots: Vec<_> = roots
+                        .iter()
+                        .copied()
+                        .map(NativeRequirementRoot::AllGroups)
+                        .collect();
+                    let native = actual.native_requirements_from_roots(&native_roots);
                     prop_assert_eq!(native.is_ok(), valid);
                     if valid {
                         prop_assert_eq!(native.unwrap(), NativeRequirements::default());
@@ -992,12 +1002,349 @@ proptest! {
         let captured = selected.clone();
         drop(admitted);
         drop(selected);
-        let requirements = captured.native_requirements_from_roots(&roots).unwrap();
+        let native_roots: Vec<_> = roots
+            .iter()
+            .copied()
+            .map(NativeRequirementRoot::AllGroups)
+            .collect();
+        let requirements = captured.native_requirements_from_roots(&native_roots).unwrap();
         prop_assert_eq!(&requirements.bindings, &expected);
         prop_assert!(requirements.packages.is_empty());
-        prop_assert_eq!(captured.native_binding_requirements_from_roots(&roots).unwrap(), expected);
-        prop_assert!(captured.native_requirements_from_roots(&[ArtifactId([255; 32])]).is_err());
+        prop_assert_eq!(captured.native_binding_requirements_from_roots(&native_roots).unwrap(), expected);
+        prop_assert!(captured.native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(ArtifactId([255; 32]))]).is_err());
         drop(captured);
         prop_assert_eq!(inventory.node_count(), 0);
+    }
+}
+
+const GROUP_ORDINALS: [u32; 2] = [7, 11];
+const GROUP_NODES: usize = 4;
+
+type GroupState = (usize, u32);
+
+struct GroupGraphFixture {
+    view: ArtifactView,
+    reversed_view: ArtifactView,
+    binding_ids: Vec<ArtifactId>,
+    root_id: ArtifactId,
+}
+
+fn group_graph_fixture(extra_edges: &[u8], generations: &[u64]) -> GroupGraphFixture {
+    use crate::certified_products::{tests::original_groups_fixture, PendingImportOwner};
+    use tidepool_repr::execution_schema::SymbolIdentity;
+
+    let empty_groups: Vec<(u32, Vec<PendingImportOwner>)> = GROUP_ORDINALS
+        .iter()
+        .map(|ordinal| (*ordinal, Vec::new()))
+        .collect();
+    let placeholders: Vec<_> = (0..GROUP_NODES)
+        .map(|node| {
+            original_groups_fixture(
+                &format!("Node{node}"),
+                empty_groups.clone(),
+                1,
+                &BTreeMap::new(),
+            )
+        })
+        .collect();
+    let owners: Vec<_> = placeholders
+        .iter()
+        .map(|product| product.owner().clone())
+        .collect();
+
+    // This core is a diamond with a cycle: 0/7 -> {1/11, 2/11} -> 3/7
+    // -> 1/11. Node 0's other group is deliberately outside that closure.
+    let mut edges = BTreeMap::<GroupState, BTreeSet<GroupState>>::new();
+    for (from, to) in [
+        ((0, 7), (1, 11)),
+        ((0, 7), (2, 11)),
+        ((1, 11), (3, 7)),
+        ((2, 11), (3, 7)),
+        ((3, 7), (1, 11)),
+        ((0, 11), (3, 11)),
+    ] {
+        edges.entry(from).or_default().insert(to);
+    }
+    for node in 0..GROUP_NODES {
+        for (ordinal_index, ordinal) in GROUP_ORDINALS.iter().copied().enumerate() {
+            let mask = extra_edges[node * GROUP_ORDINALS.len() + ordinal_index];
+            for target in 1..GROUP_NODES {
+                if target != node && mask & (1 << target) != 0 {
+                    let required =
+                        GROUP_ORDINALS[(node + target + ordinal_index) % GROUP_ORDINALS.len()];
+                    edges
+                        .entry((node, ordinal))
+                        .or_default()
+                        .insert((target, required));
+                }
+            }
+        }
+    }
+
+    let build_products = |owners: &[tidepool_repr::execution_schema::CachedHomeOwner]| {
+        (0..GROUP_NODES)
+            .map(|node| {
+                let groups = GROUP_ORDINALS
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(ordinal_index, ordinal)| {
+                        let mut imports = Vec::new();
+                        for (target, required_ordinal) in
+                            edges.get(&(node, ordinal)).into_iter().flatten().copied()
+                        {
+                            let target_module = &owners[target].module;
+                            imports.push(PendingImportOwner::Source {
+                                owner: owners[target].clone(),
+                                original_ordinal: required_ordinal,
+                                binder: SymbolIdentity {
+                                    unit: owners[target].unit.clone(),
+                                    module: target_module.clone(),
+                                    namespace: "value".into(),
+                                    occurrence: format!("entry_{required_ordinal}"),
+                                    record_parent: None,
+                                },
+                            });
+                        }
+                        imports.push(PendingImportOwner::Retained {
+                            identity: SymbolIdentity {
+                                unit: "fixture".into(),
+                                module: format!("Value{node}"),
+                                namespace: "value".into(),
+                                occurrence: format!("binding_{ordinal}"),
+                                record_parent: None,
+                            },
+                            generation: generations[node * GROUP_ORDINALS.len() + ordinal_index],
+                        });
+                        (ordinal, imports)
+                    })
+                    .collect();
+                original_groups_fixture(&format!("Node{node}"), groups, 1, &BTreeMap::new())
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_pass = build_products(&owners);
+    let exact_owners: Vec<_> = first_pass
+        .iter()
+        .map(|product| product.owner().clone())
+        .collect();
+    let products = build_products(&exact_owners);
+    for (first, second) in first_pass.iter().zip(&products) {
+        assert_eq!(first.owner(), second.owner());
+    }
+
+    let mut entries: Vec<_> = products
+        .into_iter()
+        .map(|product| {
+            ArtifactEntry::original(
+                [2; 32],
+                crate::certified_products::fixture_finalized_product(product, [2; 32]),
+            )
+            .unwrap()
+        })
+        .collect();
+    let value_ids: Vec<_> = (0..GROUP_NODES)
+        .map(|node| {
+            let owner = ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: format!("Value{node}"),
+            };
+            let entry =
+                ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    &owner.unit,
+                    &owner.module,
+                    BTreeMap::new(),
+                ));
+            let id = entry.descriptor.id;
+            entries.push(entry);
+            id
+        })
+        .collect();
+    // Carry the exact native identity before admission adds a canonical module
+    // with the same owner. Demand must never select by module name alone.
+    assert_eq!(entries[0].descriptor.kind, ArtifactKind::OriginalModule);
+    assert_eq!(entries[0].descriptor.owner.module, "Node0");
+    let root_id = entries[0].descriptor.id;
+    let inventory = ArtifactInventory::default();
+    let view = inventory
+        .admit(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    entries.reverse();
+    let reversed_inventory = ArtifactInventory::default();
+    let reversed_view = reversed_inventory
+        .admit(&reversed_inventory.empty_view(), entries)
+        .unwrap();
+    GroupGraphFixture {
+        view,
+        reversed_view,
+        binding_ids: value_ids,
+        root_id,
+    }
+}
+
+#[test]
+fn native_group_fixture_distinguishes_original_and_canonical_owner_in_both_orders() {
+    let GroupGraphFixture {
+        view,
+        reversed_view,
+        root_id,
+        ..
+    } = group_graph_fixture(
+        &[0; GROUP_NODES * GROUP_ORDINALS.len()],
+        &[0; GROUP_NODES * GROUP_ORDINALS.len()],
+    );
+    for view in [&view, &reversed_view] {
+        let owner_artifacts: Vec<_> = view
+            .descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.owner
+                    == ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: "Node0".into(),
+                    }
+            })
+            .collect();
+        assert_eq!(owner_artifacts.len(), 2);
+        assert!(owner_artifacts
+            .iter()
+            .any(|descriptor| descriptor.id == root_id
+                && descriptor.kind == ArtifactKind::OriginalModule));
+        let canonical: Vec<_> = owner_artifacts
+            .iter()
+            .filter(|descriptor| descriptor.kind == ArtifactKind::CanonicalModuleInterface)
+            .collect();
+        assert_eq!(canonical.len(), 1);
+        let canonical_id = canonical[0].id;
+        assert_ne!(root_id, canonical_id);
+        let native = view
+            .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: root_id,
+                original_ordinal: 7,
+            }])
+            .unwrap();
+        assert_eq!(native.bindings.len(), 4);
+        assert!(
+            matches!(view.native_requirements_from_roots(&[NativeRequirementRoot::Group { artifact: canonical_id, original_ordinal: 7 }]),
+            Err(CompileError::ArtifactInventory(error)) if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable { artifact: canonical_id, original_ordinal: 7 })
+        );
+    }
+}
+
+// Repeated set expansion is intentionally independent of the production
+// worklist and its graph indices.
+fn selected_group_closure(
+    edges: &BTreeMap<GroupState, BTreeSet<GroupState>>,
+    roots: &BTreeSet<GroupState>,
+) -> BTreeSet<GroupState> {
+    let mut selected = roots.clone();
+    loop {
+        let before = selected.len();
+        let newly_required: Vec<_> = selected
+            .iter()
+            .flat_map(|state| edges.get(state).into_iter().flatten().copied())
+            .collect();
+        selected.extend(newly_required);
+        if selected.len() == before {
+            return selected;
+        }
+    }
+}
+
+fn bindings_for_selected_groups(
+    groups: &BTreeSet<GroupState>,
+    binding_ids: &[ArtifactId],
+    generations: &[u64],
+) -> BTreeSet<NativeBindingRequirement> {
+    use tidepool_repr::execution_schema::SymbolIdentity;
+
+    groups
+        .iter()
+        .map(|(node, ordinal)| {
+            let ordinal_index = GROUP_ORDINALS
+                .iter()
+                .position(|candidate| candidate == ordinal)
+                .unwrap();
+            NativeBindingRequirement {
+                artifact_id: binding_ids[*node],
+                identity: SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: format!("Value{node}"),
+                    namespace: "value".into(),
+                    occurrence: format!("binding_{ordinal}"),
+                    record_parent: None,
+                },
+                generation: generations[node * GROUP_ORDINALS.len() + ordinal_index],
+            }
+        })
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(property_config())]
+    #[test]
+    fn selected_native_groups_match_independent_fixed_point(
+        extra_edges in proptest::collection::vec(0u8..16, GROUP_NODES * GROUP_ORDINALS.len()),
+        generations in proptest::collection::vec(0u64..8, GROUP_NODES * GROUP_ORDINALS.len()),
+    ) {
+        let generations: Vec<_> = generations
+            .into_iter()
+            .enumerate()
+            .map(|(index, generation)| generation + index as u64 * 16)
+            .collect();
+        let mut edges = BTreeMap::<GroupState, BTreeSet<GroupState>>::new();
+        for (from, to) in [
+            ((0, 7), (1, 11)),
+            ((0, 7), (2, 11)),
+            ((1, 11), (3, 7)),
+            ((2, 11), (3, 7)),
+            ((3, 7), (1, 11)),
+            ((0, 11), (3, 11)),
+        ] {
+            edges.entry(from).or_default().insert(to);
+        }
+        for node in 0..GROUP_NODES {
+            for (ordinal_index, ordinal) in GROUP_ORDINALS.iter().copied().enumerate() {
+                let mask = extra_edges[node * GROUP_ORDINALS.len() + ordinal_index];
+                for target in 1..GROUP_NODES {
+                    if target != node && mask & (1 << target) != 0 {
+                        let required =
+                            GROUP_ORDINALS[(node + target + ordinal_index) % GROUP_ORDINALS.len()];
+                        edges.entry((node, ordinal)).or_default().insert((target, required));
+                    }
+                }
+            }
+        }
+        let GroupGraphFixture { view, reversed_view, binding_ids, root_id } = group_graph_fixture(&extra_edges, &generations);
+        let roots = [NativeRequirementRoot::Group {
+            artifact: root_id,
+            original_ordinal: 7,
+        }];
+        let expected_groups = selected_group_closure(&edges, &BTreeSet::from([(0, 7)]));
+        let expected_bindings =
+            bindings_for_selected_groups(&expected_groups, &binding_ids, &generations);
+        let actual = view.native_requirements_from_roots(&roots).unwrap();
+        prop_assert_eq!(&actual, &reversed_view.native_requirements_from_roots(&roots).unwrap());
+        prop_assert_eq!(
+            actual.bindings.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_bindings
+        );
+        prop_assert!(actual.packages.is_empty());
+        prop_assert!(!expected_groups.is_empty());
+        prop_assert!(!expected_groups.contains(&(0, 11)), "the unselected later group on the root became a demand");
+
+        let all_groups = [NativeRequirementRoot::AllGroups(root_id)];
+        let expected_all = selected_group_closure(
+            &edges,
+            &BTreeSet::from([(0, 7), (0, 11)]),
+        );
+        let all_requirements = view.native_requirements_from_roots(&all_groups).unwrap();
+        prop_assert_eq!(&all_requirements, &reversed_view.native_requirements_from_roots(&all_groups).unwrap());
+        prop_assert_eq!(
+            all_requirements.bindings.iter().cloned().collect::<BTreeSet<_>>(),
+            bindings_for_selected_groups(&expected_all, &binding_ids, &generations)
+        );
+        prop_assert!(expected_all.contains(&(0, 11)));
     }
 }

@@ -115,6 +115,14 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/fixtures/recovery-original.hs',
         'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
+        'tidepool/runtime/src/session/fixtures/typed-segment-illtyped.hs',
+        'tidepool/runtime/src/session/fixtures/typed-segment-let-generalization.hs',
+        'tidepool/runtime/src/session/fixtures/typed-segment-oracle.hs',
+        'tidepool/runtime/src/session/fixtures/typed-segment-probe-support.hs',
+        'tidepool/runtime/src/session/fixtures/typed-segment-retained-bottom.hs',
+        'tidepool/runtime/src/session/fixtures/typed-segment-strict-publication.hs',
+        'tidepool/runtime/src/session/typed_segment_tests.rs',
+
     }),
     'tidepool-toolchain': frozenset({
         'tidepool/toolchain/src/module_candidates/codec_measurement.rs',

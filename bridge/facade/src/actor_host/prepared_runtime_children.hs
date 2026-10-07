@@ -8,4 +8,4 @@ preparedReplies <- forM [1..{prepared-child-count} :: Int] $ \ordinal -> do
   Right answer <- request @Int actor ("execute the prepared probe" :: Text.Text) defaultRequestOptions
   Right value <- await (result answer)
   pure value
-display preparedReplies
+display (preparedReplies == replicate {prepared-child-count} (41 :: Int))

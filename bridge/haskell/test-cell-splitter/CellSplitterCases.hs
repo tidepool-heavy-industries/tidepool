@@ -20,17 +20,24 @@ import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
 import GHC.Builtin.Types (intTy, intDataCon)
 import GHC.Core qualified as Core
-import GHC.Core.DataCon (dataConWorkId)
+import GHC.Core.DataCon (dataConWorkId, dataConRepArgTys, dataConTheta)
+import GHC.Core.Coercion (mkPrimEqPred)
+import GHC.Core.Type (mkInvisFunTys, isPredTy, splitTyConApp_maybe)
+import GHC.Core.Predicate (isCoVarType)
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Unit.Module.ModGuts (CgGuts, cg_binds)
 import GHC.Stg.Syntax (CgStgTopBinding)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Var.Set (IdSet)
+import GHC.Types.Var (isId, isCoVar, varType, varName)
 import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString)
-import GHC.Tc.Types (tcg_rn_decls, tcg_mod)
+import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env)
+import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
@@ -172,6 +179,123 @@ functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $
     temporary = do
       parent <- getTemporaryDirectory
       (path,handle) <- openTempFile parent "tidepool-function-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+fixtureBindingType :: String -> TcGblEnv -> IO Type
+fixtureBindingType name environment = case
+    [varType identifier | identifier <- typeEnvIds (tcg_type_env environment)
+      , getOccString identifier == name
+      , nameModule_maybe (varName identifier) == Just (tcg_mod environment)] of
+  [ty] -> pure ty
+  _ -> fail ("missing or ambiguous original fixture binding: " ++ name)
+
+-- Exercise the tier issuer and later thin-interface consumer with the real
+-- GHC sigma type, rather than deriving expected tiers from rendered text.
+sigmaValueInterfaceCompilation :: IO ()
+sigmaValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let producerPath = root </> "SigmaValueProducer.hs"
+      fixturePath = "test-cell-splitter/fixtures/sigma-retention/SigmaValueProducer.hs"
+      owner = SessionModule ValMod (Generation 1)
+      scope = SessionScope root [owner] Nothing Nothing
+  copyFile fixturePath producerPath
+  prepared <- runPipelineSelected PreparedStg producerPath [root]
+  let result = pprPipelineResult prepared
+      environment = prTargetTcGblEnv result
+  forM_ [("scalar", True), ("plain", False), ("function", True)
+        , ("boxedEquality", True), ("erased", False)
+        , ("nested", True), ("nestedErased", False), ("recursive", True)] $ \(name, expected) -> do
+    ty <- fixtureBindingType name environment
+    assertEqual ("runtime closure classification: " ++ name) expected
+      (isClosureType ty)
+  actionType <- fixtureBindingType "__result" environment
+  let (actionBinders, actionPredicates, _) = tcSplitSigmaTy actionType
+  assertEqual "producer action has no outer forall" 0 (length actionBinders)
+  assertEqual "producer action takes no dictionaries" 0 (length actionPredicates)
+  assertEqual "rank-N result contains a dictionary closure" True
+    (isClosureType (stripMonadHead actionType))
+  scalarRhs <- case [rhs | (identifier, rhs) <- Core.flattenBinds (prBinds result)
+                        , getOccString identifier == "scalar"] of
+    [rhs] -> pure rhs
+    _ -> fail "producer did not retain its original scalar Core binding"
+  let (scalarArguments, _) = Core.collectBinders scalarRhs
+  unless (any (\argument -> isId argument && not (isCoVar argument)
+                         && isPredTy (varType argument)) scalarArguments)
+    (fail "scalar Core has no runtime dictionary argument")
+  assertEqual "primitive equality evidence erases" False
+    (isClosureType (mkInvisFunTys [mkPrimEqPred intTy intTy] intTy))
+  binders <- mkBoundBinders ["capturedNumber"] 1 root result
+  case binders of
+    [binder] -> assertEqual "genuine rank-N value is retained opaque" RetainOpaque (bbTier binder)
+    _ -> fail "sigma producer did not issue exactly one captured binder"
+  -- Separate authored consumers select distinct Num dictionaries from the same
+  -- persisted value using the wrapper's source-declared rank-N accessor.
+  forM_ ["Int", "Double"] $ \numberType -> do
+    let consumerPath = root </> ("SigmaValue" ++ numberType ++ ".hs")
+    writeFile consumerPath (unlines
+      [ "module SigmaValue" ++ numberType ++ " where"
+      , "import " ++ showSDocUnsafe (ppr (renderSessionModule owner)) ++ " (capturedNumber)"
+      , "import SigmaValueProducer (sigmaNumber)"
+      , "__result :: " ++ numberType
+      , "__result = sigmaNumber capturedNumber + 2"
+      ])
+    _ <- runPipelineSessionSelected (PreparedProducts Nothing) mempty GeneralCompile
+      (Just scope) consumerPath [root] Nothing
+    pure ()
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-sigma-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- Constructor dictionaries are physical worker fields, even though they
+-- are absent from the source-level argument list. Only stored closures need
+-- opaque retention; boxed equality data and erased coercions remain distinct.
+constructorEvidenceClassification :: IO ()
+constructorEvidenceClassification = bracket temporary removeDirectoryRecursive $ \root -> do
+  let path = root </> "ConstructorEvidenceProducer.hs"
+  copyFile "test-cell-splitter/fixtures/sigma-retention/ConstructorEvidenceProducer.hs" path
+  prepared <- runPipelineSelected PreparedStg path [root]
+  let result = pprPipelineResult prepared
+      environment = prTargetTcGblEnv result
+      bindingType name = fixtureBindingType name environment
+      constructorFields ty = case splitTyConApp_maybe ty of
+        Just (constructor, _) -> pure (concatMap dataConRepArgTys (tyConDataCons constructor))
+        _ -> fail "constructor evidence fixture has no nominal type"
+  forM_ [("some", True), ("number", True), ("equality", False)
+        , ("primitive", False), ("plain", False), ("function", True)
+        , ("numScalar", True), ("forallOnly", False), ("boxedScalar", True)] $ \(name, expected) -> do
+    ty <- bindingType name
+    assertEqual ("physical closure classification: " ++ name) expected (isClosureType ty)
+  forM_ ["some", "number"] $ \name -> do
+    fields <- bindingType name >>= constructorFields
+    unless (any (\(Scaled _ field) -> isPredTy field && not (isCoVarType field)
+                && isClosureType field) fields)
+      (fail ("constructor has no real stored dictionary closure: " ++ name))
+  equalityFields <- bindingType "equality" >>= constructorFields
+  unless (any (\(Scaled _ field) -> isPredTy field && not (isCoVarType field)) equalityFields)
+    (fail "boxed equality control has no stored dictionary")
+  primitive <- bindingType "primitive"
+  case splitTyConApp_maybe primitive of
+    Just (constructor, _) -> unless
+      (any (any isCoVarType . dataConTheta) (tyConDataCons constructor))
+      (fail "GADT control has no actual primitive equality evidence")
+    _ -> fail "primitive equality control has no nominal type"
+  assertEqual "primitive equality sigma stays erased" False
+    (isClosureType (mkInvisFunTys [mkPrimEqPred intTy intTy] intTy))
+  binders <- mkBoundBinders ["capturedSome"] 1 root result
+  case binders of
+    [binder] -> assertEqual "constructor dictionary closure retained opaque" RetainOpaque (bbTier binder)
+    _ -> fail "constructor producer did not issue exactly one actual capture"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-constructor-evidence"
       hClose handle
       removeFile path
       createDirectory path

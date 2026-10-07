@@ -142,9 +142,11 @@ prologue. Binder rows have three fields; expression rows have four.
 Neither carries imports reconstructed from type presentation. Native checked
 signatures supply the exact type authority.
 
-`TPEXACTCHECK` and `TPEXACTPROGRAM` use version 3; parser receipts use
-`TPCELLPLAN2`. The matched Rust/Haskell release rejects older observations and
-receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
+`TPEXACTCHECK` uses version 3; planned-cell `TPEXACTPROGRAM` uses version 4 and
+planned-item `TPEXACTITEM` uses version 2. Parser receipts use `TPCELLPLAN3`,
+including the parser-owned action/let/recursive binding form. The matched
+Rust/Haskell release rejects older observations and receipts. Worker fields
+34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
 and rejected explicitly. Original live inputs use a compiler-issued thin value
 interface; execution uses admitted item recipes. Exact scope purposes are
 `cell-check4`, `cell-program3` and `checked-item5`. Direct template roots are
@@ -153,6 +155,18 @@ template imports. Expressions reserve one
 capture generation and observation name, with no auxiliary display recipe or
 presentation admission. Authored display operations and activation previews
 retain their separate compiler and runtime paths.
+
+Each executable inference segment has one successful authored frontend and
+one canonical finalized module with all its kept entry roots. Descriptors retain
+actual GHC capture Ids, their types and Name-keyed fixities; Session's existing
+decoder supplies the global Ids substituted into later roots before simplification.
+Planned receipts seal the complete ordered segment plan and each entry's actual
+source owner and compiler-issued original group ordinal. Generalized lets retain
+their real GHC sigma types. Unresolved action-bound captures require a concrete
+same-cell use or annotation and are refused before execution. Bare observations
+retain a lazy result thunk, with effectful observations running their action once.
+Per-item product projection and certification remain separate serialization work;
+they do not run another authored frontend.
 
 Canonical `TPFINALMODULE` version 3 certificates have thirteen fields. The final
 field is `["source-original", imports]` or `["native-authored-declaration", generation]`;

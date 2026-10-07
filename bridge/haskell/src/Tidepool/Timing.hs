@@ -27,6 +27,7 @@ module Tidepool.Timing
   , ReuseModule(..), ReuseContext(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
     -- * Opt-in memo trace (TIDEPOOL_MEMO_TRACE=1)
   , readMemoTraceEnabled
+  , MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
   , emitMemoCycleGraph
   , emitMemoMissTrace
   ) where
@@ -425,15 +426,36 @@ delta before after
 readMemoTraceEnabled :: IO Bool
 readMemoTraceEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_MEMO_TRACE"
 
+-- Selection observations describe the immutable ingress before the working
+-- memo is narrowed. They do not grant reuse or search historical alternatives.
+data MemoSelectionState = MemoOwnerAbsent | MemoIngressAbsent | MemoMatchingRejected
+  | MemoSelected | MemoTargetExcluded | MemoStandalone deriving (Eq, Show)
+data MemoSelectionTrace = MemoSelectionTrace
+  { selectionState :: MemoSelectionState
+  , selectionUnit :: String
+  , selectionKeySha256 :: String
+  , selectionNarrowedVersions :: Int
+  , selectionOriginatingCycle :: Maybe Word64
+  , selectionRejectedChecks :: [(Word64, [String])]
+  , selectionRejectedOmitted :: Int
+  , selectionExecutable :: Maybe MemoExecutableTrace
+  }
+data MemoExecutableTrace = MemoExecutableTrace
+  { executablePreviousEpoch :: Maybe Word64
+  , executableCurrentEpoch :: Word64
+  , executableHasCode :: Bool
+  , executableNeedsBytecode :: Bool
+  }
+
 -- | One line per module in the selected module graph, written once per
 -- compile cycle (never per lookup) when @TIDEPOOL_MEMO_TRACE=1@. Graph
 -- capture holds paths and fingerprints only, never source or Core.
 emitMemoCycleGraph
   :: Bool -> Word64 -> String -> String -> Maybe FilePath -> Maybe FilePath
-  -> Fingerprint -> [String] -> String -> IO ()
-emitMemoCycleGraph False _ _ _ _ _ _ _ _ = pure ()
+  -> Fingerprint -> [String] -> String -> MemoSelectionTrace -> IO ()
+emitMemoCycleGraph False _ _ _ _ _ _ _ _ _ = pure ()
 emitMemoCycleGraph True cycleId moduleName sourceKind selectedPath resolvedPath
-  sourceFingerprint directDeps dependencyDigest =
+  sourceFingerprint directDeps dependencyDigest selection =
   hPutStrLn stderr $
     "tidepool-memo-cycle-graph cycle=" ++ show cycleId
       ++ " module=" ++ moduleName
@@ -443,6 +465,20 @@ emitMemoCycleGraph True cycleId moduleName sourceKind selectedPath resolvedPath
       ++ " fingerprint=" ++ show sourceFingerprint
       ++ " direct_deps=" ++ intercalate "," directDeps
       ++ " dependency_digest=" ++ dependencyDigest
+      ++ " unit=" ++ show (selectionUnit selection)
+      ++ " selection=" ++ show (selectionState selection)
+      ++ " selection_key_sha256=" ++ selectionKeySha256 selection
+      ++ " narrowed_versions=" ++ show (selectionNarrowedVersions selection)
+      ++ " selected_originating_cycle=" ++ maybe "none" show (selectionOriginatingCycle selection)
+      ++ " rejected_checks=" ++ show (selectionRejectedChecks selection)
+      ++ " rejected_checks_omitted=" ++ show (selectionRejectedOmitted selection)
+      ++ case selectionExecutable selection of
+        Nothing -> " executable_observation=unknown"
+        Just capacity -> " executable_observation=observed"
+          ++ " previous_epoch=" ++ maybe "none" show (executablePreviousEpoch capacity)
+          ++ " current_epoch=" ++ show (executableCurrentEpoch capacity)
+          ++ " has_code_before_refresh=" ++ show (executableHasCode capacity)
+          ++ " needs_bytecode=" ++ show (executableNeedsBytecode capacity)
 
 -- | One line per memo miss, written when @TIDEPOOL_MEMO_TRACE=1@. Distinct
 -- from the always-under-'TIDEPOOL_TIMING' @tidepool-memo-miss@ summary line:

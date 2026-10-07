@@ -48,6 +48,19 @@ impl CanonicalProducerIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ArtifactId(pub [u8; 32]);
 
+/// Native demand starts at a complete module or one compiler-issued group.
+/// Selecting demand does not change the retained artifact custody.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum NativeRequirementRoot {
+    AllGroups(ArtifactId),
+    /// The ordinal is issued by the original module certificate, independently
+    /// of executable entry indices or the position of a cell item.
+    Group {
+        artifact: ArtifactId,
+        original_ordinal: u32,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -85,6 +98,13 @@ pub enum ArtifactInventoryFailure {
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("authored generation {generation} requires one certified native root; found {found}")]
     AuthoredNativeRoot { generation: u64, found: usize },
+    #[error("native root {artifact:?} is outside its retained view")]
+    NativeRootOutsideView { artifact: ArtifactId },
+    #[error("artifact {artifact:?} has no certified native group {original_ordinal}")]
+    NativeGroupUnavailable {
+        artifact: ArtifactId,
+        original_ordinal: u32,
+    },
     #[error("{dependent:?} requires another exact interface seal for {required:?}")]
     InterfaceSealMismatch {
         dependent: ExactModuleIdentity,
@@ -348,6 +368,7 @@ pub(crate) struct ArtifactEntry {
     interface_seals: BTreeMap<ExactModuleIdentity, [u8; 32]>,
     pub native_requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
     native_owners: BTreeMap<ExactModuleIdentity, NativeOwnerKey>,
+    native_group_ordinals: BTreeSet<u32>,
     pub retained_packages: Vec<RetainedPackageDependency>,
 }
 
@@ -432,6 +453,7 @@ impl ArtifactEntry {
             interface_seals,
             native_requirements: native_requirements.artifact_edges,
             native_owners,
+            native_group_ordinals: native_requirements.group_ordinals,
             retained_packages: native_requirements.retained_packages,
         })
     }
@@ -470,6 +492,7 @@ impl ArtifactEntry {
             interface_seals,
             native_requirements: Vec::new(),
             native_owners: BTreeMap::new(),
+            native_group_ordinals: BTreeSet::new(),
             retained_packages: Vec::new(),
         }
     }
@@ -504,6 +527,7 @@ impl ArtifactEntry {
             interface_seals: BTreeMap::new(),
             native_requirements: Vec::new(),
             native_owners: BTreeMap::new(),
+            native_group_ordinals: BTreeSet::new(),
             retained_packages: Vec::new(),
         }
     }
@@ -1347,25 +1371,50 @@ impl ArtifactView {
         edges
     }
     /// Select native implementation dependencies independently of interface
-    /// visibility. Each original root initially selects all its native groups;
+    /// visibility. Roots explicitly select all groups or one issued ordinal;
     /// native group edges then select only their exact required ordinals.
     pub fn native_binding_requirements_from_roots(
         &self,
-        roots: &[ArtifactId],
+        roots: &[NativeRequirementRoot],
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
         Ok(self.native_requirements_from_roots(roots)?.bindings)
     }
 
     pub fn native_requirements_from_roots(
         &self,
-        roots: &[ArtifactId],
+        roots: &[NativeRequirementRoot],
     ) -> Result<NativeRequirements, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         let owned = closure(&state, self.roots().into_iter());
-        if roots.iter().any(|id| !owned.contains(id)) {
-            return Err(failure("native root is outside retained view"));
+        let mut pending = Vec::with_capacity(roots.len());
+        for root in roots {
+            let (id, ordinal) = match *root {
+                NativeRequirementRoot::AllGroups(id) => (id, None),
+                NativeRequirementRoot::Group {
+                    artifact,
+                    original_ordinal,
+                } => (artifact, Some(original_ordinal)),
+            };
+            if !owned.contains(&id) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
+                ));
+            }
+            if let Some(original_ordinal) = ordinal {
+                if !state.payloads[&id]
+                    .native_group_ordinals
+                    .contains(&original_ordinal)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact: id,
+                            original_ordinal,
+                        },
+                    ));
+                }
+            }
+            pending.push((id, ordinal));
         }
-        let mut pending = roots.iter().map(|id| (*id, None)).collect::<Vec<_>>();
         let mut seen = BTreeSet::new();
         let mut requirements = BTreeSet::new();
         let mut packages = BTreeSet::new();
@@ -2071,7 +2120,7 @@ mod tests {
         assert_eq!(retained.descriptors().len(), 2);
         assert_eq!(retained.interface_dependencies().len(), 1);
         assert!(retained
-            .native_requirements_from_roots(&[published])
+            .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(published)])
             .unwrap()
             .bindings
             .is_empty());
@@ -2678,24 +2727,30 @@ mod tests {
             .admit(&empty, vec![value, type_user, helper, consumer])
             .unwrap();
         assert!(view
-            .native_binding_requirements_from_roots(&[type_id])
+            .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(type_id)])
             .unwrap()
             .is_empty());
         let selected = view
-            .native_binding_requirements_from_roots(&[consumer_id])
+            .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
+                consumer_id,
+            )])
             .unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].identity.module, "Val");
         assert_eq!(selected[0].identity.occurrence, "x");
         assert_eq!(selected[0].generation, 7);
         assert_eq!(
-            view.native_binding_requirements_from_roots(&[helper_id])
-                .unwrap()
-                .len(),
+            view.native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
+                helper_id
+            )])
+            .unwrap()
+            .len(),
             2
         );
         assert!(view
-            .native_binding_requirements_from_roots(&[ArtifactId([99; 32])])
+            .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
+                ArtifactId([99; 32])
+            )])
             .is_err());
     }
 
@@ -2920,6 +2975,130 @@ mod tests {
         assert!(!json.contains("NodeIndex"));
     }
     #[test]
+    fn selected_initial_group_excludes_later_captures_and_accepts_issued_empty_group() {
+        use crate::certified_products::{PackageInterfaceWitness, PendingImportOwner};
+        use tidepool_repr::execution_schema::testing;
+
+        let package_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(package_file.path(), b"selected package interface").unwrap();
+        let package_digest = digest(b"selected package interface");
+        let package_identity = |occurrence: &str| {
+            let mut identity = testing::identity("Package", occurrence);
+            identity.unit = "package-unit".into();
+            identity
+        };
+        let packages = BTreeMap::from([(
+            ("package-unit".into(), "Package".into()),
+            PackageInterfaceWitness {
+                selected_path: package_file.path().to_path_buf(),
+                sha256: package_digest,
+            },
+        )]);
+        let capture = |occurrence: &str, generation| PendingImportOwner::Retained {
+            identity: testing::identity("Values", occurrence),
+            generation,
+        };
+        let package = |occurrence: &str, generation| PendingImportOwner::RetainedPackage {
+            unit: "package-unit".into(),
+            module: "Package".into(),
+            binder: package_identity(occurrence),
+            generation,
+            interface_digest: package_digest,
+        };
+        let product = crate::certified_products::tests::original_groups_fixture(
+            "Segment",
+            vec![
+                (3, vec![capture("first", 4), package("first", 0)]),
+                (11, vec![capture("later", 9), package("later", 7)]),
+                (29, Vec::new()),
+            ],
+            1,
+            &packages,
+        );
+        let segment = ArtifactEntry::original(
+            [2; 32],
+            crate::certified_products::fixture_finalized_product(product, [2; 32]),
+        )
+        .unwrap();
+        let values = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "fixture",
+            "Values",
+            BTreeMap::new(),
+        ));
+        let outside = entry("Outside", &[]);
+        let (segment_id, values_id, outside_id) = (
+            segment.descriptor.id,
+            values.descriptor.id,
+            outside.descriptor.id,
+        );
+        let inventory = ArtifactInventory::default();
+        let admitted = inventory
+            .admit(&inventory.empty_view(), vec![segment, values, outside])
+            .unwrap();
+        let view = admitted.select_roots(vec![segment_id]).unwrap();
+        let group = |original_ordinal| NativeRequirementRoot::Group {
+            artifact: segment_id,
+            original_ordinal,
+        };
+        let first = view.native_requirements_from_roots(&[group(3)]).unwrap();
+        assert_eq!(
+            first.bindings,
+            vec![NativeBindingRequirement {
+                artifact_id: values_id,
+                identity: testing::identity("Values", "first"),
+                generation: 4,
+            }]
+        );
+        assert_eq!(
+            first.packages,
+            vec![NativePackageRequirement {
+                artifact_id: segment_id,
+                identity: package_identity("first"),
+                generation: 0,
+                interface_digest: package_digest,
+            }]
+        );
+        assert_eq!(
+            view.native_requirements_from_roots(&[group(29)]).unwrap(),
+            NativeRequirements::default()
+        );
+        assert_eq!(
+            view.native_requirements_from_roots(&[group(3), group(3)])
+                .unwrap(),
+            first
+        );
+        let all = view
+            .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(segment_id)])
+            .unwrap();
+        assert_eq!(all.bindings.len(), 2);
+        assert_eq!(all.packages.len(), 2);
+        assert_eq!(
+            all,
+            view.native_requirements_from_roots(&[group(3), group(11), group(29)])
+                .unwrap()
+        );
+        for (artifact, original_ordinal) in [(segment_id, 0), (segment_id, 30), (values_id, 3)] {
+            assert!(
+                matches!(view.native_requirements_from_roots(&[NativeRequirementRoot::Group { artifact, original_ordinal }]),
+                Err(CompileError::ArtifactInventory(error)) if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal })
+            );
+        }
+        for artifact in [outside_id, ArtifactId([255; 32])] {
+            assert!(
+                matches!(view.native_requirements_from_roots(&[NativeRequirementRoot::Group { artifact, original_ordinal: 3 }]),
+                Err(CompileError::ArtifactInventory(error)) if error.failure == ArtifactInventoryFailure::NativeRootOutsideView { artifact })
+            );
+        }
+        // Demand selection leaves the original module and its later groups in
+        // custody; it only narrows which native obligations this call requests.
+        assert!(view.artifact_ids().contains(&segment_id));
+        drop(admitted);
+        drop(view);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
     fn native_package_obligations_follow_selected_groups_without_package_artifact_nodes() {
         let inventory = ArtifactInventory::default();
         let mut root = native_entry("Root", &[]);
@@ -2949,13 +3128,15 @@ mod tests {
         let view = inventory
             .admit(&inventory.empty_view(), vec![root, helper])
             .unwrap();
-        let requirements = view.native_requirements_from_roots(&[root_id]).unwrap();
+        let requirements = view
+            .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(root_id)])
+            .unwrap();
         assert!(requirements.bindings.is_empty());
         assert_eq!(requirements.packages.len(), 1);
         assert_eq!(requirements.packages[0].artifact_id, helper_id);
         assert_eq!(requirements.packages[0].identity.occurrence, "map");
         assert_eq!(
-            view.native_requirements_from_roots(&[helper_id])
+            view.native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(helper_id)])
                 .unwrap()
                 .packages
                 .len(),
