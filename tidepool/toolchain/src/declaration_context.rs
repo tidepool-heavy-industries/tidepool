@@ -433,7 +433,7 @@ fn encode_scope_manifest(
     execution_scope: Option<Value>,
     authorization: Option<Value>,
 ) -> Result<Vec<u8>, CompileError> {
-    fields[1] = text("9");
+    fields[1] = text("10");
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
     let value = Value::Array(fields);
@@ -921,8 +921,47 @@ impl RetainedArtifactMaterialization {
 
 #[derive(Clone)]
 struct RetainedArtifactRow {
-    artifact: DeclarationArtifact,
+    interface: ExactIfaceArtifact,
     interface_evidence: Value,
+    payload: RetainedArtifactPayload,
+}
+
+#[derive(Clone)]
+enum RetainedArtifactPayload {
+    InterfaceOnly,
+    Native {
+        product: ModuleSnapshot,
+        certification_path: PathBuf,
+        certification_sha256: [u8; 32],
+    },
+}
+
+impl RetainedArtifactRow {
+    fn artifact(&self) -> DeclarationArtifact {
+        DeclarationArtifact {
+            interface: self.interface.clone(),
+            product: match &self.payload {
+                RetainedArtifactPayload::InterfaceOnly => None,
+                RetainedArtifactPayload::Native { product, .. } => Some(product.clone()),
+            },
+        }
+    }
+
+    fn native_certification(&self) -> Result<Value, CompileError> {
+        match &self.payload {
+            RetainedArtifactPayload::Native {
+                certification_path,
+                certification_sha256,
+                ..
+            } => Ok(Value::Array(vec![
+                path_value(certification_path)?,
+                text(hex(certification_sha256)),
+            ])),
+            RetainedArtifactPayload::InterfaceOnly => {
+                Err(failure("original certificate anchor is missing"))
+            }
+        }
+    }
 }
 
 /// Native generation demands belong to executable requests. A pure preview
@@ -4189,7 +4228,7 @@ impl ExactDeclarationContext {
             }
             if owned
                 .get(&entry.descriptor.id)
-                .is_some_and(|row| row.artifact == *artifact)
+                .is_some_and(|row| row.artifact() == *artifact)
             {
                 continue;
             }
@@ -4575,21 +4614,39 @@ impl ExactDeclarationContext {
         let mut validation = PackageInterfaceValidation::default();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
-        let (materialized, _) = self.materialize_entries_with_validation(
+        let (materialized, references) = self.materialize_entries_with_validation(
             root,
             &new_entries,
             &mut validation,
             MaterializationMode::Scratch,
         )?;
+        let references = references
+            .iter()
+            .map(|reference| (identity(&reference.unit, &reference.module), reference))
+            .collect::<BTreeMap<_, _>>();
         for artifact in materialized.artifacts {
             let entry =
                 &metadata.entries[&identity(&artifact.interface.unit, &artifact.interface.module)];
             let interface_evidence = scope_interface_evidence(entry, root, &mut validation)?;
+            let payload = match artifact.product {
+                Some(product) => {
+                    let reference = references
+                        .get(&entry.descriptor.owner)
+                        .ok_or_else(|| failure("original certificate reference is missing"))?;
+                    RetainedArtifactPayload::Native {
+                        product,
+                        certification_path: root.join(&reference.certification_path),
+                        certification_sha256: reference.certification_sha256,
+                    }
+                }
+                None => RetainedArtifactPayload::InterfaceOnly,
+            };
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
-                    artifact,
+                    interface: artifact.interface,
                     interface_evidence,
+                    payload,
                 },
             );
         }
@@ -4604,7 +4661,7 @@ impl ExactDeclarationContext {
         selected_rows.extend(rows.iter().map(|(id, row)| (*id, row)));
         let artifacts = entries
             .iter()
-            .map(|entry| selected_rows[&entry.descriptor.id].artifact.clone())
+            .map(|entry| selected_rows[&entry.descriptor.id].artifact())
             .collect::<Vec<_>>();
         let start = std::time::Instant::now();
         // The recovery writer issued every row from owned immutable bytes and
@@ -4713,7 +4770,7 @@ impl ExactDeclarationContext {
         let artifacts = metadata
             .entries
             .values()
-            .map(|entry| selected_rows[&entry.descriptor.id].artifact.clone())
+            .map(|entry| selected_rows[&entry.descriptor.id].artifact())
             .collect::<Vec<_>>();
         let groups: Arc<[PendingCertifiedGroup]> =
             RetainedArtifactMaterialization::selected_group_refs([retained.as_ref()], metadata)
@@ -4844,6 +4901,10 @@ impl ExactDeclarationContext {
                                     })
                                     .collect(),
                             ),
+                            selected_rows[&metadata.entries[&identity(&owner.unit, &owner.module)]
+                                .descriptor
+                                .id]
+                                .native_certification()?,
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -4942,6 +5003,73 @@ pub(crate) fn certified_product_artifact_view_with_validation(
         entries.into_iter().map(Arc::new).collect(),
         demand,
     )
+}
+
+/// Admit only the inventory's selected dependency closure. Original byte custody
+/// remains complete; previously admitted groups must survive unchanged.
+pub(crate) fn certify_artifact_view_groups_with_validation(
+    view: &ArtifactView,
+    candidates: &[PendingCertifiedGroup],
+    baseline: &[PendingCertifiedGroup],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+    let metadata = view.metadata_snapshot();
+    metadata.validate_native_selection()?;
+    let entries = metadata.artifacts.values().cloned().collect::<Vec<_>>();
+    let available = original_products_by_id(&entries);
+    let selected_key = |group: &PendingCertifiedGroup| {
+        let entry = metadata
+            .entries
+            .get(&identity(&group.owner().unit, &group.owner().module))
+            .ok_or_else(|| failure("certified group has no available artifact"))?;
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(failure("certified group has no native artifact"));
+        };
+        if product.owner() != group.owner() {
+            return Err(failure("certified group has another native owner"));
+        }
+        Ok(crate::artifact_inventory::NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: group.group().original_ordinal(),
+        })
+    };
+    let mut current = Vec::new();
+    for group in candidates {
+        if metadata
+            .selected_native_groups
+            .contains(&selected_key(group)?)
+        {
+            current.push(group.clone());
+        }
+    }
+    let mut baseline_keys = BTreeSet::new();
+    for group in baseline {
+        let key = selected_key(group)?;
+        if !baseline_keys.insert(key) || !metadata.selected_native_groups.contains(&key) {
+            return Err(failure(
+                "artifact view removed or duplicated a previously selected group",
+            ));
+        }
+        if let Some(candidate) = current.iter().find(|candidate| {
+            candidate.owner() == group.owner()
+                && candidate.group().original_ordinal() == group.group().original_ordinal()
+        }) {
+            if candidate.group() != group.group() || candidate.imports() != group.imports() {
+                return Err(failure("artifact view changed a previously selected group"));
+            }
+        } else {
+            current.push(group.clone());
+        }
+    }
+    let additional = certify_selected_owned_products_in_context_with_validation(
+        &available,
+        &current,
+        &metadata.selected_native_groups,
+        validation,
+    )
+    .map_err(failure)?;
+    current.extend(additional);
+    Ok(current)
 }
 
 pub(crate) fn certified_artifact_view(
@@ -6226,6 +6354,39 @@ mod tests {
             .prepare_compilation(&scratch.path().join("base"), &producer)
             .unwrap();
         assert_eq!(base_request.groups.len(), 1);
+        let native_descriptor = |request: &ExactCompilationRequest| {
+            let bytes = std::fs::read(&request.manifest).unwrap();
+            let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+            assert_eq!(manifest.as_array().unwrap()[1], text("10"));
+            let row = manifest.as_array().unwrap()[6]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row.as_array().unwrap()[1] == text("Native"))
+                .unwrap();
+            let fields = row.as_array().unwrap();
+            assert_eq!(fields.len(), 8);
+            assert_eq!(fields[6].as_array().unwrap().len(), 1);
+            let descriptor = fields[7].as_array().unwrap();
+            let Value::Text(path) = &descriptor[0] else {
+                unreachable!()
+            };
+            assert!(Path::new(path).is_absolute());
+            let certificate = std::fs::read(path).unwrap();
+            assert_eq!(descriptor[1], text(sha256(&certificate)));
+            assert_eq!(
+                certificate,
+                request
+                    .context
+                    .recovery_products()
+                    .iter()
+                    .find(|product| product.owner().module == "Native")
+                    .unwrap()
+                    .certification_bytes()
+            );
+            fields[7].clone()
+        };
+        let base_descriptor = native_descriptor(&base_request);
         let left = extend(&base, product("Left", 8, 12));
         let right = extend(&base, product("Right", 9, 13));
         let left_request = left
@@ -6241,6 +6402,7 @@ mod tests {
         let joined_request = joined
             .prepare_compilation(&scratch.path().join("joined"), &producer)
             .unwrap();
+        assert_eq!(native_descriptor(&joined_request), base_descriptor);
         let joined_owner = joined_request.materialization.as_ref().unwrap();
         assert!(
             joined_owner.groups.is_empty(),
@@ -10112,6 +10274,10 @@ mod tests {
                     text(hex(&owner.product_sha256)),
                     path_value(&root.join(format!("{}.tpmod", owner.module))).unwrap(),
                     Value::Array(vec![]),
+                    Value::Array(vec![
+                        path_value(&root.join(format!("{}.owners", owner.module))).unwrap(),
+                        text(hex(&[1; 32])),
+                    ]),
                 ])
             })
             .collect();
@@ -10126,7 +10292,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("9"));
+        assert_eq!(decoded.as_array().unwrap()[1], text("10"));
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()
