@@ -1,5 +1,30 @@
 use super::*;
 
+pub(super) async fn settle_provider_child(
+    kernel: &KernelContext,
+    child: ActorRef,
+) -> Result<(), KernelBehaviorError> {
+    let child_owner = kernel.resolve(child).ok_or_else(|| {
+        KernelBehaviorError::new(format!(
+            "provider child {child:?} lacks retained cleanup ownership"
+        ))
+    })?;
+    let shutdown = child_owner
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "enclosing provider boundary released incomplete child".into(),
+            diagnostic: None,
+        })
+        .await
+        .map_err(KernelInvocationFailure::into_behavior_error)?;
+    if !shutdown.cleanup.is_confirmed() {
+        return Err(KernelBehaviorError::new(format!(
+            "provider child {child:?} cleanup is unconfirmed"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn settle_provider_children(
     journal: &Arc<Mutex<WorkbenchExecutions>>,
     kernel: &KernelContext,
@@ -7,24 +32,7 @@ pub(super) async fn settle_provider_children(
 ) -> Result<(), KernelBehaviorError> {
     let children = journal.lock().provider_children(boundary)?;
     for child in children {
-        let child_owner = kernel.resolve(child).ok_or_else(|| {
-            KernelBehaviorError::new(format!(
-                "provider child {child:?} lacks retained cleanup ownership"
-            ))
-        })?;
-        let shutdown = child_owner
-            .shutdown_with_cleanup(ActorTerminal {
-                kind: ActorExitKind::Cancelled,
-                summary: "enclosing provider boundary released incomplete child".into(),
-                diagnostic: None,
-            })
-            .await
-            .map_err(KernelInvocationFailure::into_behavior_error)?;
-        if !shutdown.cleanup.is_confirmed() {
-            return Err(KernelBehaviorError::new(format!(
-                "provider child {child:?} cleanup is unconfirmed"
-            )));
-        }
+        settle_provider_child(kernel, child).await?;
         journal.lock().provider_child_released(boundary, child)?;
     }
     Ok(())
@@ -902,6 +910,34 @@ mod tests {
         );
         assert_eq!(
             journal.lock().provider_children(&boundary).unwrap(),
+            vec![bad.identity()]
+        );
+        assert!(kernel.forget_terminal_actor(bad.identity()));
+        assert!(kernel.resolve(bad.identity()).is_none());
+        assert!(settle_provider_child(&kernel, bad.identity())
+            .await
+            .is_err());
+        assert!(settle_provider_children(&journal, &kernel, &boundary)
+            .await
+            .is_err());
+        assert_eq!(
+            journal.lock().provider_children(&boundary).unwrap(),
+            vec![bad.identity()]
+        );
+        let abort_owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || false)
+            .unwrap()
+            .unwrap();
+        let abort_cleanup = abort_owner.collect_cleanup(|| BoundaryAbortCleanup {
+            children: vec![bad.identity()],
+            scopes: Vec::new(),
+        });
+        assert!(settle_provider_child(&kernel, abort_cleanup.children[0])
+            .await
+            .is_err());
+        assert_eq!(
+            abort_owner
+                .collect_cleanup(|| panic!("lost child remains owned"))
+                .children,
             vec![bad.identity()]
         );
         // The finalization owner itself prevents a caller from asserting

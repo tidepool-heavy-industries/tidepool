@@ -11715,25 +11715,7 @@ where
             workbench_ledger::BoundaryAbortCleanup { children, scopes }
         });
         while let Some(child) = cleanup.children.last().copied() {
-            if let Some(child) = kernel.resolve(child) {
-                let shutdown = child
-                    .shutdown_with_cleanup(ActorTerminal {
-                        kind: ActorExitKind::Cancelled,
-                        summary: "enclosing tool output was aborted".into(),
-                        diagnostic: None,
-                    })
-                    .await
-                    .map_err(KernelInvocationFailure::into_behavior_error)?;
-                if !shutdown.cleanup.is_confirmed() {
-                    return Err(KernelBehaviorError {
-                        detail: format!(
-                            "provider boundary child {:?} cleanup is unconfirmed",
-                            child.identity()
-                        ),
-                        diagnostic: None,
-                    });
-                }
-            }
+            workbench_ledger::settle_provider_child(kernel, child).await?;
             cleanup.children.pop();
             owner.retain_cleanup(cleanup.clone());
         }
