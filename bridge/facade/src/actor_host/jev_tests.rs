@@ -1050,13 +1050,11 @@ async fn jev_call_failure_is_a_typed_left() {
         answer: Err(JevCallFailure::JevUnconfigured),
     });
     let campaign = campaign_with(backend).await;
-    let failure_cell = CELL.replace(
-        "_ <- if either (const 0) (\\response -> J.handle (J.answers response) (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer == 12 then pure () else error \"choice did not select line 12\"",
-        "_ <- case answer of { Left (J.Transport J.JevUnconfigured) -> pure (); _ -> error \"unconfigured Jev did not preserve its typed cause\" }",
-    );
-    assert_ne!(
-        failure_cell, CELL,
-        "the typed-failure assertion must replace the success assertion"
+    let (question_cell, _) = CELL
+        .rsplit_once("\n_ <-")
+        .expect("the fixture ends with its result assertion");
+    let failure_cell = format!(
+        "{question_cell}\n_ <- case answer of {{ Left (J.Transport J.JevUnconfigured) -> pure (); _ -> error \"unconfigured Jev did not preserve its typed cause\" }}"
     );
     let result =
         dispatch_haskell_script(campaign.root_installation.policy.as_ref(), &failure_cell).await;
