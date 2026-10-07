@@ -9857,12 +9857,16 @@ pub(crate) mod tests {
     }
 
     fn empty_package_bundle() -> Vec<u8> {
+        empty_package_bundle_for("Fresh")
+    }
+
+    fn empty_package_bundle_for(module: &str) -> Vec<u8> {
         let roots = Value::Array(vec![
             Value::Text("TPPKGROOTS".into()),
             Value::Text("2".into()),
             Value::Array(vec![
                 Value::Text("main".into()),
-                Value::Text("Fresh".into()),
+                Value::Text(module.into()),
                 Value::Text(hex(&sha(&[0x42]))),
             ]),
             Value::Array(vec![]),
@@ -9875,7 +9879,7 @@ pub(crate) mod tests {
             Value::Integer(1.into()),
             Value::Array(vec![Value::Array(vec![
                 Value::Text("main".into()),
-                Value::Text("Fresh".into()),
+                Value::Text(module.into()),
                 Value::Bytes(sidecar),
             ])]),
         ]);
@@ -11576,8 +11580,10 @@ pub(crate) mod tests {
     }
 
     fn exact_current_original_history(nonempty: bool) {
-        use crate::artifact_inventory::CanonicalProducerIdentity;
-        use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        use crate::artifact_inventory::{ArtifactInventory, CanonicalProducerIdentity};
+        use crate::declaration_context::{
+            ExactDeclarationContext, ExactProductAdmission, OriginalCompilerInputs,
+        };
         use crate::execution_source::{
             CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
         };
@@ -11681,11 +11687,122 @@ pub(crate) mod tests {
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");
             std::fs::write(&input, source).unwrap();
-            let request_context = Arc::new(context.clone());
-            let request = request_context
-                .prepare_compilation(&directory.join("inputs"), &producer)
+            // An unrelated, genuinely certified public owner changes declaration
+            // identity without exposing Fresh in the public source scope.
+            let marker = format!("Marker{index}");
+            let marker_source = format!("module {marker} where");
+            let marker_input = directory.join(format!("{marker}.hs"));
+            std::fs::write(&marker_input, &marker_source).unwrap();
+            let marker_bytes =
+                tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                    unit: "main".into(),
+                    module: marker.clone(),
+                    interface: vec![0x42],
+                    groups: vec![],
+                }]);
+            let marker_parsed =
+                ParsedModuleProducts::decode(&marker_bytes, &empty_package_bundle_for(&marker))
+                    .unwrap();
+            let mut marker_evidence = evidence(&marker_source);
+            marker_evidence.modules[0].module = marker.clone();
+            let mut marker_worker = marker_evidence.clone();
+            marker_worker.sources[0].path = marker_input.clone();
+            marker_worker.modules[0].source = marker_input.clone();
+            let marker_worker = serde_json::to_vec(&marker_worker).unwrap();
+            let mut marker_receipt = receipt(&marker_bytes, &marker_evidence, &marker_source);
+            marker_receipt.module = marker;
+            marker_receipt.dependency_witness_sha256 = sha(&marker_worker);
+            let marker_packet = CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
+                finalization: fixture_finalization(Some(root.path()), &[marker_receipt.clone()]),
+                modules: vec![marker_receipt],
+                targets: BTreeMap::new(),
+                packages: BTreeMap::new(),
+            };
+            let marker_certified = certify_products(
+                None,
+                &marker_packet,
+                &marker_parsed,
+                &marker_worker,
+                &marker_input,
+                root.path(),
+                &CompletedSourceEvidence::from_normalized(marker_evidence, &marker_source).unwrap(),
+                &marker_source,
+                &producer,
+                &include,
+                None,
+                None,
+            )
+            .unwrap();
+            let marker_context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(
+                    canonical_producer,
+                    &marker_certified.recovery_products,
+                )
                 .unwrap();
+            let public_context = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_interface_artifacts(marker_context.artifact_view())
+                    .unwrap(),
+            );
+            assert!(public_context.recovery_products().is_empty());
+            assert!(public_context
+                .interface_owners()
+                .iter()
+                .all(|entry| entry.owner.module != "Fresh"));
+            // Full original custody and executable group selection are independent.
+            let inventory = ArtifactInventory::default();
+            let private_view = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    context.artifact_view().entries(),
+                    &BTreeSet::new(),
+                )
+                .unwrap();
+            let selection = CertifiedSourceSelection::from_compiler_projection(
+                context.compiler_input_projection(),
+                &private_view.metadata_snapshot(),
+                &InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+            let private_input =
+                OriginalCompilerInputs::from_selection(&selection, &private_view).unwrap();
+            let request = public_context
+                .prepare_compilation(&directory.join("inputs"), &producer)
+                .unwrap()
+                .in_program_context_with_private_input(
+                    &directory.join("private-inputs"),
+                    public_context.clone(),
+                    &private_input,
+                )
+                .unwrap();
+            assert!(request.groups.is_empty());
+            assert!(request
+                .compiler_inputs()
+                .unwrap()
+                .metadata
+                .selected_native_groups
+                .is_empty());
             assert!(request.compiler_original_products().unwrap().is_empty());
+            let effective = request.compiler_inputs().unwrap();
+            assert_eq!(
+                effective
+                    .metadata
+                    .artifacts
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        crate::artifact_inventory::ArtifactPayload::Original(product) =>
+                            Some(product.owner().clone()),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>(),
+                prior
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .collect::<BTreeSet<_>>(),
+            );
             let mut worker = admitted.clone();
             worker.sources[1].path = input.clone();
             let complete_evidence = serde_json::to_vec(&worker).unwrap();
@@ -11788,6 +11905,20 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            let expected_custody = prior
+                .iter()
+                .map(|product| product.owner().clone())
+                .chain(std::iter::once(owner.clone()))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                certified
+                    .recovery_products
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_custody,
+                "private original custody lost: iteration={index}, nonempty={nonempty}"
+            );
             let current = certified
                 .recovery_products
                 .iter()
@@ -11968,10 +12099,35 @@ pub(crate) mod tests {
                     select(&producer, &include, &directory.join("cached-offer")).unwrap();
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
-                let cached_request = Arc::new(context.clone())
-                    .prepare_compilation(&directory.join("cached-inputs"), &producer)
+                let inventory = ArtifactInventory::default();
+                let private_view = inventory
+                    .admit_recovery_selection(
+                        &inventory.empty_view(),
+                        context.artifact_view().entries(),
+                        &BTreeSet::new(),
+                    )
                     .unwrap();
-                assert_eq!(cached_request.groups.len(), 2);
+                let private_input = OriginalCompilerInputs::from_selection(
+                    &certified.source_selection,
+                    &private_view,
+                )
+                .unwrap();
+                let cached_request = public_context
+                    .prepare_compilation(&directory.join("cached-inputs"), &producer)
+                    .unwrap()
+                    .in_program_context_with_private_input(
+                        &directory.join("cached-private-inputs"),
+                        public_context.clone(),
+                        &private_input,
+                    )
+                    .unwrap();
+                assert!(cached_request.groups.is_empty());
+                assert!(cached_request
+                    .compiler_inputs()
+                    .unwrap()
+                    .metadata
+                    .selected_native_groups
+                    .is_empty());
                 let mut cached_complete = admitted.clone();
                 cached_complete.sources[0].path = bundle.source.clone();
                 cached_complete.modules[0].source = bundle.source.clone();
