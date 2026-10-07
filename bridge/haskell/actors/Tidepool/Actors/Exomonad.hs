@@ -24,9 +24,6 @@ module Tidepool.Actors.Exomonad
   , ActorContext
   , ActorContextInfo (..)
   , ActivationKind (..)
-  , ActorContextRole (..)
-  , ActorNativeTools (..)
-  , ActorWorkspaceAccess (..)
   , AgentLaunch
   , AgentInspection
   , AgentControl
@@ -257,9 +254,6 @@ import Tidepool.Effects.Core
   , CheckpointRefusal (..)
   , ActorContextInfo (..)
   , ActivationKind (..)
-  , ActorContextRole (..)
-  , ActorNativeTools (..)
-  , ActorWorkspaceAccess (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
   , AgentDisposition (..)
