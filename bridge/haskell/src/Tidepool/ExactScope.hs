@@ -15,6 +15,7 @@ module Tidepool.ExactScope
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal, normalizeInterfaceEvidence
+  , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, writeCheckedExactCompilation, extendSourceSelectedOriginals
@@ -218,6 +219,11 @@ canonicalHomeUnits = certificateHomeUnits . canonicalFacts
 
 canonicalSourceSha256 :: CanonicalInterfaceProof -> String
 canonicalSourceSha256 = certificateSource . canonicalFacts
+
+canonicalProofMatchesOwner :: String -> (String, String) -> CanonicalInterfaceProof -> Bool
+canonicalProofMatchesOwner producer owner proof =
+  certificateProducer (canonicalFacts proof) == producer
+    && certificateOwner (canonicalFacts proof) == owner
 
 canonicalRequirements :: CanonicalInterfaceProof -> Map.Map (String,String) String
 canonicalRequirements = certificateRequirements . canonicalFacts

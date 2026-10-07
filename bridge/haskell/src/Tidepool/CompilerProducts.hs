@@ -16,6 +16,7 @@ module Tidepool.CompilerProducts
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , currentReconciledOriginalProducts
   , selectPreparedOriginalSessionOutputs
   ) where
 
@@ -47,13 +48,15 @@ import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
 import System.Mem.StableName (makeStableName)
 import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
+import Tidepool.OriginalProductRoots
+  ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionOutputs )
 import Tidepool.ExactScope
   ( ExactScope(..), scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
   , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
-  , CanonicalInterfaceProof, captureFinalizedSourceOriginals )
+  , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncoding, prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
@@ -198,6 +201,7 @@ data CurrentOriginalInventory = CurrentOriginalInventory
   , currentOriginalProducts :: [ModuleProductEncoding]
   , currentOriginalPackages :: Map.Map (String,String) BS.ByteString
   , currentOriginalFinalized :: FinalizedModuleArtifacts
+  , currentReconciledOriginalProducts :: ReconciledOriginalProducts
   , currentOriginalNames :: Map.Map Name SymbolIdentity
     -- Already admitted native originals are imports, never fresh emitted groups.
   , currentOriginalExternalNames :: Map.Map Name SymbolIdentity
@@ -261,11 +265,19 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       (availability,products,packages) <- admitModuleProducts originalInterfaces admittedContext
         (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared)
         (pprPackageImports prepared)
+      reconciled <- either (ioError . userError) pure (reconcileOriginalProducts
+        (compilationScope <$> preparedExactCompilation prepared)
+        (Map.fromList [((unitString (moduleUnit owner), moduleNameString (moduleName owner)),
+            admittedOriginalProof original)
+          | (owner, original) <- Map.toAscList (preparedRetainedOriginals admittedContext)])
+        [(T.unpack unit, T.unpack name, map originalGroupFromProjected groups)
+          | product <- products, let (unit,name,_,groups) = moduleProductInput product])
       let inventory = CurrentOriginalInventory
             { currentOriginalAvailability = availability
             , currentOriginalProducts = products
             , currentOriginalPackages = packages
             , currentOriginalFinalized = finalized
+            , currentReconciledOriginalProducts = reconciled
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
             , currentOriginalExternalNames = pprAcceptedCandidateBindings prepared
             }
@@ -652,7 +664,11 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
                       exactProgramProductVersionFromDigest scope (T.unpack unit) (T.unpack name)
                         (T.unpack source) iface native packages)) (sourceProductSha256 finalDependencies (T.unpack unit) (T.unpack name))
                     _ -> ""]
-      certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      reconciled <- case inventory of
+        Just current -> pure (currentReconciledOriginalProducts current)
+        Nothing -> either (ioError . userError) pure (reconcileOriginalProducts
+          (compilationScope <$> preparedExactCompilation prepared) retainedProofs [])
+      certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes

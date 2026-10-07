@@ -78,7 +78,7 @@ import Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCache
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
-  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, selectPreparedOriginalSessionOutputs
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts, selectPreparedOriginalSessionOutputs
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
@@ -101,7 +101,7 @@ import Tidepool.CertifiedProducts (resolvePackageGlobal, homeInterfaceUsageOwner
 import Tidepool.FinalizedModuleArtifacts
   ( finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained, unrecoveredExactProducts)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
   , generatedActivationPreviewRecipe
   , RenderedProtectedTemplateImports
@@ -658,10 +658,6 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
           , binder <- originalBinders group]
          ++ [binder | candidate <- candidates, group <- candidateGroups candidate
           , binder <- candidateGroupBinders group])
-      exactOriginals =
-        [(originalUnit originalProduct, originalModule originalProduct,
-          [(originalOrdinal group, originalBinders group, originalGlobals group)
-           | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
   let prepareOriginal executor = do
         acquired <- recoveryOriginalWorklist caches
         case acquired of
@@ -691,6 +687,11 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
+      exactOriginals =
+        [(originalUnit originalProduct, originalModule originalProduct,
+          [(originalOrdinal group, originalBinders group, originalGlobals group)
+           | group <- originalGroups originalProduct])
+        | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
   let newRecovery = case recoveryExecutor caches of
         Nothing -> newPreparedRecoveryWithPackageRoots
         Just executor -> newPreparedRecoveryWithExecutor executor
