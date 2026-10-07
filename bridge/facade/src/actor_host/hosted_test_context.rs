@@ -435,6 +435,14 @@ pub(super) struct HostTestObserver {
     installations: Arc<Mutex<HashMap<ActorRef, ObservedInstallation>>>,
     changed: watch::Sender<u64>,
     coordination_failure: watch::Sender<Option<String>>,
+    shutdown: Arc<Mutex<HostShutdownEvidence>>,
+}
+
+#[derive(Default)]
+struct HostShutdownEvidence {
+    forest: Option<Vec<exomonad_actor::ForestRootShutdown>>,
+    applications: Option<Result<(), String>>,
+    executor_joined: bool,
 }
 
 impl Default for HostTestObserver {
@@ -443,11 +451,47 @@ impl Default for HostTestObserver {
             installations: Arc::default(),
             changed: watch::channel(0).0,
             coordination_failure: watch::channel(None).0,
+            shutdown: Arc::default(),
         }
     }
 }
 
 impl HostTestObserver {
+    pub(super) fn forest_shutdown(&self, outcomes: &[exomonad_actor::ForestRootShutdown]) {
+        self.shutdown.lock().forest = Some(outcomes.to_vec());
+    }
+
+    pub(super) fn application_shutdown(&self, outcome: Result<(), String>) {
+        self.shutdown.lock().applications = Some(outcome);
+    }
+
+    fn executor_joined(&self) {
+        self.shutdown.lock().executor_joined = true;
+    }
+
+    fn cleanup_outcome(&self) -> CleanupOutcome {
+        let evidence = self.shutdown.lock();
+        let (Some(forest), Some(applications)) = (&evidence.forest, &evidence.applications) else {
+            return CleanupOutcome::Unknown;
+        };
+        if !evidence.executor_joined || forest.is_empty() {
+            return CleanupOutcome::Unknown;
+        }
+        let unconfirmed = forest
+            .iter()
+            .filter(|outcome| !outcome.is_confirmed())
+            .collect::<Vec<_>>();
+        match (unconfirmed.is_empty(), applications) {
+            (true, Ok(())) => CleanupOutcome::Confirmed,
+            (_, Err(error)) => CleanupOutcome::Failed {
+                message: error.clone(),
+            },
+            (false, Ok(())) => CleanupOutcome::Failed {
+                message: format!("resident forest cleanup unconfirmed: {unconfirmed:?}"),
+            },
+        }
+    }
+
     pub(super) fn fail_coordination(&self, message: &str) {
         self.coordination_failure.send_replace(Some(message.into()));
     }
@@ -619,7 +663,18 @@ impl HostedTestRuntime {
         scenario: impl for<'a> FnOnce(&'a Self) -> futures_util::future::LocalBoxFuture<'a, ()>,
     ) {
         let diagnostics = self.diagnostics.clone();
-        let cleanup = Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take());
+        let observer = self.context.observer.clone();
+        let stop = self.stop.clone();
+        let outcome = self.outcome.clone();
+        let thread = self.thread.take();
+        let cleanup_observer = observer.clone();
+        let cleanup = async move {
+            let termination = Self::terminate(stop, outcome, thread).await;
+            if termination.joined.is_ok() {
+                cleanup_observer.executor_joined();
+            }
+            termination.into_result()
+        };
         let (scenario, cleanup, report_errors) = settle_scenario(
             async { scenario(&self).await },
             cleanup,
@@ -627,7 +682,12 @@ impl HostedTestRuntime {
                 let Some(diagnostics) = &diagnostics else {
                     return Ok(());
                 };
-                diagnostics.report(scenario, cleanup)?;
+                let cleanup_evidence = if matches!(cleanup, CleanupOutcome::Unknown) {
+                    CleanupOutcome::Unknown
+                } else {
+                    observer.cleanup_outcome()
+                };
+                diagnostics.report(scenario, &cleanup_evidence)?;
                 if matches!(
                     scenario,
                     ScenarioOutcome::Failed {
@@ -1871,4 +1931,30 @@ mod tests {
         assert!(stopped);
         assert_eq!(evidence, vec!["injected evidence failure"; 2]);
     }
+}
+
+#[test]
+fn cleanup_reporting_requires_owner_receipts_and_joined_executor() {
+    let observer = HostTestObserver::default();
+    assert_eq!(observer.cleanup_outcome(), CleanupOutcome::Unknown);
+    observer.application_shutdown(Ok(()));
+    assert_eq!(observer.cleanup_outcome(), CleanupOutcome::Unknown);
+    observer.forest_shutdown(&[]);
+    observer.executor_joined();
+    assert_eq!(observer.cleanup_outcome(), CleanupOutcome::Unknown);
+}
+
+#[test]
+fn cleanup_reporting_preserves_timed_out_forest_with_clean_application_receipt() {
+    let observer = HostTestObserver::default();
+    observer.forest_shutdown(&[exomonad_actor::ForestRootShutdown::TimedOut {
+        actor: ActorRef::first(exomonad_actor::ActorId(42)),
+    }]);
+    observer.application_shutdown(Ok(()));
+    assert_eq!(observer.cleanup_outcome(), CleanupOutcome::Unknown);
+    observer.executor_joined();
+    assert!(matches!(
+        observer.cleanup_outcome(),
+        CleanupOutcome::Failed { .. }
+    ));
 }

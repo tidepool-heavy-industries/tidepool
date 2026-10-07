@@ -1102,6 +1102,13 @@ pub(super) async fn run_interactive_applications(
     } else {
         Some(cleanup_failures.join("; "))
     };
+    #[cfg(test)]
+    if let Some(observer) = &test_observer {
+        observer.application_shutdown(match &cleanup_failure {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        });
+    }
     match (failure, cleanup_failure) {
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
         (Some(error), None) | (None, Some(error)) => Err(error),

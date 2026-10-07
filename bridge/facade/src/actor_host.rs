@@ -2428,6 +2428,8 @@ async fn run_owned(
             });
         }
     }
+    #[cfg(test)]
+    let shutdown_observer = test_observer.clone();
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -2489,6 +2491,10 @@ async fn run_owned(
     shutdown.send_replace(ApplicationShutdown::Draining(retirement));
     operator.shutdown().await;
     let forest_shutdown = forest.shutdown().await;
+    #[cfg(test)]
+    if let Some(observer) = &shutdown_observer {
+        observer.forest_shutdown(&forest_shutdown);
+    }
     shutdown.send_replace(ApplicationShutdown::ForestSettled(retirement));
     let cleanup = if !applications_finished {
         await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
