@@ -440,4 +440,33 @@ mod tests {
             .claim_spawn(owner, SessionId(1), None, Some(2))
             .is_err());
     }
+    #[test]
+    fn pre_start_identity_failure_retains_identity_and_releases_reserved_capacity() {
+        let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(crate::ActorId(1));
+        let failed = registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .unwrap();
+        let child = ActorRef::first(crate::ActorId(2));
+        failed.authority.reserve_child(owner, child).unwrap();
+        assert!(registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .is_err());
+        failed.authority.fail("pre_start journal refused".into());
+        assert_eq!(
+            failed.authority.outcome(),
+            SpawnAdmissionOutcome::Failed {
+                child: Some(child),
+                detail: "pre_start journal refused".into(),
+            }
+        );
+        assert!(matches!(
+            failed.authority.error("pre_start journal refused".into()),
+            crate::start::SpawnError::SpawnPartiallyStarted((2, 1), None, _)
+        ));
+        registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .unwrap();
+        assert!(!registry.state.lock().active.contains(&child));
+    }
 }

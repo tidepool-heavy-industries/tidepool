@@ -68,6 +68,18 @@ pub(super) struct ChildLaunchResume {
     >,
 }
 
+/// An interrupted startup wait cannot leave an unbound capacity reservation.
+/// Once readiness wins, the retained terminal decision makes this drop inert.
+struct SpawnStartupGuard(Option<crate::SpawnAdmission>);
+
+impl Drop for SpawnStartupGuard {
+    fn drop(&mut self) {
+        if let Some(authority) = &self.0 {
+            authority.fail("spawn startup was interrupted before readiness".into());
+        }
+    }
+}
+
 struct ChildStartupAdmission {
     creator: ActorRef,
     authority: crate::SpawnAdmission,
@@ -103,6 +115,7 @@ where
         continuation,
         admission,
     } = prepared;
+    let _startup_guard = SpawnStartupGuard(continuation.spawn_admission.clone());
     let context = &continuation.context;
     let result = Box::pin(async {
         let ChildLaunchAdmission {
