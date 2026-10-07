@@ -4587,6 +4587,12 @@ where
 
     /// Run an already compiled installer and preserve its exact closure dependencies.
     /// The caller imports the rooted action into this machine before admission.
+    #[tracing::instrument(
+        target = "exomonad_actor::workbench_phase",
+        name = "compiled_spec_install",
+        skip_all,
+        fields(origin = "explicit_live", actor = %context.actor, installation = install)
+    )]
     pub(crate) async fn prepare_explicit_tools(
         &self,
         context: crate::ActorSessionContext,
