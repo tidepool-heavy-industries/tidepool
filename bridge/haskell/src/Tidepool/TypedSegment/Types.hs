@@ -12,7 +12,7 @@ import GHC.Core (CoreBind, CoreExpr, Bind(..))
 import GHC.Core.Type (Type)
 import GHC.Types.Fixity (Fixity)
 import GHC.Types.Id (Id, idType)
-import GHC.Unit.Module.Name (ModuleName)
+import GHC.Unit.Module (ModuleName)
 import Numeric (showHex)
 
 -- The source factory reserves this qualifier before the authored frontend.
