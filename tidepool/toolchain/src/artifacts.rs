@@ -2489,20 +2489,21 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
-    let fresh_products = if let Some(segment) = source_segment {
-        segment.original_products(
+    let shared_fresh_products = if let Some(segment) = source_segment {
+        Some(segment.original_products(
             offer.exact.as_ref().ok_or_else(|| {
                 CompileError::ExtractFailed("segment inventory lacks exact request".into())
             })?,
             &product_bytes,
             &package_bundle_bytes,
             &validation.inventory,
-        )?
+        )?)
     } else {
-        owned_fresh_products
-            .as_ref()
-            .ok_or_else(|| CompileError::ExtractFailed("original inventory absent".into()))?
+        None
     };
+    let fresh_products = shared_fresh_products
+        .or(owned_fresh_products.as_ref())
+        .ok_or_else(|| CompileError::ExtractFailed("original inventory absent".into()))?;
     timing::record_inventory_work("products.decode.after", output_dir, &validation.inventory);
     timing::record_stage(
         timing::NO_NODE,
@@ -2669,7 +2670,8 @@ fn seal_turn_outputs_with_validation(
     {
         let publication_products = match owned_fresh_products {
             Some(products) => products,
-            None => fresh_products
+            None => shared_fresh_products
+                .ok_or_else(|| CompileError::ExtractFailed("shared inventory absent".into()))?
                 .copy_for_publication()
                 .map_err(compiler_evidence_failure)?,
         };
