@@ -1,7 +1,6 @@
 //! Interpret generated form operations through exact native frame ownership.
 use super::*;
 use crate::forms::{attempt_id, lease_id, FormCleanup, MountedForm};
-use std::time::Duration;
 use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormLease, FormTransition};
 
 pub(crate) enum FormOperation {
@@ -151,12 +150,13 @@ where
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
                     loop {
                         if mounted.cleanup.is_closed() { return Err(FormCause::FormClosed); }
+                        let changed = mounted.cleanup.host.changed();
                         if let Some(attempt) = admitted(interaction_control.as_ref(), work, || mounted.cleanup.host.attempt(context.actor, &mounted.cleanup.mount))? { return Ok(attempt); }
                         tokio::select! {
                             biased;
                             _ = retirement.wait_requested_shutdown() => { control.request_cancellation(); return Err(FormCause::FormClosed); }
                             () = control.wait_for_cancellation() => return Err(FormCause::FormClosed),
-                            () = tokio::time::sleep(Duration::from_millis(25)) => {}
+                            change = changed => change?,
                         }
                     }
                 }.await;

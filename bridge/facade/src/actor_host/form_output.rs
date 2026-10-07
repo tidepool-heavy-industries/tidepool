@@ -80,6 +80,15 @@ impl ActorOutputAuthority for ViewAuthority<'_> {
     }
 }
 impl FormHost for StoreFormHost {
+    fn changed(&self) -> futures_util::future::BoxFuture<'static, Result<(), FormCause>> {
+        let mut changes = self.store.subscribe_actor_form_changes();
+        Box::pin(async move {
+            changes
+                .changed()
+                .await
+                .map_err(|error| FormCause::FormTransportFailed(error.to_string()))
+        })
+    }
     fn open(
         &self,
         publication: &FormPublication,
@@ -213,6 +222,54 @@ impl FormHost for StoreFormHost {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn production_form_wait_observes_submission_before_future_is_polled() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(root.path().join("store.sqlite")).unwrap());
+        let host = StoreFormHost {
+            store: store.clone(),
+            run: "run".into(),
+            control: Arc::new(OnceLock::new()),
+        };
+        let actor = ActorRef::first(exomonad_actor::ActorId(1));
+        host.open(
+            &FormPublication {
+                actor,
+                operation: None,
+            },
+            "form",
+            &json!({"version":1,"root":{"kind":"empty"}}),
+        )
+        .unwrap();
+
+        // The native loop subscribes before inspecting durable state. A browser
+        // submission between the read and select must remain observable.
+        let changed = host.changed();
+        assert!(host.attempt(actor, "form").unwrap().is_none());
+        store
+            .submit_actor_form(&host.origin(actor), "form", "submission", &json!({}))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), changed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            host.attempt(actor, "form").unwrap(),
+            Some(FormAttempt::FormSubmitted(_, _))
+        ));
+
+        let changed = host.changed();
+        host.close(actor, "form").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), changed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            host.attempt(actor, "form"),
+            Err(FormCause::FormClosed)
+        ));
+    }
 
     #[test]
     fn production_form_bridge_retains_drafts_and_commits_before_return() {

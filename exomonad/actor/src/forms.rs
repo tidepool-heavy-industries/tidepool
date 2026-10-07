@@ -11,6 +11,9 @@ pub struct FormPublication {
 
 /// Installed before actor admission. Successful commit means the answer is durable.
 pub trait FormHost: Send + Sync {
+    /// Subscribe synchronously before reading durable attempt state. Wakes
+    /// are hints; the subsequent Store read remains authoritative.
+    fn changed(&self) -> futures_util::future::BoxFuture<'static, Result<(), FormCause>>;
     fn open(
         &self,
         publication: &FormPublication,
@@ -112,6 +115,9 @@ mod tests {
         fail_closes: AtomicUsize,
     }
     impl FormHost for Host {
+        fn changed(&self) -> futures_util::future::BoxFuture<'static, Result<(), FormCause>> {
+            Box::pin(std::future::pending())
+        }
         fn open(
             &self,
             _: &FormPublication,
