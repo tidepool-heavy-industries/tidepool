@@ -7,7 +7,7 @@ data Receiver mode = Receiver
   , selfEnqueue :: mode :- Call () (R.Reply (Either Text ()))
   , readReceiver :: mode :- Call () (R.Reply Int)
   } deriving Generic
-let receiverDefinition = R.definition "try-send-receiver" Actor.ReadOnly Receiver
+let receiverDefinition = R.definition "try-send-receiver" (Actor.Selected (knownEffects @'[Actor])) Receiver
       { receiverState = 0
       , add = \amount -> R.modify' (+ amount)
       , selfEnqueue = \() -> do { own <- R.self @Receiver; R.trySend (add own) 5 }
@@ -24,7 +24,7 @@ data Manager mode = Manager
   { managerState :: mode :- State Int
   , terminalRoute :: mode :- Call () NoReply
   } deriving Generic
-let managerDefinition = R.definition "try-send-manager" Actor.ReadOnly Manager
+let managerDefinition = R.definition "try-send-manager" (Actor.Selected (knownEffects @'[Actor])) Manager
       { managerState = 0
       , terminalRoute = \() -> do
           { result <- R.trySend (add receiverClient) 1

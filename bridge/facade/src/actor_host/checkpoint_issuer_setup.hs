@@ -1,21 +1,15 @@
-import GHC.Generics (Generic)
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
 import Data.Text (Text)
-import qualified Tidepool.Actor as Actor
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Actors.Exomonad
+
 let x = 41 :: Int
 let getX = x + 1
-data SeedBox mode = SeedBox
-  { seedState :: mode :- State (Maybe ContextCheckpoint)
-  , storeSeed :: mode :- Call ContextCheckpoint NoReply
-  , readSeed :: mode :- Call () (R.Reply (Maybe ContextCheckpoint))
-  } deriving Generic
-let seedBox = R.definition "checkpoint-seeds" Actor.ReadOnly SeedBox
-      { seedState = Nothing
-      , storeSeed = \seed -> R.put (Just seed)
-      , readSeed = \() -> R.get
-      }
-seedStore <- R.start seedBox
-let campaign = "checkpoint" :: CampaignLabel
-let producerGroup = "producer" :: ForkGroupLabel
-let producerLabel = [label|producer|]
-producer <- unfoldDeferred (batch campaign producerGroup)
-  (child (withLifetime ActorOwned (researching @Text projectHead (assignment producerLabel ("capture" :: Text)))))
+Right seed <- checkpoint "checkpoint issuer context"
+Right producer <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "producer", spawnLifetime = ActorOwned })
+Right producerRequest <- request @Text producer ("capture" :: Text)
+  (defaultRequestOptions { requestLabel = Just "producer" })

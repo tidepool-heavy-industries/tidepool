@@ -4,11 +4,9 @@ guideIsUnavailable :: WatchState result -> Bool
 guideIsUnavailable (WatchPending _) = False
 guideIsUnavailable (WatchReady _) = False
 guideIsUnavailable (WatchUnavailable _) = True
-let failureLabel = [label|guide-unavailable|]
-failureResponse <- request @Text (responseActor worker) (assignment failureLabel ("This request will be interrupted." :: Text))
-let failureWatchLabel = "guide-unavailable-ready" :: WatchLabel
-failureReady <- watch failureWatchLabel (awaitSettled failureResponse)
-let outerFailureWatchLabel = "guide-outer-unavailable" :: WatchLabel
-outerFailureReady <- watch outerFailureWatchLabel (awaitResponse failureResponse)
+failureResponse <- request @Text (responseActor worker) ("This request will be interrupted." :: Text)
+  (defaultRequestOptions { requestLabel = Just "guide-unavailable" })
+failureReady <- watch (Just "guide-unavailable-ready") (settlement failureResponse)
+outerFailureReady <- watch (Just "guide-outer-unavailable") (result failureResponse)
 let retainedFailureReady = fst (guideWatchTypes failureReady (WatchDeadline 1))
 stopAgent (responseActor worker)

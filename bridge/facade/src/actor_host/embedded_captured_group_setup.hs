@@ -1,11 +1,11 @@
-data GroupBox mode = GroupBox
-  { groupState :: mode :- State (Maybe ForkGroupHandle)
-  , storeGroup :: mode :- Call ForkGroupHandle NoReply
-  , readGroup :: mode :- Call () (R.Reply (Maybe ForkGroupHandle))
+data AgentBox mode = AgentBox
+  { agentState :: mode :- State [AgentRef]
+  , storeAgents :: mode :- Call [AgentRef] NoReply
+  , readAgents :: mode :- Call () (R.Reply [AgentRef])
   } deriving Generic
-let groupBox = R.definition "embedded-checkpoint-groups" Actor.ReadOnly GroupBox
-      { groupState = Nothing
-      , storeGroup = \group -> R.put (Just group)
-      , readGroup = \() -> R.get
+let groupBox = R.definition "embedded-checkpoint-agents" (Actor.Selected (knownEffects @'[])) AgentBox
+      { agentState = []
+      , storeAgents = R.put
+      , readAgents = \() -> R.get
       }
 groupStore <- R.start groupBox

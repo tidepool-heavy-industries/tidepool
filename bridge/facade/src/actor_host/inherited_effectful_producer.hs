@@ -1,4 +1,12 @@
-let effectfulCampaign = "effectful-closure" :: CampaignLabel
-let effectfulWave = "producer" :: ForkGroupLabel
-let effectfulProducerLabel = [label|producer|]
-worker <- unfoldDeferred (batch effectfulCampaign effectfulWave) (child (withLifetime ActorOwned (coding @(() -> Eff CodingEffects Cmd.Job) currentCheckout (assignment effectfulProducerLabel ()))))
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Actors.Exomonad
+
+Right workerAgent <- spawnSubagent (FreshCtx "Return an effectful command closure.")
+  (ForkWorktree currentCheckout)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "producer", spawnLifetime = ActorOwned })
+Right worker <- request @(() -> Eff '[Commands] Cmd.Job) workerAgent ()
+  (defaultRequestOptions { requestLabel = Just "producer" })

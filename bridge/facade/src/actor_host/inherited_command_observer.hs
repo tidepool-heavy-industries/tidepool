@@ -1,4 +1,12 @@
-let campaign = "inherited-command" :: CampaignLabel
-let wave = "observers" :: ForkGroupLabel
-let childLabel = [label|observer|]
-observer <- unfoldDeferred (batch campaign wave) (child (withLifetime ActorOwned (coding @Text currentCheckout (assignment childLabel ("inspect inherited job" :: Text)))))
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Actors.Exomonad
+
+Right seed <- checkpoint "capture the inherited command job"
+Right observerAgent <- spawnSubagent (ForkCtx seed) (ForkWorktree currentCheckout)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "observer", spawnLifetime = ActorOwned })
+Right observer <- request @Text observerAgent ("inspect inherited job" :: Text)
+  (defaultRequestOptions { requestLabel = Just "observer" })

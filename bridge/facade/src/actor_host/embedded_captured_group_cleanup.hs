@@ -1,4 +1,4 @@
 do
-  Just group <- R.call (readGroup (R.client groupStore)) ()
-  cleaned <- planCleanup group >>= executeCleanup
-  display (cleanupReceiptComplete cleaned)
+  agents <- R.call (readAgents (R.client groupStore)) ()
+  outcomes <- mapM stopAgent agents
+  display (all (\outcome -> case outcome of { StoppedNow -> True; AlreadyStopped -> True; _ -> False }) outcomes)

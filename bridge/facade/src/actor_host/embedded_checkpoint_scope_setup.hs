@@ -9,7 +9,7 @@ data SeedBox mode = SeedBox
   , storeSeed :: mode :- Call ContextCheckpoint NoReply
   , readSeed :: mode :- Call () (R.Reply (Maybe ContextCheckpoint))
   } deriving Generic
-let seedBox = R.definition "embedded-checkpoint-seeds" Actor.ReadOnly SeedBox
+let seedBox = R.definition "embedded-checkpoint-seeds" (Actor.Selected (knownEffects @'[])) SeedBox
       { seedState = Nothing
       , storeSeed = \seed -> R.put (Just seed)
       , readSeed = \() -> R.get

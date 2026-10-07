@@ -1,8 +1,13 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
 import Data.Text (Text)
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Actors.Exomonad
+
 Just seed <- R.call (readSeed (R.client seedStore)) ()
-let x = 99 :: Int
-let observerGroup = "observer" :: ForkGroupLabel
-let observerLabel = [label|observer|]
-observer <- unfold (batch campaign observerGroup)
-  (child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
-    (researching @Text projectHead (assignment observerLabel ("inspect" :: Text))))))
+Right observer <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "observer", spawnLifetime = ActorOwned })
+Right observerRequest <- request @Text observer ("inspect" :: Text)
+  (defaultRequestOptions { requestLabel = Just "observer" })
