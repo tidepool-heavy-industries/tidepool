@@ -737,7 +737,7 @@ impl RecoveredArtifactInventory {
     }
 
     /// Standalone callers explicitly request every authenticated original group.
-    /// Durable V7 restoration always uses `context` with its recorded selection.
+    /// Durable restoration uses `context_with_roles` with its recorded roles.
     pub fn context_all_groups(
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
@@ -1866,7 +1866,9 @@ impl ExactProductAdmission<'_> {
             if !exact_roots.contains(&owner) || imports.contains_key(&owner) {
                 continue;
             }
-            let retained = artifacts.entries_for_owners(std::iter::once(owner.clone()))?;
+            let retained = CompilerInputProjection::from_interface_view(artifacts)?
+                .project_metadata(artifacts.metadata_snapshot())?
+                .entries;
             if let Some(entry) = retained.get(&owner) {
                 match &entry.payload {
                     ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
@@ -1950,16 +1952,7 @@ impl ExactCompilationRequest {
     pub(crate) fn compiler_original_products(
         &self,
     ) -> Result<Vec<CertifiedRecoveryProduct>, CompileError> {
-        Ok(self
-            .context
-            .compiler_metadata_snapshot()?
-            .entries
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => Some(product.clone()),
-                _ => None,
-            })
-            .collect())
+        self.context.compiler_original_products()
     }
     /// Capture metadata from this still-live offer, never from reconstructed
     /// source or current cache state. The copy is diagnostic, not authority.
@@ -2352,6 +2345,7 @@ impl ExactCompilationRequest {
             original_products: std::sync::OnceLock::new(),
         })
     }
+    #[cfg(test)]
     pub(crate) fn admit_program_segment_support(
         &mut self,
         context: Arc<ExactDeclarationContext>,
@@ -2366,8 +2360,10 @@ impl ExactCompilationRequest {
             &segment.admissions,
             produced_types,
             Some(&segment.request.context),
+            None,
         )
     }
+    #[cfg(test)]
     pub(crate) fn admit_program_support(
         &mut self,
         context: Arc<ExactDeclarationContext>,
@@ -2375,7 +2371,42 @@ impl ExactCompilationRequest {
         admissions: &[ExactSourceAdmission],
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.admit_program_support_inner(context, support, admissions, produced_types, None)
+        self.admit_program_support_inner(context, support, admissions, produced_types, None, None)
+    }
+    pub(crate) fn admit_program_segment_support_with_selection(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        segment: &ExactProgramSegmentAdmission,
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        segment.validate_request(self)?;
+        self.admit_program_support_inner(
+            context,
+            support,
+            segment.admissions(),
+            produced_types,
+            Some(&segment.request.context),
+            Some(selection),
+        )
+    }
+    pub(crate) fn admit_program_support_with_selection(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        admissions: &[ExactSourceAdmission],
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.admit_program_support_inner(
+            context,
+            support,
+            admissions,
+            produced_types,
+            None,
+            Some(selection),
+        )
     }
     fn admit_program_support_inner(
         &mut self,
@@ -2384,6 +2415,7 @@ impl ExactCompilationRequest {
         admissions: &[ExactSourceAdmission],
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         segment_input: Option<&ExactDeclarationContext>,
+        selection: Option<&crate::certified_products::CertifiedSourceSelection>,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
         let mut selected_originals = BTreeMap::new();
@@ -2413,15 +2445,45 @@ impl ExactCompilationRequest {
                 }
             }
         }
-        let supplied = support
-            .entries_for_owners(support.descriptors().into_iter().map(|entry| entry.owner))?;
-        let retained = context
-            .artifact_view()
-            .entries_for_owners(supplied.keys().cloned())?;
+        let issued = match selection {
+            Some(selection) => {
+                let entries = support.entries();
+                let mut originals = Vec::new();
+                for owner in selection.selected_original_owners() {
+                    let matching = entries.iter().filter(|entry| {
+                        matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
+                    }).cloned().collect::<Vec<_>>();
+                    // A selected original may be the generated target, excluded
+                    // from this support view by its authenticated source owner.
+                    if matching.len() > 1 {
+                        return Err(failure(
+                            "compiler support offer has conflicting exact original artifacts",
+                        ));
+                    }
+                    originals.extend(matching);
+                }
+                CompilerInputProjection::from_interface_view(support)?
+                    .merge(&CompilerInputProjection::from_issued_entries(&originals)?)?
+            }
+            None => {
+                // Historical unit cases supply explicit original fixtures;
+                // every production consumer passes current receipt authority.
+                #[cfg(test)]
+                {
+                    CompilerInputProjection::from_issued_entries(&support.entries())?
+                }
+                #[cfg(not(test))]
+                {
+                    return Err(failure("program support lacks current compiler selection"));
+                }
+            }
+        };
+        let supplied = issued
+            .project_metadata(support.metadata_snapshot())?
+            .entries;
+        let retained = context.compiler_metadata_snapshot()?.entries;
         let source_input = segment_input.unwrap_or(&context);
-        let retained_source_input = source_input
-            .artifact_view()
-            .entries_for_owners(supplied.keys().cloned())?;
+        let retained_source_input = source_input.compiler_metadata_snapshot()?.entries;
         let fresh = supplied
             .keys()
             .filter(|owner| {
@@ -2452,7 +2514,11 @@ impl ExactCompilationRequest {
                             "source-selected support has another original owner",
                         ));
                     }
-                } else if retained_source_input.contains_key(owner) {
+                } else if retained_source_input
+                    .get(owner)
+                    .is_some_and(|entry| entry.is_native())
+                    || (selection.is_none() && retained_source_input.contains_key(owner))
+                {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
                     ));
@@ -2467,40 +2533,16 @@ impl ExactCompilationRequest {
                         "fresh program support lacks a canonical source seal",
                     ));
                 }
-            } else if !retained.contains_key(owner) {
+            } else if !retained.contains_key(owner) && selection.is_none() {
                 return Err(failure("program support lacks its fresh source admission"));
             } else if canonical_source_interface(entry).is_none()
-                && retained[owner].descriptor.id != entry.descriptor.id
+                && retained
+                    .get(owner)
+                    .is_none_or(|previous| previous.descriptor.id != entry.descriptor.id)
             {
                 return Err(failure(
                     "program support changed an inherited synthetic interface",
                 ));
-            }
-        }
-        for (owner, entry) in &supplied {
-            if matches!(entry.payload, ArtifactPayload::Original(_)) {
-                if let Some(previous) = retained.get(owner) {
-                    match &previous.payload {
-                        ArtifactPayload::Original(_)
-                            if previous.descriptor.id != entry.descriptor.id =>
-                        {
-                            return Err(failure("supporting original differs from retained owner"));
-                        }
-                        ArtifactPayload::Canonical(interface)
-                            if canonical_source_interface(entry) != Some(interface) =>
-                        {
-                            return Err(failure(
-                                "supporting original differs from canonical module",
-                            ));
-                        }
-                        ArtifactPayload::Interface(_, _) => {
-                            return Err(failure(
-                                "supporting original collides with synthetic interface",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
             }
         }
         let extend_start = std::time::Instant::now();
@@ -2509,7 +2551,10 @@ impl ExactCompilationRequest {
         for descriptor in support.descriptors() {
             context.admit_producer(descriptor.producer_sha256)?;
         }
+        let compiler_projection = context.compiler_projection.merge(&issued)?;
         context.inventory = context.inventory.merge(support)?;
+        context.compiler_projection = compiler_projection;
+        context.normalize()?;
         let context = Arc::new(context);
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -2556,12 +2601,16 @@ impl ExactCompilationRequest {
             &implementations,
         )?
         .lexical;
-        let entries = context.artifact_view().entries_for_owners(
-            fresh
-                .iter()
-                .cloned()
-                .chain(selected_originals.keys().cloned()),
-        )?;
+        let selected = context.compiler_metadata_snapshot()?.entries;
+        let entries = fresh
+            .iter()
+            .chain(selected_originals.keys())
+            .filter_map(|owner| {
+                selected
+                    .get(owner)
+                    .map(|entry| (owner.clone(), entry.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
         for (owner, selected) in &selected_originals {
             let Some(entry) = entries.get(owner) else {
                 return Err(failure(
@@ -2665,17 +2714,20 @@ impl ExactCompilationRequest {
         // The worker checks the remaining cell against these same-request
         // fresh originals. Retained hidden dependencies are not selected roots.
         let view = planned.artifact_view();
-        let retained = self.context.artifact_view().entries_for_owners(
-            planned
-                .original_home_imports()
-                .map(|(owner, _)| owner.clone()),
-        )?;
-        let entries = view.entries_for_owners(
-            planned
-                .original_home_imports()
-                .filter(|(owner, _)| !retained.contains_key(*owner))
-                .map(|(owner, _)| owner.clone()),
-        )?;
+        let retained = self.context.compiler_metadata_snapshot()?.entries;
+        let selected = planned
+            .compiler_input_projection()
+            .project_metadata(view.metadata_snapshot())?
+            .entries;
+        let entries = planned
+            .original_home_imports()
+            .filter(|(owner, _)| !retained.contains_key(*owner))
+            .filter_map(|(owner, _)| {
+                selected
+                    .get(owner)
+                    .map(|entry| (owner.clone(), entry.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
         let support =
             view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
         let mut request = self.clone();
@@ -3476,6 +3528,7 @@ impl ExactDeclarationContext {
             crate::artifact_inventory::ArtifactDependency,
         )],
         native_groups: &[crate::artifact_inventory::NativeGroupKey],
+        compiler_roles: &[CompilerInputRole],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
         let inventory = RecoveredArtifactInventory::capture_inputs(
@@ -3487,9 +3540,10 @@ impl ExactDeclarationContext {
             Some((descriptors, dependencies)),
         )
         .map_err(failure)?;
-        inventory.context(
+        inventory.context_with_roles(
             &inventory.entries.keys().copied().collect::<Vec<_>>(),
             native_groups,
+            compiler_roles,
             lexical,
         )
     }
@@ -3653,6 +3707,19 @@ impl ExactDeclarationContext {
     }
     pub fn artifact_view(&self) -> &ArtifactView {
         &self.inventory
+    }
+    pub(crate) fn compiler_original_products(
+        &self,
+    ) -> Result<Vec<CertifiedRecoveryProduct>, CompileError> {
+        Ok(self
+            .compiler_metadata_snapshot()?
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product.clone()),
+                _ => None,
+            })
+            .collect())
     }
     pub fn compiler_input_projection(&self) -> &CompilerInputProjection {
         &self.compiler_projection
@@ -4266,7 +4333,7 @@ impl ExactDeclarationContext {
             ),
             Value::Array(
                 metadata
-                    .entries
+                    .artifacts
                     .values()
                     .filter_map(|entry| match &entry.payload {
                         ArtifactPayload::Interface(interface, JoinedInterfaceRole::LexicalJoin) => {
@@ -4452,15 +4519,11 @@ impl ExactDeclarationContext {
     }
 
     fn normalize(&self) -> Result<(), CompileError> {
-        self.compiler_projection.validate(&self.inventory)?;
+        let metadata = self.compiler_metadata_snapshot()?;
         if let Some(retained) = &self.template_imports {
             retained.validate(self.producer, self.artifact_view())?;
         }
-        let interfaces = self.interface_owners();
-        let owners = interfaces
-            .iter()
-            .map(|interface| &interface.owner)
-            .collect::<BTreeSet<_>>();
+        let owners = metadata.entries.keys().collect::<BTreeSet<_>>();
         let lexical_owners = self
             .lexical
             .iter()
@@ -4538,7 +4601,13 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        self.materialize_entries_with_validation(root, &self.inventory.entries(), validation, mode)
+        let metadata = self.compiler_metadata_snapshot()?;
+        self.materialize_entries_with_validation(
+            root,
+            &metadata.entries.values().cloned().collect::<Vec<_>>(),
+            validation,
+            mode,
+        )
     }
 
     fn materialize_entries_with_validation(
@@ -4554,15 +4623,19 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        let mut native_owners = BTreeSet::new();
+        let mut native_owners = BTreeMap::new();
         for entry in entries
             .iter()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
-            if !native_owners.insert(entry.descriptor.owner.clone()) {
+            if let Some(previous) =
+                native_owners.insert(entry.descriptor.owner.clone(), entry.descriptor.id)
+            {
                 return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                    ArtifactInventoryFailure::CompilerOriginalOfferConflict {
                         owner: entry.descriptor.owner.clone(),
+                        existing: previous,
+                        incoming: entry.descriptor.id,
                     },
                 ));
             }
@@ -4717,7 +4790,13 @@ impl ExactDeclarationContext {
                 retained._directory.disable_cleanup(true);
                 Ok(retained)
             })?;
-        self.prepare_compilation(root, producer)
+        self.prepare_compilation_from_metadata(
+            root,
+            producer,
+            None,
+            &metadata,
+            self.semantic_sha256_from_metadata(&metadata),
+        )
     }
 
     pub(crate) fn prepare_compilation_with_authorization(

@@ -4379,13 +4379,17 @@ mod tests {
             },
         }];
         let mut validation = PackageInterfaceValidation::default();
-        let imports = certified_products::certify_target_available_owners_with_validation(
+        let original_groups = certified_products::certify_owned_products_with_validation(
+            &products.iter().collect::<Vec<_>>(),
+            &[],
+            &mut validation,
+        )
+        .unwrap();
+        let imports = certified_products::certify_target_owners(
             &target,
             &accepted,
-            &products,
-            &[],
+            &original_groups,
             &BTreeMap::new(),
-            &mut validation,
         )
         .unwrap();
         let entries = products
@@ -4480,17 +4484,13 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(
-                certified_products::certify_target_available_owners_with_validation(
-                    &target,
-                    &invalid,
-                    &products,
-                    &[],
-                    &BTreeMap::new(),
-                    &mut validation
-                )
-                .is_err()
-            );
+            assert!(certified_products::certify_target_owners(
+                &target,
+                &invalid,
+                &original_groups,
+                &BTreeMap::new(),
+            )
+            .is_err());
         }
         let missing_inventory = ArtifactInventory::default();
         assert!(missing_inventory

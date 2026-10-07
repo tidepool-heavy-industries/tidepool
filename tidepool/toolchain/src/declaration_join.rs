@@ -2383,6 +2383,7 @@ mod authored_tests {
             &descriptors,
             &stored.artifact_dependencies,
             &native_groups,
+            &accepted.context().compiler_input_roles(),
             lexical.clone(),
         )
         .unwrap();

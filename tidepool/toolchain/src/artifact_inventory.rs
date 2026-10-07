@@ -194,6 +194,8 @@ pub enum ArtifactInventoryFailure {
     AuthoredNativeRoot { generation: u64, found: usize },
     #[error("native root {artifact:?} is outside its retained view")]
     NativeRootOutsideView { artifact: ArtifactId },
+    #[error("native root {artifact:?} has no original native proof")]
+    NativeRootNotOriginal { artifact: ArtifactId },
     #[error("artifact {artifact:?} has no certified native group {original_ordinal}")]
     NativeGroupUnavailable {
         artifact: ArtifactId,
@@ -1670,6 +1672,8 @@ impl ArtifactView {
 
     /// Canonical interfaces authorize types alongside their implementations;
     /// they cannot replace or grant a selected source implementation role.
+    /// Classify retained implementations for lexical traversal. Exact variants
+    /// share their kind; this census never selects a compiler original offer.
     pub(crate) fn source_implementation_roles(
         &self,
     ) -> BTreeMap<ExactModuleIdentity, ArtifactKind> {
@@ -1994,6 +1998,7 @@ impl ArtifactView {
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
         entries
     }
+    #[cfg(test)]
     pub(crate) fn entries_for_owners(
         &self,
         owners: impl Iterator<Item = ExactModuleIdentity>,

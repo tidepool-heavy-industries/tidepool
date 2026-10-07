@@ -122,21 +122,23 @@ impl CompilerInputProjection {
         incoming: CompilerInputRole,
     ) -> Result<(), CompileError> {
         if let Some(previous) = self.roles.get_mut(&owner) {
+            if let (Some(existing), Some(new)) = (previous.original(), incoming.original()) {
+                if existing != new {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                            owner,
+                            existing,
+                            incoming: new,
+                        },
+                    ));
+                }
+            }
             if previous.interface() != incoming.interface() {
                 return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
                     owner,
                 }));
             }
             match (previous.original(), incoming.original()) {
-                (Some(old), Some(new)) if old != new => {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::CompilerOriginalOfferConflict {
-                            owner,
-                            existing: old,
-                            incoming: new,
-                        },
-                    ));
-                }
                 (None, Some(_)) => *previous = incoming,
                 _ => {}
             }
@@ -307,6 +309,29 @@ impl TargetNativeSelection {
 }
 
 impl ArtifactView {
+    /// The target certifier owns source imports; a checked entry additionally
+    /// authenticates its exact original ordinal. Retained unrelated groups do
+    /// not enter this execution's selected native closure.
+    pub(crate) fn certified_target_native_selection(
+        &self,
+        entry: Option<&crate::checked_cell::CheckedTypedEntry>,
+        imports: &[crate::certified_products::PendingImportOwner],
+    ) -> Result<TargetNativeSelection, CompileError> {
+        let mut groups = certified_target_source_groups(&self.entries(), imports)?;
+        if let Some(entry) = entry {
+            groups.insert(entry.native_group_key());
+        }
+        self.target_native_selection(
+            &groups
+                .into_iter()
+                .map(|group| NativeRequirementRoot::Group {
+                    artifact: group.artifact,
+                    original_ordinal: group.original_ordinal,
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
     /// Resolve a target's already certified roots inside this admitted view.
     /// This closes exact group edges; it does not grant a checked entry or infer
     /// target demand from the compiler's original offers.
@@ -335,6 +360,15 @@ impl ArtifactView {
             if !owned.contains(&InventoryNodeKey::Artifact(artifact)) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView { artifact },
+                ));
+            }
+            if !state
+                .payloads
+                .get(&artifact)
+                .is_some_and(|entry| entry.is_native())
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootNotOriginal { artifact },
                 ));
             }
             for ordinal in ordinals {
