@@ -17,8 +17,19 @@ data Duration
   = DurationMilliseconds Int
   | DurationSeconds Int
   | DurationMinutes Int
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
+instance Eq Duration where
+  left == right = magnitude left == magnitude right
+
+instance Ord Duration where
+  compare left right = compare (magnitude left) (magnitude right)
+
+-- Normalize after widening: even valid unit counts may exceed Int when scaled.
+magnitude :: Duration -> Integer
+magnitude (DurationMilliseconds value) = toInteger value
+magnitude (DurationSeconds value) = toInteger value * 1000
+magnitude (DurationMinutes value) = toInteger value * 60000
 
 milliseconds :: Natural -> Duration
 milliseconds = DurationMilliseconds . bounded

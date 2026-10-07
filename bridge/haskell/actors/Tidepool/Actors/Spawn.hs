@@ -20,6 +20,12 @@ module Tidepool.Actors.Spawn
   , existingWorktree
   , currentWorkspace
   , SpawnOptions (..)
+  , SpawnLimits (..)
+  , DescendantDepth
+  , ActiveDescendants
+  , SpawnLimitError (..)
+  , descendantDepth
+  , activeDescendants
   , defaultSpawnOptions
   , SpawnError (..)
   , SpawnRetainedResources (..)
@@ -31,6 +37,7 @@ module Tidepool.Actors.Spawn
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
+import Numeric.Natural (Natural)
 import Prelude
 import Tidepool.Agent.Contract
   ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, installSpec )
@@ -72,6 +79,40 @@ data SpawnError
   | SpawnPartialFailure SpawnRetainedResources SpawnCleanup Text
   deriving (Show)
 
+-- | Maximum further spawn depth and sponsored active descendants of the child.
+-- Zero forbids further descendants. These caps only attenuate parent limits.
+-- Active descendants include pending admissions throughout its spawn ancestry.
+data SpawnLimits = SpawnLimits
+  { maximumDescendantDepth :: DescendantDepth
+  , maximumActiveDescendants :: ActiveDescendants
+  }
+  deriving (Show, Eq)
+
+newtype DescendantDepth = DescendantDepth Int
+  deriving (Show, Eq, Ord)
+
+newtype ActiveDescendants = ActiveDescendants Int
+  deriving (Show, Eq, Ord)
+
+data SpawnLimitError
+  = DescendantDepthTooLarge Natural
+  | ActiveDescendantsTooLarge Natural
+  deriving (Show, Eq)
+
+-- | Accepted quantities match the runtime's inclusive 0..65535 range.
+descendantDepth :: Natural -> Either SpawnLimitError DescendantDepth
+descendantDepth value
+  | value > 65535 = Left (DescendantDepthTooLarge value)
+  | otherwise = Right (DescendantDepth (fromIntegral value))
+
+activeDescendants :: Natural -> Either SpawnLimitError ActiveDescendants
+activeDescendants value
+  | value > 65535 = Left (ActiveDescendantsTooLarge value)
+  | otherwise = Right (ActiveDescendants (fromIntegral value))
+
+limitsWire :: SpawnLimits -> (Int, Int)
+limitsWire (SpawnLimits (DescendantDepth depth) (ActiveDescendants active)) = (depth, active)
+
 -- | The real typed spec is retained with all its compiled closure dependencies.
 data SpawnOptions tools childEffects = SpawnOptions
   { spawnSpec :: AgentSpec tools childEffects
@@ -80,7 +121,8 @@ data SpawnOptions tools childEffects = SpawnOptions
   , spawnInstructions :: Maybe Text
   , spawnLabel :: Maybe Text
   , spawnLifetime :: WorkerLifetime
-  , spawnLimits :: Maybe (Int, Int)
+  -- Nothing inherits the parent's attenuated limits, including unbounded width.
+  , spawnLimits :: Maybe SpawnLimits
   }
 
 defaultSpawnOptions :: AgentSpec tools childEffects -> SpawnOptions tools childEffects
@@ -105,7 +147,7 @@ spawnSubagent context workspace options = do
     (spawnEffort options)
     (spawnInstructions options)
     (spawnLifetime options)
-    (spawnLimits options))
+    (limitsWire <$> spawnLimits options))
   pure $ case admitted of
     Left failure -> Left (spawnError failure)
     Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
