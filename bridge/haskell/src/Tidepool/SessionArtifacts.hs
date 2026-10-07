@@ -204,7 +204,8 @@ prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
           global <- case filter ((== nameOccName (idName original)) . nameOccName . idName) globals of
             [found] -> pure found
             _ -> fail "typed capture has no unique hydrated session global"
-          unless (eqType (idType global) (persisted capture))
+          unless (eqType (idType global) (persisted capture)
+            && eqType (idType global) (idType original))
             (fail "typed capture differs from its hydrated session type")
           pure (original, global)
         let binders = zipWith (captureBinder owner representation) selected (map snd pairs)

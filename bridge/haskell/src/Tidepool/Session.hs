@@ -354,11 +354,15 @@ injectSessionIfaceWithCapture :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, CapturedSessionInterface)
 injectSessionIfaceWithCapture root sm hsc0 = do
   (env, _, captured) <- injectSessionIfaceWithBindings root sm hsc0
+  registerSessionInterfaceLocation (sessionHiPath root sm) sm env
   pure (env, captured)
 
 -- Return the global identifiers reconstructed from these same captured bytes.
 -- A caller substituting retained captures must use these identifiers, rather
 -- than constructing a Core global from the module and occurrence spelling.
+-- Typed batches consume the HPT directly and do not register their private
+-- staging paths in the mutable finder. Live scope injection registers its
+-- own published path only after this hydration succeeds.
 injectSessionIfaceWithBindings :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, [Id], CapturedSessionInterface)
 injectSessionIfaceWithBindings root sm hsc0 = do
@@ -393,7 +397,6 @@ injectSessionIfaceWithBindings root sm hsc0 = do
       details <- injectDetails hsc0 modNm iface
       let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
           hsc1 = hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0
-      registerSessionInterfaceLocation path sm hsc1
       packageExists <- doesFileExist (path ++ ".packages")
       requirementsExist <- doesFileExist (path ++ ".requirements")
       evidence <- if not packageExists && not requirementsExist then pure Nothing else do
