@@ -1129,7 +1129,7 @@ mod template_haskell_pin {
         let src = template_haskell(PRE, STACK, CODE, "", "", None);
         assert_eq!(
             src,
-            "{-# LANGUAGE MagicHash #-}\nmodule Expr where\ndefault (Int)\nimport qualified Tidepool.Internal.Resume as TidepoolResume\nimport qualified Data.Text as TidepoolScaffoldText\nimport qualified GHC.Exts as TidepoolScaffoldExts\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 10:10\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n__prepared = TidepoolResume.settle result\n__resume q x = TidepoolResume.settle (TidepoolResume.resumeLifted q x)\n__applyEntry f n = TidepoolResume.settle (f (TidepoolScaffoldExts.I# n))\n__applyValue f x = TidepoolResume.settle (f x)\n",
+            "{-# LANGUAGE MagicHash #-}\n{-# LANGUAGE PackageImports #-}\nmodule Expr where\ndefault (Int)\nimport qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\nimport qualified Data.Text as TidepoolScaffoldText\nimport qualified GHC.Exts as TidepoolScaffoldExts\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 11:11\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n__prepared = TidepoolResume.settle result\n__resume q x = TidepoolResume.settle (TidepoolResume.resumeLifted q x)\n__applyEntry f n = TidepoolResume.settle (f (TidepoolScaffoldExts.I# n))\n__applyValue f x = TidepoolResume.settle (f x)\n",
             "template_haskell output changed — this is a compile-cache input, see TurnTemplate::render"
         );
     }
@@ -1139,7 +1139,7 @@ mod template_haskell_pin {
         let src = template_haskell_anchored(PRE, STACK, CODE, "", "", None);
         assert_eq!(
             src,
-            "{-# LANGUAGE MagicHash #-}\nmodule Expr where\ndefault (Int)\nimport qualified Tidepool.Internal.Resume as TidepoolResume\nimport qualified Data.Text as TidepoolScaffoldText\nimport qualified GHC.Exts as TidepoolScaffoldExts\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 10:10\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON (__anchor _r))\n__prepared = TidepoolResume.settle result\n__resume q x = TidepoolResume.settle (TidepoolResume.resumeLifted q x)\n__applyEntry f n = TidepoolResume.settle (f (TidepoolScaffoldExts.I# n))\n__applyValue f x = TidepoolResume.settle (f x)\n",
+            "{-# LANGUAGE MagicHash #-}\n{-# LANGUAGE PackageImports #-}\nmodule Expr where\ndefault (Int)\nimport qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\nimport qualified Data.Text as TidepoolScaffoldText\nimport qualified GHC.Exts as TidepoolScaffoldExts\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 11:11\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON (__anchor _r))\n__prepared = TidepoolResume.settle result\n__resume q x = TidepoolResume.settle (TidepoolResume.resumeLifted q x)\n__applyEntry f n = TidepoolResume.settle (f (TidepoolScaffoldExts.I# n))\n__applyValue f x = TidepoolResume.settle (f x)\n",
             "template_haskell_anchored output changed — this is a compile-cache input, see TurnTemplate::render"
         );
     }
@@ -1149,7 +1149,7 @@ mod template_haskell_pin {
         let src = template_haskell_show_default(PRE, STACK, CODE, "", "", None);
         assert_eq!(
             src,
-            "{-# LANGUAGE MagicHash #-}\nmodule Expr where\ndefault (Int)\nimport qualified Tidepool.Internal.Resume as TidepoolResume\nimport qualified Data.Text as TidepoolScaffoldText\nimport qualified GHC.Exts as TidepoolScaffoldExts\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 10:10\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire _r)\n__prepared = TidepoolResume.settle result\n__resume q x = TidepoolResume.settle (TidepoolResume.resumeLifted q x)\n__applyEntry f n = TidepoolResume.settle (f (TidepoolScaffoldExts.I# n))\n__applyValue f x = TidepoolResume.settle (f x)\n",
+            "{-# LANGUAGE MagicHash #-}\n{-# LANGUAGE PackageImports #-}\nmodule Expr where\ndefault (Int)\nimport qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\nimport qualified Data.Text as TidepoolScaffoldText\nimport qualified GHC.Exts as TidepoolScaffoldExts\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 11:11\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire _r)\n__prepared = TidepoolResume.settle result\n__resume q x = TidepoolResume.settle (TidepoolResume.resumeLifted q x)\n__applyEntry f n = TidepoolResume.settle (f (TidepoolScaffoldExts.I# n))\n__applyValue f x = TidepoolResume.settle (f x)\n",
             "template_haskell_show_default output changed — this is a compile-cache input, see TurnTemplate::render"
         );
     }
@@ -1399,7 +1399,7 @@ mod template_haskell_pin {
             .find("default (Int, Double, Text)")
             .expect("marker survives");
         let resume_import_pos = src
-            .find("import qualified Tidepool.Internal.Resume")
+            .find("import qualified \"tidepool-resume\" Tidepool.Internal.Resume")
             .expect("resume import present");
         assert!(
             resume_import_pos < default_pos,

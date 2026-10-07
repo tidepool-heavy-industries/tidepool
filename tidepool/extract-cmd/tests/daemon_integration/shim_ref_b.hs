@@ -1,3 +1,4 @@
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE DataKinds #-}
 module ShimRefB where
 
@@ -6,7 +7,7 @@ import Tidepool.Session.Val.G1 (x)
 import Tidepool.Prelude
 import Tidepool.Shim
 import Tidepool.Companion
-import qualified Tidepool.Internal.Resume as TidepoolResume
+import qualified "tidepool-resume" Tidepool.Internal.Resume as TidepoolResume
 
 mine :: Pinned
 mine = companionVal

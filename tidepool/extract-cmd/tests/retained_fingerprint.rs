@@ -102,7 +102,7 @@ fn unrelated_retained_symbols_do_not_scale_g3_interface() {
     let input = wave.join("W1.hs");
     fs::copy(fixture_root().join("W1.hs"), &input).unwrap();
     let stdlib = stdlib_root();
-    assert!(stdlib.join("Tidepool/Internal/Resume.hs").is_file());
+    assert!(stdlib.is_dir(), "matched runtime source library is missing");
 
     // Produce the thin G2 iface through the same worker that will consume it.
     // The historical G2 source is unavailable; this binder is only imported
