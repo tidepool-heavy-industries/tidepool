@@ -1277,6 +1277,10 @@ impl ResidentToolClient {
         self.finalize_provider_operation(boundary, true).await
     }
 
+    // Provider callbacks acknowledge one logical operation admitted by the
+    // transport's durable claim and scheduler. Direct native physical retries
+    // earn no separate acknowledgement; exact terminal replay names this same
+    // owner. An arbitrary unissued operation must still refuse.
     async fn finalize_provider_operation(
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
