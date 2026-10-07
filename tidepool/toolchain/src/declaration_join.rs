@@ -2035,12 +2035,34 @@ mod authored_tests {
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn authored_declaration_in_exact_context_keeps_its_native_origin() {
         let root = tempfile::tempdir().unwrap();
-        let module = SessionModule::lib(Generation(1));
-        let source = "module Tidepool.Session.Lib.G1 where\nanswer = (41 :: Int)\n";
+        let baseline_module = SessionModule::lib(Generation(1));
+        let baseline_source = "module Tidepool.Session.Lib.G1 where\nbaseline = (40 :: Int)\n";
+        let baseline_path = root.path().join(baseline_module.relative_hs_path());
+        std::fs::create_dir_all(baseline_path.parent().unwrap()).unwrap();
+        std::fs::write(&baseline_path, baseline_source).unwrap();
+        let baseline = Arc::new(
+            certify_authored_declaration(
+                baseline_module,
+                &baseline_path,
+                baseline_source,
+                &[root.path().to_path_buf()],
+                root.path(),
+            )
+            .expect("the same compile front door must issue the baseline producer"),
+        );
+        let context = Arc::new(
+            ExactDeclarationContext::new(std::slice::from_ref(&baseline), &[], Vec::new()).unwrap(),
+        );
+        assert_ne!(context.toolchain_identity_sha256(), [0; 32]);
+        assert_eq!(
+            context.toolchain_identity_sha256(),
+            baseline.toolchain_identity_sha256()
+        );
+        let module = SessionModule::lib(Generation(2));
+        let source = "module Tidepool.Session.Lib.G2 where\nanswer = (41 :: Int)\n";
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
         let result = certify_authored_declaration_in_context(
             module,
             &path,
@@ -2054,14 +2076,20 @@ mod authored_tests {
         assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
         assert_eq!(
             result.product.module_interface().unwrap().origin(),
-            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 2 }
+        );
+        assert_eq!(
+            result.toolchain_identity_sha256(),
+            baseline.toolchain_identity_sha256()
         );
         assert!(result
             .introduced_exports()
             .iter()
             .any(|export| export.head.occurrence == "answer"));
-        let context = ExactDeclarationContext::new(&[Arc::new(result)], &[], Vec::new()).unwrap();
+        let context =
+            ExactDeclarationContext::new(&[baseline, Arc::new(result)], &[], Vec::new()).unwrap();
         assert!(context.authored_native_root(1).is_ok());
+        assert!(context.authored_native_root(2).is_ok());
     }
 
     #[test]
