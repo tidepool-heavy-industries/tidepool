@@ -280,6 +280,7 @@ impl AwaitDependency {
 pub(crate) enum RequestError {
     RequestReservationRejected(ReplyError),
     RequestSubmissionRejected(ReplyError),
+    RequestInvalidDeadline(String),
 }
 
 pub(crate) struct RequestReservation {

@@ -2304,3 +2304,89 @@ async fn interrupted_unsubmitted_rollback_notice_retries_original_watch_transiti
     ));
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let root = InvocationWork::new(owner, reservation());
+    let source = root.new_scope().unwrap();
+    let destination = root.new_scope().unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = fixture
+        .kernel
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let child_context = receive.await.unwrap();
+    source.register_worker(worker.clone()).unwrap();
+    assert_eq!(child_context.supervisor_identity(), Some(owner));
+    fixture
+        .kernel
+        .with_worker_lifetime_transfer(&worker, true, || {
+            source.release_worker_cleanup(owner, worker.identity())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_context.supervisor_identity(), None);
+    assert!(!source.owns_worker(worker.identity()));
+    source.close();
+    fixture.cleanup(&source).await;
+    assert!(
+        worker.terminal().get().is_none(),
+        "released worker outlives its source scope"
+    );
+    fixture
+        .kernel
+        .with_worker_lifetime_transfer(&worker, false, || {
+            destination.adopt_worker(owner, worker.clone())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_context.supervisor_identity(), Some(owner));
+    assert!(destination.owns_worker(worker.identity()));
+    let closed = root.new_scope().unwrap();
+    closed.close();
+    assert_eq!(
+        destination.transfer_worker_to_owner(&closed, owner, worker.identity()),
+        Err(super::super::agent_retention::AgentRetentionError::AgentRetainOwnerClosed)
+    );
+    assert!(
+        destination.owns_worker(worker.identity()),
+        "refused transfer retains original custody"
+    );
+    fixture.cleanup(&root).await;
+    assert!(worker.terminal().get().is_some());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn borrowed_worker_transfer_refuses_before_membership_callback() {
+    let fixture = Fixture::start().await;
+    let other = Fixture::start().await;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = fixture
+        .kernel
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let context = receive.await.unwrap();
+    let calls = AtomicUsize::new(0);
+    let transfer = other
+        .kernel
+        .with_worker_lifetime_transfer(&worker, true, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<(), ()>(())
+        });
+    assert_eq!(
+        transfer,
+        Err(crate::local_actor::LifetimeTransferError::Unauthorized)
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        context.supervisor_identity(),
+        Some(fixture.actor.identity())
+    );
+    other.finish().await;
+    fixture.finish().await;
+}

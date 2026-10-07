@@ -2696,6 +2696,11 @@ pub(crate) enum ResidentActorBoundary {
     },
     AgentForget(AgentInspectionBoundary),
     AgentStop(AgentInspectionBoundary),
+    AgentRetention {
+        continuation: ResidentHole,
+        target: ActorRef,
+        lifetime: crate::WorkerLifetime,
+    },
     CleanupPlan {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
@@ -2706,6 +2711,10 @@ pub(crate) enum ResidentActorBoundary {
         inspected: Vec<(crate::ActorRef, u64)>,
     },
     RequestReservation(RequestReservation),
+    RequestAdmissionRejected {
+        continuation: ResidentHole,
+        error: crate::request_effect::RequestError,
+    },
     CurrentRequest {
         continuation: ResidentHole,
         site: Option<u64>,
@@ -2970,9 +2979,11 @@ impl ResidentActorBoundary {
             Self::AgentGroupList { .. } => "observeForkGroup",
             Self::AgentForget(_) => "forgetAgent",
             Self::AgentStop(_) => "stopAgent",
+            Self::AgentRetention { .. } => "retainAgent",
             Self::CleanupPlan { .. } => "planCleanup",
             Self::CleanupExecute { .. } => "executeCleanup",
             Self::RequestReservation(_) => "request",
+            Self::RequestAdmissionRejected { .. } => "request admission rejected",
             Self::CurrentRequest { .. } => "currentRequest",
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
@@ -3211,6 +3222,9 @@ impl ResidentRequest {
             Self::AgentControl(
                 crate::generated::agent_control::AgentControlReq::AgentControlStopWith(..),
             ) => "stopAgent",
+            Self::AgentControl(
+                crate::generated::agent_control::AgentControlReq::AgentControlRetainWith(..),
+            ) => "retainAgent",
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(..),
             ) => "planCleanup",
@@ -8673,6 +8687,8 @@ where
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayAllowanceWith) => Ok(ResidentActorBoundary::DisplayAllowance { continuation: hole }),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) => Err(ResidentActorWorkbenchError::ActorProtocol("display expansion input requires a retained callback invocation".into())),
                     ResidentRequest::Commands(request) => Ok(ResidentActorBoundary::Command { continuation: hole, request }),
+                    ResidentRequest::AgentControl(crate::generated::agent_control::AgentControlReq::AgentControlRetainWith(target, lifetime)) =>
+                        Ok(ResidentActorBoundary::AgentRetention { continuation: hole, target: crate::wait::decode_address(target.0, target.1)?, lifetime }),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlStopWith(
                             target,
@@ -8961,6 +8977,13 @@ where
                         address,
                         deadline,
                     )) => {
+                        let deadline = match deadline.map(crate::request_effect::RequestDuration::checked).transpose() {
+                            Ok(deadline) => deadline,
+                            Err(detail) => return Ok(ResidentActorBoundary::RequestAdmissionRejected {
+                                continuation: hole,
+                                error: crate::request_effect::RequestError::RequestInvalidDeadline(detail),
+                            }),
+                        };
                         let custody = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             ?
@@ -8978,10 +9001,7 @@ where
                                     context.placement.session,
                                     custody,
                                 ),
-                                deadline: deadline
-                                    .map(crate::request_effect::RequestDuration::checked)
-                                    .transpose()
-                                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                                deadline,
                             },
                         ))
                     }

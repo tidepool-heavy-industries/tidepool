@@ -8,6 +8,7 @@
 use std::sync::{Arc, OnceLock};
 
 mod after_tool_wait;
+mod agent_retention;
 #[cfg(test)]
 mod capture_workspace_tests;
 mod captured_commit;
@@ -3292,6 +3293,13 @@ impl CurrentEffectOwner<'_> {
                 Some(execution.invocation_work.clone())
             }
             Self::Actor { .. } => None,
+        }
+    }
+
+    fn ephemeral_work(&self) -> Option<Arc<InvocationWork>> {
+        match self {
+            Self::Scoped { scope, .. } => Some(scope.clone()),
+            _ => self.invocation_work(),
         }
     }
 
@@ -6592,6 +6600,18 @@ where
                     .resume_agent_forget(context.clone(), forget.continuation, outcome)
                     .await
             }),
+            ResidentActorBoundary::AgentRetention {
+                continuation,
+                target,
+                lifetime,
+            } => Box::pin(async move {
+                let outcome =
+                    self.retain_agent_resource(kernel, context, &effect_owner, target, lifetime);
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, outcome)
+                    .await
+            }),
             ResidentActorBoundary::AgentStop(stop) => Box::pin(async move {
                 let (known, authorized) = {
                     let records = self.environment.actors.lock();
@@ -7494,6 +7514,15 @@ where
                         .await
                 })
             }
+            ResidentActorBoundary::RequestAdmissionRejected {
+                continuation,
+                error,
+            } => Box::pin(async move {
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, Err::<(), _>(error))
+                    .await
+            }),
             ResidentActorBoundary::RequestReservation(reservation) => Box::pin(async move {
                 use crate::request_effect::RequestError;
                 let owner =
@@ -7803,7 +7832,7 @@ where
                                 settlements.release(&dependencies);
                             }
                             registered.and_then(|watch| {
-                                if let Some(invocation) = effect_owner.invocation_work() {
+                                if let Some(invocation) = effect_owner.ephemeral_work() {
                                     if let Err(error) = invocation.register_transient_watch(watch) {
                                         let _ = self
                                             .environment

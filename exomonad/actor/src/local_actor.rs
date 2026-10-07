@@ -354,7 +354,62 @@ impl LocalActorDirectory {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifetimeTransferError {
+    Closed,
+    Unauthorized,
+    Unavailable,
+}
+
 impl KernelContext {
+    pub(crate) fn with_worker_lifetime_transfer<T, E>(
+        &self,
+        child: &LocalActorRef,
+        destination_run: bool,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, LifetimeTransferError> {
+        let admission = self
+            .child_admission_closed
+            .try_read()
+            .map_err(|_| LifetimeTransferError::Closed)?;
+        if *admission {
+            return Err(LifetimeTransferError::Closed);
+        }
+        self.directory
+            .with_run_admission(|| {
+                if self
+                    .directory
+                    .resolve(child.identity())
+                    .is_none_or(|known| known.address().get_id() != child.address().get_id())
+                {
+                    return Err(LifetimeTransferError::Unauthorized);
+                }
+                if child.terminal().get().is_some() {
+                    return Err(LifetimeTransferError::Unavailable);
+                }
+                let cell = child.address().get_cell();
+                if cell
+                    .try_get_supervisor()
+                    .is_some_and(|supervisor| supervisor.get_id() != self.myself.get_id())
+                {
+                    return Err(LifetimeTransferError::Unauthorized);
+                }
+                let mut children = self.children.lock();
+                let result = operation();
+                if result.is_ok() {
+                    if destination_run {
+                        children.remove(&child.address().get_id());
+                        cell.unlink(self.myself.get_cell());
+                    } else {
+                        cell.link(self.myself.get_cell());
+                        children.insert(child.address().get_id(), child.clone());
+                    }
+                }
+                Ok(result)
+            })
+            .map_err(|_| LifetimeTransferError::Closed)?
+    }
+
     /// Internal resources use Ractor supervision without a resident machine or model.
     pub(crate) async fn spawn_resource<A: ractor::Actor>(
         &self,
