@@ -826,14 +826,43 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
         .unwrap();
     assert_eq!(session.observed(), [23]);
     session.assert_only_publication_join_since_last_effect();
+    let published = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let declaration_surface = session
+        .resident
+        .exact_exports_in_namespace(
+            session.public,
+            tidepool_toolchain::declaration_join::ExportNamespace::Value,
+            &["historyCaptured"],
+        )
+        .unwrap();
+    assert_eq!(
+        declaration_surface.source_module(),
+        Some(tidepool_repr::SessionModule::lib(published.declaration_tip))
+    );
+    let [declaration] = declaration_surface.declarations().unwrap() else {
+        panic!("published barrier must retain exactly one certified declaration export");
+    };
+    assert_eq!(
+        declaration.kind,
+        tidepool_toolchain::declaration_join::DeclarationKind::Value
+    );
+    assert_eq!(
+        declaration.head.namespace,
+        tidepool_toolchain::declaration_join::ExportNamespace::Value
+    );
+    assert_eq!(declaration.head.occurrence, "historyCaptured");
     assert!(session
         .resident
-        .current_binding_in(session.public, "historyCaptured")
+        .current_binding_in(session.public, "historyValue0")
         .is_some());
     session
         .execute("produced_type_reuse", "segmentRecord historyCaptured", 0)
         .unwrap();
     assert_eq!(session.observed(), [23, 23]);
+    session.assert_no_compiler_since_last_effect();
 }
 
 #[test]
