@@ -47,6 +47,57 @@ def root_entry_source_fixture(root, modules):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_catalog_resources_cross_frozen_cohort_delegation_without_ambient_selection(self):
+        runner_spec = importlib.util.spec_from_file_location(
+            'frozen_resource_runner', SCRIPT.parent.parent / 'rust/isolated-libtest.py')
+        runner = importlib.util.module_from_spec(runner_spec)
+        runner_spec.loader.exec_module(runner)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resources = {}
+            for name in ('TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'):
+                resource = root / name
+                resource.mkdir()
+                resources[name] = str(resource)
+            descriptor_path = root / 'qualification.json'
+            descriptor_path.write_text('sealed descriptor')
+            descriptor = {
+                'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                'cohorts': qualification.cohorts(), 'environment': resources,
+                'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                'profile': 'production', 'stdlib_mode': 'catalog-backed',
+            }
+
+            def execute(command, **kwargs):
+                declared = [command[index + 1] for index, value in enumerate(command)
+                            if value == '--resource-env']
+                self.assertEqual(set(declared), set(resources))
+                with patch.dict(os.environ, kwargs['env'], clear=True):
+                    runner.resolve_resource_environment(declared)
+                    delegated, _ = runner.delegated_command(
+                        ['/frozen/libtest'], 1800, 'app.slice', {},
+                        environment=os.environ, declared_resources=declared)
+                    for name, path in resources.items():
+                        self.assertIn(f'--setenv={name}={path}', delegated)
+                    self.assertFalse(any('ambient-endpoint' in value for value in delegated))
+                tests = root / 'evidence/tests'
+                tests.mkdir()
+                qualification.write_json(tests / 'case.json', {
+                    'test': qualification.PREPARED_CHILD_TESTS[0], 'passed': True,
+                    'execution': {'executed_test_count': 1, 'exit_code': 0}})
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(qualification, 'verify', return_value=descriptor), \
+                 patch.object(qualification.subprocess, 'run', side_effect=execute), \
+                 patch.dict(os.environ, {
+                     'TIDEPOOL_COMPILER_MODULES': '/ambient-catalog',
+                     'TIDEPOOL_PREPARED_ROOT_ENTRY': '/ambient-entry',
+                     'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/ambient-endpoint'}):
+                self.assertEqual(qualification.main([
+                    'run', str(descriptor_path), '--cohort', 'prepared-child',
+                    '--output', str(root / 'evidence'), '--delegated-service']), 0)
+
     def test_prepared_child_cohort_selects_frozen_native_case_and_refuses_incomplete_execution(self):
         outcomes = [('complete', 1, True, 0), ('empty', 0, True, 1),
                     ('unknown', None, True, 1), ('failed', 1, False, 1)]

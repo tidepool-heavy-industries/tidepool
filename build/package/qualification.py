@@ -1002,6 +1002,11 @@ def run_cohort(args) -> int:
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
         command.extend(["--delegated-service", "--service-slice", service_slice])
+    # These optional catalog-backed inputs are verified by the frozen owner.
+    # The runner must retain their declared-resource identity across delegation.
+    for name in ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"):
+        if name in descriptor["environment"]:
+            command.extend(["--resource-env", name])
     for name in cohort["tests"]:
         command.extend(["--exact", name])
     if cohort["ignored"]:
