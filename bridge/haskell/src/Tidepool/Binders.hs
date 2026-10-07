@@ -71,7 +71,8 @@ import qualified GHC.Parser (parseModule)
 import qualified GHC.Parser as Parser (parseImport)
 import GHC.Parser.Header (getOptions)
 import GHC.Parser.Lexer
-  ( ParseResult(..)
+  ( PState
+  , ParseResult(..)
   , Token(..)
   , initParserState
   , lexTokenStream
@@ -777,7 +778,7 @@ refineExecutableSourceItems flags item
                   traverse (refine parsedState) (reverse reversed)
             terminal : [authored] | isSyntheticTerminal terminal ->
               Right [(CompleteSourceLine item, classifyWithFlagsExactFormUsing flags source
-                (Just (POk parsedState authored)))]
+                (ParsedStatement parsedState authored))]
             _ -> parseFailure
         _ -> parseFailure
       PFailed _ -> parseFailure
@@ -813,7 +814,7 @@ refineExecutableSourceItems flags item
                 (take (end - start) (drop start source))
         if end <= start then Left CellLexFailure
           else Right (authored, classifyWithFlagsExactFormUsing flags
-            (cellSourceText (positionedExecutableSource authored)) (Just (POk parsedState statement)))
+            (cellSourceText (positionedExecutableSource authored)) (ParsedStatement parsedState statement))
       _ -> Left CellLexFailure
     sourceOffset target = go 0 sourceLocation source
       where
@@ -1275,10 +1276,16 @@ classifyWithFlagsExact :: DynFlags -> String -> StmtBinders
 classifyWithFlagsExact dflags src = fst (classifyWithFlagsExactForm dflags src)
 
 classifyWithFlagsExactForm :: DynFlags -> String -> (StmtBinders, Maybe CellBindingForm)
-classifyWithFlagsExactForm dflags src = classifyWithFlagsExactFormUsing dflags src Nothing
+classifyWithFlagsExactForm dflags src = classifyWithFlagsExactFormUsing dflags src ParseOwnStatement
+
+-- ParseResult is unlifted in GHC. Retain the successful parser-owned facts in
+-- a lifted choice and reconstruct its result only when classifying the AST.
+data StatementClassificationSource
+  = ParseOwnStatement
+  | ParsedStatement PState (LStmt GhcPs (LHsExpr GhcPs))
 
 classifyWithFlagsExactFormUsing :: DynFlags -> String
-  -> Maybe (ParseResult (LStmt GhcPs (LHsExpr GhcPs)))
+  -> StatementClassificationSource
   -> (StmtBinders, Maybe CellBindingForm)
 classifyWithFlagsExactFormUsing dflags src retainedStatement = (verdict, bindingForm)
   where
@@ -1298,8 +1305,8 @@ classifyWithFlagsExactFormUsing dflags src retainedStatement = (verdict, binding
     -- is safe to reuse; the mutable lexer state is not).
     declRes = unP parseDeclaration (initParserState popts buf loc)
     stmtRes = case retainedStatement of
-      Just parsed -> parsed
-      Nothing -> unP parseStatement (initParserState popts buf loc)
+      ParsedStatement parsedState statement -> POk parsedState statement
+      ParseOwnStatement -> unP parseStatement (initParserState popts buf loc)
     modRes  = unP GHC.Parser.parseModule (initParserState popts buf loc)
 
 -- A local fixity affects later statements in a do segment but is not part of
