@@ -1,5 +1,32 @@
 use super::*;
 
+/// Refusal before provider attachment belongs to this exact child admission.
+/// The existing actor failure owner performs retirement and records cleanup.
+fn refuse_child_attachment(
+    installation: &LocalResidentInstallation,
+    detail: String,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let actor = installation.actor.clone();
+    let admission = installation.spawn_admission.clone();
+    async move {
+        let identity = actor.identity();
+        if let Some(admission) = admission {
+            admission.fail(detail.clone());
+        }
+        if let Err(failure) = apply_application_failure(
+            actor,
+            ExternalApplicationFailure {
+                class: ExternalApplicationFailureClass::ToolHostStartup,
+                detail,
+            },
+        )
+        .await
+        {
+            tracing::warn!(actor = ?identity, %failure, "child attachment refusal cleanup remains unconfirmed");
+        }
+    }
+}
+
 pub(super) async fn run_interactive_applications(
     mut lifecycle: mpsc::Receiver<LocalResidentDeployment>,
     application_owners: InteractiveOwners,
@@ -428,10 +455,15 @@ pub(super) async fn run_interactive_applications(
                             Arc::clone(&provider_forest), installation.actor.identity(),
                         ) {
                             Ok(admission) => admission,
-                            Err(error) => break Some(format!(
-                                "actor {:?} provider attachment is unavailable: {error}",
-                                installation.actor.identity(),
-                            )),
+                            Err(error) => {
+                                let detail = format!(
+                                    "actor {:?} provider attachment is unavailable: {error}",
+                                    installation.actor.identity(),
+                                );
+                                if installation.creator.is_none() { break Some(detail); }
+                                refuse_child_attachment(&installation, detail).await;
+                                continue;
+                            },
                         };
                         if installation.creator.is_none() {
                             launch_context.config = root_config.borrow_and_update().clone();
@@ -459,17 +491,7 @@ pub(super) async fn run_interactive_applications(
                                 ) {
                                     Ok(parent) => Some(parent),
                                     Err(error) => {
-                                        if let Some(gate) = installation.fork_gate.as_ref() {
-                                            gate.mark_failed().ok();
-                                        }
-                                        if let Some(admission) = &installation.spawn_admission { admission.fail(error.clone()); }
-                                        tracing::warn!(?actor, %error, "selected provider ancestry refused");
-                                        if let Err(failure) = apply_application_failure(installation.actor.clone(), ExternalApplicationFailure {
-                                            class: ExternalApplicationFailureClass::ToolHostStartup,
-                                            detail: error,
-                                        }).await {
-                                            tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
-                                        }
+                                        refuse_child_attachment(&installation, error).await;
                                         continue;
                                     },
                                 }
@@ -481,7 +503,10 @@ pub(super) async fn run_interactive_applications(
                             } else {
                                 let Some(captured) = installation.checkpoint_attachment.as_ref()
                                     .and_then(|attachment| attachment.downcast::<embedded_harness::EmbeddedHostedCheckpoint>()) else {
-                                    break Some(format!("embedded child {actor:?} has no admitted checkpoint identity"));
+                                    refuse_child_attachment(&installation, format!(
+                                        "embedded child {actor:?} has no admitted checkpoint identity"
+                                    )).await;
+                                    continue;
                                 };
                                 captured.child_path(actor)
                             };
@@ -493,9 +518,14 @@ pub(super) async fn run_interactive_applications(
                                     None,
                                 ) {
                                     Ok(binding) => binding,
-                                    Err(error) => break Some(format!(
-                                        "embedded actor {actor:?} notification owner could not open: {error}"
-                                    )),
+                                    Err(error) => {
+                                        let detail = format!(
+                                            "embedded actor {actor:?} notification owner could not open: {error}"
+                                        );
+                                        if installation.creator.is_none() { break Some(detail); }
+                                        refuse_child_attachment(&installation, detail).await;
+                                        continue;
+                                    },
                                 };
                                 update_embedded_state(&application_owners, actor, |state| {
                                     state.conversation = Some(binding);
@@ -511,7 +541,11 @@ pub(super) async fn run_interactive_applications(
                             {
                                 Ok(Some(model)) => model,
                                 Ok(None) => launch_context.config.model.clone(),
-                                Err(error) => break Some(error),
+                                Err(error) => {
+                                    if is_root { break Some(error); }
+                                    refuse_child_attachment(&installation, error).await;
+                                    continue;
+                                },
                             };
                             let effort = match installation.fork_effort.unwrap_or(launch_context.config.effort) {
                                 ForkEffort::Low => harness::model::Effort::Low,
@@ -550,23 +584,23 @@ pub(super) async fn run_interactive_applications(
                                     break Some(error);
                                 }
                             } else if installation.checkpoint_attachment.is_none() && installation.context_parent.is_some() {
-                                break Some(format!(
+                                refuse_child_attachment(&installation, format!(
                                     "embedded child actor {actor:?} requires a hosted checkpoint"
-                                ));
+                                )).await;
+                                continue;
                             }
                             let initial_input = installation.initial_user_message.clone();
                             if !is_root {
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {
-                                        if let Some(admission) = &installation.spawn_admission { admission.fail(error.to_string()); }
-                                        tracing::warn!(?actor, %error, "embedded child queue admission refused");
+                                        refuse_child_attachment(&installation, format!(
+                                            "embedded child queue admission refused: {error}"
+                                        )).await;
                                         continue;
                                     }
                                 };
                                 let spawn_admission = installation.spawn_admission.clone();
-                                let fork_gate = installation.fork_gate.clone();
-                                let committed_gate = fork_gate.clone();
                                 let runtime = Arc::clone(&service.runtime);
                                 let run_root = launch_context.run_root.clone();
                                 let ready = embedded_ready_tx.clone();
@@ -581,14 +615,6 @@ pub(super) async fn run_interactive_applications(
                                 });
                                 let task = embedded_tasks.spawn(async move {
                                     let result = async {
-                                        if let Some(gate) = committed_gate {
-                                            tokio::select! {
-                                                committed = gate.wait_committed() => {
-                                                    committed.map_err(|error| format!("fork publication refused: {error}"))?;
-                                                }
-                                                _ = cancellation_rx.changed() => return Ok(()),
-                                            }
-                                        }
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }
@@ -660,18 +686,6 @@ pub(super) async fn run_interactive_applications(
                                 update_embedded_state(&application_owners, actor, |state| {
                                     state.task_id = Some(task.id());
                                 });
-                                // The child attachment may wait for checkpoint publication.
-                                // Its actor input queue is already owned here, so advertise
-                                // readiness before that wait: the issuing cell can be waiting
-                                // for this group to become ready before it delivers the capture.
-                                if let Some(gate) = fork_gate {
-                                    if let Err(error) = gate.mark_ready() {
-                                        if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
-                                            cancel.send_replace(true);
-                                        }
-                                        tracing::warn!(?actor, %error, "embedded child fork admission refused");
-                                    }
-                                }
                                 drop(queue_admission);
                                 continue;
                             }

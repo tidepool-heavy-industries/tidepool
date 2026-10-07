@@ -3433,7 +3433,7 @@ fn compile_root(
     .with_capabilities(exomonad_actor::ActorCapabilities::default());
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
-            exomonad_actor::ActorSourceLayers::layer_include(layers.as_ref(), &[])
+            exomonad_actor::ActorSourceLayers::layer_include_for(layers.as_ref(), "run")
                 .map_err(std::io::Error::other)?,
         );
     }

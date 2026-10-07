@@ -438,28 +438,36 @@ impl Driver {
         match event {
             LocalResidentDeployment::PolicyInstalled(installation) => {
                 let session = self.session()?;
-                if let [worktree] = installation.launch_worktrees.as_slice() {
-                    let tree = session
-                        .worktrees
-                        .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
-                        .ok_or("admitted check worktree missing")?;
-                    let principal = WorktreePrincipal::exact_actor(
-                        &runtime_namespace(session.session_root.path()),
-                        installation.actor.identity().id.0,
-                        installation.actor.identity().incarnation.0,
-                    );
-                    if session
-                        .bindings
-                        .lock()
-                        .current(tree.id())
-                        .map(|row| row.agent())
-                        != Some(&principal)
-                        || installation.worktree_custody.is_none()
-                    {
-                        return Err(runtime_error(
-                            "recipe actor lacks exact admitted worktree custody",
-                        ));
+                let workspace_ready = (|| -> Result<()> {
+                    if let [worktree] = installation.launch_worktrees.as_slice() {
+                        let tree = session
+                            .worktrees
+                            .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
+                            .ok_or("admitted check worktree missing")?;
+                        let principal = WorktreePrincipal::exact_actor(
+                            &runtime_namespace(session.session_root.path()),
+                            installation.actor.identity().id.0,
+                            installation.actor.identity().incarnation.0,
+                        );
+                        if session
+                            .bindings
+                            .lock()
+                            .membership(tree.id(), &principal)
+                            .is_none()
+                            || installation.worktree_custody.is_none()
+                        {
+                            return Err(runtime_error(
+                                "recipe actor lacks exact admitted worktree custody",
+                            ));
+                        }
                     }
+                    Ok(())
+                })();
+                if let Err(error) = workspace_ready {
+                    if let Some(admission) = &installation.spawn_admission {
+                        admission.fail(error.to_string());
+                    }
+                    return Err(error);
                 }
                 if installation.creator.is_none() {
                     session.authority.install_grant(
@@ -467,11 +475,12 @@ impl Driver {
                         ActorWorktreeGrant::Repository,
                     );
                 }
-                if let Some(gate) = &installation.fork_gate {
-                    gate.mark_ready()?;
+                let actor = installation.actor.identity();
+                let admission = installation.spawn_admission.clone();
+                self.installations.insert(actor, *installation);
+                if let Some(admission) = admission {
+                    admission.acknowledge(actor)?;
                 }
-                self.installations
-                    .insert(installation.actor.identity(), *installation);
                 Ok(None)
             }
             LocalResidentDeployment::CommandBackend(request) => {
