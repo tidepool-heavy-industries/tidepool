@@ -25,7 +25,7 @@ path = "empty.rs"
 "futures-util" = { package = "futures-util", version = "=0.3.34", default-features = true, features = [] }
 "genai" = { package = "genai", version = "=0.6.5", default-features = true, features = [] }
 "glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
-"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "62aa050822358290dfef425675db0b215dc0bd49" }
+"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "7f6e5e6315610b0a95b6fbf67f87aeeaccf82179" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
 "insta" = { package = "insta", version = "=1.48.0", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
