@@ -1529,6 +1529,12 @@ impl ModuleCandidateOffer {
             .checked_values
             .as_ref()
             .ok_or_else(|| CompileError::ExtractFailed("program has no interface owner".into()))?;
+        let typed_segments = checked_cell::read_program_typed_segments(
+            root,
+            &initial.request_sha256,
+            specification,
+            planned,
+        )?;
         let mut context = initial.context.clone();
         let mut program_request = initial.clone();
         // One host admission observes package bytes once across all original
@@ -1685,6 +1691,9 @@ impl ModuleCandidateOffer {
                         &directory,
                         &segment_root,
                         &item_produced_types,
+                        &typed_segments,
+                        index,
+                        specification.admission_digest,
                         &mut validation,
                     )?;
                     let source_admissions = effective
@@ -1791,13 +1800,10 @@ impl ModuleCandidateOffer {
                             "program output lacks original execution evidence".into(),
                         )
                     })?,
-                Some(
-                    &output
-                        .products
-                        .as_ref()
-                        .expect("program output was sealed")
-                        .certified_groups,
-                ),
+                output
+                    .products
+                    .as_ref()
+                    .and_then(|products| products.typed_entry.as_ref()),
             )?;
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
@@ -1845,6 +1851,9 @@ impl ModuleCandidateOffer {
         directory: &Path,
         source_directory: &Path,
         produced_types: &crate::checked_cell::ProducedValueTypeInterfaces,
+        typed_segments: &[crate::checked_cell::CheckedTypedSegmentPlan],
+        item_index: usize,
+        admission_digest: [u8; 32],
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -1876,6 +1885,7 @@ impl ModuleCandidateOffer {
                 None,
                 OriginalOutputPublication::Transaction,
                 Some(produced_types),
+                Some((typed_segments, item_index, admission_digest)),
                 validation,
             )?
             .ok_or_else(|| {
@@ -2019,6 +2029,7 @@ impl ModuleCandidateOffer {
             Some(&authored),
             OriginalOutputPublication::Transaction,
             produced_types,
+            None,
             validation,
         )?
         .ok_or_else(fail)?;
@@ -2234,6 +2245,7 @@ pub struct SealedTurnProducts {
     // items cannot enlarge an earlier item's original instance environment.
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
+    typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
@@ -2426,6 +2438,7 @@ fn seal_turn_outputs_inner(
         authored,
         publication,
         None,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -2442,6 +2455,11 @@ fn seal_turn_outputs_with_validation(
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     publication: OriginalOutputPublication,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    typed_item: Option<(
+        &[crate::checked_cell::CheckedTypedSegmentPlan],
+        usize,
+        [u8; 32],
+    )>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -2623,6 +2641,32 @@ fn seal_turn_outputs_with_validation(
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
+    let typed_entry = typed_item
+        .map(|(plans, index, admission_digest)| {
+            let admission = exact.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("typed entry lacks exact source admission".into())
+            })?;
+            crate::checked_cell::CheckedTypedEntry::issue_program_item(
+                output_dir,
+                &admission.request.request_sha256,
+                admission_digest,
+                plans,
+                index,
+                source,
+                prepared,
+                &admission.source.generated_source_owner()?,
+                &certified.recovery_products,
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &offer.producer,
+                )
+                .sha256(),
+            )
+        })
+        .transpose()?;
+    let demand = typed_entry.as_ref().map_or(
+        crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+        crate::artifact_inventory::NativeArtifactDemand::VerifiedGroupRoot,
+    );
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -2635,6 +2679,7 @@ fn seal_turn_outputs_with_validation(
             exact
                 .as_ref()
                 .map(|admission| admission.request.context.as_ref()),
+            demand,
             validation,
         )?;
     let original_compile_input =
@@ -2726,6 +2771,7 @@ fn seal_turn_outputs_with_validation(
     };
     Ok(Some(SealedTurnProducts {
         artifact_view,
+        typed_entry,
         original_execution,
         original_compile_input,
         checked,
@@ -3914,6 +3960,7 @@ fn compile_invocation_inner(
                 exact_request
                     .as_ref()
                     .map(|request| request.context.as_ref()),
+                crate::artifact_inventory::NativeArtifactDemand::AllGroups,
                 &mut validation,
             )?;
         artifacts.certified_groups = certified.groups;
