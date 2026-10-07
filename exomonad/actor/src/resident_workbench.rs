@@ -4817,9 +4817,9 @@ where
                     resumption_registration.replace_in_checkout(session, &settled);
                     require_tool_installation_completion(session, &resumption_registration, &settled)?;
                     if let Some(prepared) = code.prepared() {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
                     } else {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", install, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
                     }
                     Ok(ResidentWorkbenchTools {
                         declarations,
