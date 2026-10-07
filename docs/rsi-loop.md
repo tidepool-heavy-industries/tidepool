@@ -23,6 +23,40 @@ independent investigations when the critical path or uncertainty changes. Explic
 iteration commitments still apply, but a confirmed local defect need not acquire
 an elaborate experiment before repair.
 
+## Learning from mistakes
+
+Apply kaizen to development as well as the product. When a mistake is found,
+retain a short account of the violated expectation, the causal mechanism and
+why the existing checks or reasoning allowed it through. Scale this to the
+finding: a wrong import needs a compile check, not a new review bureaucracy.
+An unresolved cause remains a hypothesis, not a lesson stated as fact.
+
+Distinguish a product defect, a defective test or procedure, and a confirmed
+regression. A newly failing test does not establish a regression: compare the
+same semantic workload before and after the suspected change. A repaired test
+may expose an older defect. Keep fixture corrections distinguishable from
+production repairs, and do not attribute failures to nearby performance work
+without causal evidence. Source review, compilation and behavioral execution
+establish different claims.
+
+Close both loops: repair the behavior and improve the mechanism that should
+have prevented or detected it. Follow the lost invariant across issuance,
+transport, consumption, replay and cleanup; inspect analogous paths such as
+success and abort. Prefer one owning implementation or a type that carries the
+known fact. Then exercise the real boundary where that fact could be lost and
+check that the new safeguard detects or prevents the original failure.
+A mock supplied with the correct answer cannot establish that production
+constructs it correctly.
+
+Put the durable lesson where it changes future work: an invariant in the owner,
+a regression or generator in the test suite, automation in the existing tool,
+or a concise decision rule in the nearest guide. Link retained evidence from
+the delivery record; keep incident chronology out of standing instructions.
+Name any remaining prevention or detection gap and its owner. If an existing
+rule already covers the mistake, investigate why it was ineffective instead of
+adding a duplicate. Recurrence is evidence to revisit the mechanism, including
+whether the guidance is actionable, discoverable and supported by tools.
+
 ## The harness destination
 
 The product workload builds a custom home for Exomonad agents, ultimately replacing

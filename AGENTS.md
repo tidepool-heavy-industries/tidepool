@@ -69,6 +69,11 @@ Most changes touch one of three layers, and it helps to know which:
 - Backward compatibility is not a goal when it would preserve a bad internal
   boundary. Serialized formats and externally consumed APIs still require an
   explicit migration decision.
+- Carry authoritative facts from their issuing owner through consumers and
+  recovery. Do not reconstruct exact selections from broader inventories, infer
+  ownership from names, or treat missing state as proof of successful cleanup.
+  Preserve distinctions such as available versus selected and completed versus
+  released in the types and their production constructors.
 - Use types for control flow. If a string has a closed or partly closed set of
   meanings, represent it with an enum (an `Other(String)` case is fine).
   Rendered error text and labels must not secretly drive behavior.
@@ -113,6 +118,13 @@ observations could reveal. Separate a product finding, a broken investigative
 procedure and unresolved uncertainty. Follow [property testing](docs/property-testing.md),
 [compiler profiling](docs/compiler-profiling.md), or [workflow audits](docs/rsi-loop.md)
 for the evidence needed by that method.
+
+Learn from each mistake, including mistakes in tests, tooling and our own
+reasoning. Ask both why it happened and why the existing checks missed it;
+repair the mechanism and the detection gap. Prefer an enforced invariant or
+executable check over another reminder. Update the nearest owning guidance
+when a reusable decision rule is missing, and replace obsolete advice rather
+than accumulating incident checklists. See [learning from mistakes](docs/rsi-loop.md#learning-from-mistakes).
 
 ## Planning improvements
 

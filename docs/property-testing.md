@@ -57,6 +57,12 @@ test must exercise those callers and the resulting observable state. Keep real
 compiler/runtime integration tests for contracts that synthetic values cannot
 establish; do not add test-only production authority constructors.
 
+Exercise proof issuance when that is the claim. Manually supplying a valid
+certificate can test its consumer, but cannot show that the real producer earns
+or publishes it. Keep logical model identities independent of returned production
+handles; assert required uniqueness before recording their correspondence so an
+ID collision cannot overwrite the oracle's own state.
+
 Useful maintained examples are:
 
 - `tidepool/runtime/src/session/binding_table.rs`: incremental membership,
@@ -80,6 +86,13 @@ prefixes and suffixes: retain → branch → mutate → release, settle → retr
 observe, and remove → reinsert → query. Shrinking must preserve meaningful
 operations. Resolve logical handles deterministically and report explicit
 rejections instead of silently skipping operations whose prerequisites vanished.
+
+Assert the scenario's semantic premises before triggering the event under test.
+A test of cancellation during pending work must establish that the intended
+operation was admitted and is pending; a sleep or ignored setup result does not
+prove that. A refusal test must reach the intended boundary rather than fail
+earlier because its supposedly valid fixture is malformed. Observe the setup without consuming the event whose
+ordering the test needs to explore.
 
 Measure generated behavior: shared owners, successful mutations, terminal
 transitions, refusals, depth, sizes and relevant operation combinations. Keep
@@ -122,6 +135,14 @@ when present; keep normal Cargo persistence otherwise. Do not derive native
 seed paths from `CARGO_MANIFEST_DIR` or `file!()`: those can identify disposable
 Buck source projections. Run from the checkout root so the declared relative
 path resolves into the source tree.
+
+For custom runners, keep generated production replay inside the configured
+runner so failures receive shrinking and persistence. Separate deterministic
+regressions from generator-support checks; a failing prelude must not prevent
+the campaign from running unnoticed. Report observed coverage on failure too.
+Distinguish selected test functions, configured fresh cases and actual callbacks:
+replay and shrinking can add callbacks, while zero-case replay may execute none.
+A passing empty replay establishes no search coverage.
 
 Retain the minimized operation trace as well as the seed, tested revision,
 command, counts and logs. Strategies evolve, so a seed alone is not a stable
