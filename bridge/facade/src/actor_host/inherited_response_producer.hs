@@ -9,5 +9,5 @@ Right workerAgent <- spawnSubagent (FreshCtx "Return the requested value and inc
   (ForkWorktree currentCheckout)
   ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "worker", spawnLifetime = ActorOwned })
-Right worker <- request @(Text, Int -> Int) workerAgent ("custody" :: Text)
+Right worker <- request @((Text, [Int]), Int -> Int) workerAgent ("custody" :: Text)
   (defaultRequestOptions { requestLabel = Just "worker" })

@@ -441,7 +441,7 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
 
     let watch = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "inheritedWatch <- watch (Just \"inherited-ready\") (result worker)",
+        "inheritedWatch <- watch (Just \"inherited-ready\") (response worker)",
     )
     .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
@@ -454,7 +454,7 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
 
     let reply = tests::dispatch_haskell_script(
         producer.policy.as_ref(),
-        "respond ((sessionInput :: Text), (\\x -> x + (1 :: Int)))",
+        "respond (((sessionInput :: Text), map (+ 1) [1 .. 400 :: Int]), (\\x -> x + (1 :: Int)))",
     )
     .await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
@@ -530,7 +530,7 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     assert_committed(&released);
     let expired = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "expired <- pollResponse worker\n_ <- case expired of { ResponseUnavailable (ResponseRejected ReplyStale) -> if fst retained == \"custody\" && snd retained 41 == 42 then pure () else Effects.error \"released lazy result changed\"; _ -> Effects.error \"released response did not refuse observation\" }",
+        include_str!("inherited_response_released.hs"),
     )
     .await;
     assert_committed(&expired);
@@ -547,7 +547,7 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     // Its decision and the filled Haskell cell remain independently readable.
     let queued_after_release =
         tests::dispatch_haskell_script(observer.policy.as_ref(),
-            "queuedState <- pollWatch queuedWatch\n_ <- case queuedState of { WatchReady answer -> let (label, run) = answer in if label == \"custody\" && run 41 == 42 then pure () else Effects.error \"settled watch result changed\"; _ -> Effects.error \"settled watch lost its captured result\" }").await;
+            "queuedState <- pollWatch queuedWatch\n_ <- case queuedState of { WatchReady answer -> let ((label, values), run) = answer in if label == \"custody\" && values == [2 .. 401] && run 41 == 42 then pure () else Effects.error \"settled watch result changed\"; _ -> Effects.error \"settled watch lost its captured result\" }").await;
     assert_committed(&queued_after_release);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
