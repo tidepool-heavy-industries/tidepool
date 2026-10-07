@@ -3390,15 +3390,18 @@ mod tests {
             panic!("genuine Join retains native binding requirement");
         };
         binding.module = original.owner().module;
-        for (index, markers) in [vec![], vec![wrong_join_generation], vec![wrong_join_owner]]
-            .into_iter()
-            .enumerate()
+        // Omission and generation substitution preserve the marker's exact
+        // artifact identity. The native custody reader refuses both after seal.
+        for (index, (markers, state)) in [
+            (vec![], RecoveryNodeState::ExactArtifactClosure),
+            (vec![wrong_join_generation], original_join.state.clone()),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let mut refused = join_graph.clone();
             refused.nodes[join_index].live_dependencies = markers;
-            if refused.nodes[join_index].live_dependencies.is_empty() {
-                refused.nodes[join_index].state = RecoveryNodeState::ExactArtifactClosure;
-            }
+            refused.nodes[join_index].state = state;
             refused.seal().unwrap();
             let path = root.path().join(format!("refused-join-{index}.json"));
             assert!(matches!(
@@ -3423,6 +3426,23 @@ mod tests {
             assert_eq!(lib.generation(), Generation(0));
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
+        // Owner substitution contradicts the marker's authenticated artifact
+        // identity, so the graph owner refuses it before a manifest is issued.
+        let owner_manifest = root.path().join("refused-join-owner.json");
+        let accepted_generation = recovered.lib().generation();
+        let mut refused_owner = join_graph.clone();
+        refused_owner.nodes[join_index].live_dependencies = vec![wrong_join_owner];
+        let refusal = refused_owner.seal().unwrap_err();
+        assert!(matches!(refusal.kind, RecoveryErrorKind::Manifest));
+        assert_eq!(
+            refusal.detail,
+            "native binding dependency differs from its certified original identity"
+        );
+        assert!(refusal.path.is_none());
+        assert!(!owner_manifest.exists());
+        assert_eq!(fs::read(&join_manifest).unwrap(), join_bytes);
+        assert_eq!(recovered.lib().generation(), accepted_generation);
+        assert!(recovered.prepared().is_none());
         // Private hydration retains the original implementation and its exact
         // live requirements, without admitting a lexical public selector.
         graph.public_surfaces.clear();
