@@ -31,6 +31,7 @@ struct InvocationWorkState {
     phase: InvocationWorkPhase,
     scopes: Vec<Arc<InvocationWork>>,
     compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    launch_revision: u64,
     launch_placements: Vec<(
         tidepool_repr::SessionId,
         child_launch::ChildPlacementCustody,
@@ -736,23 +737,38 @@ impl InvocationWork {
             return Err("launch placement owner is unauthorized".into());
         }
         // The placement was already minted by the checked-out effect. Even
-        // late refusal must retain it, invalidating an earlier cleanup proof.
-        let mut placement = Some(placement);
-        let admitted = self.with_admission_state(|state| {
-            state.launch_placements.push((
-                context.placement.session,
-                placement.take().expect("one launch placement registration"),
-            ));
-            state.cleanup = None;
-        });
-        if let Some(placement) = placement {
-            let mut state = self.state.lock();
-            state
-                .launch_placements
-                .push((context.placement.session, placement));
-            state.cleanup = None;
+        // late refusal retains it and invalidates every enclosing proof under
+        // the same root-first ancestry lock order as ordinary admission.
+        let mut ancestors = Vec::new();
+        let mut parent = self.parent.upgrade();
+        let mut retained_parent = self.scope_id.is_none() || parent.is_some();
+        while let Some(owner) = parent {
+            parent = owner.parent.upgrade();
+            retained_parent &= owner.scope_id.is_none() || parent.is_some();
+            ancestors.push(owner);
         }
-        admitted
+        ancestors.reverse();
+        let mut guards: Vec<_> = ancestors.iter().map(|owner| owner.state.lock()).collect();
+        let mut state = self.state.lock();
+        let admitted = retained_parent
+            && state.phase == InvocationWorkPhase::Active
+            && guards
+                .iter()
+                .all(|guard| guard.phase == InvocationWorkPhase::Active);
+        for guard in &mut guards {
+            guard.cleanup = None;
+            guard.launch_revision += 1;
+        }
+        state
+            .launch_placements
+            .push((context.placement.session, placement));
+        state.cleanup = None;
+        state.launch_revision += 1;
+        if admitted {
+            Ok(())
+        } else {
+            Err("resource scope ownership is closed".into())
+        }
     }
 
     pub(super) fn register_scope_realm(
@@ -894,7 +910,7 @@ impl InvocationWork {
         O: OutputSink + Sync + 'static,
     {
         let _cleanup = self.cleanup_lock.lock().await;
-        let (commands, mut workers, watches) = {
+        let (commands, mut workers, watches, launch_revision) = {
             let mut state = self.state.lock();
             state.phase = InvocationWorkPhase::Closing;
             if let Some(cleanup) = &state.cleanup {
@@ -906,6 +922,7 @@ impl InvocationWork {
                 state.commands.clone(),
                 state.workers.clone(),
                 state.watches.clone(),
+                state.launch_revision,
             )
         };
         let mut cleanup = InvocationCleanup {
@@ -1218,7 +1235,6 @@ impl InvocationWork {
             })
             .collect();
         let launch_placements = self.state.lock().launch_placements.clone();
-        let launch_count = launch_placements.len();
         for (parent_session, placement) in launch_placements {
             match tokio::time::timeout(
                 RELEASE_WAIT,
@@ -1254,7 +1270,7 @@ impl InvocationWork {
             }
         }
         let mut state = self.state.lock();
-        if state.launch_placements.len() != launch_count {
+        if state.launch_revision != launch_revision {
             cleanup
                 .failures
                 .push("late launch placement remains for cleanup retry".into());

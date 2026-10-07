@@ -959,9 +959,20 @@ mod tests {
             Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
         let context = ActorDescriptor::new("retained launch", placement).session_context(actor);
         let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let scope_owner = work.new_scope().unwrap();
+        // A parent that already confirmed cleanup must revisit late custody
+        // retained by its closed nested scope.
+        assert_eq!(
+            work.cleanup(&fixture.environment, &fixture.kernel)
+                .await
+                .uncertainty(),
+            None
+        );
         let custody = ChildPlacementCustody::new(placement);
         let startup = custody.startup_guard();
-        work.retain_launch_placement(&context, custody).unwrap();
+        assert!(scope_owner
+            .retain_launch_placement(&context, custody)
+            .is_err());
         drop(startup);
         let first = work.cleanup(&fixture.environment, &fixture.kernel).await;
         assert!(first.uncertainty().is_some());
