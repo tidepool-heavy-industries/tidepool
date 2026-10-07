@@ -4587,46 +4587,56 @@ where
 
     /// Run an already compiled installer and preserve its exact closure dependencies.
     /// The caller imports the rooted action into this machine before admission.
-    #[tracing::instrument(
-        target = "exomonad_actor::workbench_phase",
-        name = "compiled_spec_install",
-        skip_all,
-        fields(origin = "explicit_live", actor = %context.actor, installation = install)
-    )]
-    pub(crate) async fn prepare_explicit_tools(
-        &self,
+    pub(crate) fn prepare_explicit_tools<'a>(
+        &'a self,
         context: crate::ActorSessionContext,
         install: u64,
         granted_effects: Vec<crate::ActorEffectKey>,
         installer: Arc<RootCustody>,
-    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
-        let support = self.access.source.installed_effect_support().to_vec();
-        let observer = self.access.handler_effect_support.clone();
-        let requested = granted_effects.clone();
-        let admitted_base = self
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                let mut support = support;
-                support.extend(observer(session.handlers()));
-                if requested
-                    .iter()
-                    .any(|key| !support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "compiled spec requires unavailable interpreter support".into(),
-                    ));
-                }
-                Ok(requested)
-            })
-            .await?;
-        self.install_tools_action(
-            context,
-            install,
-            granted_effects,
-            admitted_base,
-            InstalledToolCode::ExplicitLive(installer),
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        // Source and live installers use the same heap boundary: nested child
+        // startup must not embed the installation's machine futures in its caller.
+        let span = tracing::info_span!(
+            target: "exomonad_actor::workbench_phase",
+            "compiled_spec_install",
+            origin = "explicit_live",
+            actor = %context.actor,
+            installation = install
+        );
+        Box::pin(
+            async move {
+                let support = self.access.source.installed_effect_support().to_vec();
+                let observer = self.access.handler_effect_support.clone();
+                let requested = granted_effects.clone();
+                let admitted_base = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        let mut support = support;
+                        support.extend(observer(session.handlers()));
+                        if requested.iter().any(|key| {
+                            !support.contains(&exomonad_tool::ToolEffectKey::Actor(*key))
+                        }) {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "compiled spec requires unavailable interpreter support".into(),
+                            ));
+                        }
+                        Ok(requested)
+                    })
+                    .await?;
+                self.install_tools_action(
+                    context,
+                    install,
+                    granted_effects,
+                    admitted_base,
+                    InstalledToolCode::ExplicitLive(installer),
+                )
+                .await
+            }
+            .instrument(span),
         )
-        .await
     }
 
     async fn install_tools_action(
