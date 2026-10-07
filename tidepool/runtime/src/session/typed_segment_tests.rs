@@ -289,6 +289,9 @@ fn is_raised_exception(error: &ResidentError) -> bool {
 
 #[test]
 fn signed_template_helpers_execute_recursion_and_polymorphism_once() {
+    use super::super::tests::TestEnvGuard;
+
+    let _timing = TestEnvGuard::set("TIDEPOOL_TIMING", "1");
     let results = Arc::new(CaptureMutex::new(Vec::new()));
     let mut session = SemanticSession::with_raw_result(Some(results.clone()));
     let definitions = include_str!("fixtures/typed-segment-template-helpers.hs")
