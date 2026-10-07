@@ -5,7 +5,7 @@ use crate::{FormHost, FormPublication};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormTransition};
-use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
+use tidepool_runtime::session::{ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -170,10 +170,7 @@ impl Fixture {
         let effects =
             tidepool_mcp::ensure_effects_module(&declarations).expect("declared effect module");
         let include = crate::resident_workbench::request_tests::fixture_include_roots(&effects);
-        let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_notebook_preamble(&declarations, false),
-            "Tidepool.Prelude",
-        );
+        let preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         let directory = tempfile::tempdir().expect("session source directory");
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, directory.path(), ModuleEnv::standalone_default())
