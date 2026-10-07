@@ -3,7 +3,7 @@
     reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
 )]
 use super::*;
-use exomonad_actor::{ForkWorkspaceCustody, ResidentToolEndpoint};
+use exomonad_actor::{ResidentToolEndpoint, WorkspaceAdmission, WorkspaceCustody, WorkspaceSelection};
 use exomonad_worktree::WorktreeHandle;
 
 pub(super) fn custody_fixture() -> (
@@ -11,7 +11,7 @@ pub(super) fn custody_fixture() -> (
     tempfile::TempDir,
     WorktreeHandle,
     Arc<Mutex<BindingTable>>,
-    Arc<ActorForkWorkspaceAdmission>,
+    Arc<ActorWorkspaceAdmission>,
 ) {
     let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
     repository
@@ -58,14 +58,16 @@ async fn bootstrapping_a_campaign_leaves_the_source_repository_clean() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
-    let (_repo, _runtime, tree, _bindings, admission) = custody_fixture();
+    let (_repo, _runtime, _tree, _bindings, admission) = custody_fixture();
     let owner = ActorRef::first(exomonad_actor::ActorId(7));
+    admission
+        .authority
+        .install_grant(owner.into(), ActorWorktreeGrant::Repository);
     let _custody = admission
-        .install_custody(
-            owner,
-            tree.id().as_str(),
-            exomonad_actor::WorkspaceAccess::ReadWrite,
-        )
+        .prepare(owner, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(owner)
         .unwrap();
     let (entered, ready) = oneshot::channel();
     let (release, released) = oneshot::channel();
@@ -76,11 +78,10 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
         released.blocking_recv().unwrap();
     });
     ready.await.unwrap();
-    let mut preparation = admission.admit(
+    let mut preparation = admission.prepare(
         owner,
-        "root/async-child".into(),
-        ForkWorkspaceSeed::CurrentCheckout(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
-        exomonad_actor::WorkspaceAccess::ReadWrite,
+        WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CurrentCheckout),
+        Some(exomonad_worktree::WorkspaceAccess::ReadWrite),
     );
     std::future::poll_fn(|cx| {
         assert!(preparation.as_mut().poll(cx).is_pending());
@@ -104,94 +105,92 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
         std::fs::read_to_string(handle.cwd().join("README.md")).unwrap(),
         "seed"
     );
-    assert_ne!(handle.id(), tree.id());
+    assert_ne!(handle.cwd(), admission.manager.source_repository());
 }
 
-#[test]
-fn custody_is_exact_and_released_only_after_last_owner() {
+#[tokio::test]
+async fn custody_is_exact_and_released_only_after_last_owner() {
     let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
-    let custody = admission
-        .install_custody(
-            actor,
-            tree.id().as_str(),
-            exomonad_actor::WorkspaceAccess::ReadWrite,
-        )
+    admission
+        .authority
+        .install_grant(actor.into(), ActorWorktreeGrant::Repository);
+    let first = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
         .unwrap();
+    let second = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap();
+    let custody = first.install(actor).unwrap();
+    let bound_tree = admission.authority.bound_worktree(actor.into()).unwrap();
     assert!(
-        admission
-            .install_custody(
-                actor,
-                tree.id().as_str(),
-                exomonad_actor::WorkspaceAccess::ReadWrite
-            )
-            .is_err()
+        second.install(actor).is_err(),
+        "one exact actor cannot acquire duplicate custody"
     );
-    for other in [
-        ActorRef::first(exomonad_actor::ActorId(8)),
-        ActorRef {
-            incarnation: exomonad_actor::Incarnation(2),
-            ..actor
-        },
-    ] {
-        assert!(
-            admission
-                .install_custody(
-                    other,
-                    tree.id().as_str(),
-                    exomonad_actor::WorkspaceAccess::ReadWrite
-                )
-                .is_err()
-        );
-    }
+    let peer = ActorRef::first(exomonad_actor::ActorId(8));
+    let peer_custody = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(peer)
+        .unwrap();
     let host = custody.clone();
     drop(host);
-    assert!(bindings.lock().current(tree.id()).is_some());
+    assert!(bindings.lock().current(&bound_tree).is_some());
     drop(custody);
-    assert!(bindings.lock().current(tree.id()).is_none());
+    assert!(admission.authority.bound_worktree(actor.into()).is_none());
+    assert_eq!(
+        admission.authority.bound_worktree(peer.into()),
+        Some(bound_tree.clone())
+    );
     assert!(tree.cwd().join("README.md").exists());
     let rebound = admission
-        .install_custody(
-            actor,
-            tree.id().as_str(),
-            exomonad_actor::WorkspaceAccess::ReadWrite,
-        )
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(actor)
         .unwrap();
     drop(rebound);
-    assert!(bindings.lock().current(tree.id()).is_none());
+    assert_eq!(
+        admission.authority.bound_worktree(peer.into()),
+        Some(bound_tree.clone())
+    );
+    drop(peer_custody);
+    assert_eq!(bindings.lock().participants(&bound_tree).unwrap().count(), 0);
 }
 
-#[test]
-fn custody_retains_binding_when_process_cleanup_is_uncertain() {
+#[tokio::test]
+async fn custody_retains_binding_when_process_cleanup_is_uncertain() {
     let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    admission.authority.install_grant(actor.into(), ActorWorktreeGrant::Repository);
     let custody = admission
-        .install_custody(
-            ActorRef::first(exomonad_actor::ActorId(7)),
-            tree.id().as_str(),
-            exomonad_actor::WorkspaceAccess::ReadWrite,
-        )
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(actor)
         .unwrap();
+    let bound_tree = admission.authority.bound_worktree(actor.into()).unwrap();
     custody.process_may_exist();
     drop(custody);
-    assert!(bindings.lock().current(tree.id()).is_some());
+    assert!(bindings.lock().current(&bound_tree).is_some());
+    assert!(tree.cwd().join("README.md").exists());
 }
 
-#[test]
-fn custody_rejects_missing_worktrees_without_binding() {
+#[tokio::test]
+async fn custody_rejects_missing_workspaces_without_binding() {
     let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
-    for tree in ["../outside", "wt-absent"] {
-        assert!(
-            admission
-                .install_custody(actor, tree, exomonad_actor::WorkspaceAccess::ReadWrite)
-                .is_err()
-        );
-        assert!(
-            bindings
-                .lock()
-                .current(&WorktreeId::from_raw(tree))
-                .is_none()
-        );
+    for raw in ["../outside", "wt-absent"] {
+    let invalid = WorkspaceSelection::ExistingDirectory(
+        tidepool_bridge_effects::WtWorkspaceHandle { raw: raw.into() },
+    );
+        assert!(admission.prepare(actor, invalid, None).await.is_err());
+    }
+    for raw in ["../outside", "wt-absent"] {
+        assert!(bindings.lock().current(&WorktreeId::from_raw(raw)).is_none());
     }
 }
 
@@ -204,35 +203,24 @@ enum InstallPhase {
 #[derive(Clone)]
 struct DelayedCustody {
     phase: InstallPhase,
-    inner: Arc<dyn ForkWorkspaceAdmission>,
+    inner: Arc<dyn WorkspaceAdmission>,
     entered: mpsc::UnboundedSender<(ActorRef, oneshot::Sender<()>)>,
 }
 
-impl ForkWorkspaceAdmission for DelayedCustody {
-    fn admit(
+impl WorkspaceAdmission for DelayedCustody {
+    fn prepare(
         &self,
         owner: ActorRef,
-        path: String,
-        seed: ForkWorkspaceSeed,
-        policy: exomonad_actor::WorkspaceAccess,
-    ) -> exomonad_actor::ForkWorkspaceAdmissionFuture<'_> {
+        selection: WorkspaceSelection,
+        access: Option<exomonad_actor::WorkspaceAccess>,
+    ) -> exomonad_actor::WorkspaceAdmissionFuture<'_> {
         let controller = self.clone();
         Box::pin(async move {
-            let prepared = self.inner.admit(owner, path, seed, policy).await?;
-            Ok(exomonad_actor::PreparedForkWorkspace::new(
+            let prepared = self.inner.prepare(owner, selection, access).await?;
+            Ok(exomonad_actor::PreparedWorkspaceAttachment::new(
                 prepared.handle().clone(),
                 move |actor| controller.delay_installation(actor, || prepared.install(actor)),
             ))
-        })
-    }
-    fn install_custody(
-        &self,
-        _actor: ActorRef,
-        _worktree: &str,
-        _access: exomonad_actor::WorkspaceAccess,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        Err(ForkWorkspaceAdmissionError {
-            detail: "admitted child must consume its owned preparation".into(),
         })
     }
 }
@@ -241,8 +229,8 @@ impl DelayedCustody {
     fn delay_installation(
         &self,
         actor: ActorRef,
-        install: impl FnOnce() -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        install: impl FnOnce() -> Result<Arc<dyn WorkspaceCustody>, exomonad_actor::WorkspaceAdmissionError>,
+    ) -> Result<Arc<dyn WorkspaceCustody>, exomonad_actor::WorkspaceAdmissionError> {
         let mut install = Some(install);
         let installed = match self.phase {
             InstallPhase::BeforeBind => None,
@@ -251,12 +239,12 @@ impl DelayedCustody {
         let (release, ready) = oneshot::channel();
         self.entered
             .send((actor, release))
-            .map_err(|_| ForkWorkspaceAdmissionError {
+            .map_err(|_| exomonad_actor::WorkspaceAdmissionError {
                 detail: "test custody controller dropped".into(),
             })?;
         ready
             .blocking_recv()
-            .map_err(|_| ForkWorkspaceAdmissionError {
+            .map_err(|_| exomonad_actor::WorkspaceAdmissionError {
                 detail: "test custody installation cancelled".into(),
             })?;
         match installed {
@@ -1181,14 +1169,34 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
 async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
     let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
     let holder = ActorRef::first(exomonad_actor::ActorId(11));
-    let _custody = admission
-        .install_custody(
+    admission
+        .authority
+        .install_grant(holder.into(), ActorWorktreeGrant::Repository);
+    let attachment = admission
+        .prepare(
             holder,
-            tree.id().as_str(),
-            exomonad_actor::WorkspaceAccess::ReadWrite,
+            WorkspaceSelection::ForkDirectory(
+                exomonad_actor::WorkspaceSeedWire::CommittedSource(
+                    tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                        tidepool_bridge_effects::WtWorktreeId {
+                            raw: tree.id().as_str().into(),
+                        },
+                    ),
+                ),
+            ),
+            Some(exomonad_worktree::WorkspaceAccess::ReadWrite),
         )
+        .await
         .unwrap();
-    let authority = ActorWorktreeAuthority::new("custody-test", bindings);
+    let tree = admission
+        .manager
+        .lookup(&WorktreeId::from_raw(
+            &attachment.handle().handle_receipt.tree_id.raw,
+        ))
+        .unwrap()
+        .unwrap();
+    let _custody = attachment.install(holder).unwrap();
+    let authority = admission.authority.clone();
     let source = admission.manager.source_repository().to_owned();
 
     let held = resident_command_roots(&authority, &admission.manager, &source, holder).unwrap();
@@ -1244,9 +1252,9 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
     );
 }
 
-#[test]
-fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
-    let (_repo, _runtime, child_tree, bindings, admission) = custody_fixture();
+#[tokio::test]
+async fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
+    let (_repo, _runtime, child_tree, _bindings, admission) = custody_fixture();
     let source = admission.manager.source_repository();
     let root_tree = admission
         .manager
@@ -1265,16 +1273,19 @@ fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
     let operator = ActorRef::first(exomonad_actor::ActorId(22));
     let ungranted = ActorRef::first(exomonad_actor::ActorId(23));
     let child = ActorRef::first(exomonad_actor::ActorId(24));
-    let _custody = admission
-        .install_custody(
-            child,
-            child_tree.id().as_str(),
-            exomonad_actor::WorkspaceAccess::ReadWrite,
-        )
-        .unwrap();
-    let authority = ActorWorktreeAuthority::new("custody-test", bindings);
+    let authority = admission.authority.clone();
     authority.install_grant(root.into(), ActorWorktreeGrant::Repository);
     authority.install_grant(operator.into(), ActorWorktreeGrant::RepositoryReadOnly);
+    admission.authority.install_grant(child.into(), ActorWorktreeGrant::Repository);
+    let attachment = admission.prepare(child, WorkspaceSelection::ForkDirectory(
+        exomonad_actor::WorkspaceSeedWire::CommittedSource(
+            tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                tidepool_bridge_effects::WtWorktreeId { raw: child_tree.id().as_str().into() }
+            )
+        )), Some(exomonad_worktree::WorkspaceAccess::ReadWrite)).await.unwrap();
+    let child_tree = admission.manager.lookup(&WorktreeId::from_raw(
+        &attachment.handle().handle_receipt.tree_id.raw)).unwrap().unwrap();
+    let _custody = attachment.install(child).unwrap();
     authority.install_grant(
         child.into(),
         ActorWorktreeGrant::Bound {
