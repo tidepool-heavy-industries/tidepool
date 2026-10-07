@@ -31,9 +31,9 @@ pub use tidepool_runtime::session::{PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKE
 ///
 /// `hide_note`: also hide Prelude's `note` (`Control.Error.Util`'s `a ->
 /// Maybe b -> Either a b`) from the unqualified surface — set exactly when
-/// `AskUser` is in the compiling row, since `Tidepool.Form.note :: Member AskUser effects => Text -> Eff effects
-/// ()` (the display-channel helper, auto-imported alongside `askUser`/
-/// `choose` whenever `AskUser` is present — see `extra_imports_for!`)
+/// `AskUser` is in the compiling row, since `Tidepool.Form.note :: Member Console effects => Text -> Eff effects
+/// ()` (the display-channel helper, imported alongside `askUser` when
+/// `AskUser` selects `Tidepool.Form`)
 /// otherwise collides with it (`Ambiguous occurrence`). `false` everywhere
 /// else keeps `note` reachable on the general eval/Agent surface, which never
 /// imports `Tidepool.Form` at all.

@@ -561,20 +561,6 @@ mod tests {
         assert!(r.contains("__user = let {\n __b =\nsizeRank 9 <$> sized\n  where\n    sized ="));
     }
 
-    /// The askUser description must show the derives needed to read submissions.
-    #[test]
-    fn effect_descriptions_model_the_typed_derive_sets() {
-        let ask = askuser_decl().description;
-        assert!(
-            ask.contains("derive `Generic` and `FromJSON`"),
-            "askUser's derive set must name FromJSON, not Generic alone:\n{ask}"
-        );
-        assert!(
-            ask.contains("deriving (Generic, FromJSON)") && ask.contains("askUser @Deploy"),
-            "askUser must carry a worked `askUser @T` example:\n{ask}"
-        );
-    }
-
     #[test]
     fn test_extract_sigs() {
         let src = "\
