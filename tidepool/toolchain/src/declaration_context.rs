@@ -5517,7 +5517,7 @@ pub(crate) fn certified_product_artifact_view(
         products,
         interfaces,
         &[],
-        baseline,
+        baseline.map(ExactDeclarationContext::artifact_view),
         crate::artifact_inventory::NativeArtifactDemand::AllGroups,
         &mut PackageInterfaceValidation::default(),
     )
