@@ -11064,6 +11064,12 @@ pub(crate) mod tests {
             WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals);
         let mut expected_owners = BTreeSet::from([prior[0].owner().clone()]);
         let mut first_promoted = None;
+        // Current source compilation owns Target only. Fresh is emitted from
+        // authenticated retained Core, without a fresh source observation.
+        let mut current_evidence = evidence(source);
+        current_evidence.modules[0].module = "Target".into();
+        let normalized =
+            CompletedSourceEvidence::from_normalized(current_evidence.clone(), source).unwrap();
         for (index, body_tag) in [0, 0, 1, 0].into_iter().enumerate() {
             let projection = context.compiler_input_projection().interface_only();
             context = context.with_compiler_input_projection(projection).unwrap();
@@ -11079,8 +11085,8 @@ pub(crate) mod tests {
                 request.context.recovery_products().len(),
                 expected_owners.len()
             );
-            let mut worker = admitted.clone();
-            worker.sources[1].path = input.clone();
+            let mut worker = current_evidence.clone();
+            worker.sources[0].path = input.clone();
             let receipt_root = directory.join(".exact-compilations/current");
             std::fs::create_dir_all(&receipt_root).unwrap();
             let snapshot = receipt_root.join("source.hs");
@@ -11096,7 +11102,7 @@ pub(crate) mod tests {
                 value_text(String::from_utf8(serde_json::to_vec(&worker).unwrap()).unwrap()),
                 value_array([value_array([
                     value_text("main"),
-                    value_text("Fresh"),
+                    value_text("Target"),
                     Value::Bool(false),
                     value_array([]),
                 ])]),
