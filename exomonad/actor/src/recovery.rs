@@ -1299,7 +1299,6 @@ mod tests {
     fn embedded_application_intent_and_binding_survive_cold_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
@@ -1532,7 +1531,6 @@ mod tests {
     fn every_application_publication_boundary_reopens_without_inventing_progress() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let path = directory.path().join("actors.jsonl");
         let binding = directory.path().join("binding.json");
         let actor = ActorRef::first(ActorId(9));
 
@@ -1579,7 +1577,6 @@ mod tests {
     fn recovered_host_requires_the_original_lifecycle_owner() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let missing = directory.path().join("missing.jsonl");
         assert_eq!(
             ActorRecoveryJournal::open_existing(&anchor, "missing.jsonl")
                 .err()
@@ -1598,7 +1595,6 @@ mod tests {
                 .contains("creation marker")
         );
 
-        let initialized = directory.path().join("initialized.jsonl");
         drop(ActorRecoveryJournal::open(&anchor, "initialized.jsonl").unwrap());
         ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl").unwrap();
     }
