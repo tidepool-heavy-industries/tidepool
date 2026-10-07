@@ -75,6 +75,8 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
               | identifier <- issued, Just owner <- [nameModule_maybe (varName identifier)]]) of
             [owner] -> pure owner
             _ -> fail (name ++ ": issued item/ABI roots do not have one actual module owner")
+          unless (all ((== Just owner) . nameModule_maybe . varName) issued)
+            (fail (name ++ ": an issued item/ABI root lacks its actual module owner"))
           target <- case [modul | modul <- pprModules (preparedSegmentProducts products), pmModule modul == owner] of
             [modul] -> pure modul
             _ -> fail (name ++ ": actual prepared target module is absent or ambiguous")
