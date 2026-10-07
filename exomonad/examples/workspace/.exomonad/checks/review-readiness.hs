@@ -1,10 +1,10 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaign = "review-readiness" :: CampaignLabel
-let workerLabel = [label|candidate|]
-let task = Task (batch campaign "submission") "plans/component.md" sourceHead
-      "Submit a candidate" "Check the terminal source receipt"
-      ["candidate source"] "read exact source" []
-(worker, updates) <- unfoldDeferred (taskGroup task)
-  (childWithProgress @WorkProgress @(Outcome Candidate)
-    (withLifetime ActorOwned $ coding projectHead (assignment workerLabel task)))
+let work = (task "candidate" "Submit a candidate" ["candidate source"] "read exact source" sourceHead)
+      { planPath = "plans/component.md", rationale = "Check the terminal source receipt" }
+Right workerAgent <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just "luna", spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right (worker, updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work
+  (defaultRequestOptions { requestReporting = Silent })
 Right readiness <- followWork [("candidate", worker, updates)] (notifyReviewReady me)

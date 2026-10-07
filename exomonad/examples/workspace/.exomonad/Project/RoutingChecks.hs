@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (mixedBatch, refusedBatch, observerIsolation, routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, candidateHistory, reviewReadiness, reviewedCheckpoints, forwardingFailure) where
+module Project.RoutingChecks (mixedRequests, refusedRoutes, observerIsolation, routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, candidateHistory, reviewReadiness, reviewedCheckpoints, forwardingFailure) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -12,9 +12,9 @@ import Project.Checks (script)
 
 routing :: Member RecipeCheck effects => Eff effects ()
 routing = do
-  mixedBatch
+  mixedRequests
   void restart
-  refusedBatch
+  refusedRoutes
   void restart
   observerIsolation
   void restart
@@ -54,12 +54,12 @@ routing = do
   void restart
   twoLaneHandoff
 
--- The shared collector receives projected values while the product retains
--- independently typed response/progress handles and exact original receipts.
-mixedBatch :: Member RecipeCheck effects => Eff effects ()
-mixedBatch = do
+-- The collector observes already launched requests and retains their exact
+-- terminal receipts alongside independent progress sources.
+mixedRequests :: Member RecipeCheck effects => Eff effects ()
+mixedRequests = do
   owner <- root
-  script owner "mixed-batch"
+  script owner "mixed-requests"
   textWorker <- activation
   numberWorker <- activation
   void $ turn (checkActor textWorker) "reportProgress True"
@@ -67,22 +67,21 @@ mixedBatch = do
   void $ turn (checkActor textWorker) "respond (\"text ready\" :: Text)"
   void $ turn (checkActor numberWorker) "respond (42 :: Int)"
   void $ turn owner $ Text.unlines
-    [ "view <- readWork (routedCollector mixed)"
-    , "ResponseReady textReceipt <- pollResponse textResponse"
-    , "ResponseReady numberReceipt <- pollResponse numberResponse"
-    , "let sameReceipt original projected = responseExecution original == responseExecution projected && responseWorktree original == responseWorktree projected"
-    , "let textMatches = [sameReceipt textReceipt receipt && responseValue receipt == TextResult (responseValue textReceipt) | WorkFinished \"text\" (Right receipt) <- workHistory view]"
-    , "let numberMatches = [sameReceipt numberReceipt receipt && responseValue receipt == NumberResult (responseValue numberReceipt) | WorkFinished \"number\" (Right receipt) <- workHistory view]"
+    [ "view <- readWork collection"
+    , "ResponseReady textReceipt <- pollResponse textRequest"
+    , "ResponseReady numberReceipt <- pollResponse numberRequest"
+    , "let textMatches = [responseExecution receipt == responseExecution textReceipt && responseWorktree receipt == responseWorktree textReceipt && responseValue receipt == TextResult (responseValue textReceipt) | WorkFinished \"text\" (Right receipt) <- workHistory view]"
+    , "let numberMatches = [responseExecution receipt == responseExecution numberReceipt && responseWorktree receipt == responseWorktree numberReceipt && responseValue receipt == NumberResult (responseValue numberReceipt) | WorkFinished \"number\" (Right receipt) <- workHistory view]"
     , "let checkObserved = (textMatches == [True] && numberMatches == [True] && length [() | source <- collectedWork view, Just _ <- [sourceCursor source]] == 2)"
     ]
-  assertCell owner "mixed batch keeps original handles and exact receipts across projections" "checkObserved"
-  void $ turn owner "finishRoutedBatch mixed"
+  assertCell owner "collector retains exact receipts and progress from both supplied requests" "checkObserved"
+  void $ turn owner "finishWork collection"
 
-refusedBatch :: Member RecipeCheck effects => Eff effects ()
-refusedBatch = do
+refusedRoutes :: Member RecipeCheck effects => Eff effects ()
+refusedRoutes = do
   owner <- root
-  script owner "refused-batch"
-  assertCell owner "invalid batches return typed refusals before allocating any actor" "(case emptyRefusal of { Left EmptyWorkBatch -> True; _ -> False }) && (case blankRefusal of { Left EmptyWorkName -> True; _ -> False }) && (case duplicateRefusal of { Left (DuplicateWorkName \"same\") -> True; _ -> False }) && (case contextRefusal of { Left (WorkAdmissionRefused (UnfoldUncapturedContext _)) -> True; _ -> False }) && beforeRefusal == afterRefusal"
+  script owner "refused-routes"
+  assertCell owner "invalid collector configuration returns typed domain errors without consuming requests" "(case emptyRefusal of { Left NoSources -> True; _ -> False }) && (case blankRefusal of { Left BlankSourceName -> True; _ -> False }) && (case duplicateRefusal of { Left (DuplicateSourceName \"same\") -> True; _ -> False }) && beforeRefusal == afterRefusal"
 
 observerIsolation :: Member RecipeCheck effects => Eff effects ()
 observerIsolation = do
@@ -90,7 +89,7 @@ observerIsolation = do
   script owner "progress-route-producer"
   producer <- activation
   void $ turn owner "refusedExisting <- followWork [(\"same\", producer, updates), (\"same\", producer, updates)] keepWork\noriginalState <- pollResponse producer"
-  assertCell owner "collector refusal leaves original supplied response active" "((case refusedExisting of { Left (DuplicateWorkName \"same\") -> True; _ -> False }) && (case originalState of { ResponsePending _ -> True; _ -> False }))"
+  assertCell owner "collector refusal leaves original supplied request active" "((case refusedExisting of { Left (DuplicateSourceName \"same\") -> True; _ -> False }) && (case originalState of { ResponsePending _ -> True; _ -> False }))"
   script owner "observer-isolation"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
@@ -116,7 +115,6 @@ twoLaneHandoff = do
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "handoff-setup"
   left <- activation
-  void $ turn owner "(right, rightProgress) <- unfoldDeferred (taskGroup task) (childWithProgress @WorkProgress @Delivery (withLifetime ActorOwned $ coding projectHead (assignment rightLabel task)))"
   right <- activation
   script owner "handoff-router"
   partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
@@ -246,29 +244,25 @@ reviewedCheckpoints = do
   assertCell owner "a review for another basis is refused" "case checkObserved of { Left (CheckpointBasisMismatch _ _) -> True; _ -> False }"
   void $ turn owner "checkObserved <- (admitReviewedCheckpoint (reviewRequest { reviewInput = Candidate (GitOid \"different\") [] [] }) reviewer)"
   assertCell owner "a requested candidate without the review checkout HEAD is refused" "case checkObserved of { Left (CheckpointSourceRejected _) -> True; _ -> False }"
-  void $ turn owner "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)\nalteredReviewRetention <- detachRequest alteredReview"
-  assertCell owner "alteredReview request detaches successfully" "case alteredReviewRetention of { Right () -> True; _ -> False }"
+  void $ turn owner "Right (alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) reviewRequest defaultRequestOptions"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { reportedChecks = [\"different\"] }) [] \"accepted\")))"
   void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest alteredReview)"
   assertCell owner "a reviewer verdict for another full candidate is refused" "case checkObserved of { Left (CheckpointCandidateMismatch _ _) -> True; _ -> False }"
-  void $ turn owner "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)\nblockedReviewRetention <- detachRequest blockedReview"
-  assertCell owner "blockedReview request detaches successfully" "case blockedReviewRetention of { Right () -> True; _ -> False }"
+  void $ turn owner "Right (blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) reviewRequest defaultRequestOptions"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Blocked \"review blocked\" [\"missing source proof\"] :: Outcome ReviewDecision)"
   void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest blockedReview)"
   assertCell owner "a blocked review cannot become a reviewed checkpoint" "case checkObserved of { Left (CheckpointBlocked _ _) -> True; _ -> False }"
-  void $ turn owner "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)\nrepairReviewRetention <- detachRequest repairReview"
-  assertCell owner "repairReview request detaches successfully" "case repairReviewRetention of { Right () -> True; _ -> False }"
+  void $ turn owner "Right (repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) reviewRequest defaultRequestOptions"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Repair (reviewInput sessionInput) [\"repair requested\"]))"
   void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest repairReview)"
   assertCell owner "a review requesting repair cannot become a reviewed checkpoint" "case checkObserved of { Left (CheckpointNeedsRepair _ _) -> True; _ -> False }"
-  void $ turn owner "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)\ndirtyReviewRetention <- detachRequest dirtyReview"
-  assertCell owner "dirtyReview request detaches successfully" "case dirtyReviewRetention of { Right () -> True; _ -> False }"
+  void $ turn owner "Right (dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) reviewRequest defaultRequestOptions"
   void activation
   writeFile (checkActor reviewerActor) "README.md" "dirty review checkout\n"
   void $ turn (checkActor reviewerActor)
@@ -282,7 +276,7 @@ reviewedCheckpoints = do
   assertCell owner "updating questions or evidence preserves the reviewed checkpoint" "workReviewed withQuestions == [reviewed] && workReviewed withEvidence == [reviewed]"
   assertCell owner "the checkpoint retains the original review response reference" "executionRequest (responseExecution (checkpointReceipt reviewed)) == requestId reviewer"
   void $ turn owner
-    "(producer, updates) <- unfoldDeferred (batch campaign \"produce\") (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment [label|producer|] reviewed)))\nRight collection <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
+    "Right producerAgent <- spawnSubagent (FreshCtx \"Publish a reviewed candidate and its questions.\") (ForkWorktree projectHead) ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"producer\" })\nRight (producer, updates) <- requestWithProgress @WorkProgress @Text producerAgent reviewed (defaultRequestOptions { requestReporting = Silent })\nRight collection <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
   producerActor <- activation
   void $ turn (checkActor producerActor)
     "reportProgress (WorkProgress [checkpointCandidate sessionInput] [])"
@@ -353,7 +347,6 @@ independentSources = do
   owner <- root
   script owner "attention-sources-setup"
   left <- activation
-  void $ turn owner "(right, rightProgress) <- unfoldDeferred (batch campaign wave) (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment rightLabel (\"right\" :: Text))))"
   right <- activation
   script owner "attention-sources-route"
   script (checkActor left) "attention-sources-question"
@@ -411,6 +404,6 @@ forwardCandidate disposition = do
     void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply, ReplyState (..))\nobligation <- pollReply sessionReply"
     assertCell (checkActor lead) "lost execution does not become a successful candidate" "obligation == ReplyOpen"
   else do
-    void $ turn owner "ready <- watch \"forwarded-candidate\" (awaitResponse lead)\nanswer <- awaitWatch ready"
+    void $ turn owner "answer <- await (settlement lead)"
     assertCell owner "routing forwards exact evidence without a lead relay turn"
-      ("case answer of { Right receipt -> candidateCommit (responseValue receipt) == " <> gitOidLiteral candidate <> " && remainingGates (responseValue receipt) == [\"independent review remains\"]; _ -> False }")
+      ("case answer of { Right (Right value) -> candidateCommit value == " <> gitOidLiteral candidate <> " && remainingGates value == [\"independent review remains\"]; _ -> False }")

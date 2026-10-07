@@ -1,6 +1,8 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaign = "project-delivery" :: CampaignLabel
-let workGroup = "feature" :: ForkGroupLabel
-let task = Task (batch campaign workGroup) "plans/current/feature.md" sourceHead "Implement the feature" "Preserve the product boundary during preparation." ["feature.txt"] "Preserve the product gate" []
-let workerLabel = [label|implement|]
-(worker, workerQuestions) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (withLifetime ActorOwned $ withContext (selected taskContext) (solTaskFrom workerLabel Medium projectHead task)))
+let work = (task "implement-feature" "Implement the feature" ["feature.txt"] "Preserve the product gate" sourceHead)
+      { planPath = "plans/current/feature.md", rationale = "Preserve the product boundary during preparation." }
+Right workerAgent <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just "executor", spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right (worker, workerQuestions) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions

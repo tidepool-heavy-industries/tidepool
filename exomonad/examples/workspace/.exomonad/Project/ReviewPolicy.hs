@@ -20,7 +20,8 @@ import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (GitRef (..), Jev)
 import Tidepool.Worktree (renderGitOid)
 import Exomonad.Contrib.Types
-import Project.Work (projectPrompt, reviewContext)
+import Project.Work
+  ( WorkAdmissionError (..), projectPrompt, reviewContext, workspaceAgentSpec )
 import Exomonad.Contrib.ReviewFlow
 
 defaultReviewFlowPolicy :: ReviewFlowPolicy
@@ -31,14 +32,29 @@ defaultReviewFlowPolicy = ReviewFlowPolicy
   , flowEscalationCriteria = []
   , flowCompleted = Nothing
   , flowIntegration = Nothing
-  , flowReviewer = \sourcePlan request evidence ->
-      withInstructions (projectPrompt "review" <>
-        "\nThis review has inspection-only ResearchLeafEffects. Do not execute checks or modify source. The flow owns executed checks; distinguish retained evidence from inspection. Reply with respond; keep questions pending through progress.\n") $
-      withContext (selected (\input -> reviewContext input <> reviewScope sourcePlan <> "\nFlow check evidence:\n" <> evidence)) $
-      withModel "luna" $ withEffort Medium $ withLifetime ActorOwned $
-      narrowed @ResearchLeafEffects knownEffects
-        (inspectionPolicy (atRef (GitRef (renderGitOid (candidateCommit (reviewInput request))))))
-        ((assignment [label|review|] request) { report = Silent })
+  , flowReviewer = \sourcePlan request evidence -> do
+      let instructions = projectPrompt "review" <>
+            "\nReview the exact candidate and return Accepted or concrete Repair findings. Do not execute additional checks or modify source; the flow owns executed checks. Distinguish retained execution evidence from inspection. Keep questions pending through progress.\n"
+          context = reviewContext request <> reviewScope sourcePlan
+            <> "\nFlow check evidence:\n" <> evidence
+          source = atRef (GitRef (renderGitOid (candidateCommit (reviewInput request))))
+          spawnOptions = (defaultSpawnOptions workspaceAgentSpec)
+            { spawnModel = Just "luna"
+            , spawnEffort = Just Medium
+            , spawnInstructions = Just instructions
+            , spawnLabel = Just "review"
+            }
+      spawned <- spawnSubagent (FreshCtx context) (ForkWorktree source) spawnOptions
+      case spawned of
+        Left issue -> pure (Left (WorkSpawnRefused issue))
+        Right reviewer -> do
+          let requestOptions = defaultRequestOptions
+                { requestLabel = Just "review"
+                , requestReporting = Silent
+                }
+          admitted <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
+            reviewer request requestOptions
+          pure (either (Left . WorkRequestRefused reviewer) Right admitted)
   , flowCorrectionInstructions = projectPrompt "review" <>
       "\nYour prior Repair response had no findings. Return Accepted only after verifying this exact source, or Repair with concrete findings. This correction is final."
   , flowRepairInstructions = projectPrompt "repair"

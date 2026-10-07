@@ -1,5 +1,8 @@
 {-# LANGUAGE QuasiQuotes #-}
-let leadWave = "lead" :: ForkGroupLabel
-let leadLabel = [label|delivery-lead|]
-let task = Task (batch routeCampaign leadWave) "plans/current/feature.md" sourceHead "Deliver the feature" "Retain request ownership through automatic forwarding." ["feature.txt"] "Retain the exact evidence" []
-lead <- unfold (taskGroup task) (child @Candidate (withLifetime ActorOwned (solTaskFrom leadLabel Medium projectHead task)))
+let work = (task "delivery-lead" "Deliver the feature" ["feature.txt"] "Retain the exact evidence" sourceHead)
+      { planPath = "plans/current/feature.md", rationale = "Retain request ownership through automatic forwarding." }
+Right leadAgent <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just "executor", spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right lead <- request @Candidate leadAgent work defaultRequestOptions

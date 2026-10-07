@@ -12,7 +12,7 @@ import Tidepool.Aeson (eitherDecode)
 import Tidepool.Aeson.Value (Value (..), encodeValue)
 import qualified Data.Map.Strict as Map
 import Exomonad.Workspace (workspaceRoot)
-import Tidepool.Actors.Exomonad (GitOid, batch)
+import Tidepool.Actors.Exomonad (GitOid)
 import Project.DecisionAnswers
 import Exomonad.Contrib.Types
 import Tidepool.Check
@@ -60,7 +60,7 @@ decisionCases =
     contradictory = AcceptedDecision ((question "Cancelling a waiter") { questionKey = "later-choice" }) source
       "Cancelling a waiter must terminate the underlying command."
       ["plans/waits.md#contradictory-choice"]
-    work = Task (batch "answer-probe" "waits") "plans/waits.md" source
+    work = Task "waits" "plans/waits.md" source
       "Implement command waiter cancellation" "Keep command identity and evidence intact"
       ["src/waits.rs"] "Detaching a waiter preserves the original command handle" [accepted]
 

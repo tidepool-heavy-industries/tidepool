@@ -13,12 +13,11 @@ case retainedInterviews of
     if terminal then do
       cleanupReceipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce
       afterCleanup <- R.call (reviewSnapshot (R.client flow)) ()
-      let releaseSteps = case cleanupReceipt of
-            ReviewCleanupAttempted groups ->
-              [(group, map cleanupReceiptSteps receipts) | (group, receipts) <- groups]
+      let reviewerStops = case cleanupReceipt of
+            ReviewCleanupAttempted outcomes -> outcomes
             _ -> []
       pure (inspectFull (show (map responseValue interviewReceipts, flowStage current,
-        flowReviewRoutes current, cleanupReceipt, releaseSteps,
+        flowReviewRoutes current, cleanupReceipt, reviewerStops,
         flowCleanupResult afterCleanup)))
     else pure (inspectFull ("review pending; cleanup not requested" :: Text))
 -- Inspect every CleanupReceipt step. StoppedReleasing requires its later host

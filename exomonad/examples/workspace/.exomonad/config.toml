@@ -29,7 +29,7 @@ checks = [
   "Project.DecisionAnswerChecks.routing",
   "Project.DecisionAnswerChecks.exportRequests",
   "Project.DecisionAnswerChecks.replay",
-  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.nestedRequests",
   "Project.RecursiveWorkChecks.revisedReview",
   "Project.BackgroundCommandExampleChecks.completion",
   "Project.MergeChecks.redPreserved",

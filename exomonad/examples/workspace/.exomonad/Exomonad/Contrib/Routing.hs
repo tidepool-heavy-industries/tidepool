@@ -10,17 +10,17 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleContexts #-}
 
--- Typed evidence collection for live batches. Runtime owners retain ordered
--- delivery and lifetime; callers choose notification and observation policy.
+-- Typed evidence collection for caller-owned live requests. The caller owns
+-- request admission and lifetime; this module routes their progress/results.
 module Exomonad.Contrib.Routing
   ( WorkActor (workSnapshot, workNotification, acknowledgeWork), WorkState (..), WorkSource (..), WorkStatus (..)
   , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink (..), WorkDelivery (..), ObserverAdmission (..), noWorkDelivery, observeWork
   , WorkNoticePolicy (..), WorkPolicyReceipt (..), setWorkNoticePolicy
-  , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence, outstandingReviewed
+  , WorkSourceInput, projectWorkSource
+  , followWork, followWorkSources, workDefinition, readWork, finishWork, keepWork, outstandingEvidence, outstandingReviewed
   , notifyWork, workNoticeMessage, workMessage, workQuestionsMessage, withCheckpoints
   , ReviewReadiness (..), reviewReadiness, reviewReadyMessage, notifyReviewReady
-  , WorkBatchPlan, BatchFailure (..), RoutedBatch (..), WorkBatch (..)
-  , projectWorkChildWith, projectWorkChild, workChild, unfoldWorkBatch, unfoldWork, unfoldWorkWith, finishWorkBatch, finishRoutedBatch
+  , RoutingError (..)
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -36,14 +36,17 @@ import Tidepool.Effects.Core (Actor)
 import Exomonad.Contrib.Types
 import Exomonad.Contrib.Actors (CoordinationEffects, coordinationActor)
 
--- Applicative admission retains the original handle product. Only the event
--- projection changes a result's value; execution and worktree receipts survive.
-data WorkBatchPlan effects event handles = WorkBatchPlan [Text]
-  (Unfold effects (handles, WorkSources event))
-
 data WorkSources value = WorkSources
   { progressEvents :: R.EventSource (Text, ProgressState WorkProgress)
   , resultEvents :: R.EventSource (Text, Either ResponseFailure (ResponseResult value))
+  }
+
+-- One already-issued typed request projected into the collector's common
+-- result type. Constructing this value has no effects and admits no work.
+data WorkSourceInput value = WorkSourceInput
+  { inputName :: Text
+  , inputProgressEvents :: R.EventSource (Text, ProgressState WorkProgress)
+  , inputResultEvents :: R.EventSource (Text, Either ResponseFailure (ResponseResult value))
   }
 
 instance Semigroup (WorkSources value) where
@@ -52,142 +55,21 @@ instance Semigroup (WorkSources value) where
 instance Monoid (WorkSources value) where
   mempty = WorkSources mempty mempty
 
-instance Functor (WorkBatchPlan effects event) where
-  fmap f (WorkBatchPlan names admission) = WorkBatchPlan names
-    (fmap (\(handles, sources) -> (f handles, sources)) admission)
-
-instance Applicative (WorkBatchPlan effects event) where
-  pure handles = WorkBatchPlan [] (pure (handles, mempty))
-  WorkBatchPlan ln left <*> WorkBatchPlan rn right = WorkBatchPlan (ln ++ rn)
-    ((\(f, ls) (x, rs) -> (f x, ls <> rs)) <$> left <*> right)
-
-data BatchFailure = EmptyWorkBatch | EmptyWorkName | DuplicateWorkName Text
-  | WorkAdmissionRefused UnfoldError
+-- These errors describe collector configuration. Request admission failures
+-- belong to the caller that issued the requests.
+data RoutingError = NoSources | BlankSourceName | DuplicateSourceName Text
   deriving (Show, Eq)
 
-validateBatch :: [Text] -> Either BatchFailure ()
-validateBatch [] = Left EmptyWorkBatch
-validateBatch names
-  | any (Text.null . Text.strip) names = Left EmptyWorkName
+validateSources :: [Text] -> Either RoutingError ()
+validateSources [] = Left NoSources
+validateSources names
+  | any (Text.null . Text.strip) names = Left BlankSourceName
   | otherwise = go [] names
   where
     go _ [] = Right ()
     go seen (name : rest)
-      | name `elem` seen = Left (DuplicateWorkName name)
+      | name `elem` seen = Left (DuplicateSourceName name)
       | otherwise = go (name : seen) rest
-
-data RoutedBatch handles event = RoutedBatch
-  { routedMembers :: handles
-  , routedCollector :: ActorHandle (WorkActor event)
-  }
-
-data WorkBatch value = WorkBatch
-  { batchMembers :: [(Text, Response value, Progress WorkProgress)]
-  , batchRouter :: ActorHandle (WorkActor value)
-  }
-
-{-# INLINE projectWorkChildWith #-}
-projectWorkChildWith
-  :: forall progress value event child input parent.
-     (KnownEffects child, Subset child parent)
-  => Text -> (progress -> WorkProgress) -> (value -> event)
-  -> Branch child input value
-  -> WorkBatchPlan parent event (Text, Response value, Progress progress)
-projectWorkChildWith name projectProgress projectResult branch = WorkBatchPlan [name] $
-  (\(response, progress) ->
-    ((name, response, progress), WorkSources
-      (fmap ((,) name . mapProgress projectProgress) (R.progress progress))
-      (fmap ((,) name . fmap (mapResult projectResult)) (R.settlement response))))
-    <$> childWithProgress @progress @value (withReport Silent branch)
-  where
-    mapProgress f observation = case observation of
-      ProgressPending -> ProgressPending
-      ProgressUpdate cursor value -> ProgressUpdate cursor (f value)
-      ProgressClosed -> ProgressClosed
-      ProgressRejected failure -> ProgressRejected failure
-    mapResult f receipt = ResponseResult (f (responseValue receipt))
-      (responseExecution receipt) (responseWorktree receipt)
-
-{-# INLINE projectWorkChild #-}
-projectWorkChild
-  :: (KnownEffects child, Subset child parent)
-  => Text -> (value -> event) -> Branch child input value
-  -> WorkBatchPlan parent event (Text, Response value, Progress WorkProgress)
-projectWorkChild name = projectWorkChildWith name id
-
-{-# INLINE workChild #-}
-workChild
-  :: (KnownEffects child, Subset child parent)
-  => Text -> Branch child input value
-  -> WorkBatchPlan parent value (Text, Response value, Progress WorkProgress)
-workChild name = projectWorkChild name id
-
-unfoldWorkBatch
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
-      Member Actor effects)
-  => ForkGroupPath -> WorkBatchPlan effects event handles -> WorkSink event
-  -> Eff effects (Either BatchFailure (RoutedBatch handles event))
-unfoldWorkBatch group plan sink = fmap (fmap fst)
-  (admitWorkBatch group plan (\_ -> pure (sink, ())))
-
-admitWorkBatch
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
-      Member Actor effects)
-  => ForkGroupPath -> WorkBatchPlan effects event handles
-  -> (handles -> Eff effects (WorkSink event, extra))
-  -> Eff effects (Either BatchFailure (RoutedBatch handles event, extra))
-admitWorkBatch group (WorkBatchPlan names admission) configure = case validateBatch names of
-  Left issue -> pure (Left issue)
-  Right () -> do
-    admitted <- attemptUnfold group admission
-    case admitted of
-      Left issue -> pure (Left (WorkAdmissionRefused issue))
-      Right (members, sources) -> do
-        (sink, extra) <- configure members
-        router <- R.start (sourceDefinition names sources sink)
-        pure (Right (RoutedBatch members router, extra))
-
-unfoldWork
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
-      Member Actor effects)
-  => ForkGroupPath
-  -> [WorkBatchPlan effects value (Text, Response value, Progress WorkProgress)]
-  -> WorkSink value -> Eff effects (Either BatchFailure (WorkBatch value))
-unfoldWork group branches sink = fmap (fmap fst)
-  (unfoldWorkWith group branches (\_ -> pure (sink, ())))
-
-unfoldWorkWith
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
-      Member Actor effects)
-  => ForkGroupPath
-  -> [WorkBatchPlan effects value (Text, Response value, Progress WorkProgress)]
-  -> ([(Text, Response value, Progress WorkProgress)] -> Eff effects (WorkSink value, extra))
-  -> Eff effects (Either BatchFailure (WorkBatch value, extra))
-unfoldWorkWith group branches configure = fmap
-  (fmap (\(RoutedBatch members router, extra) -> (WorkBatch members router, extra)))
-  (admitWorkBatch group (sequenceA branches) configure)
-
--- Closing the collector is distinct from retiring children. Refuse while any
--- original request lacks a terminal observation, leaving its route intact.
-finishWorkBatch
-  :: Member Actor effects => WorkBatch value
-  -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
-finishWorkBatch = finishCollector . batchRouter
-
-finishRoutedBatch
-  :: Member Actor effects => RoutedBatch handles value
-  -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
-finishRoutedBatch = finishCollector . routedCollector
-
-finishCollector
-  :: Member Actor effects => ActorHandle (WorkActor value)
-  -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
-finishCollector router = do
-  state <- readWork router
-  case [sourceName source | source <- collectedWork state,
-        Nothing <- [sourceResult source]] of
-    [] -> Right <$> finishWork router
-    pending -> pure (Left pending)
 
 -- Closure keeps unanswered questions. The terminal response is independent of
 -- progress closure and retains its execution/worktree evidence, including failure.
@@ -316,9 +198,39 @@ observeWork name endpoint project (WorkSink sink) = WorkSink $ \policy event -> 
 
 followWork
   :: Member Actor effects
-  => [(Text, Response value, Progress WorkProgress)] -> WorkSink value
-  -> Eff effects (Either BatchFailure (ActorHandle (WorkActor value)))
+  => [(Text, Request value, Progress WorkProgress)] -> WorkSink value
+  -> Eff effects (Either RoutingError (ActorHandle (WorkActor value)))
 followWork inputs sink = case workDefinition inputs sink of
+  Left issue -> pure (Left issue)
+  Right spec -> Right <$> R.start spec
+
+-- Project independently typed progress and results into one authored route.
+-- The receipt's request, actor and worktree evidence remains unchanged.
+projectWorkSource
+  :: Text -> (progress -> WorkProgress) -> (answer -> value)
+  -> Request answer -> Progress progress -> WorkSourceInput value
+projectWorkSource name projectProgress projectAnswer request updates = WorkSourceInput
+  { inputName = name
+  , inputProgressEvents = fmap ((,) name . projectProgressState projectProgress) (R.progress updates)
+  , inputResultEvents = fmap (mapResult name projectAnswer) (R.settlement request)
+  }
+
+projectProgressState :: (progress -> WorkProgress) -> ProgressState progress -> ProgressState WorkProgress
+projectProgressState _ ProgressPending = ProgressPending
+projectProgressState project (ProgressUpdate cursor value) = ProgressUpdate cursor (project value)
+projectProgressState _ ProgressClosed = ProgressClosed
+projectProgressState _ (ProgressRejected failure) = ProgressRejected failure
+
+mapResult :: Text -> (answer -> value)
+  -> Either ResponseFailure (ResponseResult answer)
+  -> (Text, Either ResponseFailure (ResponseResult value))
+mapResult name project = (,) name . fmap (\receipt -> receipt { responseValue = project (responseValue receipt) })
+
+followWorkSources
+  :: Member Actor effects
+  => [WorkSourceInput value] -> WorkSink value
+  -> Eff effects (Either RoutingError (ActorHandle (WorkActor value)))
+followWorkSources inputs sink = case workSourcesDefinition inputs sink of
   Left issue -> pure (Left issue)
   Right spec -> Right <$> R.start spec
 
@@ -336,14 +248,20 @@ finishWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effec
 finishWork = R.finish
 
 workDefinition
-  :: forall value. [(Text, Response value, Progress WorkProgress)] -> WorkSink value
-  -> Either BatchFailure (ActorSpec (WorkActor value) (WorkEffects value))
-workDefinition inputs sink = do
-  let names = [name | (name, _, _) <- inputs]
-  validateBatch names
+  :: forall value. [(Text, Request value, Progress WorkProgress)] -> WorkSink value
+  -> Either RoutingError (ActorSpec (WorkActor value) (WorkEffects value))
+workDefinition inputs sink = workSourcesDefinition
+  [projectWorkSource name id id request updates | (name, request, updates) <- inputs] sink
+
+workSourcesDefinition
+  :: [WorkSourceInput value] -> WorkSink value
+  -> Either RoutingError (ActorSpec (WorkActor value) (WorkEffects value))
+workSourcesDefinition inputs sink = do
+  let names = map inputName inputs
+  validateSources names
   pure (sourceDefinition names (WorkSources
-    (mconcat [fmap ((,) name) (R.progress updates) | (name, _, updates) <- inputs])
-    (mconcat [fmap ((,) name) (R.settlement response) | (name, response, _) <- inputs])) sink)
+    (mconcat (map inputProgressEvents inputs))
+    (mconcat (map inputResultEvents inputs))) sink)
 
 sourceDefinition
   :: forall value. [Text] -> WorkSources value -> WorkSink value

@@ -6,12 +6,12 @@ module Project.SkillChecks (skills, notebookForms, reviewProvenance) where
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
-import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Exomonad.Workspace (workspaceRoot)
 import Tidepool.Check
 import Tidepool.Aeson (Value)
+import Project.Work (workspaceAgentSpec)
 
 -- Execute the skill's actual code blocks, not separately maintained copies.
 example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
@@ -24,71 +24,19 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet work = Task (batch campaign group) \".exomonad/workspace/skills/exomonad-fork/SKILL.md\" " <> gitOidLiteral baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
-  void $ example owner "exomonad-fork" 0
+  void $ turn owner "let input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just \"luna\", spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
+  void $ example owner "exomonad-agent-work" 0
   worker <- activation
-  check "skill launches a fresh Luna Medium worker" (checkModel worker == Just "gpt-6-luna" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)
-  void $ turn owner "let Just group = forkGroupHandle worker\ncleanup <- releaseGroup group"
-  assertCell owner "scoped release retains the pending worker instead of cancelling its request"
-    "not (cleanupReceiptComplete cleanup) && any (\\step -> case step of { CleanupBlocked _ -> True; _ -> False }) (cleanupReceiptSteps cleanup)"
+  check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna" && "Reply to one typed request" `Text.isInfixOf` checkContext worker)
+  void $ turn (checkActor worker) "respond (\"typed result\" :: Text)"
+  awaitCell owner "the published skill awaits the exact request result" "reply == \"typed result\""
   void $ example owner "exomonad-define-actors" 0
   awaitCell owner "record skill joins differently typed inputs"
     "(== Just (\"abc123\",4)) <$> R.call (joined endpoints) ()"
   void $ example owner "exomonad-define-actors" 1
   awaitCell owner "record skill attaches the exact pending request"
     "(== 0) <$> R.call (resultCount (R.client results)) ()"
-  void $ turn (checkActor worker) ("let candidate = Candidate " <> gitOidLiteral baseline <> " [\"example check\"] [\"product acceptance remains\"]")
-  void $ example (checkActor worker) "exomonad-coordinate" 0
-  void $ example owner "exomonad-coordinate" 1
-  awaitCell owner "collector retains candidate progress and pending result"
-    ("do { observed <- readWork router; pure (case collectedWork observed of { [source] -> case sourceResult source of { Nothing -> any (\\candidate -> candidateCommit candidate == " <> gitOidLiteral baseline <> " && remainingGates candidate == [\"product acceptance remains\"]) (workEvidence (sourceProgress source)); _ -> False }; _ -> False }) }")
-  -- Block 0 is reviewCommit's own root recipe: run it from the actual root
-  -- actor (owner), not a forked child, so a regression to a relative
-  -- subgroup path (which only a child with an allocated parent path can
-  -- resolve) fails this turn instead of passing unnoticed.
-  void $ turn owner ("let base = " <> gitOidLiteral baseline <> "\nlet commit = " <> gitOidLiteral baseline)
-  void $ example owner "exomonad-review" 0
-  commitReviewer <- activation
-  check "root review-by-commit forks a fresh Luna reviewer with no parent path" (checkModel commitReviewer == Just "gpt-6-luna")
-  void $ turn (checkActor commitReviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
-  void $ turn owner "finishWork reviewQuestions"
-  void $ example (checkActor worker) "exomonad-review" 1
-  reviewer <- activation
-  void $ turn (checkActor reviewer) "let checks = [\"fixture review\"] :: [Text]\nlet scope = \"skill composition only\" :: Text"
-  replied <- example (checkActor reviewer) "exomonad-review" 2
-  check "text UX: successful reply explicitly reports submission" ("Reply submitted." `Text.isInfixOf` output replied)
-  void $ turn (checkActor worker) "finishWork reviewQuestions"
-  void $ turn (checkActor worker) "respond (Produced candidate)"
-  awaitCell owner "collector retains terminal candidate and gates"
-    ("do { observed <- readWork router; pure (case collectedWork observed of { [source] -> case sourceResult source of { Just (Right receipt) -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == " <> gitOidLiteral baseline <> " && remainingGates candidate == [\"product acceptance remains\"]; _ -> False }; _ -> False }; _ -> False }) }")
-  awaitCell owner "record skill receives the typed terminal source once"
-    "(== 1) <$> R.call (resultCount (R.client results)) ()"
   void $ example owner "exomonad-define-actors" 2
-  void $ example owner "exomonad-coordinate" 2
-  assertCell owner "the coordinate skill retains its scoped cleanup receipt"
-    "cleanupPlanGroup (cleanupReceiptPlan released) == cleanupPlanGroup (cleanupReceiptPlan cleanup) && not (null (cleanupReceiptSteps released))"
-
-  -- The shipped decomposition example is a real multi-item cell. It uses an
-  -- ordinary local selector, selected Task context and a selective collector.
-  void $ turn owner ("let baseline = " <> gitOidLiteral baseline)
-  void $ example owner "exomonad-coordinate" 3
-  firstChild <- activation
-  secondChild <- activation
-  let children = sortOn checkLabel [firstChild, secondChild]
-      [consumer, interface] = children
-      labels = map checkLabel children
-  check ("one plan yields two distinct Luna assignments with their shared contract: " <> Text.pack (show labels))
-    (labels == ["corpus/fanout/consumer", "corpus/fanout/interface"]
-      && all ((== Just "gpt-6-luna") . checkModel) children
-      && all (Text.isInfixOf "The interface and consumer share one accepted contract" . checkContext) children)
-  void $ example owner "exomonad-coordinate" 4
-  void $ turn (checkActor interface) ("let found = Candidate " <> gitOidLiteral baseline <> " [\"interface evidence\"] []\nreportProgress (WorkProgress [found] [])")
-  void $ turn (checkActor consumer) ("let found = Candidate " <> gitOidLiteral baseline <> " [\"consumer evidence\"] []\nreportProgress (WorkProgress [found] [])")
-  awaitCell owner "collector retains both candidates without a routine wake"
-    "do { observed <- readWork router; pure (length (collectedWork observed) == 2 && all (\\(name, evidence) -> any (\\source -> sourceName source == name && any (\\candidate -> reportedChecks candidate == [evidence]) (workEvidence (sourceProgress source))) (collectedWork observed)) [(\"interface\", \"interface evidence\"), (\"consumer\", \"consumer evidence\")]) }"
-  void $ turn (checkActor interface) "respond (Produced found)"
-  void $ turn (checkActor consumer) "respond (Produced found)"
-  void $ turn owner "drained <- finishWorkBatch localBatch\nlet Just group = forkGroupHandle interface\nreleased <- releaseGroup group\ninspectFull released"
 
   -- Execute the published notebook forms in the actual ambient namespace.
   -- File/command examples belong to the command material.
@@ -115,27 +63,6 @@ skills = do
     "case answer of { Left _ -> next == \"jev unavailable; inspecting by hand\"; Right _ -> next `elem` [\"would rerun session::retry_is_bounded\\n\", \"would rerun the suite\\n\", \"reading the failure by hand\", \"rerun unavailable\", \"suite unavailable\"] }"
   void $ example owner "exomonad-jev" 4
 
-  -- The unfold skill's launch and watch cells are the published doc examples;
-  -- these two read a child's identity and its submission without touching the
-  -- child's own checkout.
-  void $ example owner "exomonad-unfold" 2
-  void $ example owner "exomonad-unfold" 3
-  assertCell owner "a settled child is inspected through its typed submission evidence"
-    ("case evidence of { Just (WorktreeObserved _ submitted _) -> submitted == " <> gitOidLiteral baseline <> "; _ -> False }")
-
-  -- Cleanup is inspected before it is executed; the plan is a value.
-  void $ example owner "exomonad-cleanup" 0
-  assertCell owner "the cleanup skill retains its typed plan"
-    "cleanupPlanGroup (cleanupReceiptPlan cleanupReceipt) == cleanupPlanGroup (cleanupReceiptPlan cleanup)"
-
-  void $ example owner "exomonad-fork" 1
-  parserChild <- activation
-  storeChild <- activation
-  testChild <- activation
-  check "primitive fork example admits its three ready obligations"
-    (all ((== Just "gpt-6-luna") . checkModel) [parserChild, storeChild, testChild])
-  mapM_ (\child -> void $ turn (checkActor child) "respond (Blocked \"fixture complete\" [] :: Outcome Candidate)") [parserChild, storeChild, testChild]
-  void $ turn owner "finishWork primitiveQuestions"
   checkNotebookForms owner
 
 -- Run the pure authoring forms independently of the worker/review examples.
@@ -169,7 +96,9 @@ reviewProvenance = do
   baseline <- git owner ["rev-parse", "HEAD"]
   candidate <- checkpoint owner "review-provenance.txt" "review candidate\n" "review provenance fixture"
   void $ turn owner ("let base = " <> gitOidLiteral baseline <> "\nlet commit = " <> gitOidLiteral candidate)
-  void $ example owner "exomonad-review" 0
+  void $ turn owner ("let reviewInputValue = ReviewRequest (ExactScope " <> gitOidLiteral baseline
+    <> " [\"review-provenance.txt\"] \"review provenance fixture\") (Candidate "
+    <> gitOidLiteral candidate <> " [] []) OwnerRepairs\nRight (reviewRequest, reviewProgress) <- requestReview \"review-provenance\" reviewInputValue")
   reviewer <- activation
   check "review context carries the distinct cumulative base and candidate"
     (("Base: " <> baseline) `Text.isInfixOf` checkContext reviewer
@@ -180,39 +109,31 @@ reviewProvenance = do
   assertCell (checkActor reviewer) "typed request preserves both revision identities"
     ("reviewBase (reviewBasis current) == " <> gitOidLiteral baseline <> " && candidateCommit latest == " <> gitOidLiteral candidate)
   void $ turn (checkActor reviewer)
-    "import qualified Tidepool.Agent.Reply as ReviewReply\noldScope <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet oldId = case oldScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
+    "import qualified Tidepool.Agent.Reply as ReviewReply\noldScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet oldId = case oldScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
   assertCell (checkActor reviewer) "request scope borrows the exact active review input"
     ("case oldScope of { ReviewReply.RequestActive _ active -> candidateCommit (reviewInput active) == " <> gitOidLiteral candidate <> "; _ -> False }")
   void $ turn (checkActor reviewer)
-    "wrongInput <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope () (Outcome ReviewDecision)))\nwrongResult <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest ()))"
+    "wrongInput <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope () (Outcome ReviewDecision)))\nwrongResult <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest ()))"
   assertCell (checkActor reviewer) "wrong request input and result types refuse before borrowing"
     "case (wrongInput, wrongResult) of { (ReviewReply.RequestUnavailable ReviewReply.RequestTypeMismatch, ReviewReply.RequestUnavailable ReviewReply.RequestTypeMismatch) -> True; _ -> False }"
-  void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet conclusion = \"review provenance fixture\" :: Text"
-  prompt <- readFile (checkActor reviewer) (Text.pack workspaceRoot <> "/prompts/review.md")
-  let section = snd (Text.breakOn "For acceptance" prompt)
-      blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" section))
-  void $ turn (checkActor reviewer) (head blocks)
-  void $ turn owner "accepted <- waitFor (awaitResponse reviewer)"
+  void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet conclusion = \"review provenance fixture\" :: Text\nimport qualified Project.ReviewTools as ReviewTool\nimport Tidepool.Agent.Contract (handler)\nlet submit = handler (ReviewTool.submit_review ReviewTool.tools)\nsubmit (ReviewTool.ReviewSubmitInput oldId commit checks conclusion)"
+  void $ turn owner "accepted <- pollResponse reviewRequest"
   assertCell owner "exact acceptance retains its scope without fabricating a Task"
     "case accepted of { Right receipt -> case responseValue receipt of { Produced (Accepted checked) -> case reviewedBasis checked of { ExactScope originalBase _ _ -> originalBase == base && candidateCommit (reviewedCandidate checked) == commit; _ -> False }; _ -> False }; _ -> False }"
   -- Exact review retries retain the real scope, including when the caller offers
   -- a retained implementer: there is no implementation Task to assign to it.
-  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\n(retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|exact-retry|] exact)\nretryRetention <- detachRequest retry"
-  assertCell owner "exact review retry retains its request"
-    "case retryRetention of { Right () -> True; _ -> False }"
-  void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\nverdict <- repair [label|exact-findings|] current latest [\"repair at the owner\"]"
+  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\nRight (retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) exact defaultRequestOptions"
+  void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\nverdict <- repair \"exact-findings\" current latest [\"repair at the owner\"]"
   assertCell (checkActor reviewer) "exact-scope repair returns findings without inventing an implementation assignment"
     "case verdict of { Left (Repair found issues) -> found == latest && issues == [\"repair at the owner\"]; _ -> False }"
   void $ turn (checkActor reviewer) "respond (Produced (Repair latest [\"repair at the owner\"]))"
   revised <- checkpoint owner "review-provenance.txt" "revised review candidate\n" "review repair fixture"
   void $ git (checkActor reviewer) ["merge", "--ff-only", revised]
   void $ turn owner ("let revisedCommit = " <> gitOidLiteral revised)
-  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|assigned-retry|] assignedRequest)\nassignedReviewRetention <- detachRequest assignedReview"
-  assertCell owner "assigned review retry retains its request"
-    "case assignedReviewRetention of { Right () -> True; _ -> False }"
+  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task \"assigned-review\" \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\nRight (assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) assignedRequest defaultRequestOptions"
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
   void $ turn (checkActor reviewer)
-    "newScope <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
+    "newScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
   assertCell (checkActor reviewer) "a prepared retained request replaces identity and mounted input"
     ("case newScope of { ReviewReply.RequestActive request active -> ReviewReply.requestIdNumber request /= oldId && candidateCommit (reviewInput active) == " <> gitOidLiteral revised <> "; _ -> False }")
   void $ turn (checkActor reviewer)
@@ -235,6 +156,6 @@ reviewProvenance = do
   void $ turn (checkActor reviewer)
     ("submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral revised
       <> " [\"checked revised candidate\"] \"assigned acceptance\")")
-  void $ turn owner "retained <- waitFor (awaitResponse assignedReview)"
+  void $ turn owner "retained <- pollResponse assignedReview"
   assertCell owner "assigned acceptance preserves the whole Task, decisions and candidate gates"
     "case retained of { Right receipt -> case responseValue receipt of { Produced (Accepted checked) -> reviewedBasis checked == AssignedTask assigned && reviewedCandidate checked == reviewInput assignedRequest; _ -> False }; _ -> False }"

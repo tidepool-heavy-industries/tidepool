@@ -1,6 +1,8 @@
 {-# LANGUAGE QuasiQuotes #-}
 let destination = respond
-let wave = "implementation" :: ForkGroupLabel
-let feature = [label|feature|]
-candidate <- unfold (subgroup wave) (child @Candidate (withLifetime ActorOwned (solTask feature Medium sessionInput)))
-forwarding <- route (awaitSettled candidate) (\settled -> case settled of { ReplyAvailable answer -> void (destination (responseValue answer)); ReplyUnavailable failure -> error (T.pack (show failure)) })
+Right candidateAgent <- spawnSubagent (FreshCtx (taskContext sessionInput)) (ForkWorktree currentCheckout)
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just "executor", spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just "feature" })
+Right candidate <- request @Candidate candidateAgent sessionInput defaultRequestOptions
+forwarding <- route (result candidate) destination

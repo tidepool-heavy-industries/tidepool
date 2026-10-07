@@ -1,6 +1,7 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaign = "attention-sources" :: CampaignLabel
-let wave = "owners" :: ForkGroupLabel
-let leftLabel = [label|left|]
-let rightLabel = [label|right|] :: Label
-(left, leftProgress) <- unfoldDeferred (batch campaign wave) (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment leftLabel ("left" :: Text))))
+Right leftAgent <- spawnSubagent (FreshCtx "Inspect the left side and report your findings.") (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just "left" })
+Right (left, leftProgress) <- requestWithProgress @WorkProgress @Text leftAgent "left" defaultRequestOptions
+Right rightAgent <- spawnSubagent (FreshCtx "Inspect the right side and report your findings.") (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just "right" })
+Right (right, rightProgress) <- requestWithProgress @WorkProgress @Text rightAgent "right" defaultRequestOptions

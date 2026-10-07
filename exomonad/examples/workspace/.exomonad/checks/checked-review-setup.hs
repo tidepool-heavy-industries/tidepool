@@ -2,13 +2,14 @@
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Effects.Core (GitRef (..))
 import qualified Exomonad.Contrib.Merge as Merge
-Right campaign <- pure (campaignLabel ("checked-review-" <> scenario))
-let task = Task (batch campaign "component") "plans/component.md" sourceHead
-      "Repair the recovery fixture" "Exercise a counted check before exact review"
-      ["review-flow.txt"] "One recovery test passes; semantic ownership stays with parent" []
-(worker, _) <- unfold (taskGroup task)
-  (childWithProgress @WorkProgress @(Outcome Candidate)
-    (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
+let work = (task ("implement-" <> scenario) "Repair the recovery fixture" ["review-flow.txt"] "One recovery test passes; semantic ownership stays with parent" sourceHead)
+      { planPath = "plans/component.md", rationale = "Exercise a counted check before exact review" }
+Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
+  (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just "luna", spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right (worker, _) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions
 let check = PlanCheck "recovery" ["scripts/cargo-focused-test"] (\oid -> FocusedSpec "recovery fixture" (renderGitOid oid) "fixture" "lib" "fixture::one" 1) (Cmd.MiB 256) WithoutPreparation
 integration <- if scenario == "publish" then do
   Right tree <- createWorktree (fromRef (GitRef (renderGitOid sourceHead)) "checked-publish")
@@ -19,5 +20,5 @@ let policy = defaultReviewFlowPolicy { flowRepairLimit = 1, flowIntegration = in
 Right reviewRun <- startReviewFlowWith
   (\_ -> pure (ReviewRouteResult
     (if scenario == "escalate" then EscalateReview "owner scope decision" else HonorReview)
-    DeterministicRoute)) me task policy worker [check]
+    DeterministicRoute)) me work policy worker [check]
 let flow = reviewRunFlow reviewRun
