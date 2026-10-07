@@ -1903,30 +1903,18 @@ impl ModuleCandidateOffer {
         admissions: &[crate::declaration_context::ExactSourceAdmission],
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
-        let generated = admissions
-            .iter()
-            .filter(|admission| {
-                admission
-                    .witness
-                    .matches_source(admission.witness.source_path(), &output.source)
-            })
-            .map(|admission| admission.generated_source_owner())
-            .collect::<Result<Vec<_>, _>>()?;
-        let generated = match generated.as_slice() {
-            [owner] => owner,
-            _ => {
-                return Err(CompileError::ExtractFailed(
-                    "program support lacks one authenticated generated source owner".into(),
-                ));
-            }
-        };
+        let generated =
+            crate::declaration_context::ExactSourceAdmission::matching_generated_source_owner(
+                admissions,
+                &output.source,
+            )?;
         let support = program_support_artifacts(
             &output
                 .products
                 .as_ref()
                 .expect("program output was sealed")
                 .artifact_view,
-            generated,
+            &generated,
         )?;
         request.admit_program_support(context, &support, admissions, produced_types)
     }
