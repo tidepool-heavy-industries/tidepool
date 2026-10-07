@@ -4,13 +4,20 @@ module Tidepool.SessionArtifacts
   , prepareSessionBindings
   , sessionBindingRepresentations
   , writeSessionBindings
+  , PreparedTypedSegmentBindings
+  , prepareTypedSegmentSessionBindings
+  , typedSegmentSessionEnvironment, typedSegmentSessionGlobals
+  , typedSegmentSessionInterfaces, typedSegmentSessionBinders
+  , typedSegmentSessionBindingRepresentations
+  , writeTypedSegmentSessionBindings
   , emitHostBindingInterface
   , parseValModule
   ) where
 
 import Control.Monad (forM_, unless, when)
-import Control.Exception (bracket)
-import Control.Monad (forM)
+import Control.Exception (bracket, mask, onException)
+import Control.Monad (forM, foldM)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (nub, isPrefixOf)
 import Data.Data (Data, Typeable, cast, gmapQ)
 import qualified Data.Map.Strict as Map
@@ -25,7 +32,8 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
-import GHC.Core.Type (Type, tyConsOfType)
+import GHC.Core.Type (Type, tyConsOfType, eqType)
+import GHC.Types.Id (Id, idName, idType)
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Core.TyCon (tyConName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
@@ -36,9 +44,10 @@ import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Driver.Env (HscEnv, hsc_home_unit)
 import GHC.Types.Name.Occurrence (OccName, mkVarOcc, occNameString)
 import Data.Word (Word64)
-import System.IO (hPutStrLn, stderr, openTempFile, hClose)
-import System.Directory (doesPathExist, createDirectory, removeDirectoryRecursive, removeFile)
+import System.IO (hPutStrLn, stderr, openTempFile, openBinaryTempFile, hClose, hIsClosed)
+import System.Directory (doesPathExist, createDirectory, removeDirectoryRecursive, removeFile, createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
+import System.Posix.Files (createLink)
 
 import Tidepool.Binders (BoundBinder(..), ValueTier(..))
 import Tidepool.GhcPipeline
@@ -52,13 +61,14 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIfaceWithFixities, parseSessionModule, sessionBinderName
   , scaffoldTargetName, scaffoldOutputBase
-  , sessionModuleString, writeSessionIface )
+  , sessionModuleString, writeSessionIface, injectSessionIfaceWithBindings
+  , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence )
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
   , newOriginalInterfaceArtifacts )
 import Tidepool.ExactScope
-  ( ExactScope(..), scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
+  ( CanonicalInterfaceAdmission, ExactScope(..), scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
 import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes)
@@ -67,6 +77,10 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), CompilerProvidedImpor
 import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
 import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
+import Tidepool.TypedSegment.Types
+  ( TypedSegment, typedSegmentItems, typedItemPlan, typedItemCaptures
+  , TypedItemPlan(..), typedCaptureIdentifier, typedCaptureType
+  , typedCaptureFixity )
 
 -- The captured GHC types and their authority are resolved once, before native
 -- projection, and retained unchanged for the later session interface write.
@@ -110,6 +124,140 @@ writeSessionBindings :: Word64 -> FilePath -> PreparedSessionBindings -> IO [Bou
 writeSessionBindings generation root (PreparedSessionBindings result bindings) = do
   fixities <- boundBinderFixities [name | (name, _, _, _) <- bindings] (prTargetTcGblEnv result)
   writeNativeSessionBindings (prHscEnv result) generation root bindings fixities
+
+-- The compiler owns the captures; this product owns their thin transport and
+-- actual hydrated global identifiers. It grants no authority to a live value.
+data PreparedTypedSegmentBindings = PreparedTypedSegmentBindings HscEnv
+  [PreparedTypedItemBindings] [HostBindingRepresentation]
+
+data PreparedTypedItemBindings
+  = UncapturedTypedItem Int
+  | CapturedTypedItem Int SessionModule [BoundBinder] [(Id, Id)] CapturedSessionInterface
+
+typedSegmentSessionEnvironment :: PreparedTypedSegmentBindings -> HscEnv
+typedSegmentSessionEnvironment (PreparedTypedSegmentBindings env _ _) = env
+
+typedSegmentSessionGlobals :: PreparedTypedSegmentBindings -> [(Id, Id)]
+typedSegmentSessionGlobals (PreparedTypedSegmentBindings _ items _) =
+  concat [globals | CapturedTypedItem _ _ _ globals _ <- items]
+
+typedSegmentSessionInterfaces :: PreparedTypedSegmentBindings -> [CapturedSessionInterface]
+typedSegmentSessionInterfaces (PreparedTypedSegmentBindings _ items _) =
+  [captured | CapturedTypedItem _ _ _ _ captured <- items]
+
+typedSegmentSessionBinders :: PreparedTypedSegmentBindings -> [(Int, [BoundBinder])]
+typedSegmentSessionBinders (PreparedTypedSegmentBindings _ items _) =
+  map itemBinders items
+  where
+    itemBinders (UncapturedTypedItem ordinal) = (ordinal, [])
+    itemBinders (CapturedTypedItem ordinal _ binders _ _) = (ordinal, binders)
+
+typedSegmentSessionBindingRepresentations :: PreparedTypedSegmentBindings -> [HostBindingRepresentation]
+typedSegmentSessionBindingRepresentations (PreparedTypedSegmentBindings _ _ representations) = representations
+
+-- Complete the batch transport before returning any hydrated global. The
+-- staging root belongs to this request; it must not be the public session root.
+prepareTypedSegmentSessionBindings
+  :: HscEnv -> Map.Map (String, String) CanonicalInterfaceAdmission
+  -> TypedSegment -> FilePath -> IO PreparedTypedSegmentBindings
+prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
+  let items = typedSegmentItems segment
+      captures = concatMap typedItemCaptures items
+      persisted capture = stabilizeEffectRows (typedCaptureType capture)
+      itemModule item = SessionModule ValMod (Generation (plannedItemGeneration (typedItemPlan item)))
+      modules = [itemModule item | item <- items, not (null (typedItemCaptures item))]
+      outputs = concatMap (sessionBindingPaths stagingRoot) modules
+  unless (length modules == length (nub modules))
+    (fail "typed segment repeats a session generation")
+  forM_ outputs refuseExisting
+  authorities <- resolveHostBindingAuthorities (map persisted captures) initial admitted
+  let representation capture = hostBindingRepresentationForType authorities (persisted capture)
+  (do
+    forM_ items $ \item -> unless (null (typedItemCaptures item)) $ do
+      let selected = typedItemCaptures item
+          owner = itemModule item
+          occurrence = nameOccName . idName . typedCaptureIdentifier
+          fixities = [(occurrence capture, fixity) | capture <- selected
+            , Just fixity <- [typedCaptureFixity capture]]
+      iface <- mkThinSessionIfaceWithFixities initial owner
+        [(occurrence capture, persisted capture) | capture <- selected] fixities
+      writeSessionIface initial stagingRoot owner iface
+      writeSessionBindingEvidence initial stagingRoot owner (map persisted selected)
+    (env, reversed) <- foldM (hydrateItem persisted representation itemModule) (initial, []) items
+    pure (PreparedTypedSegmentBindings env (reverse reversed)
+      [value | capture <- captures, Just value <- [representation capture]]))
+    `onException` removeExisting outputs
+  where
+    hydrateItem persisted representation itemModule (env, completed) item = do
+      let selected = typedItemCaptures item
+          ordinal = plannedItemOrdinal (typedItemPlan item)
+          owner = itemModule item
+      if null selected then pure (env, UncapturedTypedItem ordinal : completed) else do
+        (hydrated, globals, captured) <- injectSessionIfaceWithBindings stagingRoot owner env
+        let expectedOwner = fst (capturedSessionInterface captured)
+            occurrences = map (nameOccName . idName) globals
+        unless (length globals == length selected && length occurrences == length (nub occurrences)
+          && all ((== Just expectedOwner) . nameModule_maybe . idName) globals)
+          (fail "typed session interface has a different global binder inventory")
+        pairs <- forM selected $ \capture -> do
+          let original = typedCaptureIdentifier capture
+          global <- case filter ((== nameOccName (idName original)) . nameOccName . idName) globals of
+            [found] -> pure found
+            _ -> fail "typed capture has no unique hydrated session global"
+          unless (eqType (idType global) (persisted capture))
+            (fail "typed capture differs from its hydrated session type")
+          pure (original, global)
+        let binders = zipWith (captureBinder owner representation) selected (map snd pairs)
+        pure (hydrated, CapturedTypedItem ordinal owner binders pairs captured : completed)
+
+    captureBinder owner representation capture global = BoundBinder
+      (occNameString (nameOccName (idName global))) (stableVarId (idName global))
+      (sessionModuleString owner)
+      (if isClosureType (idType global) then RetainOpaque else ForceData)
+      (renderType (typedCaptureType capture)) (rootNominalHeadOfType (idType global))
+      (hostBindingRepresentationAuthority <$> representation capture)
+
+-- Publish only the immutable bytes that supplied the substituted global Ids.
+-- Exclusive links refuse an existing generation, including a racing publisher;
+-- the masked link/record pair makes cancellation rollback own exactly its files.
+writeTypedSegmentSessionBindings :: FilePath -> PreparedTypedSegmentBindings -> IO ()
+writeTypedSegmentSessionBindings root (PreparedTypedSegmentBindings _ items _) = do
+  files <- fmap concat $ forM items $ \item -> case item of
+    UncapturedTypedItem _ -> pure []
+    CapturedTypedItem _ owner _ _ snapshot -> case capturedSessionInterfaceEvidence snapshot of
+      Nothing -> fail "typed capture interface lacks complete binding evidence"
+      Just (packages, requirements, _) -> do
+        let path = sessionHiPath root owner
+        pure [(path, snd (capturedSessionInterface snapshot)),
+          (path ++ ".packages", packages), (path ++ ".requirements", requirements)]
+  forM_ files (refuseExisting . fst)
+  created <- newIORef []
+  let publish (path, bytes) = mask $ \restore -> do
+        createDirectoryIfMissing True (takeDirectory path)
+        bracket (openBinaryTempFile (takeDirectory path) "typed-session.tmp")
+          (\(temporary, handle) -> do
+            closed <- hIsClosed handle
+            unless closed (hClose handle)
+            removeFile temporary)
+          (\(temporary, handle) -> do
+            restore (BS.hPut handle bytes >> hClose handle)
+            createLink temporary path
+            modifyIORef' created (path :))
+  forM_ files publish `onException` (readIORef created >>= removeExisting)
+
+sessionBindingPaths :: FilePath -> SessionModule -> [FilePath]
+sessionBindingPaths root owner = let path = sessionHiPath root owner
+  in [path, path ++ ".packages", path ++ ".requirements"]
+
+refuseExisting :: FilePath -> IO ()
+refuseExisting path = do
+  exists <- doesPathExist path
+  when exists (fail "session generation output already exists")
+
+removeExisting :: [FilePath] -> IO ()
+removeExisting paths = forM_ paths $ \path -> do
+  exists <- doesPathExist path
+  when exists (removeFile path)
 
 -- Only retained compiler interfaces supply the signature's original Names.
 -- This operation emits a fresh type-only value interface without compiling code.
@@ -172,7 +320,6 @@ writeNativeSessionBindings
 writeNativeSessionBindings hsc generation root bindings fixities = do
   let
       sessionModule = SessionModule ValMod (Generation generation)
-      persistedTypes = [persisted | (_, _, persisted, _) <- bindings]
       build (name, ty, persistedType, representation) =
         let
             occurrence = mkVarOcc name
@@ -187,6 +334,17 @@ writeNativeSessionBindings hsc generation root bindings fixities = do
       binders = [binder | (binder, _, _) <- built]
   iface <- mkThinSessionIfaceWithFixities hsc sessionModule [(occ, ty) | (_, occ, ty) <- built] fixities
   writeSessionIface hsc root sessionModule iface
+  writeSessionBindingEvidence hsc root sessionModule [persisted | (_, _, persisted, _) <- bindings]
+  forM_ binders $ \(BoundBinder name varId moduleName tier displayType rootHead hostAuthority) ->
+    hPutStrLn stderr $ "  Wrote session iface: " ++ moduleName ++ " (" ++ name
+      ++ " :: " ++ displayType ++ ", " ++ show tier ++ ", root " ++ show rootHead
+      ++ ", authority " ++ show hostAuthority ++ ", varId " ++ show varId ++ ")"
+  pure binders
+
+-- The same interface writer seals package and nominal type requirements for
+-- both legacy single-item binding and the typed segment batch.
+writeSessionBindingEvidence :: HscEnv -> FilePath -> SessionModule -> [Type] -> IO ()
+writeSessionBindingEvidence hsc root sessionModule persistedTypes = do
   let path = sessionHiPath root sessionModule
       owners = nub [owner | ty <- persistedTypes
         , constructor <- nonDetEltsUniqSet (tyConsOfType ty)
@@ -205,11 +363,6 @@ writeNativeSessionBindings hsc generation root bindings fixities = do
   BS.writeFile (path ++ ".requirements") (toStrictByteString
     (encodeListLen (fromIntegral (length requirements))
       <> foldMap (\(unit,owner) -> encodeListLen 2 <> text unit <> text owner) requirements))
-  forM_ binders $ \(BoundBinder name varId moduleName tier displayType rootHead hostAuthority) ->
-    hPutStrLn stderr $ "  Wrote session iface: " ++ moduleName ++ " (" ++ name
-      ++ " :: " ++ displayType ++ ", " ++ show tier ++ ", root " ++ show rootHead
-      ++ ", authority " ++ show hostAuthority ++ ", varId " ++ show varId ++ ")"
-  pure binders
 
 -- Resolve the compiler wrapper's returned variables before looking up fixities.
 -- Renamed Names distinguish nested and shadowed declarations with the same

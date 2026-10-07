@@ -65,6 +65,7 @@ module Tidepool.Session
   , mkThinSessionIfaceWithFixities
   , writeSessionIface
   , injectSessionIface
+  , injectSessionIfaceWithBindings
   , injectSessionScope, registerSessionInterfaceLocation
   , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence
   , injectSessionScopeWithCaptures
@@ -90,7 +91,7 @@ import GHC.Types.Avail (AvailInfo(..))
 import GHC.Types.Name (Name, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (OccName)
 import GHC.Types.Fixity (Fixity)
-import GHC.Types.Id (mkVanillaGlobal, idType)
+import GHC.Types.Id (Id, mkVanillaGlobal, idType)
 import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.Unique (mkUniqueGrimily)
 import GHC.Core.Type (Type, tyConsOfType)
@@ -264,6 +265,8 @@ mkThinSessionIface hsc sm binders = mkThinSessionIfaceWithFixities hsc sm binder
 mkThinSessionIfaceWithFixities
   :: HscEnv -> SessionModule -> [(OccName, Type)] -> [(OccName, Fixity)] -> IO ModIface
 mkThinSessionIfaceWithFixities hsc sm binders fixities = do
+  unless (length (map fst binders) == length (nub (map fst binders)))
+    (fail "session interface has duplicate exported binders")
   unless (length (map fst fixities) == length (nub (map fst fixities))
       && all (\(occurrence,_) -> length (filter ((== occurrence) . fst) binders) == 1) fixities)
     (fail "session fixity does not name one unique exported binder")
@@ -350,6 +353,15 @@ capturedSessionInterfaceEvidence (CapturedSessionInterface _ _ evidence) = evide
 injectSessionIfaceWithCapture :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, CapturedSessionInterface)
 injectSessionIfaceWithCapture root sm hsc0 = do
+  (env, _, captured) <- injectSessionIfaceWithBindings root sm hsc0
+  pure (env, captured)
+
+-- Return the global identifiers reconstructed from these same captured bytes.
+-- A caller substituting retained captures must use these identifiers, rather
+-- than constructing a Core global from the module and occurrence spelling.
+injectSessionIfaceWithBindings :: FilePath -> SessionModule -> HscEnv
+  -> IO (HscEnv, [Id], CapturedSessionInterface)
+injectSessionIfaceWithBindings root sm hsc0 = do
   let homeU = hsc_home_unit hsc0
       modNm = renderSessionModule sm
       theMod = mkModule (homeUnitAsUnit homeU) modNm
@@ -397,7 +409,7 @@ injectSessionIfaceWithCapture root sm hsc0 = do
               , Just owner <- [nameModule_maybe (tyConName constructor)]
               , moduleUnit owner == home]
         pure (Just (packages,requirements,nominalOwners))
-      pure (hsc1, CapturedSessionInterface theMod bytes evidence)
+      pure (hsc1, typeEnvIds (md_types details), CapturedSessionInterface theMod bytes evidence)
   where
     readSelected limit path = do
       bytes <- readFileAtMost path (limit + 1)
