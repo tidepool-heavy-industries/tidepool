@@ -115,7 +115,7 @@ import Data.Char (digitToInt)
 import qualified Data.Graph as Graph
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
-  ( renderWithContext, defaultSDocContext, ppr, SDocContext(..)
+  ( renderWithContext, defaultSDocContext, ppr, SDocContext(..), Outputable, showSDocUnsafe
   , mkUserStyle, NamePprCtx(..), QualifyName(..), Depth(..), PromotionTickContext(..) )
 import GHC.Types.Id (idName, setIdExported)
 import GHC.Core.Type
