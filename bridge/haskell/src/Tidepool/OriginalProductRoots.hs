@@ -36,10 +36,10 @@ reconcileOriginalProducts (Just scope) proofs recovered = do
   let owners = Map.fromList [((unit, name), groups) | (unit, name, groups) <- recovered]
   unless (Map.size owners == length recovered)
     (Left "duplicate recovered original owner in package root inventory")
-  selected <- forM (scopeProducts scope) $ \product -> case Map.lookup (originalUnit product, originalModule product) owners of
-    Nothing -> Right (Just product)
+  selected <- forM (scopeProducts scope) $ \original -> case Map.lookup (originalUnit original, originalModule original) owners of
+    Nothing -> Right (Just original)
     Just groups -> do
-      let owner = (originalUnit product, originalModule product)
+      let owner = (originalUnit original, originalModule original)
           indexed = Map.fromList [(originalOrdinal group, group) | group <- groups]
       unless (Map.size indexed == length groups)
         (Left "duplicate recovered original ordinal in package root inventory")
@@ -47,7 +47,7 @@ reconcileOriginalProducts (Just scope) proofs recovered = do
         (Just proof, Just admitted)
           | canonicalProofMatchesOwner (scopeProducerSha256 scope) owner proof && proof == admitted -> Right ()
         _ -> Left "recovered original group lacks its exact canonical owner"
-      forM_ (originalGroups product) $ \group -> case Map.lookup (originalOrdinal group) indexed of
+      forM_ (originalGroups original) $ \group -> case Map.lookup (originalOrdinal group) indexed of
         Nothing -> Left "recovered original lacks an admitted native group ordinal"
         Just current -> do
           unless (originalBinders current == originalBinders group
@@ -55,7 +55,7 @@ reconcileOriginalProducts (Just scope) proofs recovered = do
             (Left "recovered original group differs from its admitted native witness")
           Right ()
       Right Nothing
-  Right (ReconciledOriginalProducts [product | Just product <- selected])
+  Right (ReconciledOriginalProducts [original | Just original <- selected])
 
 -- The outline bit records whether recovery must supply a definition. GHC's
 -- evaluatedness flag is independent: an unevaluated dictionary still needs

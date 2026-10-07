@@ -201,6 +201,8 @@ data CurrentOriginalInventory = CurrentOriginalInventory
   , currentOriginalProducts :: [ModuleProductEncoding]
   , currentOriginalPackages :: Map.Map (String,String) BS.ByteString
   , currentOriginalFinalized :: FinalizedModuleArtifacts
+    -- Kept with these immutable products through item output selection; both
+    -- package demand and certification consume this same reconciliation.
   , currentReconciledOriginalProducts :: ReconciledOriginalProducts
   , currentOriginalNames :: Map.Map Name SymbolIdentity
     -- Already admitted native originals are imports, never fresh emitted groups.
