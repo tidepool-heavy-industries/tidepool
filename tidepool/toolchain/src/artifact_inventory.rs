@@ -48,6 +48,31 @@ impl CanonicalProducerIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ArtifactId(pub [u8; 32]);
 
+/// Content-bound original group selection. These serialized facts grant no
+/// authority until the inventory checks the certified group and its closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGroupKey {
+    pub artifact: ArtifactId,
+    pub original_ordinal: u32,
+}
+
+/// Whole-module demand and a checked compiler entry cross the same admission
+/// owner. A raw ordinal or recovered selection cannot mint a checked entry.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NativeArtifactDemand<'a> {
+    AllGroups,
+    VerifiedGroupRoot(&'a crate::checked_cell::CheckedTypedEntry),
+}
+
+/// Graph vertices retain one full artifact allocation separately from its
+/// admitted native groups. A carrier never implies demand for every group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+enum InventoryNodeKey {
+    Artifact(ArtifactId),
+    Group(NativeGroupKey),
+}
+
 /// Native demand starts at a complete module or one compiler-issued group.
 /// Selecting demand does not change the retained artifact custody.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

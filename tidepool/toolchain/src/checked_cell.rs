@@ -2447,6 +2447,12 @@ impl CheckedTypedEntry {
     pub fn original_ordinal(&self) -> u32 {
         self.original_ordinal
     }
+    pub(crate) fn native_group_key(&self) -> crate::artifact_inventory::NativeGroupKey {
+        crate::artifact_inventory::NativeGroupKey {
+            artifact: self.artifact,
+            original_ordinal: self.original_ordinal,
+        }
+    }
     pub fn native_requirement_root(&self) -> crate::artifact_inventory::NativeRequirementRoot {
         crate::artifact_inventory::NativeRequirementRoot::Group {
             artifact: self.artifact,
