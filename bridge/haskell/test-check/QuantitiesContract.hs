@@ -37,7 +37,7 @@ checkFixture fixture expectation = do
 quantitiesTests :: [TestTree]
 quantitiesTests =
   [ testCase "spawn quantities and duration magnitude boundaries" $ checkFixture "Quantities" Executed
-  , testCase "default installed profile admits scoped sleep" $ checkFixture "DefaultScopeSleep" Executed
+  , testCase "generated actor profile installs scope and sleep" $ checkFixture "DefaultScopeSleep" Executed
   , testCase "pure installed profile refuses resource scopes" $ checkFixture "NarrowScopeRefusal" (Rejected "ResourceScopes")
   , testCase "pure installed profile refuses sleep" $ checkFixture "NarrowSleepRefusal" (Rejected "Sleep")
   ]
