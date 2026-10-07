@@ -1961,6 +1961,12 @@ authoredGenericConflictsRemainErrors =
         requireSourceDiagnostics diagnostics = unless
           (any ((== DiagError) . dSeverity) diagnostics)
           (fail "authored Generic refusal has no native error diagnostic")
+    -- The same target and class compile with one real authored instance
+    -- before either conflict refusal is allowed to satisfy this control.
+    source <- readFile "test-cell-splitter/fixtures/explicit-generic/AuthoredConflictBaseline.cell.hs"
+    baselinePlan <- analyzeOrderedCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
+    baseline <- compile (omitCellGenericDeclarations ["Conflicting"] baselinePlan)
+    assertGenericInstances ["Conflicting"] baseline
     -- Removing the generated candidate leaves the real authored conflict.
     -- Recovery must preserve that refusal rather than authorizing either one.
     authored <- try (compile (omitCellGenericDeclarations ["Conflicting"] plan))
