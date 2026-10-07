@@ -310,13 +310,13 @@ fn genuine_let_generalization_and_unused_inner_bottom_match_ghc() {
         assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
         let (multiline_let, multiline_do) = if separator == "; " {
             (
-                "segmentRecord 29; let offset = (1 :: Int)\n                      applied = segmentIdentity (31 + offset)\n; segmentRecord applied",
-                "segmentRecord 37; nested <- (do\n                      pure ()\n                      pure (segmentIdentity (41 :: Int)))\n; segmentRecord nested",
+                include_str!("fixtures/typed-segment-retained-layout-inline-let.hs"),
+                include_str!("fixtures/typed-segment-retained-layout-inline-do.hs"),
             )
         } else {
             (
-                "segmentRecord 29\nlet offset = (1 :: Int)\n    applied = segmentIdentity (31 + offset)\nsegmentRecord applied",
-                "segmentRecord 37\nnested <- (do\n  pure ()\n  pure (segmentIdentity (41 :: Int)))\nsegmentRecord nested",
+                include_str!("fixtures/typed-segment-retained-layout-newline-let.hs"),
+                include_str!("fixtures/typed-segment-retained-layout-newline-do.hs"),
             )
         };
         for (name, authored, expected_trace) in [

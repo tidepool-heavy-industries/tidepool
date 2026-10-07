@@ -2519,6 +2519,10 @@ semicolonStatementRefinement flags = do
   assertEqual "first-line positioning preserves implicit let layout"
     ["pure ()", "         let first = (1 :: Int)\n             second = first + 1"]
     (map cellAnalysisSource multiline)
+  forM_ ["pure ();", "pure (); -- trailing; comment", "; pure ()"] $ \source -> do
+    separators <- analyze source
+    assertEqual "parser-owned empty separators do not create authored statements"
+      [(KExpr, Nothing, [])] (identities separators)
   empty <- analyze "-- only; a comment\n"
   assertEqual "comment-only cell has no executable statements" [] empty
   declarations <- analyze "identity :: a -> a; identity value = value"
