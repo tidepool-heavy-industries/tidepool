@@ -2477,6 +2477,60 @@ validateInterfaceMeasurement expectedModule expectedStage expectedReuse row = do
       value -> fail ("non-decimal interface measurement field " ++ name ++ ": " ++ show value)
     rtsCounters = ["allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs"]
 
+semicolonStatementRefinement :: DynFlags -> IO ()
+semicolonStatementRefinement flags = do
+  forM_ cases $ \(label, statements, expected) -> do
+    newline <- analyze (intercalate "\n" statements)
+    inline <- analyze (intercalate "; " statements)
+    assertEqual (label ++ " newline statement identities") expected (identities newline)
+    assertEqual (label ++ " semicolon statement identities") expected (identities inline)
+    assertEqual (label ++ " ordered authored ordinals") [0 .. length statements - 1]
+      (map cellAnalysisSourceOrdinal (concatMap cellAnalysisSourceItems inline))
+    assertEqual (label ++ " source slices exclude synthetic terminal") statements
+      (map cellAnalysisSource inline)
+  coordinates <- analyze "pure \"λ;γ\";\tpure \"δ\""
+  assertEqual "Unicode and tab source slices" ["pure \"λ;γ\"", "pure \"δ\""]
+    (map cellAnalysisSource coordinates)
+  assertEqual "GHC tab columns in original source" [1, 17]
+    (map (cellStartColumn . cellAnalysisSpan) coordinates)
+  comments <- analyze "pure (17 :: Int); {- not; a; statement -} pure (19 :: Int) -- trailing; comment"
+  assertEqual "comment semicolons do not become statements" [KExpr, KExpr]
+    (map (sbKind . cellAnalysisVerdict) comments)
+  assertEqual "trailing comment cannot swallow parser terminal"
+    ["pure (17 :: Int)", "pure (19 :: Int)"] (map cellAnalysisSource comments)
+  empty <- analyze "-- only; a comment\n"
+  assertEqual "comment-only cell has no executable statements" [] empty
+  declarations <- analyze "identity :: a -> a; identity value = value"
+  assertEqual "same-line authored declarations remain one original" [KDecl]
+    (map (sbKind . cellAnalysisVerdict) declarations)
+  malformed <- analyzeOrderedCellWithFlags flags checkTemplate "answer <- ; pure answer"
+  case malformed of
+    Left CellStatementParseFailure {} -> pure ()
+    _ -> fail ("invalid statement list received executable identities: " ++ show malformed)
+  where
+    analyze source = analyzeOrderedCellWithFlags flags checkTemplate source
+      >>= either (fail . renderCellSplitError) (pure . cellPlanItems)
+    identities = map (\item ->
+      (sbKind (cellAnalysisVerdict item), cellAnalysisBindingForm item,
+        sbBinders (cellAnalysisVerdict item)))
+    cases =
+      [ ("two observations", ["pure (17 :: Int)", "pure (19 :: Int)"],
+          [(KExpr, Nothing, []), (KExpr, Nothing, [])])
+      , ("action and observation", ["answer <- pure (7 :: Int)", "pure answer"],
+          [(KBind, Just ActionBinding, ["answer"]), (KExpr, Nothing, [])])
+      , ("let declarations retain nested semicolons",
+          ["let { identity value = value; constant value _ = value }", "pure (identity (7 :: Int))"],
+          [(KBind, Just LetBinding, ["identity", "constant"]), (KExpr, Nothing, [])])
+      , ("nested explicit do", ["answer <- do { pure (); pure (7 :: Int) }", "pure answer"],
+          [(KBind, Just ActionBinding, ["answer"]), (KExpr, Nothing, [])])
+      , ("nested implicit do", ["answer <- (do\n  pure ()\n  pure (7 :: Int))", "pure answer"],
+          [(KBind, Just ActionBinding, ["answer"]), (KExpr, Nothing, [])])
+      , ("strings", ["pure \"left;right\"", "pure \"next\""],
+          [(KExpr, Nothing, []), (KExpr, Nothing, [])])
+      , ("quasiquotes", ["quoted <- [q|left;right|]", "pure quoted"],
+          [(KBind, Just ActionBinding, ["quoted"]), (KExpr, Nothing, [])])
+      ]
+
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do
   items <- split flags lexicalCell

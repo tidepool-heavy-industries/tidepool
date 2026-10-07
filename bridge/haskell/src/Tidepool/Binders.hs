@@ -81,7 +81,7 @@ import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, unpackFS)
 import GHC.Types.PkgQual (RawPkgQual(..))
-import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Types.SrcLoc (mkRealSrcLoc, advanceSrcLoc, srcSpanStart, srcSpanEnd, srcLocLine)
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString, isSymOcc)
 import GHC.Types.Error (errorsFound)
@@ -273,6 +273,7 @@ data CellSourceItem = CellSourceItem
 
 data CellSplitError
   = CellLexFailure
+  | CellStatementParseFailure CellSourceSpan
   | CellPrologueFailure CellSourceSpan String
   | CellHeaderFailure String
   | CellDanglingOperatorFailure CellSourceSpan String
@@ -281,6 +282,9 @@ data CellSplitError
 
 renderCellSplitError :: CellSplitError -> String
 renderCellSplitError CellLexFailure = "<cell>:1:1: GHC could not lex the notebook cell"
+renderCellSplitError (CellStatementParseFailure sourceSpan) =
+  "<cell>:" ++ show (cellStartLine sourceSpan) ++ ":" ++ show (cellStartColumn sourceSpan)
+    ++ ": GHC could not parse the notebook statement list"
 renderCellSplitError (CellPrologueFailure sourceSpan message) =
   "<cell>:" ++ show (cellStartLine sourceSpan) ++ ":" ++ show (cellStartColumn sourceSpan)
     ++ ": " ++ message
@@ -629,7 +633,8 @@ analyzeCellWithGrouping ordered dflags template source = do
           [] -> maxBound
         bodySource = blankBeforeLine firstBodyLine source
     body <- splitCellWithFlags effective bodySource
-    classified <- traverse (uncurry (classify effective)) (zip [length headerItems..] body)
+    statements <- concat <$> traverse (refineExecutableSourceItems effective) body
+    classified <- traverse (uncurry (classify effective)) (zip [length headerItems..] statements)
     -- Retained declaration imports are part of the next cell's namespace.
     let genericAlias = freshAlias "TidepoolCompilerGeneric" (template ++ source)
         displayAlias = freshAlias "TidepoolCompilerDisplay" (template ++ source)
@@ -670,14 +675,13 @@ analyzeCellWithGrouping ordered dflags template source = do
     -- the real problem. Reject it here, before any such wrapping, with a
     -- diagnostic that names the actual operator. Other verdicts (KBind,
     -- KDecl) are spliced without an enclosing section and are not at risk.
-    classify effective ordinal item =
-      let (verdict, bindingForm) = classifyWithFlagsExactForm effective (cellSourceText item)
-       in if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
-            then Left (CellUnsupportedLocalFixity (cellSourceSpan item))
-            else case (sbKind verdict, cellSourceDanglingOperator item) of
-            (KExpr, Just operatorText) ->
-              Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
-            _ -> Right CellAnalysisItem
+    classify effective ordinal (item, (verdict, bindingForm)) =
+      if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
+        then Left (CellUnsupportedLocalFixity (cellSourceSpan item))
+        else case (sbKind verdict, cellSourceDanglingOperator item) of
+          (KExpr, Just operatorText) ->
+            Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
+          _ -> Right CellAnalysisItem
               { cellAnalysisSpan = cellSourceSpan item
               , cellAnalysisSource = cellSourceText item
               , cellAnalysisVerdict = verdict
@@ -739,6 +743,68 @@ analyzeCellWithGrouping ordered dflags template source = do
           || last (cellAnalysisSource item) == '\n'
         then ""
         else "\n"
+
+-- A physical source slice can contain several explicit do statements. GHC's
+-- statement-list parser owns their boundaries, including nested layout and
+-- quotations; classification consumes those same parsed statements.
+refineExecutableSourceItems :: DynFlags -> CellSourceItem
+  -> Either CellSplitError [(CellSourceItem, (StmtBinders, Maybe CellBindingForm))]
+refineExecutableSourceItems flags item
+  | sbKind (fst originalClassification) == KDecl = unchanged
+  | otherwise = case unP parseStatement state of
+      POk parsedState statement -> case unLoc statement of
+        BodyStmt _ (L _ (HsDo _ (DoExpr Nothing) statements)) _ _ ->
+          case reverse (unLoc statements) of
+            terminal : reversed
+              | length reversed > 1 && isSyntheticTerminal terminal ->
+                  traverse (refine parsedState) (reverse reversed)
+            terminal : [_] | isSyntheticTerminal terminal -> unchanged
+            _ -> parseFailure
+        _ -> parseFailure
+      PFailed _ -> parseFailure
+  where
+    source = cellSourceText item
+    originalClassification = classifyWithFlagsExactForm flags source
+    unchanged = Right [(item, originalClassification)]
+    parseFailure = case cellSourceDanglingOperator item of
+      Just operatorText -> Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
+      Nothing -> Left (CellStatementParseFailure (cellSourceSpan item))
+    -- The synthetic terminal permits a final bind or let in the parser-only
+    -- wrapper. It is removed from the authored statement inventory.
+    wrapperPrefix = "do {\n"
+    initialLocation = mkRealSrcLoc (mkFastString "<cell>") 1 1
+    sourceLocation = foldl' advanceSrcLoc initialLocation wrapperPrefix
+    wrapped = wrapperPrefix ++ source ++ "\n; ()\n}"
+    state = initParserState (initParserOpts flags) (stringToStringBuffer wrapped)
+      initialLocation
+    terminalLocation = foldl' advanceSrcLoc
+      sourceLocation (source ++ "\n; ")
+    isSyntheticTerminal statement = case getLocA statement of
+      RealSrcSpan span' _ -> srcSpanStart span' == terminalLocation
+      _ -> False
+    refine parsedState statement = case getLocA statement of
+      RealSrcSpan span' _ -> do
+        start <- sourceOffset (srcSpanStart span')
+        end <- sourceOffset (srcSpanEnd span')
+        let baseLine = cellStartLine (cellSourceSpan item) - srcLocLine sourceLocation
+            authored = CellSourceItem
+              { cellSourceSpan = CellSourceSpan
+                  (baseLine + srcSpanStartLine span') (srcSpanStartCol span')
+                  (baseLine + srcSpanEndLine span') (srcSpanEndCol span')
+              , cellSourceText = take (end - start) (drop start source)
+              , cellSourceDanglingOperator = Nothing
+              }
+        if end <= start then Left CellLexFailure
+          else Right (authored, classifyWithFlagsExactFormUsing flags
+            (cellSourceText authored) (Just (POk parsedState statement)))
+      _ -> Left CellLexFailure
+    sourceOffset target = go 0 sourceLocation source
+      where
+        go offset location remaining
+          | location == target = Right offset
+          | otherwise = case remaining of
+              character : rest -> go (offset + 1) (advanceSrcLoc location character) rest
+              [] -> Left CellLexFailure
 
 -- | Append standalone 'Generic' instances to the declaration item rather than
 -- inventing source items. The original source coordinates and ordinals remain
@@ -1192,7 +1258,12 @@ classifyWithFlagsExact :: DynFlags -> String -> StmtBinders
 classifyWithFlagsExact dflags src = fst (classifyWithFlagsExactForm dflags src)
 
 classifyWithFlagsExactForm :: DynFlags -> String -> (StmtBinders, Maybe CellBindingForm)
-classifyWithFlagsExactForm dflags src = (verdict, bindingForm)
+classifyWithFlagsExactForm dflags src = classifyWithFlagsExactFormUsing dflags src Nothing
+
+classifyWithFlagsExactFormUsing :: DynFlags -> String
+  -> Maybe (ParseResult (LStmt GhcPs (LHsExpr GhcPs)))
+  -> (StmtBinders, Maybe CellBindingForm)
+classifyWithFlagsExactFormUsing dflags src retainedStatement = (verdict, bindingForm)
   where
     verdict = classifyTurn declRes stmtRes modRes
     bindingForm | sbKind verdict == KBind = case stmtRes of
@@ -1209,7 +1280,9 @@ classifyWithFlagsExactForm dflags src = (verdict, bindingForm)
     -- Fresh parser state per attempt (the StringBuffer is immutable, so it
     -- is safe to reuse; the mutable lexer state is not).
     declRes = unP parseDeclaration (initParserState popts buf loc)
-    stmtRes = unP parseStatement   (initParserState popts buf loc)
+    stmtRes = case retainedStatement of
+      Just parsed -> parsed
+      Nothing -> unP parseStatement (initParserState popts buf loc)
     modRes  = unP GHC.Parser.parseModule (initParserState popts buf loc)
 
 -- A local fixity affects later statements in a do segment but is not part of

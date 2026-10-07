@@ -280,18 +280,54 @@ fn is_raised_exception(error: &ResidentError) -> bool {
 #[test]
 fn genuine_let_generalization_and_unused_inner_bottom_match_ghc() {
     let source = include_str!("fixtures/typed-segment-let-generalization.hs");
-    assert_eq!(ghc_trace(source), [7, 11, 13]);
-    let mut session = SemanticSession::new();
-    session.execute("let_generalization", source, 0).unwrap();
-    assert_eq!(session.observed(), [7, 11, 13]);
-    session
-        .execute(
-            "retained_let_generalization",
-            "segmentRecord (segmentIdentity (17 :: Int)); segmentRecord (if segmentIdentity True then 19 else 0)",
-            0,
+    let inline_source = source
+        .replacen(
+            "let segmentIdentity value = value",
+            "let { segmentIdentity value = value }",
+            1,
         )
-        .unwrap();
-    assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        .lines()
+        .collect::<Vec<_>>()
+        .join("; ");
+    let retained_actions = [
+        "segmentRecord (segmentIdentity (17 :: Int))",
+        "segmentRecord (if segmentIdentity True then 19 else 0)",
+    ];
+    for (cold_source, separator) in [(source, "\n"), (inline_source.as_str(), "; ")] {
+        assert_eq!(ghc_trace(cold_source), [7, 11, 13]);
+        let mut session = SemanticSession::new();
+        session
+            .execute("let_generalization", cold_source, 0)
+            .unwrap();
+        assert_eq!(session.observed(), [7, 11, 13]);
+        session
+            .execute(
+                "retained_let_generalization",
+                &retained_actions.join(separator),
+                0,
+            )
+            .unwrap();
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        let snapshot = session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap();
+        let error = session
+            .execute("invalid_statement_list", "answer <- ; segmentRecord 23", 0)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(diagnostics))) if !diagnostics.is_empty()),
+            "malformed statements must retain parser diagnostics: {error:?}"
+        );
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        assert_eq!(
+            session
+                .resident
+                .public_visibility_snapshot_in(session.public)
+                .unwrap(),
+            snapshot
+        );
+    }
 }
 
 #[test]
