@@ -982,8 +982,29 @@ fn exact_original_versions_do_not_substitute_across_views_or_reuse_indices() {
 #[test]
 fn selected_demand_keeps_authentication_of_needed_and_unused_original_bytes() {
     let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let originals = catalog
+        .originals
+        .iter()
+        .map(|entry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            product
+        })
+        .collect::<Vec<_>>();
+    let accepted = crate::certified_products::certify_owned_products_in_context_with_validation(
+        &originals,
+        &[],
+        &originals,
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert_eq!(accepted.len(), MODULES * ORDINALS.len());
+    let early = catalog.group_closure(&root_groups(0));
+    assert!(early.contains(&(1, 3)) && !early.contains(&(0, 11)));
     // One mutation hits the demanded SCC helper, the other an unselected group
-    // in the root's full product. Neither changes or bypasses the certificate.
+    // in the root's full product. Canonical attachment preserves the body; full
+    // original certification authenticates it before selecting native demand.
     for (node, ordinal) in [(1, 3), (0, 11)] {
         let ArtifactPayload::Original(product) = &catalog.originals[node].payload else {
             unreachable!()
@@ -1002,9 +1023,22 @@ fn selected_demand_keeps_authentication_of_needed_and_unused_original_bytes() {
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         );
-        assert!(corrupt
+        let corrupt = corrupt
             .with_module_interface(product.module_interface().unwrap().clone())
-            .is_err());
+            .unwrap();
+        let mut changed = originals.clone();
+        changed[node] = &corrupt;
+        assert!(matches!(
+            crate::certified_products::certify_owned_products_in_context_with_validation(
+                &changed,
+                &[],
+                &changed,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            ),
+            Err(crate::certified_products::CertificationError::Mismatch(
+                "inherited artifact bytes"
+            ))
+        ));
     }
     let inventory = ArtifactInventory::default();
     let mut entries = catalog.originals.clone();
