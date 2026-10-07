@@ -5256,10 +5256,11 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let projected_metadata = exact
-        .map(|admission| admission.request.context.compiler_metadata_snapshot())
+    let compiler_inputs = exact
+        .map(|admission| admission.request.compiler_inputs())
         .transpose()
         .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
+    let projected_metadata = compiler_inputs.as_ref().map(|inputs| &inputs.metadata);
     let inherited_module_interfaces =
         projected_metadata
             .as_ref()
@@ -5856,8 +5857,11 @@ pub(crate) fn certify_products_with_validation(
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut source_selection = match exact {
-        Some(admission) => CertifiedSourceSelection::from_compiler_projection(
-            admission.request.context.compiler_input_projection(),
+        Some(_) => CertifiedSourceSelection::from_compiler_projection(
+            &compiler_inputs
+                .as_ref()
+                .ok_or(CertificationError::Mismatch("compiler original projection"))?
+                .projection,
             projected_metadata
                 .as_ref()
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?,

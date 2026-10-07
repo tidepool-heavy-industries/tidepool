@@ -1058,15 +1058,7 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         context.clone(),
                         &specification.template_sources(),
-                    )?
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    ),
+                    )?,
             ),
             checked_cell: Some(specification),
             planned_cell: None,
@@ -1146,6 +1138,14 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
+                    .with_generated_scaffold_imports(
+                        std::iter::once(specification.template_source.as_str()).chain(
+                            specification
+                                .turn_templates
+                                .iter()
+                                .map(|(_, source)| source.as_str()),
+                        ),
+                    )?
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -1156,15 +1156,7 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         context.clone(),
                         &specification.template_sources(),
-                    )?
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    ),
+                    )?,
             ),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
@@ -1213,6 +1205,13 @@ impl ModuleCandidateOffer {
         checked_item.validate_include(include)?;
         let mut selected = None;
         let exact = compile_context_with_declarations(compile_context, context.clone())
+            .with_generated_scaffold_imports(
+                checked_item
+                    .item
+                    .turn_templates()
+                    .iter()
+                    .map(|(_, source)| source.as_str()),
+            )?
             .prepare_compilation_authorizing(
                 &scratch.join("exact-scope"),
                 producer,
@@ -1253,13 +1252,6 @@ impl ModuleCandidateOffer {
                 exact
                     .with_source_search_context(include)
                     .with_checked_value_imports(checked_item.prefix.import_authority()?)
-                    .with_generated_scaffold_imports(
-                        checked_item
-                            .item
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
-                    )
                     .with_initial_template_interfaces(
                         checked_item.item.template_context(),
                         &checked_item.item.template_sources(),
@@ -1370,14 +1362,14 @@ impl ModuleCandidateOffer {
         let exact = (*context)
             .clone()
             .with_declarations(declarations)
+            .with_generated_scaffold_imports(templates.iter().map(String::as_str))?
             .prepare_compilation_with_authorization(
                 &scratch.join("exact-scope"),
                 producer,
                 Some(authorization),
             )?
             .with_source_search_context(include)
-            .with_checked_value_imports(values.import_authority())
-            .with_generated_scaffold_imports(templates.iter().map(String::as_str));
+            .with_checked_value_imports(values.import_authority());
         Ok(ActivationPreviewSelection::Ready(Self {
             selected: None,
             producer: producer.to_vec(),
