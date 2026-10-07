@@ -200,6 +200,12 @@ module Tidepool.Actors.Exomonad
   , Workspace (..)
   , WorkspaceHandle
   , currentWorkspace
+  , SpawnLimits (..)
+  , DescendantDepth
+  , ActiveDescendants
+  , SpawnLimitError (..)
+  , descendantDepth
+  , activeDescendants
   , SpawnOptions (..)
   , defaultSpawnOptions
   , SpawnError (..)
@@ -216,6 +222,8 @@ module Tidepool.Actors.Exomonad
   , withScope
   , observed
   , AwaitError (..)
+  , response
+  , settledResponse
   , result
   , settlement
   , eitherOf

@@ -12,7 +12,7 @@ module Tidepool.Agent.Watch.Internal
   , AwaitDependency (..), AwaitError (..)
   , Watch, WatchId (..), Watches (..), WatchState (..)
   , RawWatchObservation (..), ForgetWatchOutcome (..)
-  , result, settlement, eitherOf, after, afterSited, observed, await
+  , response, settledResponse, result, settlement, eitherOf, after, afterSited, observed, await
   , watch, pollWatch, forgetWatch
   , Route, RouteState (..), route, pollRoute, listRoutes, forgetRoute
   , requireObserved, Observation (..)
@@ -129,19 +129,28 @@ data Watches a where
 data ForgetWatchOutcome = WatchForgotten | WatchForgetPending | WatchForgetRejected ReplyError
   deriving (Show, Eq)
 
--- | Project a successful value. Dependency failures are returned by 'await'.
-result :: Request a -> Await a
-result request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) False)] 0)
-  (\_ _ _ -> pure (responseValue (requireObserved (readResponse request))))
+-- | Retain the original successful reply and its execution/worktree evidence.
+-- Dependency failures are returned by 'await'.
+response :: Request a -> Await (ResponseResult a)
+response request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) False)] 0)
+  (\_ _ _ -> pure (requireObserved (readResponse request)))
 
--- | Capture settlement failure as an ordinary value, allowing all outcomes
--- to be collected with traverse through the same evaluator.
-settlement :: Request a -> Await (Either ResponseFailure a)
-settlement request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) True)] 0)
+-- | Capture terminal failure as a value while retaining successful receipts.
+-- This uses the same evaluator and projection custody as 'response'.
+settledResponse :: Request a -> Await (Either ResponseFailure (ResponseResult a))
+settledResponse request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) True)] 0)
   (\_ node (AwaitDecision leaves _) -> pure $ case lookup node leaves of
     Just (Just failure) -> Left failure
-    Just Nothing -> Right (responseValue (requireObserved (readResponse request)))
+    Just Nothing -> Right (requireObserved (readResponse request))
     Nothing -> error "await: terminal decision omitted its selected settlement")
+
+-- | Project a successful value without changing its readiness or custody.
+result :: Request a -> Await a
+result = fmap responseValue . response
+
+-- | Capture terminal failure as a value for ordinary traverse collection.
+settlement :: Request a -> Await (Either ResponseFailure a)
+settlement = fmap (fmap responseValue) . settledResponse
 
 requireObserved :: Maybe a -> a
 requireObserved (Just value) = value
