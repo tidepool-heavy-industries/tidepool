@@ -173,7 +173,7 @@ reviewCommit name base commit accept owned = requestReview name $
 -- declared ownership. A command failure is unavailable evidence, never an
 -- empty passing diff.
 unownedPaths
-  :: Member Commands effects
+  :: Member Cmd.Commands effects
   => GitOid -> GitOid -> [Text] -> Eff effects [Text]
 unownedPaths base candidate owned = do
   let range = renderGitOid base <> ".." <> renderGitOid candidate
