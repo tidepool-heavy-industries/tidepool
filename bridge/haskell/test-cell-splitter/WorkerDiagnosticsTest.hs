@@ -92,6 +92,8 @@ runWorkerDiagnosticsTests = withScratch $ \root -> do
     (fail "inspection diagnostics lost locations or order")
 
   forM_ [ (CellLexFailure, Just (1, 1, 1, 1), "GHC could not lex the notebook cell")
+        , (CellStatementParseFailure (CellSourceSpan 2 3 4 5), Just (2, 3, 4, 5),
+            "GHC could not parse the notebook statement list")
         , (CellPrologueFailure (CellSourceSpan 2 3 4 5) "prologue", Just (2, 3, 4, 5), "prologue")
         , (CellDanglingOperatorFailure (CellSourceSpan 2 3 4 5) "+", Just (2, 3, 4, 5),
             "cell ends with a dangling operator `+`: remove it or supply its right operand")
