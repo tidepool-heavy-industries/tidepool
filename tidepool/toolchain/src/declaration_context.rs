@@ -2427,8 +2427,19 @@ impl ExactCompilationRequest {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            // The generated target is excluded from this support view by its
-            // authenticated source owner.
+            // Only the authenticated generated target may leave the support
+            // view; every other selected original keeps its exact carrier.
+            if matching.is_empty()
+                && !admissions.iter().any(|admission| {
+                    admission.generated_source_owner().is_ok_and(|generated| {
+                        generated.unit == owner.unit && generated.module == owner.module
+                    })
+                })
+            {
+                return Err(failure(
+                    "compiler support offer omitted a selected original",
+                ));
+            }
             if matching.len() > 1 {
                 return Err(failure(
                     "compiler support offer has conflicting exact original artifacts",
@@ -5957,6 +5968,93 @@ mod tests {
         ));
         assert!(request.program_support.is_none());
         assert!(empty.artifact_view().is_empty());
+    }
+
+    #[test]
+    fn program_support_omits_only_authenticated_generated_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let before = empty.semantic_sha256();
+        let selection = |fixture: &CompilerSupportFixture| {
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &fixture.projection,
+                &fixture.artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap()
+        };
+        let missing = support_offer(&[support_product("Hidden")]);
+        let mut request = program_request(directory.path(), empty.clone());
+        let refusal = request
+            .admit_program_support_with_selection(
+                empty.clone(),
+                &support_view(&[]),
+                &[],
+                None,
+                &selection(&missing),
+            )
+            .unwrap_err();
+        assert!(matches!(refusal, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: compiler support offer omitted a selected original"));
+        assert!(request.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        assert_eq!(empty.semantic_sha256(), before);
+        assert!(empty.artifact_view().is_empty());
+
+        let receipt = import_receipt(directory.path(), &request, "Unadmitted");
+        let mut value = read_receipt(&receipt);
+        value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        write_receipt(&receipt, &value);
+        let admission = request.validate_receipt(&receipt, None, &empty).unwrap();
+        assert_eq!(
+            admission.generated_source_owner().unwrap(),
+            identity("fixture", "Consumer")
+        );
+        let source = std::fs::read(directory.path().join("Consumer.hs")).unwrap();
+        let generated = crate::certified_products::fixture_source_finalized_product(
+            support_product("Consumer").with_source_sha256(Sha256::digest(&source).into()),
+            [2; 32],
+            vec![],
+        );
+        let generated = crate::certified_products::tests::recovered_witness_fixtures(&[generated])
+            .remove(0)
+            .product;
+        let omitted = request
+            .admit_program_support_with_selection(
+                empty.clone(),
+                &support_view(&[]),
+                std::slice::from_ref(&admission),
+                None,
+                &selection(&support_offer(&[generated])),
+            )
+            .unwrap();
+        assert_eq!(omitted.producer, request.producer_sha256);
+        assert!(omitted.artifact_view().is_empty());
+        assert!(omitted.compiler_original_products().unwrap().is_empty());
+        assert_eq!(empty.semantic_sha256(), before);
+        assert!(request.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+
+        for (unit, module) in [("foreign", "Consumer"), ("fixture", "AnotherConsumer")] {
+            let offer = support_offer(&[support_product_in_unit(unit, module)]);
+            let mut request = program_request(directory.path(), empty.clone());
+            assert!(request
+                .admit_program_support_with_selection(
+                    empty.clone(),
+                    &support_view(&[]),
+                    std::slice::from_ref(&admission),
+                    None,
+                    &selection(&offer),
+                )
+                .is_err());
+            assert!(request.program_support.is_none());
+            assert!(request.program_source_lexical().is_empty());
+            assert_eq!(request.context.semantic_sha256(), before);
+            assert_eq!(empty.semantic_sha256(), before);
+            assert!(empty.artifact_view().is_empty());
+        }
     }
 
     fn support_admission(root: &Path) -> ExactSourceAdmission {
