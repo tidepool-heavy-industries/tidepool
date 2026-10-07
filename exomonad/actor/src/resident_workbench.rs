@@ -11917,7 +11917,7 @@ pub(crate) mod request_tests {
         }
     }
 
-    fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
+    pub(crate) fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
         // Native resource locations can be relative to the runner's CWD.
         // Resolve only the source roots selected by the owning producers.
         let prelude = tidepool_testing::eval_harness::prelude_path()
