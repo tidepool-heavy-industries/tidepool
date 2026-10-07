@@ -1409,7 +1409,7 @@ data MyTools mode = MyTools
 tools :: Member Cmd.Commands effects => MyTools (AsServerT (Eff effects))
 tools = MyTools
   { shell = Shell.tools
-  , probe = tool "Answer one fixed question about a topic." (\_ -> pure "one")
+  , probe = presentWith id $ tool "Answer one fixed question about a topic." (\_ -> pure "one")
   }
 
 agentSpec :: Member Cmd.Commands effects => AgentSpec MyTools effects

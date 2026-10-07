@@ -1274,7 +1274,7 @@ probeBody request = do
 tools :: Member Jev effects => SpecTools (AsServerT (Eff effects))
 tools =
   SpecTools
-    { probe = tool "Answer one fixed question about a topic, judged by Jev." probeBody }
+    { probe = presentWith id $ tool "Answer one fixed question about a topic, judged by Jev." probeBody }
 "#;
 
 /// `AgentSpec`: the same tools record, with an after-tool slot that asks Jev
