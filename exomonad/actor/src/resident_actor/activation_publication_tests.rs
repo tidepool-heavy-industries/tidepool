@@ -219,12 +219,31 @@ async fn interrupt_during_preview(
         Ok(())
     }));
     let genuine_installation = if matches!(interruption, Interruption::FatalPreview) {
-        Some(
-            behavior
-                .prepare_interactive_policy(&fixture.kernel, &context, None)
-                .await
-                .unwrap(),
-        )
+        let installation = behavior
+            .prepare_interactive_policy(&fixture.kernel, &context, None)
+            .await
+            .unwrap();
+        let issued = installation
+            .prepared_tools
+            .as_ref()
+            .expect("genuine installer issued its handler lease");
+        let acquisition = issued
+            .toolset_acquisition()
+            .expect("genuine installer retains its source acquisition")
+            .clone();
+        assert_eq!(installation.toolset_acquisition(), Some(&acquisition));
+        // The observer envelope keeps the exact origin after handler custody
+        // leaves the envelope, without retaining the transferred lease.
+        let mut observation = installation.clone();
+        let transferred = observation.prepared_tools.take().unwrap();
+        assert_eq!(
+            observation.toolset_acquisition(),
+            transferred.toolset_acquisition()
+        );
+        drop(transferred);
+        assert_eq!(observation.toolset_acquisition(), Some(&acquisition));
+        drop(observation);
+        Some(installation)
     } else {
         None
     };
@@ -246,6 +265,7 @@ async fn interrupt_during_preview(
                 bootstrap: bootstrap.take(),
                 installation: LocalResidentInstallation {
                     prepared_tools: None,
+                    toolset_acquisition: None,
                     actor: fixture.actor.clone(),
                     label: descriptor.label().into(),
                     policy: Arc::new(crate::ResidentInteractivePolicy::local(

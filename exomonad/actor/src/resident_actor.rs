@@ -138,6 +138,8 @@ impl<H, O> ResidentActorRoot<H, O> {
 pub struct LocalResidentInstallation {
     /// Newly prepared handler custody transfers only with application publication.
     pub(crate) prepared_tools: Option<crate::InstalledToolLease>,
+    /// Exact installation observation survives handler transfer without retaining its custody.
+    toolset_acquisition: Option<crate::ToolsetAcquisition>,
     pub actor: LocalActorRef,
     pub label: String,
     pub policy: Arc<dyn ResidentToolEndpoint>,
@@ -163,9 +165,7 @@ pub struct LocalResidentInstallation {
 impl LocalResidentInstallation {
     #[must_use]
     pub fn toolset_acquisition(&self) -> Option<&crate::ToolsetAcquisition> {
-        self.prepared_tools
-            .as_ref()
-            .and_then(crate::InstalledToolLease::toolset_acquisition)
+        self.toolset_acquisition.as_ref()
     }
 }
 
@@ -7688,6 +7688,7 @@ where
                             checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
                         let installation = LocalResidentInstallation {
                             prepared_tools: None,
+                            toolset_acquisition: None,
                             actor,
                             label: self.descriptor.label().to_owned(),
                             policy,
@@ -8275,6 +8276,7 @@ where
         let checkpoint_attachment =
             checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
         Ok(LocalResidentInstallation {
+            toolset_acquisition: prepared_tools.toolset_acquisition().cloned(),
             prepared_tools: Some(prepared_tools),
             actor,
             label: self.descriptor.label().to_owned(),
