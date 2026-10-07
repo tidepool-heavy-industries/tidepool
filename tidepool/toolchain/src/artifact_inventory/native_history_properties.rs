@@ -301,6 +301,9 @@ fn groups(facts: &BTreeSet<Fact>) -> BTreeSet<RawGroup> {
 struct View {
     inventory: usize,
     facts: BTreeSet<Fact>,
+    // Artifact projection of explicit typed roots, separate from reachable
+    // carrier custody. A zero-edge group root projects to its own carrier.
+    roots: BTreeSet<ArtifactId>,
 }
 
 #[derive(Clone, Debug)]
@@ -536,6 +539,21 @@ fn prefix() -> Vec<Op> {
             right: 5,
             to: 7,
         },
+        Op::Project {
+            from: 2,
+            nodes: vec![0],
+            to: 3,
+        },
+        Op::Project {
+            from: 5,
+            nodes: vec![0],
+            to: 5,
+        },
+        Op::Merge {
+            left: 3,
+            right: 5,
+            to: 7,
+        },
     ]
 }
 
@@ -552,6 +570,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 model[*to] = Some(View {
                     inventory: *inventory,
                     facts: BTreeSet::new(),
+                    roots: BTreeSet::new(),
                 });
             }
             Op::Admit {
@@ -580,10 +599,14 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         if facts == view.facts {
                             coverage.repeated += 1;
                         }
+                        let mut roots = view.roots;
+                        roots.extend(catalog.supplied_ids(*future));
+                        roots.extend(demanded.iter().map(|group| catalog.key(*group).artifact));
                         actual[*to] = Some(result);
                         model[*to] = Some(View {
                             inventory: view.inventory,
                             facts,
+                            roots,
                         });
                         coverage.admissions += 1;
                     } else {
@@ -624,11 +647,12 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                             .into_iter()
                             .filter(|group| nodes.contains(&group.0))
                             .collect();
-                        let facts = catalog.facts(ids, selected);
+                        let facts = catalog.facts(ids.clone(), selected);
                         actual[*to] = Some(result);
                         model[*to] = Some(View {
                             inventory: view.inventory,
                             facts,
+                            roots: ids,
                         });
                         coverage.projections += 1;
                     } else {
@@ -656,8 +680,14 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     };
                     let mut facts = left_view.facts;
                     facts.extend(right_view.facts);
+                    let mut roots = left_view.roots;
+                    roots.extend(right_view.roots);
                     actual[*to] = Some(result.unwrap());
-                    model[*to] = Some(View { inventory, facts });
+                    model[*to] = Some(View {
+                        inventory,
+                        facts,
+                        roots,
+                    });
                     coverage.merges += 1;
                     if left_view.inventory != right_view.inventory {
                         coverage.cross_merges += 1;
@@ -715,6 +745,17 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     observed.selected_native_groups(),
                     catalog.selection(&groups(&view.facts)),
                     "step {}, slot {}",
+                    step,
+                    slot
+                );
+                prop_assert_eq!(
+                    observed
+                        .root_entries()
+                        .iter()
+                        .map(|entry| entry.descriptor.id)
+                        .collect::<BTreeSet<_>>(),
+                    view.roots.clone(),
+                    "root intent at step {}, slot {}",
                     step,
                     slot
                 );
@@ -982,8 +1023,29 @@ fn exact_original_versions_do_not_substitute_across_views_or_reuse_indices() {
 #[test]
 fn selected_demand_keeps_authentication_of_needed_and_unused_original_bytes() {
     let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let originals = catalog
+        .originals
+        .iter()
+        .map(|entry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            product
+        })
+        .collect::<Vec<_>>();
+    let accepted = crate::certified_products::certify_owned_products_in_context_with_validation(
+        &originals,
+        &[],
+        &originals,
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert_eq!(accepted.len(), MODULES * ORDINALS.len());
+    let early = catalog.group_closure(&root_groups(0));
+    assert!(early.contains(&(1, 3)) && !early.contains(&(0, 11)));
     // One mutation hits the demanded SCC helper, the other an unselected group
-    // in the root's full product. Neither changes or bypasses the certificate.
+    // in the root's full product. Canonical attachment preserves the body; full
+    // original certification authenticates it before selecting native demand.
     for (node, ordinal) in [(1, 3), (0, 11)] {
         let ArtifactPayload::Original(product) = &catalog.originals[node].payload else {
             unreachable!()
@@ -1002,9 +1064,22 @@ fn selected_demand_keeps_authentication_of_needed_and_unused_original_bytes() {
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         );
-        assert!(corrupt
+        let corrupt = corrupt
             .with_module_interface(product.module_interface().unwrap().clone())
-            .is_err());
+            .unwrap();
+        let mut changed = originals.clone();
+        changed[node] = &corrupt;
+        assert!(matches!(
+            crate::certified_products::certify_owned_products_in_context_with_validation(
+                &changed,
+                &[],
+                &changed,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            ),
+            Err(crate::certified_products::CertificationError::Mismatch(
+                "inherited artifact bytes"
+            ))
+        ));
     }
     let inventory = ArtifactInventory::default();
     let mut entries = catalog.originals.clone();
