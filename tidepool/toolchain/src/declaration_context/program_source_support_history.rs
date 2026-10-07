@@ -31,7 +31,7 @@ mod program_source_support_history {
     ) -> crate::certified_products::CertifiedSourceSelection {
         crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
             projection,
-            custody,
+            &custody.metadata_snapshot(),
             &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
         )
         .unwrap()
