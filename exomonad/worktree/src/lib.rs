@@ -44,7 +44,9 @@ pub mod testing;
 #[cfg(target_os = "linux")]
 mod view;
 
-pub use binding::{ActiveBinding, AgentRef, Binding, BindingState, BindingTable, BindingTerminal};
+pub use binding::{
+    ActiveBinding, AgentRef, Binding, BindingState, BindingTable, BindingTerminal, WorkspaceAccess,
+};
 pub use create::{
     DirtyPolicy, PreparedSourceWorktree, WorktreeHandle, WorktreeManager, WorktreeSource,
     WorktreeSpec, EXOMONAD_BRANCH_PREFIX, EXOMONAD_SNAPSHOT_REF_PREFIX,

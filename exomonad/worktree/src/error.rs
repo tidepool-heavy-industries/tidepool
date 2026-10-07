@@ -90,8 +90,8 @@ pub enum WorktreeError {
     #[error("source repository has an operation in progress: {0}")]
     SourceOperationInProgress(InProgressKind),
 
-    /// One worktree, one agent. Binding a second agent to an already-bound
-    /// worktree fails here rather than silently producing two writers.
+    /// An exclusive Git operation found a conflicting holder. Workspace
+    /// attachment itself permits multiple independent actor memberships.
     #[error("worktree {worktree} is already bound to agent {holder}")]
     WorktreeBusy {
         worktree: WorktreeId,
@@ -112,8 +112,7 @@ pub enum WorktreeError {
     #[error("the executing principal is not authorized for worktree {0}")]
     WorktreeUnauthorized(WorktreeId),
 
-    /// The principal's actor role does not permit this Worktree operation at
-    /// all (for example, allocation from a worker profile).
+    /// The principal's concrete resource grant does not permit this operation.
     #[error("worktree authority denied: {0}")]
     WorktreeAuthorityDenied(String),
 

@@ -178,7 +178,7 @@ pub struct WorktreeReceipt {
     /// anyone else only after [`crate::WorktreeManager::restore_retained_view`]
     /// has materialized the sealed source layers on demand.
     pub cwd: PathBuf,
-    pub branch: BranchName,
+    pub branch: Option<BranchName>,
     /// The commit the managed branch was rooted at. For a snapshot creation
     /// this is the synthetic snapshot commit, not the pre-snapshot source
     /// `HEAD` (which `snapshot_ref` lets you reach via its parent).
@@ -222,6 +222,7 @@ pub struct WorktreeRegistry {
     root: PathBuf,
     records: DurableJsonDir,
     retained: DurableJsonDir,
+    pub(crate) adoption: std::sync::Arc<std::sync::Mutex<()>>,
     #[cfg(target_os = "linux")]
     pub(crate) views: crate::view::WorktreeViews,
 }
@@ -250,6 +251,7 @@ impl WorktreeRegistry {
             root: canonical_root,
             records,
             retained,
+            adoption: Default::default(),
             #[cfg(target_os = "linux")]
             views: crate::view::WorktreeViews::default(),
         };
@@ -534,7 +536,7 @@ impl WorktreeRegistry {
             let head = mounted_git.try_run(visible_root, &["rev-parse", "HEAD"])?;
             let branch = mounted_git.try_run(visible_root, &["symbolic-ref", "--short", "HEAD"])?;
             if head.trimmed() != receipt.source_head.as_str()
-                || branch.trimmed() != receipt.branch.as_str()
+                || Some(branch.trimmed()) != receipt.branch.as_ref().map(BranchName::as_str)
             {
                 return Err(WorktreeError::WorktreeAuthorityDenied(
                     "prepared source Git state changed before finalization".into(),

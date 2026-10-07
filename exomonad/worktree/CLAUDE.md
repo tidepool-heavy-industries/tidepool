@@ -28,7 +28,7 @@ written against; changing one is a cross-cutting change, not a local edit.
 | `git.rs` | **frozen** — the ONLY `git` subprocess call site + `inspect::` helpers |
 | `registry.rs` | durable `WorktreeReceipt` storage, restart lookup |
 | `create.rs` | `WorktreeSpec`/`WorktreeManager` — creation, lookup, listing (incl. the dirty path) |
-| `binding.rs` | one worktree, one agent — the binding state machine |
+| `binding.rs` | exact actor memberships, access grants, and custody generations |
 | `snapshot.rs` | temp-index synthetic commit + the untouched-source proof |
 | `monitor.rs` | poll/reconcile, coalesced deltas, honest classification |
 | `journal.rs` | durable append-only event journal (no replay) |

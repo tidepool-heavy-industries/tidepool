@@ -141,9 +141,8 @@ use std::time::Duration;
 use exomonad_actor::{
     ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
     ActorWorkbenchSource, ExternalApplicationFailure, ExternalApplicationFailureClass,
-    ExternalFailureDisposition, ForkWorkspaceAdmission, ForkWorkspaceAdmissionError,
-    ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
-    ResidentActorRoot, ResidentForest,
+    ExternalFailureDisposition, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
+    ResidentActorRoot, ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
 };
 
 use exomonad_actor::ForkEffort;
@@ -274,7 +273,7 @@ fn with_host_interpreters(
 }
 
 #[derive(Clone)]
-struct ActorForkWorkspaceAdmission {
+struct ActorWorkspaceAdmission {
     worktrees: Arc<Mutex<ActorWorktreeHandler>>,
     authority: ActorWorktreeAuthority,
     manager: WorktreeManager,
@@ -292,11 +291,11 @@ struct ActorWorkspaceCustody {
     inheritance_notice: Option<String>,
 }
 
-impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
+impl exomonad_actor::WorkspaceCustody for ActorWorkspaceCustody {
     fn transfer_to(
         &self,
         successor: ActorRef,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
         let state = self.state.lock();
         let process_absent = match state.launch {
             scoped_custody::LaunchCustody::Unclaimed => true,
@@ -306,17 +305,15 @@ impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
             | scoped_custody::LaunchCustody::Legacy => false,
         };
         if !process_absent || state.terminal.is_some() {
-            return Err(ForkWorkspaceAdmissionError {
+            return Err(WorkspaceAdmissionError {
                 detail: "workspace transfer requires a live actor with no possible native process"
                     .into(),
             });
         }
         let mut binding = self.binding.lock();
-        let lease = binding
-            .as_mut()
-            .ok_or_else(|| ForkWorkspaceAdmissionError {
-                detail: "workspace custody was already transferred".into(),
-            })?;
+        let lease = binding.as_mut().ok_or_else(|| WorkspaceAdmissionError {
+            detail: "workspace custody was already transferred".into(),
+        })?;
         self.bindings
             .lock()
             .transfer(
@@ -328,7 +325,7 @@ impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
                 ),
                 current_time_ms(),
             )
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: error.to_string(),
             })?;
         Ok(Arc::new(Self {
@@ -381,28 +378,29 @@ impl Drop for ActorWorkspaceCustody {
     }
 }
 
-impl ActorForkWorkspaceAdmission {
+impl ActorWorkspaceAdmission {
     fn bind_workspace(
         &self,
         actor: ActorRef,
         worktree: &str,
+        access: exomonad_worktree::WorkspaceAccess,
         workspace: Option<Arc<PreparedWorkspace>>,
         inheritance_notice: Option<String>,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
         if !WorktreeId::is_path_safe(worktree) {
-            return Err(ForkWorkspaceAdmissionError {
+            return Err(WorkspaceAdmissionError {
                 detail: "invalid custody worktree id".into(),
             });
         }
         if self
             .manager
             .lookup(&WorktreeId::from_raw(worktree))
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: error.to_string(),
             })?
             .is_none()
         {
-            return Err(ForkWorkspaceAdmissionError {
+            return Err(WorkspaceAdmissionError {
                 detail: "custody worktree is not registered".into(),
             });
         }
@@ -414,9 +412,10 @@ impl ActorForkWorkspaceAdmission {
             .bind(
                 &WorktreeId::from_raw(worktree),
                 &principal,
+                access,
                 current_time_ms(),
             )
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: error.to_string(),
             })?;
         Ok(Arc::new(ActorWorkspaceCustody {
@@ -431,74 +430,116 @@ impl ActorForkWorkspaceAdmission {
     }
 }
 
-impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
+impl WorkspaceAdmission for ActorWorkspaceAdmission {
     fn install_custody(
         &self,
         actor: ActorRef,
         worktree: &str,
-        role: exomonad_actor::ActorRole,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        let custody = self.bind_workspace(actor, worktree, None, None)?;
-        // Custody alone lets the actor inspect its tree; the grant is what
-        // lets a coding-role holder merge into it. Interactive actors are
-        // granted again at `PolicyInstalled` with the same value.
-        self.authority
-            .install_grant(actor.into(), worktree_grant(role));
-        Ok(custody)
+        access: exomonad_actor::WorkspaceAccess,
+    ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
+        self.bind_workspace(actor, worktree, access, None, None)
     }
 
-    fn admit(
+    fn prepare(
         &self,
         owner: ActorRef,
-        actor_path: String,
-        seed: ForkWorkspaceSeed,
-        _policy: exomonad_actor::ForkWorkspacePolicy,
-    ) -> exomonad_actor::ForkWorkspaceAdmissionFuture<'_> {
-        let worktrees = self.worktrees.clone();
+        selection: exomonad_actor::WorkspaceSelection,
+        requested: Option<exomonad_actor::WorkspaceAccess>,
+    ) -> exomonad_actor::WorkspaceAdmissionFuture<'_> {
         let custody = self.clone();
         Box::pin(async move {
-            let authorized = tidepool_runtime::spawn_blocking_in_span(move || {
-                let (spec, dirty_policy) = match seed {
-                    ForkWorkspaceSeed::Explicit(spec) => {
-                        let dirty_policy = spec.spec_dirty_policy;
-                        (Some(spec), dirty_policy)
+            let preparation = custody.clone();
+            let (handle, access) = tidepool_runtime::spawn_blocking_in_span(move || {
+                let authority = &preparation.authority;
+                let (tree, available) = match selection {
+                    exomonad_actor::WorkspaceSelection::SameDirectory => {
+                        if let Some(tree) = authority.bound_worktree(owner.into()) {
+                            let access = authority
+                                .workspace_access(owner.into(), &tree)
+                                .ok_or_else(|| WorkspaceAdmissionError {
+                                    detail: "caller workspace membership is unavailable".into(),
+                                })?;
+                            (tree, access)
+                        } else {
+                            let available = match authority.grant(owner.into()) {
+                                ActorWorktreeGrant::Repository => {
+                                    exomonad_worktree::WorkspaceAccess::ReadWrite
+                                }
+                                ActorWorktreeGrant::RepositoryReadOnly => {
+                                    exomonad_worktree::WorkspaceAccess::ReadOnly
+                                }
+                                _ => {
+                                    return Err(WorkspaceAdmissionError {
+                                        detail: "SameDir requires an attached caller workspace"
+                                            .into(),
+                                    })
+                                }
+                            };
+                            (
+                                preparation
+                                    .manager
+                                    .register_source_checkout()
+                                    .map_err(workspace_admission_error)?
+                                    .id()
+                                    .clone(),
+                                available,
+                            )
+                        }
                     }
-                    ForkWorkspaceSeed::CurrentCheckout(dirty_policy) => (None, dirty_policy),
+                    exomonad_actor::WorkspaceSelection::ExistingDirectory(handle) => authority
+                        .workspace_capability(&handle.raw)
+                        .map_err(workspace_admission_error)?,
+                    exomonad_actor::WorkspaceSelection::ForkDirectory(seed) => {
+                        let authorized = preparation
+                            .worktrees
+                            .lock()
+                            .authorize_committed_fork(owner.into(), seed)
+                            .map_err(|error| WorkspaceAdmissionError {
+                                detail: tidepool_handlers::render_worktree_error(&error),
+                            })?;
+                        let handle = authorized.materialize_committed().map_err(|error| {
+                            WorkspaceAdmissionError {
+                                detail: tidepool_handlers::render_worktree_error(&error),
+                            }
+                        })?;
+                        return Ok((
+                            handle,
+                            requested.unwrap_or(exomonad_worktree::WorkspaceAccess::ReadWrite),
+                        ));
+                    }
                 };
-                worktrees
-                    .lock()
-                    .authorize_fork_workspace(owner.into(), actor_path, spec, dirty_policy)
-                    // The worktree's own sentence, not a struct dump: "source
-                    // repository is dirty: … commit or stash first, or call
-                    // allowDirtySnapshot" is exactly what the forking actor
-                    // needs, and Debug throws the remedy away.
-                    .map_err(|error| ForkWorkspaceAdmissionError {
-                        detail: tidepool_handlers::render_worktree_error(&error),
-                    })
+                let access = requested.unwrap_or(available);
+                if !available.permits(access) {
+                    return Err(WorkspaceAdmissionError {
+                        detail: "workspace attachment cannot widen read-only access".into(),
+                    });
+                }
+                let handle = preparation
+                    .manager
+                    .lookup(&tree)
+                    .map_err(workspace_admission_error)?
+                    .map(|handle| tidepool_handlers::handlers::worktree::handle_to_wire(&handle))
+                    .ok_or_else(|| WorkspaceAdmissionError {
+                        detail: "workspace backing is not registered".into(),
+                    })?;
+                Ok((handle, access))
             })
             .await
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: format!("workspace preparation task failed: {error}"),
             })??;
-
-            let (handle, workspace, notice) = {
-                let handle =
-                    tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
-                        .await
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: format!("workspace preparation task failed: {error}"),
-                        })?
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: tidepool_handlers::render_worktree_error(&error),
-                        })?;
-                (handle, None, None)
-            };
-            let worktree = handle.handle_receipt.tree_id.raw.clone();
-            Ok(exomonad_actor::PreparedForkWorkspace::new(
+            let tree = handle.handle_receipt.tree_id.raw.clone();
+            Ok(exomonad_actor::PreparedWorkspaceAttachment::new(
                 handle,
-                move |actor| custody.bind_workspace(actor, &worktree, workspace, notice),
+                move |actor| custody.bind_workspace(actor, &tree, access, None, None),
             ))
         })
+    }
+}
+
+fn workspace_admission_error(error: exomonad_worktree::WorktreeError) -> WorkspaceAdmissionError {
+    WorkspaceAdmissionError {
+        detail: error.to_string(),
     }
 }
 
@@ -507,8 +548,8 @@ fn fork_workspace_admission(
     authority: ActorWorktreeAuthority,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
-) -> Arc<ActorForkWorkspaceAdmission> {
-    Arc::new(ActorForkWorkspaceAdmission {
+) -> Arc<ActorWorkspaceAdmission> {
+    Arc::new(ActorWorkspaceAdmission {
         bindings,
         runtime,
 
@@ -1268,7 +1309,7 @@ struct InteractiveApplicationOwner {
     native_retirement: NativeRetirement,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
     fork_gate: Option<exomonad_actor::ForkGroupGate>,
-    custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
+    custody: Option<Arc<dyn exomonad_actor::WorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
 
     embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
@@ -4044,21 +4085,29 @@ fn resident_command_roots(
     source: &Path,
     actor: ActorRef,
 ) -> Result<ResidentCommandRoots, exomonad_worktree::WorktreeError> {
-    let custody = authority
-        .bound_worktree(actor.into())
-        .and_then(|id| worktrees.registry().get(&id).ok().flatten())
-        .map(|receipt| receipt.cwd);
+    let bound = authority.bound_worktree(actor.into());
+    let custody = bound
+        .as_ref()
+        .map(|id| {
+            worktrees.lookup(id).and_then(|handle| {
+                handle.ok_or_else(|| {
+                    exomonad_worktree::WorktreeError::WorktreeNotRegistered(id.clone())
+                })
+            })
+        })
+        .transpose()?
+        .map(|handle| handle.cwd().to_owned());
+    let access = bound
+        .as_ref()
+        .and_then(|id| authority.workspace_access(actor.into(), id))
+        .unwrap_or(exomonad_worktree::WorkspaceAccess::ReadOnly);
     let git_common_dir = exomonad_worktree::git::inspect::git_common_dir(worktrees.git(), source)?;
     let root_allocations = worktrees.root_allocations();
     let grant = authority.grant(actor.into());
     let root = grant == ActorWorktreeGrant::Repository;
     let writable = writable_repository_roots(
         root,
-        if custody.is_some() && grant != ActorWorktreeGrant::RepositoryReadOnly {
-            true
-        } else {
-            false
-        },
+        access,
         source,
         custody.as_deref(),
         &git_common_dir,
@@ -4084,7 +4133,7 @@ struct ResidentCommandRoots {
     directory: PathBuf,
     protected: Vec<PathBuf>,
     writable: Vec<PathBuf>,
-    /// Whether this actor holds an exclusive worktree binding.
+    /// Whether this actor holds its exact workspace attachment.
     custody: bool,
 }
 
@@ -4100,7 +4149,7 @@ struct ResidentCommandRoots {
 /// typed observation, never by writing in the child's checkout.
 fn writable_repository_roots(
     root: bool,
-    workspace_writable: bool,
+    workspace_access: exomonad_worktree::WorkspaceAccess,
     source: &Path,
     worker_worktree: Option<&Path>,
     git_common_dir: &Path,
@@ -4112,12 +4161,12 @@ fn writable_repository_roots(
         let mut writable = vec![source.to_path_buf()];
         writable.extend(root_worktrees.map(Path::to_path_buf));
         writable
-    } else if workspace_writable {
+    } else if workspace_access == exomonad_worktree::WorkspaceAccess::ReadWrite {
         worker_worktree.map(Path::to_path_buf).into_iter().collect()
     } else {
         Vec::new()
     };
-    if root || workspace_writable {
+    if root || workspace_access == exomonad_worktree::WorkspaceAccess::ReadWrite {
         // Writable linked worktrees intentionally share objects, refs, config,
         // and per-worktree administrative state. Inspection-only actors must
         // observe the same metadata without being able to mutate it.

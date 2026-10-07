@@ -8,13 +8,11 @@ use std::path::{Path, PathBuf};
 use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
-use crate::label::sanitize_branch_label;
 use crate::registry::{
     validate_external_root, worktree_present, WorktreeOrigin, WorktreeReceipt,
     WorktreeRecordStatus, WorktreeRegistry, WorktreeSummary,
 };
 use crate::storage::now_ms;
-use tidepool_repr::ActorPath;
 
 /// Tidepool's owned branch namespace. Every managed branch lives under this
 /// prefix so a managed branch can never collide with, or be mistaken for, a
@@ -184,8 +182,8 @@ impl WorktreeHandle {
         &self.receipt.cwd
     }
 
-    pub fn branch(&self) -> &BranchName {
-        &self.receipt.branch
+    pub fn branch(&self) -> Option<&BranchName> {
+        self.receipt.branch.as_ref()
     }
 
     pub fn source_head(&self) -> &GitOid {
@@ -726,23 +724,17 @@ impl WorktreeManager {
         &self.source_repository
     }
 
-    /// Register the clean source checkout as a typed integration target.
-    ///
-    /// This records an existing checkout; it does not create, reset, stage, or
-    /// otherwise mutate Git state. Repeated calls return the same durable
-    /// receipt. The dirty and in-progress checks happen on every call so a
-    /// stale handle cannot turn the conservative merge path into an implicit
-    /// overwrite of user work.
+    /// Adopt the existing checkout identity without changing files, index or HEAD.
+    /// Dirty and detached states are valid workspace backings. Operations such
+    /// as merge enforce their own working-state requirements when invoked.
     pub fn register_source_checkout(&self) -> Result<WorktreeHandle, WorktreeError> {
+        let _adoption = self.registry.adoption.lock().map_err(|_| {
+            crate::storage::storage_failure(
+                self.registry.root(),
+                "workspace adoption lock poisoned",
+            )
+        })?;
         let source = inspect::work_tree(&self.git, &self.source_repository)?;
-        if let Some(kind) = inspect::in_progress(&self.git, &source)? {
-            return Err(WorktreeError::SourceOperationInProgress(kind));
-        }
-        let dirty = inspect::dirty_summary(&self.git, &source)?;
-        if !dirty.is_clean() {
-            return Err(WorktreeError::SourceDirty(dirty));
-        }
-
         let canonical_source =
             source
                 .canonicalize()
@@ -763,17 +755,14 @@ impl WorktreeManager {
             return Ok(WorktreeHandle::from_receipt(receipt));
         }
 
-        let branch = self.git.try_run(
-            &canonical_source,
-            &["symbolic-ref", "--quiet", "--short", "HEAD"],
-        )?;
+        let branch = crate::submission::HeadState::read(&self.git, &canonical_source)?;
         let head = self
             .git
             .try_run(&canonical_source, &["rev-parse", "HEAD"])?;
         let receipt = WorktreeReceipt {
             worktree_id: self.registry.mint_id()?,
             cwd: canonical_source.clone(),
-            branch: BranchName::from_raw(branch.trimmed()),
+            branch: branch.branch().cloned(),
             source_head: GitOid::from_raw(head.trimmed()),
             snapshot_ref: None,
             origin: WorktreeOrigin::SourceCheckout,
@@ -794,18 +783,7 @@ impl WorktreeManager {
     /// materializing and finalize it after; a provisional row that never
     /// finalized is discoverable as such.
     pub fn create(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle, WorktreeError> {
-        self.create_with_branch(spec, None)
-    }
-
-    /// Create a worktree whose readable Git branch is the exact projection of
-    /// an already allocated actor lineage. The actor registry is the naming
-    /// authority; this owner performs the Git mutation and durable receipt.
-    pub fn create_for_actor_path(
-        &self,
-        spec: &WorktreeSpec,
-        actor_path: &ActorPath,
-    ) -> Result<WorktreeHandle, WorktreeError> {
-        self.create_with_branch(spec, Some(BranchName::from_raw(actor_path.git_branch())))
+        self.create_spec(spec)
     }
 
     /// Allocate a committed fallback without rejecting or committing dirty files.
@@ -813,7 +791,6 @@ impl WorktreeManager {
     pub fn create_committed_fork(
         &self,
         source: &WorktreeSource,
-        actor_path: &ActorPath,
     ) -> Result<WorktreeHandle, WorktreeError> {
         let (repository, origin) = match source {
             WorktreeSource::CurrentRepository => (
@@ -853,8 +830,6 @@ impl WorktreeManager {
                 git_repository: repository.clone(),
                 source_repository: repository,
             },
-            &actor_path.to_string(),
-            Some(BranchName::from_raw(actor_path.git_branch())),
             None,
         )
     }
@@ -863,11 +838,10 @@ impl WorktreeManager {
     /// files or converting staging into a commit. The source-view owner invokes
     /// this while holding native mutation admission and retains the prepared
     /// checkout until its source mount is installed. Explicit commit seeds use
-    /// `create_for_actor_path` instead.
+    /// `create` instead.
     pub fn prepare_inherited_source(
         &self,
         source: &WorktreeSource,
-        actor_path: &ActorPath,
     ) -> Result<PreparedSourceWorktree, WorktreeError> {
         let (source, origin) = match source {
             WorktreeSource::CurrentRepository => (
@@ -937,13 +911,7 @@ impl WorktreeManager {
             git_repository: source.clone(),
             source_repository: source.clone(),
         };
-        let handle = self.materialize(
-            self.registry.mint_id()?,
-            resolved,
-            &actor_path.to_string(),
-            Some(BranchName::from_raw(actor_path.git_branch())),
-            Some(&index),
-        )?;
+        let handle = self.materialize(self.registry.mint_id()?, resolved, Some(&index))?;
         // The inherited overlay deliberately omits .exomonad. Materialize
         // authored files from the exact checkpoint into this child's durable
         // host checkout before its private .exomonad mount is prepared.
@@ -1295,23 +1263,17 @@ impl WorktreeManager {
         )?))
     }
 
-    fn create_with_branch(
-        &self,
-        spec: &WorktreeSpec,
-        named_branch: Option<BranchName>,
-    ) -> Result<WorktreeHandle, WorktreeError> {
+    fn create_spec(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle, WorktreeError> {
         let id = self.registry.mint_id()?;
         let resolved = self.resolve_source(spec, &id)?;
 
-        self.materialize(id, resolved, &spec.label, named_branch, None)
+        self.materialize(id, resolved, None)
     }
 
     fn materialize(
         &self,
         id: WorktreeId,
         resolved: ResolvedSeed,
-        label: &str,
-        named_branch: Option<BranchName>,
         inherited_index: Option<&Path>,
     ) -> Result<WorktreeHandle, WorktreeError> {
         let host_git = self.git.on_host();
@@ -1323,18 +1285,12 @@ impl WorktreeManager {
             detail: error.to_string(),
         })?;
         let cwd = canonical_root.join(id.as_str());
-        let branch = named_branch.unwrap_or_else(|| {
-            BranchName::from_raw(format!(
-                "{EXOMONAD_BRANCH_PREFIX}/{}-{}",
-                sanitize_branch_label(label),
-                id.as_str()
-            ))
-        });
+        let branch = BranchName::from_raw(format!("{EXOMONAD_BRANCH_PREFIX}/{}", id.as_str()));
 
         let provisional = WorktreeReceipt {
             worktree_id: id.clone(),
             cwd: cwd.clone(),
-            branch: branch.clone(),
+            branch: Some(branch.clone()),
             source_head: resolved.seed.clone(),
             snapshot_ref: resolved.snapshot_ref.clone(),
             origin: resolved.origin.clone(),
