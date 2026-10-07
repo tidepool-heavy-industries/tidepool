@@ -5460,6 +5460,67 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    fn catalog_history_coverage(ops: &[CatalogOp]) -> CatalogCoverage {
+        let mut model = Vec::<(usize, u8)>::new();
+        let mut ever_offered = [false; QUERY_OWNER_COUNT];
+        let mut covered = CatalogCoverage::default();
+        let mut previous_was_query = false;
+        for op in ops {
+            match *op {
+                CatalogOp::Offer(owner, revision) => {
+                    let owner = owner as usize;
+                    if previous_was_query {
+                        covered.warm_mutations += 1;
+                    }
+                    match model.iter_mut().find(|(existing, _)| *existing == owner) {
+                        Some((_, current)) if *current == revision => {
+                            covered.identical_reoffers += 1;
+                        }
+                        Some((_, current)) => {
+                            covered.replacements += 1;
+                            *current = revision;
+                        }
+                        None => {
+                            if ever_offered[owner] {
+                                covered.reoffers_after_remove += 1;
+                            }
+                            model.push((owner, revision));
+                        }
+                    }
+                    ever_offered[owner] = true;
+                    covered.offers += 1;
+                    previous_was_query = false;
+                }
+                CatalogOp::Remove(owner) => {
+                    let owner = owner as usize;
+                    if previous_was_query {
+                        covered.warm_mutations += 1;
+                    }
+                    if let Some(position) =
+                        model.iter().position(|(existing, _)| *existing == owner)
+                    {
+                        model.remove(position);
+                        covered.removes += 1;
+                    } else {
+                        covered.absent_removes += 1;
+                    }
+                    previous_was_query = false;
+                }
+                CatalogOp::Query(mask) => {
+                    if mask.count_ones() < QUERY_OWNER_COUNT as u32 {
+                        covered.sparse_queries += 1;
+                    }
+                    if model.iter().all(|(owner, _)| mask & (1u8 << *owner) == 0) {
+                        covered.empty_queries += 1;
+                    }
+                    covered.queries += 1;
+                    previous_was_query = true;
+                }
+            }
+        }
+        covered
+    }
+
     fn replay_catalog_history(
         cache: &Path,
         roots: &[tempfile::TempDir],
@@ -5595,15 +5656,15 @@ pub(crate) mod tests {
             })
             .collect::<Vec<_>>();
 
+        // Census only the deterministic history shape here; every production
+        // replay stays inside the configured runner so it can shrink and persist.
         let mut support_runner = TestRunner::deterministic();
         let mut support = CatalogCoverage::default();
         for _ in 0..8 {
             let tree = targeted_catalog_history()
                 .new_tree(&mut support_runner)
                 .unwrap();
-            support.accumulate(
-                replay_catalog_history(cache.path(), &roots, &variants, &tree.current()).unwrap(),
-            );
+            support.accumulate(catalog_history_coverage(&tree.current()));
         }
         assert!(support.replacements >= 8);
         assert!(support.identical_reoffers >= 8);
@@ -5632,7 +5693,7 @@ pub(crate) mod tests {
             Ok(())
         });
         eprintln!(
-            "ordinary candidate catalog observations: mixed={:?}, targeted={support:?}",
+            "ordinary candidate catalog observations: mixed={:?}, targeted_shape={support:?}",
             *observed.borrow()
         );
         if let Err(error) = result {
