@@ -492,6 +492,36 @@ impl WorkspaceAdmission for ActorWorkspaceAdmission {
                         .workspace_capability(&handle.raw)
                         .map_err(workspace_admission_error)?,
                     exomonad_actor::WorkspaceSelection::ForkDirectory(seed) => {
+                        let seed = match seed {
+                            exomonad_actor::WorkspaceSeedWire::CurrentCheckout => {
+                                let tree =
+                                    if let Some(tree) = authority.bound_worktree(owner.into()) {
+                                        tree
+                                    } else if matches!(
+                                        authority.grant(owner.into()),
+                                        ActorWorktreeGrant::Repository
+                                            | ActorWorktreeGrant::RepositoryReadOnly
+                                    ) {
+                                        preparation
+                                            .manager
+                                            .register_source_checkout()
+                                            .map_err(workspace_admission_error)?
+                                            .id()
+                                            .clone()
+                                    } else {
+                                        return Err(WorkspaceAdmissionError {
+                                            detail: "currentCheckout requires an attached backing"
+                                                .into(),
+                                        });
+                                    };
+                                tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                                    tidepool_bridge_effects::WtWorktreeId {
+                                        raw: tree.as_str().into(),
+                                    },
+                                )
+                            }
+                            exomonad_actor::WorkspaceSeedWire::CommittedSource(source) => source,
+                        };
                         let authorized = preparation
                             .worktrees
                             .lock()

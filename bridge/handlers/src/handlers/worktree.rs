@@ -195,10 +195,15 @@ impl ActorWorktreeAuthority {
         if !available.is_some_and(|access| access.permits(requested)) {
             return Err(DomainWorktreeError::WorktreeUnauthorized(tree.clone()));
         }
+        let mut grants = self.workspace_grants.write();
+        if let Some((token, _)) = grants
+            .iter()
+            .find(|(_, (issued_tree, access))| issued_tree == tree && *access == requested)
+        {
+            return Ok(token.clone());
+        }
         let token = uuid::Uuid::new_v4().to_string();
-        self.workspace_grants
-            .write()
-            .insert(token.clone(), (tree.clone(), requested));
+        grants.insert(token.clone(), (tree.clone(), requested));
         Ok(token)
     }
 

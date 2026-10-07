@@ -113,6 +113,72 @@ async fn shared_directory_attachments_have_independent_custody_and_live_files() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn current_checkout_fork_pins_the_parent_backing_not_the_project_root() {
+    let (repository, _storage, admission) = fixture();
+    let root = ActorRef::first(exomonad_actor::ActorId(1));
+    admission
+        .authority
+        .install_grant(root.into(), ActorWorktreeGrant::Repository);
+    let parent_preparation = admission
+        .prepare(
+            root,
+            WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CommittedSource(
+                tidepool_bridge_effects::WtWorktreeSource::SourceCurrentRepository,
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+    let parent_tree = WorktreeId::from_raw(
+        parent_preparation
+            .handle()
+            .handle_receipt
+            .tree_id
+            .raw
+            .clone(),
+    );
+    let parent_backing = admission.manager.lookup(&parent_tree).unwrap().unwrap();
+    let parent = ActorRef::first(exomonad_actor::ActorId(2));
+    let custody = parent_preparation.install(parent).unwrap();
+    let expected;
+    {
+        let git = admission.manager.git();
+        let _write = git.write_scope(parent_backing.cwd()).unwrap();
+        std::fs::write(parent_backing.cwd().join("shared.txt"), "parent committed").unwrap();
+        git.try_run(parent_backing.cwd(), &["add", "shared.txt"])
+            .unwrap();
+        git.try_run(parent_backing.cwd(), &["commit", "-qm", "parent change"])
+            .unwrap();
+        expected = git
+            .try_run(parent_backing.cwd(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trimmed()
+            .to_owned();
+    }
+    assert_ne!(expected, repository.writer().head().unwrap().as_str());
+    std::fs::write(parent_backing.cwd().join("shared.txt"), "parent live dirt").unwrap();
+    let child = admission
+        .prepare(
+            parent,
+            WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CurrentCheckout),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(child.handle().handle_receipt.source_head.raw, expected);
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&child.handle().handle_receipt.cwd).join("shared.txt"))
+            .unwrap(),
+        "parent committed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_backing.cwd().join("shared.txt")).unwrap(),
+        "parent live dirt"
+    );
+    drop(custody);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn opaque_workspace_attachment_inherits_access_and_outlives_issuer() {
     let (repository, _storage, admission) = fixture();
     let parent = ActorRef::first(exomonad_actor::ActorId(1));
