@@ -345,46 +345,27 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
     let policy = campaign.root_installation.policy.as_ref();
     let helpers = dispatch_haskell_script(
         policy,
-        "pure (LookupFixture.rankingCheck, LookupFixture.packingCheck)",
+        "if LookupFixture.rankingCheck then pure () else error \"lookup ranking contract failed\"\nif LookupFixture.packingCheck then pure () else error \"lookup packing contract failed\"",
     )
     .await;
     assert_eq!(
-        helpers["items"][0]["output"].as_str().map(|text| text
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>()),
-        Some("(True,True)".to_owned()),
+        helpers["status"], "committed",
         "pure policy contracts: {helpers}"
     );
-    let raw = dispatch_haskell_script(policy, "LookupFixture.rawLookupCheck")
-        .await
-        .to_string();
-    assert!(raw.contains("True"), "raw lookup failed: {raw}");
-    let example = dispatch_haskell_script(policy, "LookupFixture.exampleIdentityCheck")
-        .await
-        .to_string();
-    assert!(
-        example.contains("True"),
-        "resolved example identity lost: {example}"
-    );
-    let rendered = dispatch_haskell_script(policy, "LookupFixture.renderedExampleCheck")
-        .await
-        .to_string();
-    assert!(
-        rendered.contains("True"),
-        "inline example rendering failed: {rendered}"
-    );
-    let namespaces = dispatch_haskell_script(policy, "LookupFixture.namespaceCheck")
-        .await
-        .to_string();
-    assert!(
-        namespaces.contains("True"),
-        "namespace identity lost: {namespaces}"
-    );
-    let empty = dispatch_haskell_script(policy, "LookupFixture.emptySelectionCheck")
-        .await
-        .to_string();
-    assert!(empty.contains("True"), "empty selection failed: {empty}");
+    for check in [
+        "rawLookupCheck",
+        "exampleIdentityCheck",
+        "renderedExampleCheck",
+        "namespaceCheck",
+        "emptySelectionCheck",
+    ] {
+        let checked = dispatch_haskell_script(
+            policy,
+            &format!("checked <- LookupFixture.{check}\nif checked then pure () else error \"{check} failed\""),
+        )
+        .await;
+        assert_eq!(checked["status"], "committed", "{check}: {checked}");
+    }
     assert!(
         backend.requests.lock().is_empty(),
         "raw and empty paths must bypass Jev"
@@ -643,15 +624,14 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     let short_page = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         &format!(
-            "Project.Shell.sectionPage (Project.Shell.outputSnapshot {binding} {} {}) (Project.Shell.SectionId 1)",
+            "import qualified Tidepool.Command as Cmd\npage <- Project.Shell.sectionPage (Project.Shell.outputSnapshot {binding} {} {}) (Project.Shell.SectionId 1)\ncase page of {{ Left (Project.Shell.SnapshotExpired Cmd.Stdout _) -> pure (); _ -> error \"short section reread did not report expired stdout\" }}",
             command_output.len(),
             "ESSENTIAL-diagnostic\n".len()
         ),
     )
-    .await
-    .to_string();
-    assert!(
-        short_page.contains("SnapshotExpired Stdout"),
+    .await;
+    assert_eq!(
+        short_page["status"], "committed",
         "a short section reread must report snapshot loss: {short_page}"
     );
     campaign.forest.shutdown().await;
@@ -985,7 +965,7 @@ const CELL: &str = r#"answer <- J.ask1 (J.rawState (String "retry loop in fetch;
      (J.alt #not_here "The branch is not in this file" (0 :: Int)
         J..| J.many #line (\(k, _, _) -> k) (\(_, w, _) -> w)
                [("line-4", "if attempts > 3", 4), ("line-12", "if elapsed > timeout", 12)]))
-either (const 0) (\a -> J.handle a (#not_here id J..| #line (\_ (_, _, n) -> n))) answer"#;
+if either (const 0) (\a -> J.handle a (#not_here id J..| #line (\_ (_, _, n) -> n))) answer == 12 then pure () else error "choice did not select line 12""#;
 
 #[tokio::test]
 async fn jev_choice_round_trips_through_the_host_backend() {
@@ -1006,8 +986,6 @@ async fn jev_choice_round_trips_through_the_host_backend() {
     let campaign = campaign_with(Arc::clone(&backend)).await;
     let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), CELL).await;
     assert_eq!(result["status"], "committed", "{result}");
-    let items = result["items"].as_array().unwrap();
-    assert_eq!(items.last().unwrap()["output"], "12", "{result}");
     {
         let requests = backend.requests.lock();
         assert_eq!(requests.len(), 1);
@@ -1031,7 +1009,7 @@ async fn score_then_choice_packets_with_alternatives_install_on_one_machine() {
         campaign.root_installation.policy.as_ref(),
         r#"let rubric = J.level #low "low" (0 :: Int) J..| J.level #high "high" 1
 answer <- J.ask (J.rawState (String "one machine regression")) (#q := J.score "How important is this?" rubric)
-fmap (\a -> a.q.expectation) answer"#,
+if either (const False) (\a -> a.q.expectation == 1) answer then pure () else error "score did not select the high criterion""#,
     )
     .await;
     assert_eq!(score["status"], "committed", "Score packet failed: {score}");
@@ -1040,17 +1018,12 @@ fmap (\a -> a.q.expectation) answer"#,
         campaign.root_installation.policy.as_ref(),
         r#"answer <- J.ask1 (J.rawState (String "one machine regression"))
   (J.choice "Which branch?" (J.alt #first "First branch" (1 :: Int) J..| J.alt #second "Second branch" 2))
-either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) answer"#,
+if either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) answer == 2 then pure () else error "choice did not select the second branch""#,
     )
     .await;
     assert_eq!(
         choice["status"], "committed",
         "Choice packet failed after Score: {choice}"
-    );
-    assert_eq!(
-        choice["items"].as_array().unwrap().last().unwrap()["output"],
-        "2",
-        "Choice answer did not reach the selected branch: {choice}"
     );
 
     {
@@ -1077,17 +1050,17 @@ async fn jev_call_failure_is_a_typed_left() {
         answer: Err(JevCallFailure::Unconfigured),
     });
     let campaign = campaign_with(backend).await;
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &CELL.replace(
-            "either (const 0) (\\a -> J.handle a (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer",
-            "either (const \"failed\") (const \"answered\") answer :: Text",
-        ),
-    )
-    .await;
+    let failure_cell = CELL.replace(
+        "if either (const 0) (\\a -> J.handle a (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer == 12 then pure () else error \"choice did not select line 12\"",
+        "case answer of { Left _ -> pure (); Right _ -> error \"unconfigured Jev did not return a typed Left\" }",
+    );
+    assert_ne!(
+        failure_cell, CELL,
+        "the typed-failure assertion must replace the success assertion"
+    );
+    let result =
+        dispatch_haskell_script(campaign.root_installation.policy.as_ref(), &failure_cell).await;
     assert_eq!(result["status"], "committed", "{result}");
-    let items = result["items"].as_array().unwrap();
-    assert_eq!(items.last().unwrap()["output"], "failed", "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1121,12 +1094,10 @@ async fn retained_packet_bindings_reach_a_later_statement() {
         r#"let offers = J.alt #line_4 "if attempts > 3" (4 :: Int) J..| J.alt #line_12 "if elapsed > timeout" 12
 let packet = #place := J.choice "Which line begins the retry-timeout branch?" offers :& #enough := J.noul "Is the branch visible?"
 answer <- J.ask (J.rawState (String "retry loop in fetch")) packet
-either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #line_12 id)) answer"#,
+if either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #line_12 id)) answer == 12 then pure () else error "retained record-dot packet did not select line 12""#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
-    let items = result["items"].as_array().unwrap();
-    assert_eq!(items.last().unwrap()["output"], "12", "{result}");
     assert_eq!(backend.requests.lock().len(), 1);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -1149,15 +1120,12 @@ async fn a_per_row_battery_sends_one_request_with_one_question_per_row() {
 answer <- J.ask (J.rawState (String "choosing what to read next"))
   ( #enough := J.noul "Is the listing enough to choose from?"
  :& #worth_reading := J.each fst (\(_, body) -> J.noul ("Worth reading in full? " <> body)) previews )
-either (T.pack . show) (const "answered") answer :: Text"##,
+case answer of
+  Left problem | T.isInfixOf "no Jev endpoint is configured" (T.pack (show problem)) -> pure ()
+  _ -> error "per-row battery did not retain the unconfigured Jev failure""##,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
-    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(output.contains("no Jev endpoint is configured"), "{result}");
     {
         let requests = backend.requests.lock();
         assert_eq!(requests.len(), 1);
@@ -1202,12 +1170,10 @@ async fn live_jev_from_a_haskell_cell() {
      (J.alt #windowsill "On a windowsill" (1 :: Int)
         J..| J.alt #roof "On a roof" 2
         J..| J.alt #bed "In a bed" 3))
-either (const 0) (\a -> J.handle a (#windowsill id J..| #roof id J..| #bed id)) answer"#,
+if either (const 0) (\a -> J.handle a (#windowsill id J..| #roof id J..| #bed id)) answer == 1 then pure () else error "live Jev did not select the windowsill""#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
-    let items = result["items"].as_array().unwrap();
-    assert_eq!(items.last().unwrap()["output"], "1", "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1414,7 +1380,7 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
     let campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
-                |admission| admission,
+            |admission| admission,
             |config| {
                 config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
                 pinned_jev_agent_spec_workspace(config);
@@ -1655,7 +1621,11 @@ async fn next_watchdog_child(
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     campaign.acknowledge_native_spawn(&child);
     child
@@ -1704,7 +1674,7 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     let mut campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
-                |admission| admission,
+            |admission| admission,
             |config| {
                 config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
                 pinned_watchdog_workspace(config);
@@ -1990,13 +1960,13 @@ import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..), annotationToJson
 import Tidepool.Aeson.Value (Value (String, Null), encodeValue)
 let sent = ToolCall "haskell" (String "Right receipt <- sendMessage p \"reset: git reset --hard master && rm -rf target\"")
 annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haskell" "toolResult1" 1 Null "Right (NotificationReceipt ((2,1),((1,1),(\"run:1:1\",7))))")
-(encodeValue (annotationToJson annotation), Watchdog.messageSend (ToolCall "haskell" (String "_ <- command \"rm -rf x\"\nsendMessage p \"done\"")), Watchdog.messageSend (ToolCall "bash" (String "sendMessage p \"x\"")), Watchdog.hostSettlementRefusal "reply not settled: your parent sent an update to request 2 that has not been confirmed as shown to you yet. Nothing was sent.", Watchdog.hostSettlementRefusal "error: build failed")"#,
+let rendered = encodeValue (annotationToJson annotation)
+if T.isInfixOf "abstained" rendered && T.isInfixOf "message send: sendMessage" rendered then pure () else error "watchdog did not abstain on the message-send cell"
+let facts = (Watchdog.messageSend (ToolCall "haskell" (String "_ <- command \"rm -rf x\"\nsendMessage p \"done\"")), Watchdog.messageSend (ToolCall "bash" (String "sendMessage p \"x\"")), Watchdog.hostSettlementRefusal "reply not settled: your parent sent an update to request 2 that has not been confirmed as shown to you yet. Nothing was sent.", Watchdog.hostSettlementRefusal "error: build failed")
+if facts == (Nothing, Nothing, True, False) then pure () else error "watchdog message/refusal classification changed""#,
     )
-    .await
-    .to_string();
-    assert!(judged.contains("abstained"), "{judged}");
-    assert!(judged.contains("message send: sendMessage"), "{judged}");
-    assert!(judged.contains("Nothing,Nothing,True,False)"), "{judged}");
+    .await;
+    assert_eq!(judged["status"], "committed", "{judged}");
 
     let gate = dispatch_haskell_script(
         policy.as_ref(),
@@ -2026,7 +1996,7 @@ display (Watchdog.trivialCall call (ToolResult "bash" "toolResult2" 2 (toJSON fa
 
     // An escalation carries the tool output whole within its budget, with no
     // excerpt notice; only a larger output is cut, and the cut names the budget.
-    let evidence = |output: &'static str| {
+    let evidence = |output: &'static str, check: &'static str| {
         let policy = policy.clone();
         async move {
             dispatch_haskell_script(
@@ -2035,28 +2005,25 @@ display (Watchdog.trivialCall call (ToolResult "bash" "toolResult2" 2 (toJSON fa
                     r#"import qualified Project.Watchdog as Watchdog
 import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..))
 import Tidepool.Aeson.Value (Value (String, Null))
-Watchdog.escalationEvidence (ToolCall "haskell" (String "build")) (ToolResult "haskell" "toolResult4" 4 Null {output})"#
+let retainedEvidence = Watchdog.escalationEvidence (ToolCall "haskell" (String "build")) (ToolResult "haskell" "toolResult4" 4 Null {output})
+if {check} then pure () else error "watchdog escalation evidence contract failed""#
                 ),
             )
             .await
-            .to_string()
         }
     };
-    let whole = evidence(r#""line one\nline two""#).await;
-    assert!(
-        whole.contains(
-            "Tool output (complete):\\nline one\\nline two\\nResult reference (held by the child): toolResult4"
-        ),
-        "{whole}"
-    );
-    assert!(!whole.contains("escalation budget"), "{whole}");
-    let cut = evidence(r#"(mconcat (replicate 9000 "x"))"#).await;
-    assert!(
-        cut.contains(
-            "Tool output (first 8192 of 9000 characters; over the 8192-character escalation budget):"
-        ),
-        "{cut}"
-    );
+    let whole = evidence(
+        r#""line one\nline two""#,
+        r#"T.isInfixOf "Tool output (complete):\nline one\nline two\nResult reference (held by the child): toolResult4" retainedEvidence && not (T.isInfixOf "escalation budget" retainedEvidence)"#,
+    )
+    .await;
+    assert_eq!(whole["status"], "committed", "{whole}");
+    let cut = evidence(
+        r#"(mconcat (replicate 9000 "x"))"#,
+        r#"T.isInfixOf "Tool output (first 8192 of 9000 characters; over the 8192-character escalation budget):" retainedEvidence"#,
+    )
+    .await;
+    assert_eq!(cut["status"], "committed", "{cut}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
