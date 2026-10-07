@@ -2,7 +2,9 @@
 //! Expectations come from fixture facts and finite-set recomputation.
 use super::*;
 use crate::certified_products::{
-    tests::{original_groups_fixture, recovered_witness_fixtures},
+    tests::{
+        original_groups_fixture, original_groups_fixture_with_interface, recovered_witness_fixtures,
+    },
     PendingImportOwner,
 };
 use crate::declaration_context::ExactDeclarationContext;
@@ -66,7 +68,7 @@ impl Catalog {
         let placeholders = (0..VERSIONS)
             .flat_map(|version| (0..MODULES).map(move |module| (module, version)))
             .map(|(module, version)| {
-                original_groups_fixture(
+                original_groups_fixture_with_interface(
                     &owner(module).module,
                     ORDINALS
                         .iter()
@@ -74,6 +76,7 @@ impl Catalog {
                         .collect(),
                     version as u8 + 1,
                     &BTreeMap::new(),
+                    owner(module).module.into_bytes(),
                 )
             })
             .collect::<Vec<_>>();
@@ -103,11 +106,12 @@ impl Catalog {
                             (*ordinal, imports)
                         })
                         .collect();
-                    original_groups_fixture(
+                    original_groups_fixture_with_interface(
                         &owner(module).module,
                         groups,
                         version as u8 + 1,
                         &BTreeMap::new(),
+                        owner(module).module.into_bytes(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -136,7 +140,7 @@ impl Catalog {
                     .then(|| {
                         (
                             ("fixture".to_owned(), owner(module + 1).module),
-                            Sha256::digest([0x42]).into(),
+                            Sha256::digest(owner(module + 1).module.as_bytes()).into(),
                         )
                     })
                     .into_iter()

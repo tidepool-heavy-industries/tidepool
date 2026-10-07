@@ -7692,7 +7692,7 @@ pub(crate) mod tests {
         original_groups_fixture_with_interface(module, groups, version, packages, vec![0x42])
     }
 
-    fn original_groups_fixture_with_interface(
+    pub(crate) fn original_groups_fixture_with_interface(
         module: &str,
         groups: Vec<(u32, Vec<PendingImportOwner>)>,
         version: u8,
