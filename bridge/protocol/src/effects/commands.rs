@@ -263,7 +263,9 @@ pub fn commands() -> Effect {
                 ],
             ),
         ],
-        external_types: &[],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "WorkerLifetime", rust_wire: "crate::WorkerLifetime", core_module: None,
+        }],
         errors: None,
         verbs: vec![
             verb(
@@ -275,6 +277,19 @@ pub fn commands() -> Effect {
                     "tidepool_bridge_effects::CommandSpec",
                 )],
                 HsType::either(named("CommandError"), HsType::Text),
+            ),
+            verb(
+                "CommandStartOwnedWith", "command_start_owned_with",
+                vec![
+                    ("spec", named("CommandSpec"), "tidepool_bridge_effects::CommandSpec"),
+                    ("lifetime", named("WorkerLifetime"), "crate::WorkerLifetime"),
+                ],
+                HsType::either(named("CommandError"), HsType::Text),
+            ),
+            verb(
+                "CommandRetainWith", "command_retain_with",
+                vec![("job", HsType::Text, "String"), ("lifetime", named("WorkerLifetime"), "crate::WorkerLifetime")],
+                HsType::either(named("CommandError"), HsType::Unit),
             ),
             verb(
                 "CommandBackgroundWith",

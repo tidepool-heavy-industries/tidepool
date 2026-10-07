@@ -27,6 +27,9 @@ module Tidepool.Command
     withTerminal,
     start,
     tryStart,
+    tryStartWith,
+    retain,
+    Lifetime,
     detach,
     tryDetach,
     background,
@@ -109,6 +112,7 @@ import Tidepool.Effects.Core
     CommandStatus (..),
     CommandStream (..),
     Commands (..),
+    WorkerLifetime,
   )
 import Tidepool.Inspection
   ( Display (..),
@@ -221,6 +225,19 @@ start command = tryStart command >>= checked
 -- | Start a command, returning the refusal instead of failing the cell.
 tryStart :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
 tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
+
+-- | Cleanup lifetime, shared with subagents and requests.
+type Lifetime = WorkerLifetime
+
+-- | Start with explicit cleanup membership; defaults of 'tryStart' remain
+-- invocation ownership. Selecting a scope checks its runtime admission gate.
+tryStartWith :: Member Commands effects => Lifetime -> Command -> Eff effects (Either CommandError Job)
+tryStartWith lifetime (Command spec) = fmap Job <$> send (CommandStartOwnedWith spec lifetime)
+
+-- | Move cleanup membership while preserving the job's controlling actor and
+-- construction provenance. Returning a Job does not transfer its lifetime.
+retain :: Member Commands effects => Job -> Lifetime -> Eff effects (Either CommandError ())
+retain (Job key) lifetime = send (CommandRetainWith key lifetime)
 
 -- | Transfer an owned job to this actor's lifetime. Borrowed handles cannot
 -- detach or cancel another owner's work.

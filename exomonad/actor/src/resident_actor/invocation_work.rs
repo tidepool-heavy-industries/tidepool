@@ -369,6 +369,7 @@ impl InvocationWork {
         .is_ok()
     }
 
+    #[cfg(test)]
     pub(crate) fn register_command(&self, id: String) -> Result<(), CommandError> {
         self.with_admission_state(|state| {
             if !state.commands.contains(&id) {
@@ -376,6 +377,80 @@ impl InvocationWork {
             }
         })
         .map_err(CommandError::CommandUnavailable)
+    }
+
+    pub(super) fn find_command_owner(
+        self: &Arc<Self>,
+        marker: &crate::request::ResourceCleanupOwner,
+    ) -> Option<Arc<Self>> {
+        if &self.resource_cleanup_owner() == marker {
+            return Some(self.clone());
+        }
+        self.scopes()
+            .into_iter()
+            .find_map(|scope| scope.find_command_owner(marker))
+    }
+
+    pub(crate) fn register_command_with_jobs(
+        &self,
+        jobs: &CommandJobs,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        self.with_admission_state(|state| {
+            if state.commands.iter().any(|command| command == id) {
+                return if jobs.cleanup_owner(self.owner, id)? == self.resource_cleanup_owner() {
+                    Ok(())
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+            }
+            jobs.transfer_cleanup_owner(
+                self.owner,
+                id,
+                &crate::request::ResourceCleanupOwner::Actor,
+                self.resource_cleanup_owner(),
+                |probe| {
+                    state.commands.push(id.into());
+                    if let Some(probe) = probe {
+                        if !state.commands.iter().any(|job| job == probe) {
+                            state.commands.push(probe.into());
+                        }
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn adopt_actor_command(
+        &self,
+        jobs: &CommandJobs,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.with_admission_state(|state| {
+            jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &crate::request::ResourceCleanupOwner::Actor,
+                self.resource_cleanup_owner(),
+                |probe| {
+                    if !state.commands.iter().any(|command| command == id) {
+                        state.commands.push(id.into());
+                    }
+                    if let Some(probe) = probe {
+                        if !state.commands.iter().any(|job| job == probe) {
+                            state.commands.push(probe.into());
+                        }
+                    }
+                    state.detached_commands.remove(id);
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
     }
 
     pub(super) fn detach_command(
@@ -387,23 +462,34 @@ impl InvocationWork {
         if caller != self.owner || jobs.owner(id)? != caller {
             return Err(CommandError::CommandUnauthorized);
         }
-        let probe = jobs.source_probe(id)?;
         self.with_admission_state(|state| {
             if state.detached_commands.contains(id) {
-                return Ok(());
+                return if jobs.cleanup_owner(caller, id)?
+                    == crate::request::ResourceCleanupOwner::Actor
+                {
+                    Ok(())
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
             }
-            let Some(index) = state.commands.iter().position(|job| job == id) else {
+            if !state.commands.iter().any(|command| command == id) {
                 return Err(CommandError::CommandUnauthorized);
-            };
-            state.commands.remove(index);
-            state.detached_commands.insert(id.into());
-            if let Some(probe) = probe {
-                if let Some(index) = state.commands.iter().position(|job| job == &probe) {
-                    state.commands.remove(index);
-                    state.detached_commands.insert(probe);
-                }
             }
-            Ok(())
+            jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &self.resource_cleanup_owner(),
+                crate::request::ResourceCleanupOwner::Actor,
+                |probe| {
+                    state
+                        .commands
+                        .retain(|job| job != id && probe != Some(job.as_str()));
+                    state.detached_commands.insert(id.into());
+                    if let Some(probe) = probe {
+                        state.detached_commands.insert(probe.into());
+                    }
+                },
+            )
         })
         .map_err(CommandError::CommandUnavailable)?
     }
@@ -417,38 +503,41 @@ impl InvocationWork {
         self.detach_command(jobs, caller, id)
     }
 
-    pub(super) fn transfer_command_to_scope(
+    pub(super) fn transfer_command_to_owner(
         self: &Arc<Self>,
         destination: &Arc<Self>,
         jobs: &CommandJobs,
         caller: ActorRef,
         id: &str,
     ) -> Result<(), CommandError> {
-        if caller != self.owner || jobs.owner(id)? != caller || destination.scope_id.is_none() {
+        if caller != self.owner || jobs.owner(id)? != caller || destination.owner != caller {
             return Err(CommandError::CommandUnauthorized);
         }
-        let probe = jobs.source_probe(id)?;
         self.with_transfer_states(destination, |states, source, target| {
             let Some(index) = states[source].commands.iter().position(|job| job == id) else {
                 return Err(CommandError::CommandUnauthorized);
             };
-            if source != target {
-                let job = states[source].commands.remove(index);
-                if !states[target].commands.contains(&job) {
-                    states[target].commands.push(job);
-                }
-                if let Some(probe) = probe {
-                    if let Some(index) =
-                        states[source].commands.iter().position(|job| job == &probe)
-                    {
-                        states[source].commands.remove(index);
-                        if !states[target].commands.contains(&probe) {
-                            states[target].commands.push(probe);
+            jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &self.resource_cleanup_owner(),
+                destination.resource_cleanup_owner(),
+                |probe| {
+                    if source != target {
+                        let job = states[source].commands.remove(index);
+                        if !states[target].commands.contains(&job) {
+                            states[target].commands.push(job);
+                        }
+                        if let Some(probe) = probe {
+                            states[source].commands.retain(|command| command != probe);
+                            if !states[target].commands.iter().any(|job| job == probe) {
+                                states[target].commands.push(probe.into());
+                            }
                         }
                     }
-                }
-            }
-            Ok(())
+                    states[target].detached_commands.remove(id);
+                },
+            )
         })
         .map_err(CommandError::CommandUnavailable)?
     }

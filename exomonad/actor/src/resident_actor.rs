@@ -5657,6 +5657,16 @@ where
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Command {
+                continuation,
+                request,
+            } if commands::ownership_operation(&request) => self.prepare_command_ownership(
+                &kernel,
+                &context,
+                effect_owner,
+                continuation,
+                request,
+            ),
             ResidentActorBoundary::ReplaceSpec {
                 continuation,
                 target,

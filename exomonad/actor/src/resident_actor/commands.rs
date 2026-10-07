@@ -1,6 +1,7 @@
 use super::*;
 use crate::command_jobs::CommandControl;
 use crate::generated::commands::CommandsReq;
+use crate::request::ResourceCleanupOwner;
 use tidepool_bridge_effects::CommandError;
 
 /// The owner settles the command operation before evaluating its Haskell continuation.
@@ -34,6 +35,129 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(super) fn prepare_command_ownership(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        continuation: ResidentHole,
+        request: CommandsReq,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<ResidentOutcome, ResidentActorWorkbenchError>,
+    > {
+        let permitted = self
+            .descriptor
+            .effective_role()
+            .effect_keys()
+            .contains(&crate::ActorEffectKey::Commands);
+        let environment = self.environment.clone();
+        let context = context.clone();
+        let kernel = kernel.clone();
+        match request {
+            CommandsReq::CommandRetainWith(id, lifetime) => {
+                let result = if permitted {
+                    self.retain_command(context.actor, &context, effect_owner, &id, lifetime)
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+                Box::pin(async move {
+                    environment
+                        .runner
+                        .resume_value(context, continuation, result)
+                        .await
+                })
+            }
+            CommandsReq::CommandStartOwnedWith(spec, lifetime) => {
+                let selected = if permitted {
+                    self.command_resource_owner(&context, effect_owner, lifetime)
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+                Box::pin(async move {
+                    let owner = match selected {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            return environment
+                                .runner
+                                .resume_value(context, continuation, Err::<String, _>(error))
+                                .await
+                        }
+                    };
+                    resolve_command(
+                        &environment,
+                        &kernel,
+                        &context,
+                        continuation,
+                        CommandsReq::CommandStartWith(spec),
+                        permitted,
+                        None,
+                        owner.as_deref(),
+                    )
+                    .await
+                    .outcome
+                })
+            }
+            _ => unreachable!("command ownership operation"),
+        }
+    }
+
+    fn command_resource_owner(
+        &self,
+        context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<Option<Arc<InvocationWork>>, CommandError> {
+        if lifetime == crate::WorkerLifetime::RunOwned {
+            return Err(CommandError::CommandInvalid(
+                "native jobs require actor, invocation, or scope cleanup ownership".into(),
+            ));
+        }
+        self.resolve_resource_owner(context, effect_owner, lifetime)
+            .map_err(|error| CommandError::CommandUnavailable(error.to_string()))
+    }
+
+    fn retain_command(
+        &self,
+        caller: ActorRef,
+        context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        id: &str,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<(), CommandError> {
+        let jobs = &self.environment.commands;
+        let marker = jobs.cleanup_owner(caller, id)?;
+        let destination = self.command_resource_owner(context, effect_owner, lifetime)?;
+        let source = match &marker {
+            ResourceCleanupOwner::Actor => None,
+            ResourceCleanupOwner::Run => return Err(CommandError::CommandUnauthorized),
+            marker => Some(
+                self.retained_scope_roots()
+                    .into_iter()
+                    .find_map(|root| root.find_command_owner(marker))
+                    .ok_or_else(|| {
+                        CommandError::CommandUnavailable(
+                            "command cleanup owner is no longer retained".into(),
+                        )
+                    })?,
+            ),
+        };
+        match (source, destination) {
+            (Some(source), Some(destination)) => {
+                source.transfer_command_to_owner(&destination, jobs, caller, id)
+            }
+            (Some(source), None) => source.transfer_command_to_actor(jobs, caller, id),
+            (None, Some(destination)) => destination.adopt_actor_command(jobs, caller, id),
+            (None, None) => jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &ResourceCleanupOwner::Actor,
+                ResourceCleanupOwner::Actor,
+                |_| (),
+            ),
+        }
+    }
+
     pub(super) async fn resolve_command(
         &mut self,
         kernel: &KernelContext,
@@ -138,6 +262,11 @@ where
                     }
                     started
                 })
+            }
+            CommandsReq::CommandStartOwnedWith(..) | CommandsReq::CommandRetainWith(..) => {
+                answer!(Err::<String, _>(CommandError::CommandUnavailable(
+                    "command ownership requires its admitted resource owner".into(),
+                )))
             }
             CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
             CommandsReq::CommandAwaitWith(id, milliseconds) => {
@@ -257,6 +386,13 @@ where
         started_job,
         retained_job_binding: None,
     }
+}
+
+pub(super) fn ownership_operation(request: &CommandsReq) -> bool {
+    matches!(
+        request,
+        CommandsReq::CommandStartOwnedWith(..) | CommandsReq::CommandRetainWith(..)
+    )
 }
 
 pub(super) fn waits_for_completion(request: &CommandsReq) -> bool {
