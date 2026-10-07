@@ -585,14 +585,6 @@ impl ToHaskell for AgentRosterProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        let role = match self.descriptor.effective_role().role() {
-            crate::ActorRole::Root => "ContextRoot",
-            crate::ActorRole::Research => "ContextResearch",
-            crate::ActorRole::Coding => "ContextCoding",
-            crate::ActorRole::Scaffolding => "ContextScaffolding",
-            crate::ActorRole::Integration => "ContextIntegration",
-            crate::ActorRole::Inherited => "ContextInherited",
-        };
         visit_core(table, visitor, "AgentRosterEntry", |visitor| {
             actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
             actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
@@ -677,7 +669,6 @@ impl ToHaskell for AgentRosterProjection {
                 .map(|x| actor_haskell_int(x.0, "request id"))
                 .collect::<Result<Vec<_>, _>>()?
                 .visit(table, visitor)?;
-            visit_core(table, visitor, role, |_| Ok(()))?;
             self.bound_worktree.visit(table, visitor)?;
             self.descriptor
                 .fork_group()
@@ -804,25 +795,6 @@ impl ToHaskell for ActorContextProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        let role = match self.descriptor.effective_role().role() {
-            crate::ActorRole::Root => "ContextRoot",
-            crate::ActorRole::Research => "ContextResearch",
-            crate::ActorRole::Coding => "ContextCoding",
-            crate::ActorRole::Scaffolding => "ContextScaffolding",
-            crate::ActorRole::Integration => "ContextIntegration",
-            crate::ActorRole::Inherited => "ContextInherited",
-        };
-        let tools = match self.descriptor.effective_role().native_tools() {
-            crate::NativeToolClass::InspectionOnly => "NativeInspectionOnly",
-            crate::NativeToolClass::Coding => "NativeCoding",
-            crate::NativeToolClass::Integration => "NativeIntegration",
-            crate::NativeToolClass::Inherited => "NativeInherited",
-        };
-        let workspace = match self.descriptor.effective_role().workspace() {
-            crate::WorkspaceAccess::None => "WorkspaceNone",
-            crate::WorkspaceAccess::InspectOnly => "WorkspaceInspectOnly",
-            crate::WorkspaceAccess::WritableBound => "WorkspaceWritableBound",
-        };
         visit_core(table, visitor, "ActorContextInfo", |v| {
             actor_haskell_int(self.context.actor.id.0, "actor id")?.visit(table, v)?;
             actor_haskell_int(self.context.actor.incarnation.0, "actor incarnation")?
@@ -838,13 +810,10 @@ impl ToHaskell for ActorContextProjection {
                 .transpose()?
                 .visit(table, v)?;
             self.descriptor.label().to_owned().visit(table, v)?;
-            visit_core(table, v, role, |_| Ok(()))?;
             self.descriptor
-                .effective_role()
+                .capabilities()
                 .haskell_effects_type()
                 .visit(table, v)?;
-            visit_core(table, v, tools, |_| Ok(()))?;
-            visit_core(table, v, workspace, |_| Ok(()))?;
             self.bound_worktree.visit(table, v)?;
             self.descriptor
                 .fork_group()
@@ -882,18 +851,13 @@ impl ToHaskell for ActorContextProjection {
             visit_usage_observation(table, v, self.runtime.latest_provider_usage())?;
             visit_usage_summary(table, v, self.runtime.provider_usage_summary.as_ref())?;
             visit_usage_summary(table, v, self.runtime.latest_turn_usage_summary.as_ref())?;
-            i64::from(self.descriptor.effective_role().descendants().maximum_depth)
+            i64::from(self.descriptor.capabilities().descendants().maximum_depth)
                 .visit(table, v)?;
             self.descriptor
-                .effective_role()
+                .capabilities()
                 .descendants()
                 .maximum_active_children
                 .map(i64::from)
-                .visit(table, v)?;
-            self.descriptor
-                .effective_role()
-                .prompt_profile()
-                .to_owned()
                 .visit(table, v)
         })
     }

@@ -62,7 +62,6 @@ pub struct TreeNode {
     pub depth: usize,
     pub parent: Option<String>,
     pub label: String,
-    pub role: exomonad_actor::ActorRole,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// Whether the actor has its own provider session; inline forks do not.
@@ -493,7 +492,6 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
                 depth: 0,
                 parent,
                 label: admission.label.clone(),
-                role: admission.role,
                 model: admission.model.clone(),
                 effort: admission.effort.map(|effort| {
                     match effort {
@@ -1152,16 +1150,15 @@ impl Review {
         let mut output = String::new();
         render(
             &mut output,
-            "tree (actor label role model/effort session | started launched first_call first_reply last_reply | standing terminal):",
+            "tree (actor label model/effort session | started launched first_call first_reply last_reply | standing terminal):",
             &self.tree,
             |output, rows| {
                 for node in rows {
                     output.push_str(&format!(
-                        "\n  {}{} {} {} {}/{} {} | {} {} {} {} {} | {}{} {}",
+                        "\n  {}{} {} {}/{} {} | {} {} {} {} {} | {}{} {}",
                         "  ".repeat(node.depth),
                         node.actor,
                         node.label,
-                        node.role,
                         node.model.as_deref().unwrap_or("-"),
                         node.effort.as_deref().unwrap_or("-"),
                         if node.own_session { "session" } else { "inline" },
@@ -1436,28 +1433,28 @@ mod tests {
         )
         .unwrap();
         fs::write(workspace.join(".exomonad/logs/run-7.jsonl"), TRACE).unwrap();
-        let admission = |id: u64, parent: Option<u64>, label: &str, role: &str| {
-            json!({"version":2,"event":"admitted","admission":{
+        let admission = |id: u64, parent: Option<u64>, label: &str| {
+            json!({"version":6,"event":"admitted","admission":{
                 "actor":{"id":id,"incarnation":1},"label":label,
                 "creator":parent.map(|id| json!({"id":id,"incarnation":1})),
                 "supervisor_parent":parent.map(|id| json!({"id":id,"incarnation":1})),
-                "context_parent":null,"actor_path":null,"role":role,
+                "context_parent":null,"actor_path":null,"effect_keys":[],
                 "model":"executor","effort":"medium","instructions":null,
                 "launch_worktrees":[],"source_layer":[]}})
         };
         let bind = |id: u64, thread: &str| {
             [
-                json!({"version":2,"event":"application_prepared","actor":{"id":id,"incarnation":1},
+                json!({"version":6,"event":"application_prepared","actor":{"id":id,"incarnation":1},
                     "binding_path":format!("/run/{id}-1/binding.json")}),
-                json!({"version":2,"event":"application_bound","actor":{"id":id,"incarnation":1},
+                json!({"version":6,"event":"application_bound","actor":{"id":id,"incarnation":1},
                     "conversation":thread}),
             ]
         };
         let mut journal = vec![
-            json!({"version":2,"event":"created"}),
-            admission(1, None, "root", "root"),
-            admission(2, Some(1), "lead", "coding"),
-            admission(3, Some(1), "work", "research"),
+            json!({"version":6,"event":"created"}),
+            admission(1, None, "root"),
+            admission(2, Some(1), "lead"),
+            admission(3, Some(1), "work"),
         ];
         journal.extend(bind(1, "thread-root"));
         journal.extend(bind(2, "thread-lead"));

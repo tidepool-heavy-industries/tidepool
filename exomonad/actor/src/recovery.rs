@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// V5 pins compiler-issued startup input identity. V4 raw program hashes and
-// earlier rows cannot prove this startup contract and remain unsupported.
-const VERSION: u32 = 5;
+// V6 records effect capabilities instead of launch roles. V5 rows cannot
+// prove the admitted effect surface and require an explicit migration.
+const VERSION: u32 = 6;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -175,8 +175,19 @@ impl DurableRootSuccessorAdmission {
 fn owner_for_admission(
     admission: &DurableActorAdmission,
 ) -> Option<tidepool_runtime::session::RecoveryPublicOwner> {
-    let path = tidepool_repr::ActorPath::parse(admission.actor_path.as_ref()?).ok()?;
+    let rendered = admission.actor_path.as_ref()?;
+    let path = tidepool_repr::ActorPath::parse(rendered).ok()?;
+    if path.to_string().as_str() != rendered.as_str() {
+        return None;
+    }
     tidepool_runtime::session::RecoveryPublicOwner::new(&path, admission.actor.incarnation.0)
+}
+
+fn is_independent_root(admission: &DurableActorAdmission) -> bool {
+    admission.creator.is_none()
+        && admission.supervisor_parent.is_none()
+        && admission.context_parent.is_none()
+        && owner_for_admission(admission).is_some()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,7 +199,7 @@ pub struct DurableActorAdmission {
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
     pub actor_path: Option<String>,
-    pub role: crate::ActorRole,
+    pub effect_keys: Vec<crate::ActorEffectKey>,
     #[serde(default)]
     pub descendant_depth: u16,
     #[serde(default)]
@@ -202,7 +213,8 @@ pub struct DurableActorAdmission {
 
 impl DurableActorAdmission {
     fn capture(actor: ActorRef, descriptor: &ActorDescriptor, launch_worktrees: &[String]) -> Self {
-        let descendants = descriptor.effective_role().descendants();
+        let capabilities = descriptor.capabilities();
+        let descendants = capabilities.descendants();
         Self {
             actor,
             label: descriptor.label().to_owned(),
@@ -210,7 +222,7 @@ impl DurableActorAdmission {
             supervisor_parent: descriptor.supervisor_parent(),
             context_parent: descriptor.context_parent(),
             actor_path: descriptor.actor_path().map(ToString::to_string),
-            role: descriptor.effective_role().role(),
+            effect_keys: capabilities.effect_keys().to_vec(),
             descendant_depth: descendants.maximum_depth,
             descendant_active_children: descendants.maximum_active_children,
             model: descriptor.model_name().map(str::to_owned),
@@ -457,12 +469,7 @@ impl ActorRecoveryJournal {
         let new = records
             .get(&successor.actor)
             .ok_or_else(|| std::io::Error::other("root successor admission is absent"))?;
-        let is_root = |record: &DurableActorRecord| {
-            record.admission.role == crate::ActorRole::Root
-                && record.admission.creator.is_none()
-                && record.admission.supervisor_parent.is_none()
-                && record.admission.context_parent.is_none()
-        };
+        let is_root = |record: &DurableActorRecord| is_independent_root(&record.admission);
         if !is_root(old)
             || !is_root(new)
             || new.terminal.is_some()
@@ -887,11 +894,7 @@ fn validate_startup(
             "startup manifest predecessor and exact revision pin must be paired",
         ));
     }
-    if admission.role != crate::ActorRole::Root
-        || admission.creator.is_some()
-        || admission.supervisor_parent.is_some()
-        || admission.context_parent.is_some()
-        || owner_for_admission(admission).is_none()
+    if !is_independent_root(admission)
         || records
             .values()
             .any(|record| owner_for_admission(&record.admission) == owner_for_admission(admission))
@@ -908,7 +911,7 @@ fn validate_startup(
         if previous == admission.actor
             || owner_for_admission(&prior.admission) == owner_for_admission(admission)
             || prior.admission.actor_path != admission.actor_path
-            || prior.admission.role != crate::ActorRole::Root
+            || !is_independent_root(&prior.admission)
             || records.values().any(|record| {
                 record
                     .startup
@@ -1068,10 +1071,7 @@ fn validate_application_intent(
         incarnation,
     }) = intent
     {
-        let root = admission.role == crate::ActorRole::Root
-            && admission.creator.is_none()
-            && admission.supervisor_parent.is_none()
-            && admission.context_parent.is_none();
+        let root = is_independent_root(admission);
         let child_suffix = format!(
             "/a{}_i{}",
             admission.actor.id.0, admission.actor.incarnation.0
@@ -1270,15 +1270,15 @@ fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActorExitKind, ActorId, ActorPlacement, EffectiveRole, Incarnation};
+    use crate::{ActorExitKind, ActorId, ActorPlacement, Incarnation};
     use tidepool_codegen::scope::ScopeId;
     use tidepool_codegen::suspension::RealmId;
     use tidepool_repr::SessionId;
 
     #[test]
-    fn v5_terminal_without_diagnostic_remains_readable() {
-        let row = parse_row(r#"{"version":5,"sequence":3,"event":"retired","actor":{"id":7,"incarnation":3},"terminal":{"kind":"failed","summary":"original failure"}}"#)
-            .expect("existing V5 terminal row");
+    fn v6_terminal_without_diagnostic_remains_readable() {
+        let row = parse_row(r#"{"version":6,"sequence":3,"event":"retired","actor":{"id":7,"incarnation":3},"terminal":{"kind":"failed","summary":"original failure"}}"#)
+            .expect("existing V6 terminal row");
         let EventKind::Retired { actor, terminal } = row.event else {
             panic!("retired row must stay retired");
         };
@@ -1362,7 +1362,7 @@ mod tests {
     fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
@@ -1371,6 +1371,12 @@ mod tests {
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
         }
+
+        let legacy = r#"{"version":5,"sequence":1,"event":"admitted","admission":{"actor":{"id":1,"incarnation":1},"label":"root","creator":null,"supervisor_parent":null,"context_parent":null,"actor_path":"root","role":"root","descendant_depth":8,"descendant_active_children":null,"model":null,"effort":null,"instructions":null,"launch_worktrees":[],"source_layer":[]}}"#;
+        let legacy_path = directory.path().join("legacy-role.jsonl");
+        std::fs::write(&legacy_path, format!("{legacy}\n")).unwrap();
+        assert!(ActorRecoveryJournal::open_existing(&anchor, "legacy-role.jsonl").is_err());
+        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), format!("{legacy}\n"));
     }
 
     #[test]
@@ -1423,7 +1429,6 @@ mod tests {
                 resource_scope: RealmId(1),
             },
         )
-        .with_effective_role(EffectiveRole::coding())
     }
 
     #[test]
@@ -1662,7 +1667,6 @@ mod tests {
         let path = run.path().join("actors.jsonl");
         let actor = ActorRef::first(ActorId(33));
         let root = descriptor("root")
-            .with_effective_role(EffectiveRole::root())
             .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let intent = startup_intent(
             actor,
@@ -1714,7 +1718,6 @@ mod tests {
         .unwrap();
         let path = tidepool_repr::ActorPath::parse("root/recovered").unwrap();
         let root = descriptor("root")
-            .with_effective_role(EffectiveRole::root())
             .with_actor_path(path.clone());
         let old = ActorRef::first(ActorId(33));
         // Explicit chain authority is independent of numeric identity adjacency.
@@ -1833,7 +1836,6 @@ mod tests {
         write_manifest(&manifest, &old_owner, "revision", 0);
         let pin = RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap();
         let root = descriptor("root")
-            .with_effective_role(EffectiveRole::root())
             .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let a = ActorRef::first(ActorId(1));
         let b = ActorRef {
