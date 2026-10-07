@@ -429,6 +429,148 @@ async fn public_replace_spec_pins_admitted_handler_and_refuses_changed_surface()
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_child() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 3);
+    let (provider, mut requests) = hosted_script_provider();
+    let (entered, _admitted) = tokio::sync::mpsc::unbounded_channel();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, move |config| {
+        configure_supplied_spec(config);
+        config.jev = Some(Arc::new(SuppliedCallGate(entered)));
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Refuse one child's model alias without retiring its parent.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = std::collections::VecDeque::new();
+            next_hosted_script_round(&mut requests, &mut pending, &root)
+                .await
+                .call(
+                    "unknown-child-model",
+                    include_str!("fixtures/child_attachment_alias_failure.hs"),
+                );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("unknown-child-model", "True");
+            let failed = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.label == "unknown-alias-child")
+                .expect("typed failure retains its exact admitted child");
+            assert_eq!(failed.creator, Some(host.context.actor.identity()));
+            assert!(failed.active_requests.is_empty(), "{failed:?}");
+            assert!(failed.queued_requests.is_empty(), "{failed:?}");
+            let installation = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                host.context.observer.installation(failed.actor),
+            )
+            .await
+            .expect("attachment refusal occurs after actual child policy installation");
+            let terminal = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                installation.actor.terminal().wait(),
+            )
+            .await
+            .expect("refused child retirement is observable");
+            // Preserve the real cleanup observation; a failed attachment alone
+            // does not certify that native custody has been released.
+            eprintln!(
+                "refused child {:?}: terminal={terminal:?}, cleanup={:?}",
+                failed.actor,
+                installation.actor.terminal().cleanup()
+            );
+            assert!(
+                pending.is_empty(),
+                "the refused child cannot activate inference"
+            );
+            assert!(matches!(
+                requests.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            root_after.call("parent-after-child-refusal", "display (6 * 7 :: Int)");
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("parent-after-child-refusal", "42");
+            root_after.call("retained-child-failure", "display (show attachmentFailure)");
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_committed("retained-child-failure");
+            let retained = root_after.settled_output("retained-child-failure");
+            assert!(
+                retained.to_string().contains("SpawnPartialFailure"),
+                "{retained}"
+            );
+            assert!(
+                retained.to_string().contains("SpawnRetainedActor"),
+                "{retained}"
+            );
+            assert!(
+                retained.to_string().contains("SpawnCleanup"),
+                "the typed receipt retains its actual cleanup category: {retained}"
+            );
+            assert!(
+                retained
+                    .to_string()
+                    .contains("deliberately-unknown-child-alias"),
+                "{retained}"
+            );
+            root_after.call(
+                "exact-retained-child",
+                &format!(
+                    "display (case attachmentFailure of {{ Left (SpawnPartialFailure (SpawnRetainedActor child) _ _) -> agentIdentity child == ({}, {}); _ -> False }})",
+                    failed.actor.id.0, failed.actor.incarnation.0
+                ),
+            );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("exact-retained-child", "True");
+            root_after.call(
+                "valid-child-after-refusal",
+                include_str!("fixtures/child_attachment_valid_request.hs"),
+            );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("valid-child-after-refusal", "True");
+            let valid = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.label == "valid-after-alias-child")
+                .expect("subsequent child is admitted and attached");
+            assert_ne!(valid.actor, failed.actor);
+            assert_eq!(valid.bound_worktree, failed.bound_worktree);
+            tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                host.context.observer.installation(valid.actor),
+            )
+            .await
+            .expect("subsequent child publishes its actual installed policy");
+            let child = child_path(&host.context, valid.actor);
+            next_hosted_script_round(&mut requests, &mut pending, &child)
+                .await
+                .call("reply-after-alias-refusal", "respond (111 :: Int)");
+            let child_after = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_eq!(
+                child_after.settled_output("reply-after-alias-refusal")["status"],
+                "replied"
+            );
+            child_after.finish();
+            root_after.call(
+                "observe-reply-after-alias-refusal",
+                include_str!("fixtures/child_attachment_observe_reply.hs"),
+            );
+            let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_done.assert_value("observe-reply-after-alias-refusal", "True");
+            assert!(host.context.actor.terminal().get().is_none());
+            root_done.finish();
+        })
+    })
+    .await;
+}
+
 fn write_spec(workspace: &std::path::Path, handler: &str, slot: &str) {
     let authored = workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
