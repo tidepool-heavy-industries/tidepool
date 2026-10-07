@@ -108,7 +108,7 @@ where
     > {
         let permitted = self
             .descriptor
-            .effective_role()
+            .capabilities()
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
         let environment = self.environment.clone();

@@ -710,14 +710,16 @@ impl KernelContext {
             mailbox_admission: mailbox_admission.clone(),
         };
         let spawned = match lifetime {
-            crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
+            crate::WorkerLifetime::InvocationOwned
+            | crate::WorkerLifetime::ActorOwned
+            | crate::WorkerLifetime::InScope(_) => {
                 Box::pin(
                     self.myself
                         .spawn_linked(name, LocalActor::<C>(PhantomData), arguments),
                 )
                 .await
             }
-            crate::WorkerLifetime::SwarmOwned => {
+            crate::WorkerLifetime::RunOwned => {
                 Box::pin(LocalActor::<C>::spawn(
                     name,
                     LocalActor::<C>(PhantomData),
@@ -743,7 +745,7 @@ impl KernelContext {
         drop(task);
         let child =
             LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission);
-        if lifetime != crate::WorkerLifetime::SwarmOwned {
+        if lifetime != crate::WorkerLifetime::RunOwned {
             self.children
                 .lock()
                 .insert(child.address().get_id(), child.clone());
