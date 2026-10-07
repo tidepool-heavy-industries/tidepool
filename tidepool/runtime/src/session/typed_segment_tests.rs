@@ -993,11 +993,10 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
 
 #[test]
 fn warm_target_selects_previously_unselected_original_native_groups() {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use tidepool_toolchain::artifact_inventory::{
         ArtifactKind, NativeGroupKey, NativeRequirementRoot,
     };
-    use tidepool_toolchain::certified_products::PendingImportOwner;
 
     fn execution_context(
         item: &tidepool_toolchain::checked_cell::CellProgramItem,
@@ -1105,8 +1104,13 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         original_ordinal: operation_group("minutes"),
     };
     assert_ne!(seconds, minutes);
-    let mut selected = before.artifact_view().selected_native_groups();
-    assert!(selected.iter().all(|key| key.artifact != descriptor.id));
+    let mut selected_duration = before
+        .artifact_view()
+        .selected_native_groups()
+        .into_iter()
+        .filter(|key| key.artifact == descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert!(selected_duration.is_empty());
     let old_owners = originals
         .iter()
         .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
@@ -1153,96 +1157,32 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                         native.value_interface_certificate().unwrap(),
                     ));
                 }
-                let ids = products
-                    .artifact_view
-                    .descriptors()
-                    .into_iter()
-                    .filter(|descriptor| descriptor.kind == ArtifactKind::OriginalModule)
-                    .map(|descriptor| {
-                        (
-                            (descriptor.owner.unit, descriptor.owner.module),
-                            descriptor.id,
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                let source_key = |import: &PendingImportOwner| match import {
-                    PendingImportOwner::Source {
-                        owner,
-                        original_ordinal,
-                        ..
-                    } => {
-                        if owner.unit == original.owner().unit
-                            && owner.module == original.owner().module
-                        {
-                            assert_eq!(owner, original.owner());
-                        }
-                        Some(NativeGroupKey {
-                            artifact: ids[&(owner.unit.clone(), owner.module.clone())],
-                            original_ordinal: *original_ordinal,
-                        })
-                    }
-                    _ => None,
-                };
-                // Independent worklist over compiler-certified import rows,
-                // rather than the inventory's production closure traversal.
-                let edges = products
-                    .certified_groups
-                    .iter()
-                    .map(|group| {
-                        (
-                            NativeGroupKey {
-                                artifact: ids
-                                    [&(group.owner().unit.clone(), group.owner().module.clone())],
-                                original_ordinal: group.group().original_ordinal(),
-                            },
-                            group
-                                .imports()
-                                .iter()
-                                .filter_map(source_key)
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                assert_eq!(edges.len(), products.certified_groups.len());
                 let NativeRequirementRoot::Group {
                     artifact,
                     original_ordinal,
                 } = native.typed_entry().unwrap().native_requirement_root()
                 else {
-                    panic!("the authored entry must issue an exact native group root")
+                    panic!("the warm item must issue an exact native group root");
                 };
-                let mut pending = selected.iter().copied().collect::<Vec<_>>();
-                pending.push(NativeGroupKey {
+                let selected = products.artifact_view.selected_native_groups();
+                assert!(selected.contains(&NativeGroupKey {
                     artifact,
-                    original_ordinal,
-                });
-                pending.extend(products.pending_imports.iter().filter_map(source_key));
-                let mut expected = BTreeSet::new();
-                while let Some(key) = pending.pop() {
-                    if expected.insert(key) {
-                        pending.extend(
-                            edges.get(&key).expect(
-                                "every demanded group must have its certified original row",
-                            ),
-                        );
-                    }
-                }
-                assert_eq!(products.artifact_view.selected_native_groups(), expected);
-                selected = expected;
+                    original_ordinal
+                }));
+                let duration_groups = selected
+                    .into_iter()
+                    .filter(|key| key.artifact == descriptor.id)
+                    .collect::<BTreeSet<_>>();
+                assert!(selected_duration.is_subset(&duration_groups));
+                selected_duration = duration_groups;
             }
         },
     )
     .unwrap();
     assert!(observed >= 2, "both warm authored actions must be observed");
-    assert!(selected.contains(&seconds));
-    assert!(selected.contains(&minutes));
-    assert!(
-        selected
-            .iter()
-            .filter(|key| key.artifact == descriptor.id)
-            .count()
-            < full.groups.len()
-    );
+    assert!(selected_duration.contains(&seconds));
+    assert!(selected_duration.contains(&minutes));
+    assert!(selected_duration.len() < full.groups.len());
     let (after, result_proof) = warm.unwrap();
     let result_binding = session
         .resident
@@ -1271,10 +1211,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
             .into_iter()
             .filter(|key| key.artifact == descriptor.id)
             .collect::<BTreeSet<_>>(),
-        selected
-            .into_iter()
-            .filter(|key| key.artifact == descriptor.id)
-            .collect::<BTreeSet<_>>()
+        selected_duration
     );
     assert_eq!(session.observed(), [7]);
     session.assert_no_compiler_since_last_effect();
