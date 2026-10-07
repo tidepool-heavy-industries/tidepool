@@ -995,13 +995,110 @@ pub(crate) struct CheckedValueInputs {
 /// Same-request type outputs captured from the reserved checked-value owner.
 /// These are not submitted inputs and grant no live native values.
 pub(crate) struct ProducedValueTypeInterfaces {
-    interfaces: Vec<(
-        Arc<crate::recovery_artifacts::CertifiedValueInterface>,
-        bool,
-    )>,
+    interfaces: Arc<[ProducedValueTypeInterface]>,
+    selection: ProducedValueTypeSelection,
+}
+
+struct ProducedValueTypeSelection(std::ops::Range<usize>);
+
+impl ProducedValueTypeSelection {
+    fn includes(&self, ordinal: usize) -> bool {
+        ordinal < self.0.end
+    }
+
+    fn requires(&self, ordinal: usize) -> bool {
+        self.0.contains(&ordinal)
+    }
+
+    fn for_item(&self, ordinal: usize) -> Result<Self, CompileError> {
+        if !self.requires(ordinal) {
+            return Err(failure(
+                "produced type item differs from its reserved segment",
+            ));
+        }
+        Ok(Self(ordinal..ordinal + 1))
+    }
+}
+
+#[cfg(test)]
+mod produced_type_selection_tests {
+    use super::ProducedValueTypeSelection;
+
+    #[test]
+    fn item_prefix_uses_ordinals_with_sparse_generations_and_empty_slots() {
+        for generations in [[901, 40, 900, 3, 1000], [2, 9900, 1, 550, 7]] {
+            // Prior binding, declaration barrier, current segment binding,
+            // discard binding, observation, binding, and next-segment binding.
+            // These are ordinal policy facts, not compiler certificates.
+            let slots = [
+                Some(generations[0]),
+                None,
+                Some(generations[1]),
+                None,
+                Some(generations[2]),
+                Some(generations[3]),
+                Some(generations[4]),
+            ];
+            let captured = slots
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, generation)| generation.map(|value| (ordinal, value)))
+                .collect::<Vec<_>>();
+            let segment = ProducedValueTypeSelection(2..6);
+            let mut expected = vec![generations[0]];
+            for ordinal in 2..6 {
+                if let Some(value) = slots[ordinal] {
+                    expected.push(value);
+                }
+                let item = segment.for_item(ordinal).unwrap();
+                let visible = captured
+                    .iter()
+                    .filter(|(index, _)| item.includes(*index))
+                    .map(|(_, generation)| *generation)
+                    .collect::<Vec<_>>();
+                let required = captured
+                    .iter()
+                    .filter(|(index, _)| item.requires(*index))
+                    .map(|(_, generation)| *generation)
+                    .collect::<Vec<_>>();
+                assert_eq!(visible, expected);
+                assert_eq!(required, slots[ordinal].into_iter().collect::<Vec<_>>());
+                assert!(
+                    item.for_item(ordinal + 1).is_err(),
+                    "a selected view cannot widen"
+                );
+                assert!(
+                    item.for_item(ordinal - 1).is_err(),
+                    "a selected view cannot change its current output"
+                );
+            }
+            assert!(segment.for_item(1).is_err());
+            assert!(segment.for_item(6).is_err());
+            let declaration = ProducedValueTypeSelection(2..2);
+            assert!(declaration.includes(0));
+            assert!(!declaration.includes(2));
+            assert!((0..slots.len()).all(|ordinal| !declaration.requires(ordinal)));
+            assert!(declaration.for_item(2).is_err());
+        }
+    }
+}
+
+struct ProducedValueTypeInterface {
+    ordinal: usize,
+    interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
 }
 
 impl ProducedValueTypeInterfaces {
+    /// Select one actual item from the once-captured segment inventory. Earlier
+    /// outputs may supply type dependencies; its own output is mandatory and
+    /// later outputs cannot authorize any row in this item's packet.
+    pub(crate) fn for_item(&self, ordinal: usize) -> Result<Self, CompileError> {
+        Ok(Self {
+            interfaces: self.interfaces.clone(),
+            selection: self.selection.for_item(ordinal)?,
+        })
+    }
+
     pub(crate) fn matches_artifact(
         &self,
         entry: &crate::artifact_inventory::ArtifactEntry,
@@ -1020,7 +1117,10 @@ impl ProducedValueTypeInterfaces {
     pub(crate) fn interfaces(
         &self,
     ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
-        self.interfaces.iter().map(|(interface, _)| interface)
+        self.interfaces
+            .iter()
+            .filter(|output| self.selection.includes(output.ordinal))
+            .map(|output| &output.interface)
     }
 
     pub(crate) fn required(
@@ -1028,8 +1128,8 @@ impl ProducedValueTypeInterfaces {
     ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
         self.interfaces
             .iter()
-            .filter(|(_, required)| *required)
-            .map(|(interface, _)| interface)
+            .filter(|output| self.selection.requires(output.ordinal))
+            .map(|output| &output.interface)
     }
 }
 
@@ -1640,10 +1740,7 @@ impl CheckedValueInputs {
             let captured = CapturedValueInterfaceOutput::capture(&path)?;
             validation
                 .inventory
-                .reserve::<(
-                    Arc<crate::recovery_artifacts::CertifiedValueInterface>,
-                    bool,
-                )>(1)
+                .reserve::<ProducedValueTypeInterface>(1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             validation
                 .inventory
@@ -1656,12 +1753,15 @@ impl CheckedValueInputs {
                         .ok_or_else(|| failure("produced type output accounting overflow"))?,
                 )
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-            interfaces.push((
-                captured.certify(producer, owner, None)?,
-                ordinal >= segment.start,
-            ));
+            interfaces.push(ProducedValueTypeInterface {
+                ordinal,
+                interface: captured.certify(producer, owner, None)?,
+            });
         }
-        Ok(ProducedValueTypeInterfaces { interfaces })
+        Ok(ProducedValueTypeInterfaces {
+            interfaces: interfaces.into(),
+            selection: ProducedValueTypeSelection(segment),
+        })
     }
 
     pub(crate) fn capture_checked(

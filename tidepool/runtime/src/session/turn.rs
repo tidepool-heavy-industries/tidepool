@@ -3197,6 +3197,41 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         .find(|row| row.as_array().unwrap()[1].as_text() == Some(future_module))
         .expect("the later capture must have genuine completed type evidence")
         .clone();
+    let same_segment_future = valid.items()[index + 1..declaration]
+        .iter()
+        .find(|item| {
+            item.native()
+                .and_then(|native| native.value_interface())
+                .is_some()
+        })
+        .expect("the first segment must contain a later genuine capture");
+    let same_segment_module = same_segment_future
+        .native()
+        .unwrap()
+        .value_interface()
+        .unwrap()
+        .0;
+    let same_segment_directory = root.join(format!(
+        "item-{}",
+        same_segment_future.checked_item().index()
+    ));
+    let same_segment_bytes =
+        std::fs::read(same_segment_directory.join("certified-products.cbor")).unwrap();
+    let same_segment_products: CborValue =
+        ciborium::de::from_reader(same_segment_bytes.as_slice()).unwrap();
+    let same_segment_row = same_segment_products.as_array().unwrap()[6]
+        .as_array()
+        .unwrap()[3]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row.as_array().unwrap()[1].as_text() == Some(same_segment_module))
+        .expect("the later same-segment capture must have genuine completed type evidence")
+        .clone();
+    assert_ne!(same_segment_module, output_module);
+    assert!(value_rows
+        .iter()
+        .all(|row| row.as_array().unwrap()[1].as_text() != Some(same_segment_module)));
     assert_ne!(future_module, output_module);
     assert!(
         value_rows
@@ -3204,7 +3239,7 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             .all(|row| { row.as_array().unwrap()[1].as_text() != Some(future_module) }),
         "the first segment must not already emit later capture evidence"
     );
-    for mutation in 0..4 {
+    for mutation in 0..5 {
         let restore_products = RestoreReceipt {
             path: products_path.clone(),
             original: products_original.clone(),
@@ -3219,21 +3254,21 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             0 => {
                 rows.remove(output_index);
             }
-            1 | 3 => {
-                let mut foreign = if mutation == 3 {
-                    future_row.clone()
-                } else {
-                    rows[output_index].clone()
+            1 | 3 | 4 => {
+                let mut foreign = match mutation {
+                    3 => future_row.clone(),
+                    4 => same_segment_row.clone(),
+                    _ => rows[output_index].clone(),
                 };
                 let row = foreign.as_array_mut().unwrap();
                 if mutation == 1 {
                     row[1] = CborValue::Text(format!("Tidepool.Session.Val.G{}", u64::MAX));
                 }
                 let parent = products_path.parent().unwrap();
-                let payload_parent: &Path = if mutation == 3 {
-                    &future_directory
-                } else {
-                    parent
+                let payload_parent: &Path = match mutation {
+                    3 => &future_directory,
+                    4 => &same_segment_directory,
+                    _ => parent,
                 };
                 let directory = tempfile::tempdir_in(parent).unwrap();
                 for (field, name) in [(2, "foreign.hi"), (5, "foreign.packages.cbor")] {
@@ -3282,6 +3317,17 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             if matches!(error.as_ref(), CertificationError::Mismatch(_))),
             "produced type mutation {mutation} must reach its evidence guard: {refusal:?}"
         );
+        if let Some(expected) = match mutation {
+            0 => Some("produced value type output is missing"),
+            4 => Some("captured value was not selected by the request"),
+            _ => None,
+        } {
+            assert!(
+                matches!(&refusal, CompileError::CompilerEvidence(error)
+                if matches!(error.as_ref(), CertificationError::Mismatch(message) if *message == expected)),
+                "produced type mutation {mutation} must reach its exact owner guard: {refusal:?}"
+            );
+        }
         drop(restore_payload);
         drop(restore_products);
         drop(foreign_payloads);
