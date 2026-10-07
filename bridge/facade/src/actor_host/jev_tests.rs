@@ -1051,8 +1051,8 @@ async fn jev_call_failure_is_a_typed_left() {
     });
     let campaign = campaign_with(backend).await;
     let failure_cell = CELL.replace(
-        "_ <- if either (const 0) (\\a -> J.handle a (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer == 12 then pure () else error \"choice did not select line 12\"",
-        "_ <- case answer of { Left _ -> pure (); Right _ -> error \"unconfigured Jev did not return a typed Left\" }",
+        "_ <- if either (const 0) (\\response -> J.handle (J.answers response) (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer == 12 then pure () else error \"choice did not select line 12\"",
+        "_ <- case answer of { Left (J.Transport J.JevUnconfigured) -> pure (); _ -> error \"unconfigured Jev did not preserve its typed cause\" }",
     );
     assert_ne!(
         failure_cell, CELL,
