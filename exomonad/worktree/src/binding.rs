@@ -119,6 +119,8 @@ pub struct Binding {
     agent: AgentRef,
     state: BindingState,
     access: WorkspaceAccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predecessor: Option<AgentRef>,
     bound_at_ms: i64,
 }
 
@@ -129,6 +131,10 @@ impl Binding {
 
     pub fn agent(&self) -> &AgentRef {
         &self.agent
+    }
+
+    pub fn predecessor(&self) -> Option<&AgentRef> {
+        self.predecessor.as_ref()
     }
 
     pub fn access(&self) -> WorkspaceAccess {
@@ -151,6 +157,7 @@ impl Binding {
             agent,
             state,
             access,
+            predecessor: None,
             bound_at_ms,
         }
     }
@@ -267,7 +274,9 @@ impl BindingTable {
             .rposition(|entry| {
                 entry.binding.worktree() == worktree
                     && entry.binding.state() == BindingState::Active
-                    && (entry.binding.agent() == predecessor || entry.binding.agent() == successor)
+                    && (entry.binding.agent() == predecessor
+                        || (entry.binding.agent() == successor
+                            && entry.binding.predecessor() == Some(predecessor)))
             })
             .ok_or_else(|| WorktreeError::StorageFailure {
                 path: self.path_for(worktree),
@@ -305,14 +314,16 @@ impl BindingTable {
             });
         }
         self.bindings[current].binding.state = BindingState::Released;
+        let mut binding = Binding::new(
+            worktree.clone(),
+            successor.clone(),
+            BindingState::Active,
+            access,
+            now_ms,
+        );
+        binding.predecessor = Some(predecessor.clone());
         self.bindings.push(BindingEntry {
-            binding: Binding::new(
-                worktree.clone(),
-                successor.clone(),
-                BindingState::Active,
-                access,
-                now_ms,
-            ),
+            binding,
             generation: Some(generation),
         });
         if let Err(error) = self.persist(worktree) {
@@ -345,15 +356,18 @@ impl BindingTable {
         let access = self.bindings[previous].binding.access();
         let generation = self.next_generation;
         self.next_generation += 1;
+        let predecessor = self.bindings[previous].binding.agent().clone();
         self.bindings[previous].binding.state = BindingState::Released;
+        let mut binding = Binding::new(
+            lease.worktree.clone(),
+            successor.clone(),
+            BindingState::Active,
+            access,
+            now_ms,
+        );
+        binding.predecessor = Some(predecessor);
         self.bindings.push(BindingEntry {
-            binding: Binding::new(
-                lease.worktree.clone(),
-                successor.clone(),
-                BindingState::Active,
-                access,
-                now_ms,
-            ),
+            binding,
             generation: Some(generation),
         });
         lease.generation = generation;
@@ -672,6 +686,31 @@ mod tests {
             Some(&previous_run),
             "the retained row still names its holder, so rebinding fails loud"
         );
+    }
+
+    #[test]
+    fn recovery_cannot_claim_an_unrelated_peer_as_the_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let tree = WorktreeId::from_raw("shared-recovery");
+        let predecessor = AgentRef::exact_actor("run", 1, 1);
+        let peer = AgentRef::exact_actor("run", 2, 1);
+        let mut table = BindingTable::open(&anchor, "").unwrap();
+        drop(
+            table
+                .bind(&tree, &predecessor, WorkspaceAccess::ReadWrite, 1)
+                .unwrap(),
+        );
+        drop(
+            table
+                .bind(&tree, &peer, WorkspaceAccess::ReadOnly, 2)
+                .unwrap(),
+        );
+        drop(table);
+        let mut table = BindingTable::open(&anchor, "").unwrap();
+        assert!(table.recover_active(&tree, &predecessor, &peer, 3).is_err());
+        assert!(table.membership(&tree, &peer).is_none());
+        assert_eq!(table.participants(&tree).unwrap().count(), 2);
     }
 
     #[test]
