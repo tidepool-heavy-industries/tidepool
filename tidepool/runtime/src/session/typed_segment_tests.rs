@@ -145,7 +145,10 @@ impl SemanticSession {
                 (0, 0),
                 label,
                 &history.cell,
-                CellDeclarationExpectation::CapturedAt(history.declaration_line),
+                CellDeclarationExpectation::CapturedAt {
+                    name: "historyCaptured",
+                    line: history.declaration_line,
+                },
                 &ScalePublication::Ephemeral,
                 AuthorityChecks::Configured,
                 &SourceImports::new(),
@@ -843,11 +846,30 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
             0,
         )
         .unwrap();
-    try_execute_cell_with_authority_checks(
-        &mut session.resident, session.public, &session.effects, &session.images, (0, 0),
-        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); sameSegmentFuture <- pure (firstPlannedValue + 9); boundaryCapture :: Int; boundaryCapture = firstPlannedValue; secondPlannedValue <- pure (boundaryCapture + 1); segmentRecord secondPlannedValue", 1,
-        &ScalePublication::Ephemeral, AuthorityChecks::TypedEntryRefusalBranches,
-    ).unwrap();
+    let source = include_str!("fixtures/typed-segment-native-entry.hs");
+    let line = source
+        .lines()
+        .position(|line| line == "boundaryCapture :: Int")
+        .expect("authored capture signature")
+        + 1;
+    try_execute_cell_with_template_imports_expectation(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "native_entry_refusal",
+        source,
+        CellDeclarationExpectation::CapturedAt {
+            name: "boundaryCapture",
+            line,
+        },
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::TypedEntryRefusalBranches,
+        &SourceImports::new(),
+        None,
+    )
+    .unwrap();
     assert_eq!(session.observed(), [4]);
 }
 
