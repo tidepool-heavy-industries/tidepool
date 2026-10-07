@@ -2,7 +2,7 @@ use super::*;
 use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
 use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
 
-fn issued_original(
+pub(super) fn issued_original(
     root: &Path,
     module: &str,
     interface: u8,
@@ -71,10 +71,12 @@ fn issued_original(
     )
     .unwrap();
     let original = certified.recovery_products.into_iter().next().unwrap();
-    assert!(original
-        .original_native()
-        .unwrap()
-        .matches_original(&original));
+    assert!(
+        original
+            .original_native()
+            .unwrap()
+            .matches_original(&original)
+    );
     assert_eq!(
         original.module_interface().unwrap().interface_bytes(),
         &[interface]
@@ -216,10 +218,12 @@ fn omission_of_an_issued_interface_only_role_is_refused() {
     let without_side = view
         .select_roots(vec![entries[0].descriptor.id, entries[2].descriptor.id])
         .unwrap();
-    assert!(!without_side
-        .metadata_snapshot()
-        .artifacts
-        .contains_key(&entries[1].descriptor.id));
+    assert!(
+        !without_side
+            .metadata_snapshot()
+            .artifacts
+            .contains_key(&entries[1].descriptor.id)
+    );
     assert!(
         OriginalCompilerInputs::from_selection(&selection, &without_side).is_err(),
         "omitted issued Side interface must not be reconstructed from other custody"

@@ -6941,6 +6941,7 @@ mod home_self_issuer_tests;
 pub(crate) mod tests {
     mod issued_interface_selection_history;
     mod promotion_import_history;
+    mod sparse_interface_selection_properties;
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use tidepool_repr::execution_schema::testing;

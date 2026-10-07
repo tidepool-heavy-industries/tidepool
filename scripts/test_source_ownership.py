@@ -142,6 +142,7 @@ TEST_ONLY_SOURCES = {
         'tidepool/toolchain/src/certified_products/retained_core/properties.rs',
         'tidepool/toolchain/src/certified_products/tests/issued_interface_selection_history.rs',
         'tidepool/toolchain/src/certified_products/tests/promotion_import_history.rs',
+        'tidepool/toolchain/src/certified_products/tests/sparse_interface_selection_properties.rs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelf.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelfCapture.hs',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
