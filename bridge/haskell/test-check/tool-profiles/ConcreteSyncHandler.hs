@@ -9,7 +9,7 @@ import Tidepool.Effects.Core (ContextReadWrite (..))
 -- Ignoring the record's mode parameter must not mislabel a sync-row handler
 -- as an async tool with the empty base profile.
 data Tools mode = Tools
-  { disguised :: Tool (Eff '[ContextReadWrite]) Text Text
+  { disguised :: Presented (Tool (Eff '[ContextReadWrite]) Text Text)
   } deriving (Generic)
 
 tools :: Tools (AsServerT (Eff '[]))

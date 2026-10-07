@@ -318,7 +318,7 @@ fn lookup_tool_policy_matches_native_ghc_oracle() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
-        "lookup policy oracle passed (13 checks)"
+        "lookup policy oracle passed (14 checks)"
     );
 }
 

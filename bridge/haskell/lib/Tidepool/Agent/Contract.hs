@@ -15,7 +15,6 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE FunctionalDependencies #-}
 -- | Mode-interpreted agent tool records compiled into declarations and
 -- dynamic dispatch.
 --
@@ -50,7 +49,9 @@ module Tidepool.Agent.Contract
   , tool
   , RawTool
   , rawTool
+  , Presented
   , PresentableTool
+  , ToolOutput
   , presentWith
   , presentJson
   , presentDisplay
@@ -145,8 +146,8 @@ data Call input output
 -- | A native custom tool receiving literal text, with bounded text presentation.
 data RawCall output
 
--- | A fire-and-forget endpoint, interpreted as @Tool m input ()@ by the
--- server mode.
+-- | A fire-and-forget endpoint. Hosted fields require presented unit-output
+-- handlers; programmatic actors use semantic unit-output handlers.
 data Notify input
 
 -- | Hold the calling agent's next inference until this invocation settles.
@@ -171,15 +172,15 @@ data AsActorT (m :: Type -> Type) state exit
 -- | Interpret one endpoint under a record mode. The closed fallthrough gives
 -- an author-facing error at an unsupported field.
 type family mode :- endpoint where
-  AsServerT (Eff base) :- Sync (Call input output) = SyncTool base input output
-  AsServerT (Eff base) :- Sync (Notify input) = SyncTool base input ()
-  AsServerT (Eff base) :- Sync (RawCall output) = SyncRawTool base output
+  AsServerT (Eff base) :- Sync (Call input output) = Presented (SyncTool base input output)
+  AsServerT (Eff base) :- Sync (Notify input) = Presented (SyncTool base input ())
+  AsServerT (Eff base) :- Sync (RawCall output) = Presented (SyncRawTool base output)
   AsServerT (Eff base) :- HaskellCell effects = HaskellTool 'Asynchronous effects base
   AsServerT (Eff base) :- Sync (HaskellCell effects) = HaskellTool 'BeforeNextInference effects base
-  AsServerT m :- RawCall output = RawTool m output
+  AsServerT m :- RawCall output = Presented (RawTool m output)
   AsActorT m state exit :- RawCall output = RawTool m output
-  AsServerT m :- Call input output = Tool m input output
-  AsServerT m :- Notify input = Tool m input ()
+  AsServerT m :- Call input output = Presented (Tool m input output)
+  AsServerT m :- Notify input = Presented (Tool m input ())
   AsActorT m state exit :- Call input output = Tool m input output
   AsActorT m state exit :- Notify input = Tool m input ()
   AsActorT m state exit :- Update input output = UpdateTool m state input output
@@ -214,45 +215,47 @@ data Tool m input output = Tool
   { toolKind :: ToolKind
   , description :: Text
   , handler :: input -> m output
-  , toolPresenter :: Maybe (output -> Text)
   }
 
 -- | Build a request\/response 'Tool'. An alias for 'Tool' — kept distinct
 -- from 'notify' so authored code reads its intent at the call site.
 tool :: Text -> (input -> m output) -> Tool m input output
-tool description run = Tool CallKind description run Nothing
+tool description run = Tool CallKind description run
 
 -- | Literal input is passed as data to an already compiled handler.
 data RawTool m output = RawTool
   { rawDescription :: Text
   , rawHandler :: Text -> m output
-  , rawPresenter :: Maybe (output -> Text)
   }
 
 rawTool :: Text -> (Text -> m output) -> RawTool m output
-rawTool description run = RawTool description run Nothing
+rawTool description run = RawTool description run
 
 -- | How a successful value of one named tool becomes the text a hosted model
 -- sees. The semantic JSON value remains a separate result.
-class PresentableTool tool output | tool -> output where
-  setToolPresenter :: (output -> Text) -> tool -> tool
+data Presented handler = Presented handler (ToolOutput handler -> Text)
 
-instance PresentableTool (Tool m input output) output where
-  setToolPresenter presenter value = value {toolPresenter = Just presenter}
+class PresentableTool handler where
+  type ToolOutput handler :: Type
+  -- | Finish a semantic handler by selecting its model-facing text. Hosted
+  -- fields require this value; programmatic actor fields retain the handler.
+  presentWith :: (ToolOutput handler -> Text) -> handler -> Presented handler
 
-instance PresentableTool (RawTool m output) output where
-  setToolPresenter presenter value = value {rawPresenter = Just presenter}
+instance PresentableTool (Tool m input output) where
+  type ToolOutput (Tool m input output) = output
+  presentWith presenter value = Presented value presenter
 
-instance PresentableTool (SyncTool base input output) output where
-  setToolPresenter presenter (SyncTool kind desc run _) = SyncTool kind desc run (Just presenter)
+instance PresentableTool (RawTool m output) where
+  type ToolOutput (RawTool m output) = output
+  presentWith presenter value = Presented value presenter
 
-instance PresentableTool (SyncRawTool base output) output where
-  setToolPresenter presenter (SyncRawTool desc run _) = SyncRawTool desc run (Just presenter)
+instance PresentableTool (SyncTool base input output) where
+  type ToolOutput (SyncTool base input output) = output
+  presentWith presenter value = Presented value presenter
 
--- | Select a tool's model-facing text. Hosted compilation rejects an
--- unpresented named tool before any handler can run.
-presentWith :: PresentableTool tool output => (output -> Text) -> tool -> tool
-presentWith = setToolPresenter
+instance PresentableTool (SyncRawTool base output) where
+  type ToolOutput (SyncRawTool base output) = output
+  presentWith presenter value = Presented value presenter
 
 -- | Use the JSON encoding as a tool's model-facing text.
 presentJson :: ToJSON output => output -> Text
@@ -263,18 +266,18 @@ presentDisplay :: Display output => output -> Text
 presentDisplay = renderToolOutput
 
 -- | A precompiled handler in the canonical synchronous row.
-data SyncTool base input output = SyncTool ToolKind Text (input -> Eff (SyncEffects base) output) (Maybe (output -> Text))
+data SyncTool base input output = SyncTool ToolKind Text (input -> Eff (SyncEffects base) output)
 
-data SyncRawTool base output = SyncRawTool Text (Text -> Eff (SyncEffects base) output) (Maybe (output -> Text))
+data SyncRawTool base output = SyncRawTool Text (Text -> Eff (SyncEffects base) output)
 
 syncTool :: Text -> (input -> Eff (SyncEffects base) output) -> SyncTool base input output
-syncTool description run = SyncTool CallKind description run Nothing
+syncTool description run = SyncTool CallKind description run
 
 syncNotify :: Text -> (input -> Eff (SyncEffects base) ()) -> SyncTool base input ()
-syncNotify description run = SyncTool NotifyKind description run Nothing
+syncNotify description run = SyncTool NotifyKind description run
 
 syncRawTool :: Text -> (Text -> Eff (SyncEffects base) output) -> SyncRawTool base output
-syncRawTool description run = SyncRawTool description run Nothing
+syncRawTool description run = SyncRawTool description run
 
 -- The constructor retains a checked profile, not an executable handler.
 data HaskellTool (schedule :: ToolSchedule) (effects :: [Type -> Type]) (base :: [Type -> Type]) =
@@ -330,7 +333,7 @@ haskellTools = HaskellTools
 
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
 notify :: Text -> (input -> m ()) -> Tool m input ()
-notify description run = Tool NotifyKind description run Nothing
+notify description run = Tool NotifyKind description run
 
 data UpdateTool m state input output = UpdateTool
   { updateDescription :: Text
@@ -427,11 +430,6 @@ data ToolCompileError
       , invalidWireName :: Text
       , invalidReason :: Text
       }
-  | MissingToolPresentation
-      { missingRecordName :: Text
-      , missingSelector :: Text
-      , missingWireName :: Text
-      }
   deriving (Eq, Show)
 
 -- | Human-readable rendering asserted on by the diagnostics fixtures: names
@@ -455,9 +453,6 @@ renderToolCompileError (InvalidToolIdentifier recName sel wire reason) =
     <> T.pack "\" is not a valid tool identifier ("
     <> reason
     <> T.pack "). Rename the selector so its snake_case form is valid."
-renderToolCompileError (MissingToolPresentation recName sel wire) =
-  recName <> T.pack "." <> sel <> T.pack " (" <> wire
-    <> T.pack "): select model-facing output with presentWith before installing this tool."
 
 -- | camelCase -> snake_case, deterministic, ASCII-scoped (selectors are
 -- Haskell identifiers). No @Named@ override in v1 (PRD: "one deterministic
@@ -494,7 +489,6 @@ data ToolEntry m result = ToolEntry
   , entryKind :: ToolKind
   , entrySchedule :: ToolSchedule
   , entryBody :: ToolBody m result
-  , entryHasPresenter :: Bool
   }
 
 -- | The single Generic traversal: read the selector name, obtain the input
@@ -546,13 +540,13 @@ instance
   where
   gCompileEntries _ _ = error "unreachable: multi-constructor tools record is a compile-time TypeError"
 
--- | Every record leaf is exactly @Tool m input output@; unit-output tools use
+-- | Hosted handler leaves require selected presentation; unit-output tools use
 -- the same instance as request/response tools.
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor source, LiftTool policy source m) =>
-  GCompileTools policy (M1 S s (K1 R (Tool source input output))) m ToolDispatchSuccess
+  GCompileTools policy (M1 S s (K1 R (Presented (Tool source input output)))) m ToolDispatchSuccess
   where
-  gCompileEntries policy (M1 (K1 (Tool kind desc h present))) =
+  gCompileEntries policy (M1 (K1 (Presented (Tool kind desc h) present))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -565,18 +559,17 @@ instance
         , entryBody = HandlerBody $ \sv -> case fromJSON sv of
             Success input' -> Right (liftTool policy (presentResult <$> h input'))
             Error msg -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack msg))
-        , entryHasPresenter = maybe False (const True) present
         }
     ]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
-      presentResult output = ToolDispatchSuccess (toJSON output) (maybe T.empty ($ output) present)
+      presentResult output = ToolDispatchSuccess (toJSON output) (present output)
 
 instance
   (Selector s, ToJSON output, JsonSchema output, Functor source, LiftTool policy source m) =>
-  GCompileTools policy (M1 S s (K1 R (RawTool source output))) m ToolDispatchSuccess
+  GCompileTools policy (M1 S s (K1 R (Presented (RawTool source output)))) m ToolDispatchSuccess
   where
-  gCompileEntries policy (M1 (K1 (RawTool desc h present))) =
+  gCompileEntries policy (M1 (K1 (Presented (RawTool desc h) present))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -589,38 +582,35 @@ instance
         , entryBody = HandlerBody $ \value -> case fromJSON value of
             Success input -> Right (liftTool policy (presentResult <$> h input))
             Error message -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack message))
-        , entryHasPresenter = maybe False (const True) present
         }
     ]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
-      presentResult output = ToolDispatchSuccess (toJSON output) (maybe T.empty ($ output) present)
+      presentResult output = ToolDispatchSuccess (toJSON output) (present output)
 
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output) =>
-  GCompileTools (Installed base) (M1 S s (K1 R (SyncTool base input output))) (Eff (SyncEffects base)) ToolDispatchSuccess
+  GCompileTools (Installed base) (M1 S s (K1 R (Presented (SyncTool base input output)))) (Eff (SyncEffects base)) ToolDispatchSuccess
   where
-  gCompileEntries _ (M1 (K1 (SyncTool kind desc run present))) =
+  gCompileEntries _ (M1 (K1 (Presented (SyncTool kind desc run) present))) =
     [ (actorEntry fieldName kind desc (jsonSchema (Proxy @output)) (fmap presentResult . run))
         { entrySchedule = BeforeNextInference }
-        { entryHasPresenter = maybe False (const True) present }
     ]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
-      presentResult output = ToolDispatchSuccess (toJSON output) (maybe T.empty ($ output) present)
+      presentResult output = ToolDispatchSuccess (toJSON output) (present output)
 
 instance
   (Selector s, ToJSON output, JsonSchema output) =>
-  GCompileTools (Installed base) (M1 S s (K1 R (SyncRawTool base output))) (Eff (SyncEffects base)) ToolDispatchSuccess
+  GCompileTools (Installed base) (M1 S s (K1 R (Presented (SyncRawTool base output)))) (Eff (SyncEffects base)) ToolDispatchSuccess
   where
-  gCompileEntries _ (M1 (K1 (SyncRawTool desc run present))) =
+  gCompileEntries _ (M1 (K1 (Presented (SyncRawTool desc run) present))) =
     [ (actorEntry fieldName RawKind desc (jsonSchema (Proxy @output)) (fmap presentResult . run))
         { entrySchedule = BeforeNextInference }
-        { entryHasPresenter = maybe False (const True) present }
     ]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
-      presentResult output = ToolDispatchSuccess (toJSON output) (maybe T.empty ($ output) present)
+      presentResult output = ToolDispatchSuccess (toJSON output) (present output)
 
 instance (Selector s, ToolSource policy m ~ Eff base) =>
   GCompileTools policy (M1 S s (K1 R (HaskellTool schedule effects base))) m result
@@ -636,7 +626,6 @@ instance (Selector s, ToolSource policy m ~ Eff base) =>
         , entryKind = RawKind
         , entrySchedule = schedule
         , entryBody = HaskellBody keys
-        , entryHasPresenter = True
         }
     ]
     where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
@@ -645,7 +634,7 @@ instance
   (Selector s, Display output, Functor m) =>
   GCompileTools InRow (M1 S s (K1 R (RawTool m output))) m (ActorToolStep state exit)
   where
-  gCompileEntries _ (M1 (K1 (RawTool desc run _))) =
+  gCompileEntries _ (M1 (K1 (RawTool desc run))) =
     [ actorEntry fieldName RawKind desc (jsonSchema (Proxy @Text)) $ \input ->
         ActorToolStay . toJSON . renderToolOutput <$> run input
     ]
@@ -663,7 +652,7 @@ instance
     m
     (ActorToolStep state exit)
   where
-  gCompileEntries _ (M1 (K1 (Tool kind desc h _))) =
+  gCompileEntries _ (M1 (K1 (Tool kind desc h))) =
     [ actorEntry fieldName kind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         ActorToolStay . toJSON <$> h input
     ]
@@ -713,7 +702,7 @@ instance
 -- while adding its own: a record that does not nest them does not have them.
 --
 -- 'OVERLAPPABLE' because the leaf instances above are the intended answer for
--- a @Tool@\/@RawTool@\/@UpdateTool@\/@FinishTool@ field. In practice the two
+-- a @Presented@\/@Tool@\/@RawTool@\/@UpdateTool@\/@FinishTool@ field. In practice the two
 -- kinds of field never both match — matching this head would require a leaf's
 -- final type argument to BE @AsServerT m@ — but the pragma keeps a partly
 -- resolved field type from being reported as an ambiguous overlap.
@@ -752,7 +741,6 @@ actorEntry fieldName kind desc outputSchema run =
     , entryBody = HandlerBody $ \sv -> case fromJSON sv of
         Success input' -> Right (run input')
         Error msg -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack msg))
-    , entryHasPresenter = False
     }
 
 -- | The constraints needed to walk the server interpretation of a tools
@@ -780,7 +768,7 @@ compileInstalledTools
   :: forall tools effects. HasInstalledAgentApi tools effects
   => tools (AsServerT (Eff effects))
   -> Either ToolCompileError (CompiledTools (Eff (SyncEffects effects)))
-compileInstalledTools value = toCompiledTools <$> compileEntrySet True
+compileInstalledTools value = toCompiledTools <$> compileEntrySet
   (gCompileEntries (Proxy @(Installed effects)) (from value) :: [ToolEntry (Eff (SyncEffects effects)) ToolDispatchSuccess])
 
 type HasActorApi tools m state exit =
@@ -801,7 +789,7 @@ compileTools ::
   Either ToolCompileError (CompiledTools m)
 compileTools v =
   toCompiledTools
-    <$> compileEntrySet True
+    <$> compileEntrySet
       (gCompileEntries (Proxy @InRow) (from v) :: [ToolEntry m ToolDispatchSuccess])
 
 data CompiledEntrySet m result = CompiledEntrySet
@@ -812,12 +800,11 @@ data CompiledEntrySet m result = CompiledEntrySet
 
 compileEntrySet
   :: Applicative m
-  => Bool
-  -> [ToolEntry m result]
+  => [ToolEntry m result]
   -> Either ToolCompileError (CompiledEntrySet m result)
-compileEntrySet requirePresenter raw =
+compileEntrySet raw =
   let named = [e {entryWireName = toSnakeCase (entrySelector e)} | e <- raw]
-   in case checkNames named >> checkPresenters requirePresenter named of
+   in case checkNames named of
         Left err -> Left err
         Right () ->
           let table = Map.fromList [(entryWireName e, entryBody e) | e <- named]
@@ -1175,7 +1162,7 @@ compileActorTools ::
   tools (AsActorT m state exit) ->
   Either ToolCompileError (CompiledEntrySet m (ActorToolStep state exit))
 compileActorTools v =
-  compileEntrySet False
+  compileEntrySet
     (gCompileEntries (Proxy @InRow) (from v) :: [ToolEntry m (ActorToolStep state exit)])
 
 checkNames :: [ToolEntry m result] -> Either ToolCompileError ()
@@ -1187,19 +1174,6 @@ checkIdentifier :: ToolEntry m result -> Either ToolCompileError ()
 checkIdentifier e = case validIdentifier (entryWireName e) of
   Right () -> Right ()
   Left reason -> Left (InvalidToolIdentifier (entryRecordName e) (entrySelector e) (entryWireName e) reason)
-
-checkPresenters :: Bool -> [ToolEntry m result] -> Either ToolCompileError ()
-checkPresenters False _ = Right ()
-checkPresenters True entries = case filter missing entries of
-  [] -> Right ()
-  entry : _ -> Left (MissingToolPresentation
-    (entryRecordName entry)
-    (entrySelector entry)
-    (entryWireName entry))
-  where
-    missing entry = case entryBody entry of
-      HandlerBody _ -> not (entryHasPresenter entry)
-      HaskellBody _ -> False
 
 -- | Backend tool identifier rules: lowercase-letter start, only
 -- @[a-z0-9_]@ after that, 64 chars max. A selector prefixed with @_@ (a
