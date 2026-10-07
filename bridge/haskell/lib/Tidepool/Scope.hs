@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 
 -- | Lexical cleanup ownership interpreted by the resident runtime.
@@ -7,6 +8,8 @@ module Tidepool.Scope
   , CleanupError (..)
   , ScopeOutcome (..)
   , withScope
+  , runScope
+  , runScopeSited
   ) where
 
 import Prelude
@@ -18,6 +21,7 @@ import Tidepool.Effects.Core
   , CleanupError (..)
   )
 import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
+import Tidepool.Internal.RequestSite (RequestSite)
 
 -- | A body can return a value even when external cleanup remains unconfirmed.
 -- Cleanup uncertainty never replaces the body's result or its original failure.
@@ -47,10 +51,27 @@ withScope body = do
         value <- body (ScopeToken token)
         case fillExitCell cell value of
           () -> send (ScopeDoneWith token)
-  (bodyStatus, cleanupStatus) <- send (ScopeRunWith publish)
+  (bodyStatus, cleanupStatus) <- runScope publish
   let bodyResult = case bodyStatus of
         Left failure -> Left failure
         Right () -> case readExitCell bodyStatus cell of
           Just value -> Right value
           Nothing -> error "Tidepool.Scope.withScope: completed body has an empty exit cell"
   pure (ScopeOutcome bodyResult cleanupStatus)
+
+-- The compiler issues evidence for the runtime's status reply separately from
+-- the arbitrary body result retained by withScope's exit cell.
+{-# OPAQUE runScope #-}
+runScope
+  :: Member ResourceScopes effects
+  => (Int -> Eff effects ())
+  -> Eff effects (Either ScopeFailure (), Either CleanupError ())
+runScope = runScopeSited (error "runScope: extractor must assign a typed site")
+
+{-# OPAQUE runScopeSited #-}
+runScopeSited
+  :: Member ResourceScopes effects
+  => RequestSite '[] (Either ScopeFailure (), Either CleanupError ())
+  -> (Int -> Eff effects ())
+  -> Eff effects (Either ScopeFailure (), Either CleanupError ())
+runScopeSited site body = send (ScopeRunWith site body)

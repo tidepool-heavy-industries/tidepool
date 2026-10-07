@@ -144,6 +144,9 @@ sitedVerbs =
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"
       "serveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
+  , (verb "runScope" "Tidepool.Scope"
+      "runScopeSited" "Tidepool.Scope" False [] DeliverHostAnswer SelectedAnswer)
+      { vsAnswerSource = EffectResult }
   ]
   where
     verb name source sibling siblingSource listAnswer inputs delivery wireSource =

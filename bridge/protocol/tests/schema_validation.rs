@@ -77,11 +77,12 @@ fn lexical_scope_delimiter_keeps_body_and_cleanup_outcomes_separate() {
     assert_eq!(
         scopes.constructor_signatures(),
         [
-            "ScopeRunWith :: (Int -> Eff bodyEffs ()) -> ResourceScopes (Either ScopeFailure (), Either CleanupError ())",
+            "ScopeRunWith :: RequestSite '[] (Either ScopeFailure (), Either CleanupError ()) -> (Int -> Eff bodyEffs ()) -> ResourceScopes (Either ScopeFailure (), Either CleanupError ())",
             "ScopeDoneWith :: Int -> ResourceScopes ()",
         ]
     );
-    assert_eq!(scopes.verbs[0].args[0].rust, RustBinding::HaskellValue);
+    assert_eq!(scopes.verbs[0].args[0].rust, RustBinding::External);
+    assert_eq!(scopes.verbs[0].args[1].rust, RustBinding::HaskellValue);
     assert!(scopes
         .verbs
         .iter()

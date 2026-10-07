@@ -91,13 +91,27 @@ pub fn resource_scopes() -> Effect {
                 vec![variant("ScopeCleanupUnconfirmed", vec![HsType::Text])],
             ),
         ],
-        external_types: &[],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "RequestSite",
+            rust_wire: "i64",
+            core_module: Some("Tidepool.Internal.RequestSite"),
+        }],
         errors: None,
         verbs: vec![
             Verb {
                 ctor: "ScopeRunWith",
                 method: "scope_run_with",
                 args: vec![Arg {
+                    name: "site",
+                    ty: HsType::app(
+                        HsType::app(HsType::Named("RequestSite"), HsType::TypeList(vec![])),
+                        HsType::Tuple(vec![
+                            HsType::either(HsType::Named("ScopeFailure"), HsType::Unit),
+                            HsType::either(HsType::Named("CleanupError"), HsType::Unit),
+                        ]),
+                    ),
+                    rust: RustBinding::External,
+                }, Arg {
                     name: "body",
                     // The callback carries the caller's concrete effects and
                     // a parent-retained exit cell, never a serialized result.

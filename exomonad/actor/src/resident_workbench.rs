@@ -8535,11 +8535,8 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
-                    ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(_)) => {
-                        let callback = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
-                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("scope callback has no retained payload".into()))?;
-                        Ok(ResidentActorBoundary::ScopeRun { continuation: hole, callback })
-                    }
+                    ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(site, _)) =>
+                        capture_scope_boundary(session, hole, site, actor_realm),
                     ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeDoneWith(token)) =>
                         Ok(ResidentActorBoundary::ScopeDone { continuation: hole, token }),
                     ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address, notify_owner, lifetime)) => Ok(
@@ -10423,6 +10420,52 @@ where
             request,
         },
     }))
+}
+
+fn capture_scope_boundary<H, O>(
+    session: &mut ResidentSession<H, O>,
+    hole: ResidentHole,
+    site: i64,
+    actor_realm: RealmId,
+) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let site = u64::try_from(site).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(format!(
+            "scope callback carried invalid site id {site}"
+        ))
+    })?;
+    if session.parked_realm(&hole) != Some(actor_realm) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+            "scope callback escaped its owning realm {actor_realm:?}"
+        )));
+    }
+    let issued = session
+        .parked_program_provenance(&hole)
+        .is_some_and(|provenance| {
+            provenance
+                .sites()
+                .iter()
+                .any(|evidence| evidence.site == site && evidence.inputs.is_empty())
+        });
+    if !issued {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "scope callback has no compiler-issued status reply site".into(),
+        ));
+    }
+    let callback = session
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "scope callback has no retained payload".into(),
+            )
+        })?;
+    Ok(ResidentActorBoundary::ScopeRun {
+        continuation: hole,
+        callback,
+    })
 }
 
 fn capture_receiver_boundary<H, O>(
@@ -19211,10 +19254,42 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
             panic!("scope body suspends")
         };
+        let outcome: ResidentOutcome = (*outcome).into();
+        let ResidentOutcome::Suspended { hole, request, .. } = &outcome else {
+            panic!("scope delimiter suspends")
+        };
+        let hole = hole.clone();
+        let request = request.clone();
+        let parent_realm = context.placement.resource_scope;
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                let ResidentRequest::ResourceScopes(
+                    crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(site, _),
+                ) = ResidentRequest::decode(&request, session.data_con_table())?
+                else {
+                    panic!("scope callback follows the generated request schema")
+                };
+                let custody = session.outstanding_custody();
+                for (invalid_site, realm) in [
+                    (-1, parent_realm),
+                    (i64::MAX, parent_realm),
+                    (site, RealmId::fresh()),
+                ] {
+                    assert!(matches!(
+                        capture_scope_boundary(session, hole.clone(), invalid_site, realm),
+                        Err(ResidentActorWorkbenchError::ActorProtocol(_))
+                    ));
+                    assert_eq!(session.outstanding_custody(), custody);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
         let boundary = runner
             .capture_boundary(
                 context.clone(),
-                (*outcome).into(),
+                outcome,
                 context.placement.resource_scope,
             )
             .await
