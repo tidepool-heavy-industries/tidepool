@@ -226,23 +226,47 @@ pub(crate) fn inherited_package_witnesses_with_validation(
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
     let mut selected = BTreeMap::new();
     for product in products {
-        let witness = decode_home_witness_with_operation(
-            product.certification_bytes(),
-            &validation.inventory,
-        )?;
-        if &witness.owner != product.owner() {
-            return Err(CertificationError::Mismatch(
-                "inherited package product owner",
-            ));
-        }
-        for (owner, interface) in witness.packages {
-            verify_package_interface(validation, &interface)?;
-            if selected
-                .insert(owner, interface.clone())
-                .is_some_and(|old| old != interface)
-            {
-                return Err(CertificationError::Mismatch("inherited package selection"));
+        let decoded;
+        let packages = match product.original_native() {
+            Some(witness) if witness.matches_original(product) => &witness.packages,
+            Some(_) => {
+                return Err(CertificationError::Mismatch(
+                    "original native witness bytes",
+                ));
             }
+            None => {
+                decoded = decode_home_witness_with_operation(
+                    product.certification_bytes(),
+                    &validation.inventory,
+                )?;
+                if &decoded.owner != product.owner() {
+                    return Err(CertificationError::Mismatch(
+                        "inherited package product owner",
+                    ));
+                }
+                &decoded.packages
+            }
+        };
+        for (owner, interface) in packages {
+            verify_package_interface(validation, interface)?;
+            match selected.get(owner) {
+                Some(old) if old != interface => {
+                    return Err(CertificationError::Mismatch("inherited package selection"));
+                }
+                Some(_) => continue,
+                None => {}
+            }
+            // The returned selection owns its containers; the issued witness
+            // retains immutable native facts under the original byte anchors.
+            validation
+                .inventory
+                .reserve::<((String, String), PackageInterfaceWitness, [usize; 4])>(1)?;
+            validation.inventory.charge(owner.0.len())?;
+            validation.inventory.charge(owner.1.len())?;
+            validation
+                .inventory
+                .charge(interface.selected_path.as_os_str().as_encoded_bytes().len())?;
+            selected.insert(owner.clone(), interface.clone());
         }
     }
     Ok(selected)
@@ -7338,6 +7362,257 @@ pub(crate) mod tests {
             .is_err(),
             "one selected context cannot combine different full versions of one owner"
         );
+    }
+
+    #[test]
+    fn inherited_packages_reuse_issued_witness_and_charge_owned_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("External.hi");
+        std::fs::write(&path, [0x43]).unwrap();
+        let packages = BTreeMap::from([(
+            ("fixture".into(), "External".into()),
+            PackageInterfaceWitness {
+                selected_path: path,
+                sha256: sha(&[0x43]),
+            },
+        )]);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture(
+                "Consumer",
+                Some(PendingImportOwner::Package {
+                    unit: "fixture".into(),
+                    module: "External".into(),
+                    binder: testing::identity("External", "entry"),
+                    interface_digest: sha(&[0x43]),
+                }),
+                7,
+                &packages,
+            ),
+            [1; 32],
+        );
+        let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        assert_eq!(
+            issued.module_interface().unwrap().producer_sha256(),
+            [1; 32]
+        );
+        assert!(issued.original_native().unwrap().matches_original(&issued));
+        let legacy = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            issued.owner().clone(),
+            issued.interface_bytes().to_vec(),
+            issued.product_bytes().to_vec(),
+            issued.package_imports_bytes().to_vec(),
+            issued.certification_bytes().to_vec(),
+        );
+        assert!(legacy.original_native().is_none());
+        assert!(
+            legacy
+                .clone()
+                .with_original_native(issued.original_native().unwrap().clone())
+                .is_err(),
+            "identical recaptured bytes cannot borrow another original's witness"
+        );
+        let mut legacy_validation = PackageInterfaceValidation::default();
+        let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+        let expected = inherited_package_witnesses_with_validation(
+            std::slice::from_ref(&legacy),
+            &mut legacy_validation,
+        )
+        .unwrap();
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            before + 1
+        );
+        assert_eq!(expected, packages);
+        let legacy_spent = legacy_validation.inventory.work_usage().unwrap().0;
+        let mut validation = PackageInterfaceValidation::default();
+        let inventory = validation.inventory.clone();
+        let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+        let selected = inherited_package_witnesses_with_validation(
+            std::slice::from_ref(&issued),
+            &mut validation,
+        )
+        .unwrap();
+        assert_eq!(selected, expected);
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            before
+        );
+        let spent = inventory.work_usage().unwrap().0;
+        assert!(spent > 0 && spent < legacy_spent);
+        let repeated = inherited_package_witnesses_with_validation(
+            &[issued.clone(), issued.clone()],
+            &mut validation,
+        )
+        .unwrap();
+        assert_eq!(repeated, expected);
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            before
+        );
+        assert!(
+            inventory.work_usage().unwrap().0 > spent,
+            "owned output copies stay charged"
+        );
+        assert_ne!(
+            selected
+                .values()
+                .next()
+                .unwrap()
+                .selected_path
+                .as_os_str()
+                .as_encoded_bytes()
+                .as_ptr(),
+            repeated
+                .values()
+                .next()
+                .unwrap()
+                .selected_path
+                .as_os_str()
+                .as_encoded_bytes()
+                .as_ptr()
+        );
+        let remaining = inventory.work_usage().unwrap().1;
+        inventory.charge(remaining).unwrap();
+        assert!(matches!(
+            inherited_package_witnesses_with_validation(
+                std::slice::from_ref(&issued),
+                &mut validation,
+            ),
+            Err(CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+            ))
+        ));
+        assert_eq!(inventory.work_usage().unwrap().1, 0);
+        assert_eq!(
+            inherited_package_witnesses_with_validation(
+                &[issued],
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap(),
+            expected
+        );
+        let mut wrong_owner = legacy.owner().clone();
+        wrong_owner.module = "AnotherConsumer".into();
+        let wrong_owner = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            wrong_owner,
+            legacy.interface_bytes().to_vec(),
+            legacy.product_bytes().to_vec(),
+            legacy.package_imports_bytes().to_vec(),
+            legacy.certification_bytes().to_vec(),
+        );
+        assert!(matches!(
+            inherited_package_witnesses_with_validation(
+                &[wrong_owner],
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "inherited package product owner"
+            ))
+        ));
+        let mut changed = legacy.certification_bytes().to_vec();
+        changed[0] ^= 1;
+        let changed = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            legacy.owner().clone(),
+            legacy.interface_bytes().to_vec(),
+            legacy.product_bytes().to_vec(),
+            legacy.package_imports_bytes().to_vec(),
+            changed,
+        );
+        assert!(inherited_package_witnesses_with_validation(
+            &[changed],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inherited_package_witness_reuse_preserves_current_files_and_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("External.hi");
+        let second = root.path().join("AnotherExternal.hi");
+        for path in [&first, &second] {
+            std::fs::write(path, [0x43]).unwrap();
+        }
+        let package = |path| {
+            BTreeMap::from([(
+                ("fixture".into(), "External".into()),
+                PackageInterfaceWitness {
+                    selected_path: path,
+                    sha256: sha(&[0x43]),
+                },
+            )])
+        };
+        let fixture = |module, packages: &BTreeMap<_, _>| {
+            fixture_finalized_product(
+                original_witness_fixture(
+                    module,
+                    Some(PendingImportOwner::Package {
+                        unit: "fixture".into(),
+                        module: "External".into(),
+                        binder: testing::identity("External", "entry"),
+                        interface_digest: sha(&[0x43]),
+                    }),
+                    7,
+                    packages,
+                ),
+                [1; 32],
+            )
+        };
+        let packages = package(first.clone());
+        let originals = recovered_witness_fixtures(&[
+            fixture("First", &packages),
+            fixture("Second", &package(second)),
+        ]);
+        let first_product = originals[0].product.clone();
+        let second_product = originals[1].product.clone();
+        let legacy = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
+            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                product.owner().clone(),
+                product.interface_bytes().to_vec(),
+                product.product_bytes().to_vec(),
+                product.package_imports_bytes().to_vec(),
+                product.certification_bytes().to_vec(),
+            )
+        };
+        for products in [
+            vec![first_product.clone(), second_product],
+            vec![legacy(&first_product), legacy(&originals[1].product)],
+        ] {
+            assert!(matches!(
+                inherited_package_witnesses_with_validation(
+                    &products,
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::Mismatch("inherited package selection"))
+            ));
+        }
+        for product in [first_product, legacy(&originals[0].product)] {
+            assert_eq!(
+                inherited_package_witnesses_with_validation(
+                    std::slice::from_ref(&product),
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap(),
+                packages
+            );
+            std::fs::write(&first, [0x44]).unwrap();
+            assert!(matches!(
+                inherited_package_witnesses_with_validation(
+                    std::slice::from_ref(&product),
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::StaleEvidence)
+            ));
+            std::fs::write(&first, [0x43]).unwrap();
+            assert_eq!(
+                inherited_package_witnesses_with_validation(
+                    &[product],
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap(),
+                packages
+            );
+        }
     }
 
     #[test]
