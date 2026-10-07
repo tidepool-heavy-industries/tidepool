@@ -969,7 +969,7 @@ fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
     exomonad_actor::DurableActorRecord {
         admission: exomonad_actor::DurableActorAdmission {
             actor,
-            label: "exomonad-root".into(),
+            label: Some("exomonad-root".into()),
             creator: None,
             supervisor_parent: None,
             context_parent: None,
@@ -1072,7 +1072,7 @@ fn recovery_preserves_root_logical_id_and_advances_actor_incarnation() {
 fn root_recovery_ignores_operator_with_root_privileges() {
     let root = ActorRef::first(exomonad_actor::ActorId(1));
     let mut operator = durable_root(ActorRef::first(exomonad_actor::ActorId(2)));
-    operator.admission.label = "operator".into();
+    operator.admission.label = Some("operator".into());
     operator.application = None;
     for records in [
         vec![durable_root(root), operator.clone()],

@@ -491,7 +491,7 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
                 actor,
                 depth: 0,
                 parent,
-                label: admission.label.clone(),
+                label: admission.display_label().to_owned(),
                 model: admission.model.clone(),
                 effort: admission.effort.map(|effort| {
                     match effort {
@@ -1433,8 +1433,20 @@ mod tests {
         )
         .unwrap();
         fs::write(workspace.join(".exomonad/logs/run-7.jsonl"), TRACE).unwrap();
+        let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(&run).unwrap();
+        let producer =
+            exomonad_actor::ActorRecoveryJournal::open(&anchor, "actor-lifecycle.v2.jsonl")
+                .unwrap();
+        drop(producer);
+        let created: Value = serde_json::from_str(
+            fs::read_to_string(run.join("actor-lifecycle.v2.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        let version = created["version"].clone();
         let admission = |id: u64, parent: Option<u64>, label: &str| {
-            json!({"version":6,"event":"admitted","admission":{
+            json!({"version":version.clone(),"event":"admitted","admission":{
                 "actor":{"id":id,"incarnation":1},"label":label,
                 "creator":parent.map(|id| json!({"id":id,"incarnation":1})),
                 "supervisor_parent":parent.map(|id| json!({"id":id,"incarnation":1})),
@@ -1444,14 +1456,14 @@ mod tests {
         };
         let bind = |id: u64, thread: &str| {
             [
-                json!({"version":6,"event":"application_prepared","actor":{"id":id,"incarnation":1},
+                json!({"version":version.clone(),"event":"application_prepared","actor":{"id":id,"incarnation":1},
                     "binding_path":format!("/run/{id}-1/binding.json")}),
-                json!({"version":6,"event":"application_bound","actor":{"id":id,"incarnation":1},
+                json!({"version":version.clone(),"event":"application_bound","actor":{"id":id,"incarnation":1},
                     "conversation":thread}),
             ]
         };
         let mut journal = vec![
-            json!({"version":6,"event":"created"}),
+            created,
             admission(1, None, "root"),
             admission(2, Some(1), "lead"),
             admission(3, Some(1), "work"),

@@ -426,7 +426,7 @@ where
         };
         // The checkout-derived include roots were fixed before any fresh
         // child machine bootstrapped inherited declarations.
-        let allocated_label = descriptor.label().to_string();
+        let allocated_label = descriptor.display_label().to_string();
         let admitted_worktree = prepared_workspace
             .as_ref()
             .map(|prepared| prepared.handle().clone());

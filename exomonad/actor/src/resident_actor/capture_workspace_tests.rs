@@ -307,7 +307,8 @@ impl CaptureFixture {
                                 .actors
                                 .lock()
                                 .get(&actor)
-                                .is_some_and(|record| labels.contains(&record.descriptor.label())),
+                                .is_some_and(|record| labels
+                                    .contains(&record.descriptor.display_label().as_ref())),
                             "child retired before installation: {terminal:?}"
                         );
                     }

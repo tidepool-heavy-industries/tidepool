@@ -4128,7 +4128,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .filter_map(|(identity, record)| {
                 let key = format!(
                     "{:?} ({}@{})",
-                    record.descriptor.label(),
+                    record.descriptor.display_label(),
                     identity.id.0,
                     identity.incarnation.0
                 );
@@ -4164,7 +4164,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     format!(
                         "\n    {}",
                         runtime.delivery_status_line(
-                            record.descriptor.label(),
+                            &record.descriptor.display_label(),
                             requests.0.len() + requests.1.len(),
                             crate::runtime_observation::unix_time_ms(),
                         )
@@ -4175,7 +4175,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 if view == StatusView::Concise {
                     return Some((key, format!(
                         "  - {:?} ({}@{}) supervisor={} bound_worktree={:?} state={state} {}{delivery}",
-                        record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        record.descriptor.display_label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent().map_or_else(
                             || "none".to_owned(),
                             |parent| format!("{}@{}", parent.id.0, parent.incarnation.0),
@@ -4187,7 +4187,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 if view == StatusView::Lineage {
                     return Some((key, format!(
                         "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
-                        record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        record.descriptor.display_label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.creator(), record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
                         record.descriptor.placement().lexical_scope.0,
                         runtime.provider_thread, runtime.provider_parent_thread,
@@ -4203,7 +4203,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     "  - {}@{} label={:?} supervisor={:?} context_parent={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
                     identity.id.0,
                     identity.incarnation.0,
-                    record.descriptor.label(),
+                    record.descriptor.display_label(),
                     record.descriptor.supervisor_parent(),
                     record.descriptor.context_parent(),
                     record.bound_worktree,
@@ -4289,7 +4289,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let current = if view == StatusView::Concise {
             format!(
                 "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  jobs: running={:?}\n  descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
-                self.descriptor.label(),
+                self.descriptor.display_label(),
                 actor.id.0,
                 actor.incarnation.0,
                 runtime.activation_kind,
@@ -4321,7 +4321,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
                 actor.id.0,
                 actor.incarnation.0,
-                self.descriptor.label(),
+                self.descriptor.display_label(),
                 self.descriptor.creator(),
                 self.descriptor.supervisor_parent(),
                 self.descriptor.context_parent(),
@@ -4456,7 +4456,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             })
             .map(|(_, record)| {
                 (
-                    record.descriptor.label().to_owned(),
+                    record.descriptor.display_label().into_owned(),
                     record.runtime_observation.snapshot().source_drift.checkout,
                 )
             })
@@ -4811,7 +4811,7 @@ where
         effect_owner: CurrentEffectOwner<'_>,
         start: crate::ResidentActorStart,
     ) -> child_launch::PreparedChildLaunch {
-        tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = start.child.descriptor.label(), phase = "child_launch_requested", "actor phase");
+        tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = %start.child.descriptor.display_label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
         let spawn_reply = child.spawn.is_some();
         let placement_custody =
@@ -6950,7 +6950,7 @@ where
                             prepared_tools: None,
                             toolset_acquisition: None,
                             actor,
-                            label: self.descriptor.label().to_owned(),
+                            label: self.descriptor.display_label().into_owned(),
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
                             fresh_context_seed: self.fresh_context_seed.clone(),
@@ -7528,7 +7528,7 @@ where
             toolset_acquisition: prepared_tools.toolset_acquisition().cloned(),
             prepared_tools: Some(prepared_tools),
             actor,
-            label: self.descriptor.label().to_owned(),
+            label: self.descriptor.display_label().into_owned(),
             policy,
             initial_user_message,
             fresh_context_seed: self.fresh_context_seed.clone(),
@@ -13117,7 +13117,7 @@ where
                     self.environment.requests.work_for_target(*actor);
                 ActorGraphNode {
                     actor: *actor,
-                    label: record.descriptor.label().to_owned(),
+                    label: record.descriptor.display_label().into_owned(),
                     model_actor: record.interactive_policy_installed,
                     creator: record.descriptor.creator(),
                     supervisor_parent: record.descriptor.supervisor_parent(),
@@ -13180,7 +13180,7 @@ where
             id: actor.id,
             incarnation: self.incarnation,
         };
-        let mut descriptor = ActorDescriptor::new(&durable.label, placement)
+        let mut descriptor = ActorDescriptor::new_optional(durable.label.clone(), placement)
             .with_capabilities(role)
             .with_model(durable.model.clone().map(crate::Model::Literal))
             .with_instructions(durable.instructions.clone())

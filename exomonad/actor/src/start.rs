@@ -336,8 +336,8 @@ impl ResidentActorStart {
             SpawnContextWire::CapturedSpawn(token) => Some(token.clone()),
             SpawnContextWire::FreshSpawn(_) => None,
         };
-        let mut descriptor = ActorDescriptor::new(
-            label.unwrap_or_default(),
+        let mut descriptor = ActorDescriptor::new_optional(
+            label,
             crate::ActorPlacement {
                 session: child_session,
                 resource_scope: child_realm,

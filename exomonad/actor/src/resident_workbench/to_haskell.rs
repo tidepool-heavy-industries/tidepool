@@ -396,7 +396,10 @@ impl ToHaskell for AgentRosterProjection {
             actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
             actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
                 .visit(table, visitor)?;
-            self.descriptor.label().to_owned().visit(table, visitor)?;
+            self.descriptor
+                .display_label()
+                .into_owned()
+                .visit(table, visitor)?;
             self.runtime
                 .requested_model
                 .as_deref()
@@ -611,7 +614,10 @@ impl ToHaskell for ActorContextProjection {
                 .map(|x| actor_haskell_int(x.incarnation.0, "supervisor incarnation"))
                 .transpose()?
                 .visit(table, v)?;
-            self.descriptor.label().to_owned().visit(table, v)?;
+            self.descriptor
+                .display_label()
+                .into_owned()
+                .visit(table, v)?;
             self.descriptor
                 .capabilities()
                 .haskell_effects_type()

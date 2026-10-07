@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// V6 records effect capabilities instead of launch roles. V5 rows cannot
-// prove the admitted effect surface and require an explicit migration.
-const VERSION: u32 = 6;
+// V7 preserves optional authored labels independently of canonical paths.
+// Earlier runs remain evidence and require an explicit migration to resume.
+const VERSION: u32 = 7;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -194,7 +194,8 @@ fn is_independent_root(admission: &DurableActorAdmission) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct DurableActorAdmission {
     pub actor: ActorRef,
-    pub label: String,
+    /// Authored text; display fallback never becomes durable authored metadata.
+    pub label: Option<String>,
     pub creator: Option<ActorRef>,
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
@@ -212,12 +213,20 @@ pub struct DurableActorAdmission {
 }
 
 impl DurableActorAdmission {
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        self.label
+            .as_deref()
+            .or(self.actor_path.as_deref())
+            .unwrap_or_default()
+    }
+
     fn capture(actor: ActorRef, descriptor: &ActorDescriptor, launch_worktrees: &[String]) -> Self {
         let capabilities = descriptor.capabilities();
         let descendants = capabilities.descendants();
         Self {
             actor,
-            label: descriptor.label().to_owned(),
+            label: descriptor.authored_label().map(str::to_owned),
             creator: descriptor.creator(),
             supervisor_parent: descriptor.supervisor_parent(),
             context_parent: descriptor.context_parent(),
@@ -1276,9 +1285,20 @@ mod tests {
     use tidepool_repr::SessionId;
 
     #[test]
-    fn v6_terminal_without_diagnostic_remains_readable() {
-        let row = parse_row(r#"{"version":6,"sequence":3,"event":"retired","actor":{"id":7,"incarnation":3},"terminal":{"kind":"failed","summary":"original failure"}}"#)
-            .expect("existing V6 terminal row");
+    fn terminal_without_diagnostic_remains_readable() {
+        let line = serde_json::to_string(&Row {
+            version: VERSION,
+            sequence: 3,
+            event: EventKind::Retired {
+                actor: ActorRef {
+                    id: ActorId(7),
+                    incarnation: Incarnation(3),
+                },
+                terminal: crate::ActorTerminal::new(ActorExitKind::Failed, "original failure"),
+            },
+        })
+        .unwrap();
+        let row = parse_row(&line).expect("current terminal row");
         let EventKind::Retired { actor, terminal } = row.event else {
             panic!("retired row must stay retired");
         };
@@ -1292,6 +1312,41 @@ mod tests {
         assert_eq!(
             terminal,
             crate::ActorTerminal::new(ActorExitKind::Failed, "original failure")
+        );
+    }
+
+    #[test]
+    fn cold_replay_preserves_optional_authored_labels_and_derives_display() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        for (index, label) in [None, Some(""), Some("duplicate"), Some("duplicate")]
+            .into_iter()
+            .enumerate()
+        {
+            let path = tidepool_repr::ActorPath::parse(&format!("spawn-{index}")).unwrap();
+            let actor = ActorRef::first(ActorId(index as u64 + 1));
+            let descriptor = ActorDescriptor::new_optional(
+                label.map(str::to_owned),
+                descriptor("placement").placement(),
+            )
+            .with_actor_path(tidepool_repr::ActorPath::parse("first-assignment").unwrap())
+            .with_actor_path(path);
+            journal.admit(actor, &descriptor, &[]).unwrap();
+        }
+        drop(journal);
+        let records = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .unwrap()
+            .records();
+        assert_eq!(records[0].admission.label, None);
+        assert_eq!(records[0].admission.display_label(), "spawn-0");
+        assert_eq!(records[1].admission.label.as_deref(), Some(""));
+        assert_eq!(records[1].admission.display_label(), "");
+        assert_eq!(records[2].admission.label.as_deref(), Some("duplicate"));
+        assert_eq!(records[3].admission.label, records[2].admission.label);
+        assert_ne!(
+            records[2].admission.actor_path,
+            records[3].admission.actor_path
         );
     }
 
@@ -1361,7 +1416,7 @@ mod tests {
     fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        for version in [1, 2, 3, 4, 5] {
+        for version in [1, 2, 3, 4, 5, 6] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
@@ -1503,7 +1558,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let records = ActorRecoveryJournal::read_observed(&path).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].admission.label, "observed");
+        assert_eq!(records[0].admission.label.as_deref(), Some("observed"));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let missing = directory.path().join("missing.jsonl");
         assert!(

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use crate::{
@@ -17,7 +19,7 @@ pub enum ActorPersistencePolicy {
 /// Immutable execution attributes selected before an actor is spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
-    label: String,
+    label: Option<String>,
     profile: ActorEffectProfile,
     effect_policy: EffectRunPolicy,
     live_payload: LivePayloadPolicy,
@@ -41,8 +43,13 @@ pub struct ActorDescriptor {
 impl ActorDescriptor {
     #[must_use]
     pub fn new(label: impl Into<String>, placement: ActorPlacement) -> Self {
+        Self::new_optional(Some(label.into()), placement)
+    }
+
+    #[must_use]
+    pub(crate) fn new_optional(label: Option<String>, placement: ActorPlacement) -> Self {
         Self {
-            label: label.into(),
+            label,
             profile: ActorEffectProfile::ReadWrite,
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
@@ -65,8 +72,19 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn label(&self) -> &str {
-        &self.label
+    pub fn authored_label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    #[must_use]
+    pub fn display_label(&self) -> Cow<'_, str> {
+        match &self.label {
+            Some(label) => Cow::Borrowed(label),
+            None => self
+                .actor_path
+                .as_ref()
+                .map_or(Cow::Borrowed(""), |path| Cow::Owned(path.to_string())),
+        }
     }
 
     #[must_use]
@@ -221,12 +239,8 @@ impl ActorDescriptor {
     }
 
     /// Canonical identity is independent of the authored descriptive label.
-    /// An unlabeled actor uses its generated path as a display fallback.
     #[must_use]
     pub fn with_actor_path(mut self, path: tidepool_repr::ActorPath) -> Self {
-        if self.label.is_empty() {
-            self.label = path.to_string();
-        }
         self.actor_path = Some(path);
         self
     }
@@ -347,8 +361,8 @@ mod tests {
         let second_path = tidepool_repr::ActorPath::parse("spawn-second").unwrap();
         let first = descriptor().with_actor_path(first_path.clone());
         let second = descriptor().with_actor_path(second_path.clone());
-        assert_eq!(first.label(), "an arbitrary human label");
-        assert_eq!(second.label(), first.label());
+        assert_eq!(first.display_label(), "an arbitrary human label");
+        assert_eq!(second.display_label(), first.display_label());
         assert_eq!(first.actor_path(), Some(&first_path));
         assert_eq!(second.actor_path(), Some(&second_path));
         assert_ne!(first.actor_path(), second.actor_path());
@@ -357,10 +371,32 @@ mod tests {
     #[test]
     fn unlabeled_actor_displays_its_canonical_path() {
         let path = tidepool_repr::ActorPath::parse("spawn-unlabeled").unwrap();
-        let unlabeled =
-            ActorDescriptor::new("", descriptor().placement()).with_actor_path(path.clone());
-        assert_eq!(unlabeled.label(), "spawn-unlabeled");
+        let unlabeled = ActorDescriptor::new_optional(None, descriptor().placement())
+            .with_actor_path(path.clone());
+        assert_eq!(unlabeled.display_label(), "spawn-unlabeled");
         assert_eq!(unlabeled.actor_path(), Some(&path));
+    }
+
+    #[test]
+    fn absent_and_explicit_empty_labels_remain_distinct_after_path_reassignment() {
+        let first_path = tidepool_repr::ActorPath::parse("spawn-first").unwrap();
+        let second_path = tidepool_repr::ActorPath::parse("spawn-second").unwrap();
+        let absent = ActorDescriptor::new_optional(None, descriptor().placement())
+            .with_actor_path(first_path.clone());
+        let empty =
+            ActorDescriptor::new("", descriptor().placement()).with_actor_path(first_path.clone());
+        assert_eq!(absent.authored_label(), None);
+        assert_eq!(absent.display_label(), "spawn-first");
+        assert_eq!(empty.authored_label(), Some(""));
+        assert_eq!(empty.display_label(), "");
+        let absent = absent.with_actor_path(second_path.clone());
+        let empty = empty.with_actor_path(second_path.clone());
+        assert_eq!(absent.authored_label(), None);
+        assert_eq!(absent.display_label(), "spawn-second");
+        assert_eq!(empty.authored_label(), Some(""));
+        assert_eq!(empty.display_label(), "");
+        assert_eq!(absent.actor_path(), Some(&second_path));
+        assert_eq!(empty.actor_path(), Some(&second_path));
     }
 
     #[test]

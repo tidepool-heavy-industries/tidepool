@@ -267,7 +267,7 @@ async fn interrupt_during_preview(
                     prepared_tools: None,
                     toolset_acquisition: None,
                     actor: fixture.actor.clone(),
-                    label: descriptor.label().into(),
+                    label: descriptor.display_label().into_owned(),
                     policy: Arc::new(crate::ResidentInteractivePolicy::local(
                         fixture.actor.clone(),
                     )),
