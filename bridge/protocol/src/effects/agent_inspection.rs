@@ -254,18 +254,6 @@ pub fn agent_inspection() -> Effect {
                 handling: HandlingClass::Actor,
             },
             Verb {
-                ctor: "AgentGroupListWith",
-                method: "agent_group_list_with",
-                args: vec![Arg {
-                    name: "group",
-                    ty: HsType::Int,
-                    rust: RustBinding::Path("i64"),
-                }],
-                ret: HsType::maybe(HsType::list(HsType::Named("AgentRosterEntry"))),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
-            Verb {
                 ctor: "AgentForgetWith",
                 method: "agent_forget_with",
                 args: vec![Arg {

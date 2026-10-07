@@ -85,8 +85,8 @@ observeAgent
   :: Member AgentInspection effs
   => AgentRef
   -> Eff effs AgentObservation
-observeAgent agent@(AgentRef target tree) = do
-  roster <- inspectAgent target
+observeAgent agent@(AgentRef _ tree) = do
+  roster <- lookupAgent agent
   let (actorId, incarnation) = agentIdentity agent
   pure AgentObservation
     { observedAgentId = actorId
@@ -100,7 +100,7 @@ lookupAgent
   :: Member AgentInspection effs
   => AgentRef
   -> Eff effs (Maybe AgentRosterEntry)
-lookupAgent (AgentRef target _) = inspectAgent target
+lookupAgent (AgentRef target _) = send (AgentInspectWith (actorAddress target))
 
 rosterAgentState :: AgentRosterEntry -> AgentState
 rosterAgentState entry = case rosterState entry of
@@ -371,7 +371,7 @@ sendMessage recipient message =
 parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)
 parentAgent = do
   context <- Core.actorContext
-  pure $ case (contextSupervisorId context, contextSupervisorIncarnation context) of
+  pure $ case (Core.contextSupervisorId context, Core.contextSupervisorIncarnation context) of
     (Just parent, Just incarnation) -> Just (internalAgentRef parent incarnation)
     _ -> Nothing
 
