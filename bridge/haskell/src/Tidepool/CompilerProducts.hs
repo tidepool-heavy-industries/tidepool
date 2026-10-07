@@ -116,7 +116,7 @@ prepareCompilerProjectionContext prepared retainedGenerations owner target auxil
     (prHscEnv (pprPipelineResult prepared))
     (compilationScope <$> preparedExactCompilation prepared)
     retainedGenerations owner target auxiliaryRoots hostJsonAuthority
-  pure context {projectionCurrentOriginals = pprAcceptedCandidateBindings prepared}
+  pure context {projectionCurrentOriginals = pprOriginalBindings prepared}
 
 prepareCompilerProjectionContextForEnvironment
   :: HscEnv -> Maybe ExactScope -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
@@ -269,9 +269,6 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
         (pprPackageImports prepared)
       reconciled <- either (ioError . userError) pure (reconcileOriginalProducts
         (compilationScope <$> preparedExactCompilation prepared)
-        (Map.fromList [((unitString (moduleUnit owner), moduleNameString (moduleName owner)),
-            admittedOriginalProof original)
-          | (owner, original) <- Map.toAscList (preparedRetainedOriginals admittedContext)])
         [(T.unpack unit, T.unpack name, map originalGroupFromProjected groups)
           | product <- products, let (unit,name,_,groups) = moduleProductInput product])
       let inventory = CurrentOriginalInventory
@@ -281,7 +278,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
             , currentOriginalFinalized = finalized
             , currentReconciledOriginalProducts = reconciled
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
-            , currentOriginalExternalNames = pprAcceptedCandidateBindings prepared
+            , currentOriginalExternalNames = pprOriginalBindings prepared
             }
       pure admittedContext {preparedCurrentOriginalInventory = Just inventory}
 
@@ -424,6 +421,10 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
       acquireOriginal siblings owner = case exact of
         Nothing -> pure Nothing
         Just scope -> do
+          when (any (\original -> (originalUnit original,originalModule original) ==
+              (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
+            (fail ("required binder is absent from the admitted original native census: "
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready
@@ -669,7 +670,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
       reconciled <- case inventory of
         Just current -> pure (currentReconciledOriginalProducts current)
         Nothing -> either (ioError . userError) pure (reconcileOriginalProducts
-          (compilationScope <$> preparedExactCompilation prepared) retainedProofs [])
+          (compilationScope <$> preparedExactCompilation prepared) [])
       certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets

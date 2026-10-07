@@ -197,7 +197,7 @@ import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterface
   , DeclarationOperation(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), scopeInterfaces, scopeInterfaceEvidence, extendExactScopeInputs, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactScope(..), scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, extendExactScopeInputs, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
@@ -205,7 +205,6 @@ import Tidepool.ExactScope
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
   , originalGroupFromCandidate, originalGroupFromProjected, normalizeInterfaceEvidence
-  , canonicalProofMatchesOwner
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
@@ -564,7 +563,8 @@ exactScopeBinders = withScratch $ \work -> do
       term groups = TList [if index == 6 then
           TList [TList [text "main", text "BinderFixture", sha, sha, sha, text (work </> "original.tpmod")
             , TList [TList [TInt ordinal, TList (map identity values), TList []]
-              | (ordinal, values) <- zip [0..] groups]]]
+              | (ordinal, values) <- zip [0..] groups]
+            , TList [text (work </> "original.native-cert.cbor"),sha]]]
         else field | (index,field) <- zip [0::Int ..] fields]
       readGroups groups = do
         BS.writeFile path (toStrictByteString (encodeTerm (term groups)))
@@ -2878,108 +2878,204 @@ originalGraphClosureProperties = do
             ++ ", expected=" ++ show (expectedGroups,expectedModules)
             ++ ", actual=" ++ show (actualGroups,actualModules))
 
-originalReconciliationChecks
-  :: ExactScope -> [(String, String, [ExactOriginalGroup])] -> IO ()
-originalReconciliationChecks scope recovered = do
+originalNativeAvailabilityChecks
+  :: HscEnv -> ExactScope -> [(String, String, [ExactOriginalGroup])] -> IO ()
+originalNativeAvailabilityChecks environment scope emitted = do
   let owner = ("main", "ProjectionOwner")
-      provider = ("main", "ProjectionUnavailableProvider")
-      proofs = scopeModuleInterfaceProofs scope
+      freshOwner = ("main", "ProjectionConsumer")
       productOwner value = (originalUnit value, originalModule value)
-      reconcile selected evidence rows = reconcileOriginalProducts (Just selected) evidence rows
-      requireRefused selected evidence rows = case reconcile selected evidence rows of
+      available = scopeAvailableOriginalProducts scope
+      reconcile selected rows = reconcileOriginalProducts (Just selected) rows
+      requireRefused selected rows = case reconcile selected rows of
         Left _ -> pure ()
-        Right _ -> fail "altered canonical original reconciliation was accepted"
-      fullGroups key = case [groups | (unit,name,groups) <- recovered, (unit,name) == key] of
+        Right _ -> fail "new production replaced an admitted native carrier"
+      groupsOf key = case [groups | (unit,name,groups) <- emitted, (unit,name) == key] of
         [groups] -> pure groups
-        _ -> fail "reconciliation fixture lost its unique emitted native owner"
-      nativeProduct key = case filter ((== key) . productOwner) (scopeProducts scope) of
+        _ -> fail "native census fixture lost its unique emitted owner"
+      productOf key = case filter ((== key) . productOwner) available of
         [value] -> pure value
-        _ -> fail "reconciliation fixture lost its unique genuine scope product"
+        _ -> fail "native census fixture lost its unique admitted carrier"
       normalizedGroups = sortOn originalOrdinal . map (\group -> group
         {originalGlobals=Set.toAscList (Set.fromList (originalGlobals group))})
-  full <- fullGroups owner
-  snapshot <- nativeProduct owner
+      replaceOwner selected = scope {scopeProducts=
+        [if productOwner value == owner then selected else value | value <- scopeProducts scope]}
+      requireInvalid selected = revalidateExactScope environment selected >>= \case
+        Left _ -> pure ()
+        Right () -> fail "altered native selection retained its admitted census"
+  full <- groupsOf owner
+  snapshot <- productOf owner
   unless (normalizedGroups full == normalizedGroups (originalGroups snapshot)
       && length full > 1) $
-    fail "genuine native scope differs from the complete emitted original groups"
-  selected <- case filter (not . null . originalGlobals) full of
+    fail "full native availability differs from the actual emitted original groups"
+  selected <- case filter (\group -> not (null (originalGlobals group))
+      && not (null (originalBinders group))) full of
     group : _ -> pure group
-    [] -> fail "reconciliation fixture needs a genuine native reference"
+    [] -> fail "native selection fixture needs a genuine native reference"
   (reference,required,remaining) <- case originalGlobals selected of
     (reference,required) : remaining -> pure (reference,required,remaining)
     [] -> fail "selected native group lost its reference"
-  let admitted = snapshot {originalGroups=[selected]}
-      selectedScope = scope {scopeProducts=
-        [if productOwner value == owner then admitted else value | value <- scopeProducts scope]}
+  let selectedScope = replaceOwner (snapshot {originalGroups=[selected]})
+      zeroScope = replaceOwner (snapshot {originalGroups=[]})
       row groups = [(fst owner,snd owner,groups)]
-      remainingProducts = filter ((/= owner) . productOwner) (scopeProducts selectedScope)
-      replaceSelected changed =
-        [if originalOrdinal group == originalOrdinal selected then changed else group | group <- full]
-  unchanged <- either fail pure (reconcile selectedScope proofs [])
-  unless (unrecoveredExactProducts unchanged == scopeProducts selectedScope) $
-    fail "absent recovery changed the genuine selected product inventory"
-  accepted <- either fail pure (reconcile selectedScope proofs (row full))
-  unless (not (null remainingProducts) && unrecoveredExactProducts accepted == remainingProducts) $
-    fail "canonical full recovery failed to replace only its selected original owner"
-  let normalized = selected {originalGlobals=
-        reverse (originalGlobals selected) ++ [(reference,required)]}
-  normalizedResult <- either fail pure
-    (reconcile selectedScope proofs (row (replaceSelected normalized)))
-  unless (unrecoveredExactProducts normalizedResult == remainingProducts) $
-    fail "native reference set normalization changed canonical reconciliation"
-  requireRefused selectedScope (Map.delete owner proofs) (row full)
-  borrowed <- maybe (fail "genuine provider canonical proof is absent") pure (Map.lookup provider proofs)
-  requireRefused selectedScope (Map.insert owner borrowed proofs) (row full)
-  let changedProducer = selectedScope {scopeProducerSha256=
-        case scopeProducerSha256 selectedScope of
-          '0':rest -> '1':rest
-          _:rest -> '0':rest
-          [] -> "0"}
-  requireRefused changedProducer proofs (row full)
-  genuine <- maybe (fail "genuine original canonical proof is absent") pure (Map.lookup owner proofs)
-  unless (canonicalProofMatchesOwner (scopeProducerSha256 selectedScope) owner genuine
-      && not (canonicalProofMatchesOwner (scopeProducerSha256 changedProducer) owner genuine)) $
-    fail "canonical proof producer binding lost its positive or altered-producer control"
-  -- Admitted scope inputs cannot rekey a proof under another sealed owner.
-  -- Calibrate the expected-owner predicate directly; moved products below
-  -- separately exercise reconciliation's absent admitted owner boundary.
-  forM_ [("other-unit",snd owner),(fst owner,"OtherOriginal")] $ \changedOwner -> do
-    when (canonicalProofMatchesOwner (scopeProducerSha256 selectedScope) changedOwner genuine) $
-      fail "canonical proof accepted another expected unit or module"
-    let moved = admitted {originalUnit=fst changedOwner,originalModule=snd changedOwner}
-        movedScope = selectedScope {scopeProducts=
-          [if productOwner value == owner then moved else value | value <- scopeProducts selectedScope]}
-    requireRefused movedScope (Map.insert changedOwner genuine proofs)
-      [(fst changedOwner,snd changedOwner,full)]
-  requireRefused selectedScope proofs
-    (row (filter ((/= originalOrdinal selected) . originalOrdinal) full))
-  let absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
-  requireRefused selectedScope proofs
-    (row (replaceSelected (selected {originalOrdinal=absentOrdinal})))
-  requireRefused selectedScope proofs
-    (row (replaceSelected (selected {originalBinders=[]})))
-  let changedReference = reference {symbolOccurrence=symbolOccurrence reference <> "_changed"}
-  requireRefused selectedScope proofs
-    (row (replaceSelected (selected {originalGlobals=(changedReference,required):remaining})))
-  requireRefused selectedScope proofs
-    (row (replaceSelected (selected {originalGlobals=(reference,not required):remaining})))
-  requireRefused selectedScope proofs (row full ++ row full)
-  requireRefused selectedScope proofs (row (selected:full))
-  providerProduct <- nativeProduct provider
-  providerGroups <- fullGroups provider
-  providerGroup <- case originalGroups providerProduct of
+  forM_ [selectedScope,zeroScope] $ \selection -> do
+    revalidateExactScope environment selection >>= either fail pure
+    unchanged <- either fail pure (reconcile selection [])
+    unless (scopeAvailableOriginalProducts selection == available
+        && unrecoveredExactProducts unchanged == available) $
+      fail "selection changed the old native payload, version or full census"
+  unless (map originalGroups (filter ((== owner) . productOwner) (scopeProducts zeroScope)) == [[]]) $
+    fail "zero selected groups acquired an executable root"
+  -- Identical canonical provenance or group outlines never authorize a second
+  -- native production for the existing owner, including an empty selection.
+  forM_ [selectedScope,zeroScope] $ \selection ->
+    forM_ [full,[selected],[]] (requireRefused selection . row)
+  freshGroups <- groupsOf freshOwner
+  freshGroup <- case freshGroups of
     group : _ -> pure group
-    [] -> fail "genuine provider has no admitted native group"
-  let conflictingProvider =
-        [if originalOrdinal group == originalOrdinal providerGroup
-          then group {originalBinders=[]} else group | group <- providerGroups]
-      orderedScope = selectedScope {scopeProducts=admitted:providerProduct:
-        filter ((/= provider) . productOwner) remainingProducts}
-  requireRefused orderedScope proofs
-    (row full ++ [(fst provider,snd provider,conflictingProvider)])
-  retry <- either fail pure (reconcile selectedScope proofs (row full))
-  unless (unrecoveredExactProducts retry == unrecoveredExactProducts accepted) $
-    fail "refused reconciliation changed a later genuine retry"
+    [] -> fail "disjoint original control has no actual emitted group"
+  let fresh = [(fst freshOwner,snd freshOwner,freshGroups)]
+  unless (freshOwner `notElem` map productOwner available) $
+    fail "fresh-owner control overlaps the genuine admitted inventory"
+  disjoint <- either fail pure (reconcile selectedScope fresh)
+  unless (unrecoveredExactProducts disjoint == available) $
+    fail "disjoint production replaced or lost an admitted original"
+  requireRefused selectedScope (fresh ++ fresh)
+  requireRefused selectedScope [(fst freshOwner,snd freshOwner,freshGroup:freshGroups)]
+  requireRefused selectedScope (fresh ++ row full)
+  ordinary <- either fail pure (reconcileOriginalProducts Nothing fresh)
+  unless (null (unrecoveredExactProducts ordinary)) $
+    fail "ordinary fresh compilation acquired a retained native carrier"
+  unless (case reconcileOriginalProducts Nothing (fresh ++ fresh) of
+      Left _ -> True; Right _ -> False) $
+    fail "ordinary original inventory admitted duplicate fresh owners"
+  -- These mutations reach the retained selection validator against its
+  -- immutable issued census, rather than an overlap-replacement exception.
+  let altered group = replaceOwner (snapshot {originalGroups=[group]})
+      absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
+      changedReference = reference {symbolOccurrence=symbolOccurrence reference <> "_changed"}
+  forM_ [ selected {originalOrdinal=absentOrdinal}
+        , selected {originalBinders=[]}
+        , selected {originalGlobals=(changedReference,required):remaining}
+        , selected {originalGlobals=(reference,not required):remaining}
+        ] (requireInvalid . altered)
+  requireInvalid (replaceOwner (snapshot {originalGroups=[selected,selected]}))
+  let changedDigest value = case value of
+        '0':rest -> '1':rest
+        _:rest -> '0':rest
+        [] -> "0"
+  forM_ [ snapshot {originalUnit="other-unit"}
+        , snapshot {originalModule="OtherOriginal"}
+        , snapshot {originalVersion=changedDigest (originalVersion snapshot)}
+        , snapshot {originalIfaceSha256=changedDigest (originalIfaceSha256 snapshot)}
+        , snapshot {originalProductSha256=changedDigest (originalProductSha256 snapshot)}
+        ] (requireInvalid . replaceOwner)
+  requireInvalid (selectedScope {scopeProducerSha256=changedDigest (scopeProducerSha256 selectedScope)})
+  let normalized = selected {originalGlobals=reverse (originalGlobals selected) ++ [(reference,required)]}
+  revalidateExactScope environment (altered normalized) >>= either fail pure
+  productBytes <- BS.readFile (originalProductPath snapshot)
+  (BS.writeFile (originalProductPath snapshot) (BS.snoc productBytes 0) >> requireInvalid selectedScope)
+    `finally` BS.writeFile (originalProductPath snapshot) productBytes
+  revalidateExactScope environment selectedScope >>= either fail pure
+  originalNativeCensusRoundTripChecks environment scope owner available
+  retry <- either fail pure (reconcile selectedScope fresh)
+  unless (unrecoveredExactProducts retry == unrecoveredExactProducts disjoint) $
+    fail "refused native replacement changed a pristine retry"
+
+-- Reuse the Rust issuer's complete HOME v5 bytes and v10 scope. Only selected
+-- groups may shrink; the private admitted census has no test constructor.
+originalNativeCensusRoundTripChecks
+  :: HscEnv -> ExactScope -> (String,String) -> [ExactProduct] -> IO ()
+originalNativeCensusRoundTripChecks environment scope owner available = do
+  let directory = takeDirectory (scopeManifestPath scope)
+      decode bytes = case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
+        Right (remaining,value) | BSL.null remaining -> pure value
+        other -> fail ("genuine native scope/certificate term did not decode: " ++ show other)
+      encode = toStrictByteString . encodeTerm
+      rewriteOwner transform fields = forM (zip [0::Int ..] fields) $ \(index,field) ->
+        if index /= 6 then pure field else case field of
+          TList rows -> TList <$> forM rows (\entry -> case entry of
+            TList values@(TString unit:TString name:_)
+              | (T.unpack unit,T.unpack name) == owner -> TList <$> transform values
+            _ -> pure entry)
+          _ -> fail "genuine scope has no native rows"
+      readAltered label transform fields = do
+        changed <- rewriteOwner transform fields
+        let path = directory </> "native-census-" ++ label ++ ".scope.cbor"
+        BS.writeFile path (encode (TList changed))
+        readExactScope path
+      refused label transform fields = readAltered label transform fields >>= \case
+        Left _ -> pure ()
+        Right _ -> fail ("altered native census was admitted: " ++ label)
+  scopeBytes <- BS.readFile (scopeManifestPath scope)
+  fields <- decode scopeBytes >>= \case
+    TList values -> pure values
+    _ -> fail "genuine native scope is not a row"
+  (descriptorPath,descriptorSha) <- case
+      [values | (6,TList rows) <- zip [0::Int ..] fields
+        , TList values@(TString unit:TString name:_) <- rows
+        , (T.unpack unit,T.unpack name) == owner] of
+    [[_,_,_,_,_,_,_,TList [TString path,TString sha]]] -> pure (T.unpack path,T.unpack sha)
+    _ -> fail "genuine native owner lacks its unique v10 descriptor"
+  nativeBytes <- BS.readFile descriptorPath
+  nativeTerm <- decode nativeBytes
+  case nativeTerm of
+    TList [TString "TPHOMEOWNERS",TInt 5,_,_,_,_,_,_,_] -> pure ()
+    _ -> fail "native census control lacks an actual HOME v5 certificate"
+  unless (digest nativeBytes == descriptorSha && encode nativeTerm == nativeBytes) $
+    fail "actual HOME v5 bytes did not retain their canonical roundtrip and SHA"
+  zero <- readAltered "zero-selection" (\case
+      [unit,name,version,iface,productSha,path,_,descriptor] ->
+        pure [unit,name,version,iface,productSha,path,TList [],descriptor]
+      _ -> fail "genuine native row has another layout") fields >>= either fail pure
+  unless (scopeAvailableOriginalProducts zero == available
+      && [originalGroups value | value <- scopeProducts zero
+        , (originalUnit value,originalModule value) == owner] == [[]]) $
+    fail "real selected-zero scope lost full availability or promoted native roots"
+  refused "descriptor-sha" (\case
+      [unit,name,version,iface,productSha,path,groups,TList [certificate,_]] ->
+        pure [unit,name,version,iface,productSha,path,groups,TList [certificate,TString (T.replicate 64 "0")]]
+      _ -> fail "genuine native descriptor has another layout") fields
+  let legacy = [if index == 1 then TString "9" else field | (index,field) <- zip [0::Int ..] fields]
+      legacyPath = directory </> "native-census-legacy.scope.cbor"
+  BS.writeFile legacyPath (encode (TList legacy))
+  readExactScope legacyPath >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "legacy scope acquired full native census authority"
+  -- Recompute the copy's descriptor seal so the HOME-version control reaches
+  -- the certificate decoder, not merely the outer file-integrity check.
+  legacyCertificate <- case nativeTerm of
+    TList (magic:_:rest) -> pure (TList (magic:TInt 4:rest))
+    _ -> fail "genuine native certificate has another layout"
+  let rejectCertificate label certificate = do
+        let certificateCopy = directory </> "native-census-" ++ label ++ ".cert.cbor"
+            certificateBytes = encode certificate
+        BS.writeFile certificateCopy certificateBytes
+        refused label (\case
+            [unit,name,version,iface,productSha,path,groups,_] -> pure
+              [unit,name,version,iface,productSha,path,groups,
+                TList [TString (T.pack certificateCopy),TString (T.pack (digest certificateBytes))]]
+            _ -> fail "genuine native row has another layout") fields
+  rejectCertificate "certificate-version" legacyCertificate
+  changedCanonical <- case nativeTerm of
+    TList [magic,version,nativeOwner,groups,sources,packages,execution,requirements,TString sha] ->
+      let changed = case T.uncons sha of
+            Just ('0',rest) -> T.cons '1' rest
+            Just (_,rest) -> T.cons '0' rest
+            Nothing -> T.replicate 64 "0"
+      in pure (TList [magic,version,nativeOwner,groups,sources,packages,execution,requirements,TString changed])
+    _ -> fail "actual HOME v5 certificate lacks its bound canonical owner"
+  rejectCertificate "canonical-owner" changedCanonical
+  (BS.writeFile descriptorPath (BS.snoc nativeBytes 0) >> readExactScope (scopeManifestPath scope) >>= \case
+      Left _ -> pure ()
+      Right _ -> fail "changed issued native certificate retained its descriptor authority")
+    `finally` BS.writeFile descriptorPath nativeBytes
+  (BS.writeFile descriptorPath (BS.snoc nativeBytes 0) >> revalidateExactScope environment scope >>= \case
+      Left _ -> pure ()
+      Right () -> fail "cached native census bypassed current receipt integrity")
+    `finally` BS.writeFile descriptorPath nativeBytes
+  restored <- readExactScope (scopeManifestPath scope) >>= either fail pure
+  unless (scopeAvailableOriginalProducts restored == available && scopeProducts restored == scopeProducts scope) $
+    fail "restored native certificate changed the retained census or selected roots"
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
@@ -3220,7 +3316,7 @@ originalProjectionProducts = withScratch $ \work -> do
     ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"]
     ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"] work capturedFixture
   nativeScope <- readExactScope nativeScopePath >>= either fail pure
-  originalReconciliationChecks nativeScope
+  originalNativeAvailabilityChecks pairedEnv nativeScope
     [(unitString (moduleUnit owner),moduleNameString (moduleName owner),map originalGroupFromProjected groups)
       | (owner,Right groups) <- preparedModuleProductOutcomes completeProducts]
   capturedScopePath <- writeGenuineCandidateLexicalScope []
@@ -3634,7 +3730,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
                 | identifier <- typeEnvIds (md_types (hm_details hmi))
                 , let identity = preparedRootIdentity identifier
                 , identity `Set.member` supported]
-          unless (pprAcceptedCandidateBindings reused == actual
+          unless (pprOriginalBindings reused == actual
               && (expected /= 42 || not (Map.null actual))) $
             fail "accepted native original inventory lost current HPT Names or admitted an unsupported binder"
           context <- prepareCompilerProjectionContext reused Map.empty

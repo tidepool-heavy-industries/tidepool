@@ -52,13 +52,20 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 9 with nine fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 10 with nine fields. The final
 fields contain an execution parcel or null and a compiler-purpose authorization
 or null. Interface rows have eight fields; their final field declares one
 closed artifact role: `["module", certificate path, certificate SHA, optional
 Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]`
 for native authored originals, `["join"]`, or `["value"]`. Native product
 owners require canonical module evidence. Roles never come from module-name spelling.
+
+Native product rows retain their selected group outlines and a sealed path/SHA
+descriptor for the existing `TPHOMEOWNERS` version 5 certificate. The worker
+admits its full native census once against the original owner, native bytes,
+canonical certificate and selected outlines. Availability and selected roots
+remain separate: later checked demand selects groups from the same stored native
+carrier, without promoting that owner's Core or emitting another native product.
 
 Canonical module certificates bind the compiler producer, finalized interface
 and package bytes, original source digest, exact dependency seals, optional
@@ -297,7 +304,7 @@ self usages are excluded. Every seal must match a fresh same-transaction
 interface or the admitted exact interface closure. Authored import adjacency
 and executable group/global requirements remain separate evidence.
 
-The durable `TPHOMEOWNERS` version 4 preserves those interface seals and an
+The durable `TPHOMEOWNERS` version 5 preserves those interface seals and an
 explicit optional execution-source digest. Inventory admission checks the
 required interface bytes and compiler producer before adding retention edges.
 Native witness reuse retains this same proof; cold recovery must preserve every

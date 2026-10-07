@@ -139,6 +139,7 @@ import Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256
   , readExactScope, revalidateExactScope, scopeInterfaces, scopeInterfaceEvidence, extendExactScopeInputs
+  , scopeAvailableOriginalProducts
   , extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -652,7 +653,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
       [] -> Nothing)
   let contextFor target = firstContext
         { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
-  let exactProducts = maybe [] scopeProducts exactScope
+  let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
       externalOriginalBinders = Set.fromList
         ([binder | product <- exactProducts, group <- originalGroups product
           , binder <- originalBinders group]
@@ -1886,8 +1887,11 @@ retainProgramProducts directory prepared certified target initial = do
           unit = T.unpack unitText
           owner = T.unpack ownerText
           key = (unit,owner)
-      when (any (\original -> (originalUnit original,originalModule original) == key)
-          (scopeProducts scope)) (fail "new native product replaces an admitted original owner")
+      forM_ [original | original <- scopeProducts scope
+          , (originalUnit original,originalModule original) == key] $ \original ->
+        fail ("new native product replaces an admitted original owner: " ++ show key
+          ++ "; admitted ordinals=" ++ show (map originalOrdinal (originalGroups original))
+          ++ "; offered ordinals=" ++ show (map Execution.projectedOriginalOrdinal groups))
       (sourceDigest,(interface,packagesPath,packagesSha)) <- case Map.lookup key (certifiedRetainedOriginals certified) of
         Just original -> do
           unless (case Map.lookup key (scopeInterfaceEvidence scope) of
