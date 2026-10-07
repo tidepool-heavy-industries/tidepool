@@ -631,8 +631,8 @@ mod tests {
         for (id, qualified_name, rep_arity) in [
             (1, "Data.Either.Right", 1),
             (2, "Data.Either.Left", 1),
-            (18344204870309087082, "GHC.Types.I#", 1),
-            (18325893844472449494, "GHC.Types.W#", 1),
+            (3, "GHC.Types.I#", 1),
+            (4, "GHC.Types.W#", 1),
             (
                 5,
                 "Tidepool.Agent.Reply.Internal.RequestReservationRejected",
@@ -667,7 +667,7 @@ mod tests {
             let [HaskellValue::Con(integer, payload)] = fields.as_slice() else {
                 panic!("reservation reply must contain a boxed Int")
             };
-            assert_eq!(*integer, DataConId(18344204870309087082));
+            assert_eq!(*integer, DataConId(3));
             assert!(
                 matches!(payload.as_slice(), [HaskellValue::Lit(Literal::LitInt(actual))] if *actual == value)
             );
