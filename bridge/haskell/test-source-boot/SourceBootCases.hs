@@ -1285,7 +1285,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       templateImports = CheckedTemplateImports [supportOwner] [templateInterface]
       templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
       protected = do
-        source <- readFile target
+        source <- T.unpack . TE.decodeUtf8 <$> BS.readFile target
         pure (unlines (take 5 (lines source)
           ++ ["import GeneratedScaffoldHomeSupport hiding (irrelevant)", init preambleImportMarker]
           ++ drop 5 (lines source)))
@@ -1304,7 +1304,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $
       fail "pinned Resume package did not settle the generated result"
-    supportText <- readFile supportPath
+    supportText <- T.unpack . TE.decodeUtf8 <$> BS.readFile supportPath
     writeFile supportPath (T.unpack (T.replace "answer = 42" "answer = 43" (T.pack supportText)))
     drifted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult drifted))) $
