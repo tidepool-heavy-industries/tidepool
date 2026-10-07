@@ -410,20 +410,51 @@ impl OriginalNativeWitness {
         current: &[(&ProjectedGroup, Vec<PendingImportOwner>)],
     ) -> CertResult<()> {
         if current.len() != self.groups.len() {
-            return Err(CertificationError::Mismatch("shared original home groups"));
+            return Err(original_group_conflict(
+                &self.owner,
+                OriginalGroupFailure::PromotionCensus {
+                    current: current.len(),
+                    original: self.groups.len(),
+                },
+            ));
         }
         let mut ordinals = BTreeSet::new();
         for (group, imports) in current {
             if !ordinals.insert(group.original_ordinal()) {
-                return Err(CertificationError::Mismatch("shared original home groups"));
+                return Err(original_group_conflict(
+                    &self.owner,
+                    OriginalGroupFailure::PromotionDuplicateOrdinal {
+                        ordinal: group.original_ordinal(),
+                    },
+                ));
             }
             let original = self
                 .groups
                 .iter()
                 .find(|original| original.group.original_ordinal() == group.original_ordinal())
-                .ok_or(CertificationError::Mismatch("shared original home groups"))?;
-            if original.group() != *group || original.imports() != imports {
-                return Err(CertificationError::Mismatch("shared original home groups"));
+                .ok_or_else(|| {
+                    original_group_conflict(
+                        &self.owner,
+                        OriginalGroupFailure::PromotionMissingOrdinal {
+                            ordinal: group.original_ordinal(),
+                        },
+                    )
+                })?;
+            if original.group() != *group {
+                return Err(original_group_conflict(
+                    &self.owner,
+                    OriginalGroupFailure::PromotionBody {
+                        ordinal: group.original_ordinal(),
+                    },
+                ));
+            }
+            if original.imports() != imports {
+                return Err(original_group_conflict(
+                    &self.owner,
+                    OriginalGroupFailure::PromotionImports {
+                        ordinal: group.original_ordinal(),
+                    },
+                ));
             }
         }
         Ok(())
@@ -565,6 +596,49 @@ pub struct SourceBinderConflict {
     pub incoming_origin: ProductOrigin,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OriginalGroupFailure {
+    PromotionCensus {
+        current: usize,
+        original: usize,
+    },
+    PromotionDuplicateOrdinal {
+        ordinal: u32,
+    },
+    PromotionMissingOrdinal {
+        ordinal: u32,
+    },
+    PromotionBody {
+        ordinal: u32,
+    },
+    PromotionImports {
+        ordinal: u32,
+    },
+    SelectionOverlap {
+        ordinal: u32,
+        current_origin: ProductOrigin,
+        inherited_origin: ProductOrigin,
+        body_matches: bool,
+        imports_match: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OriginalGroupConflict {
+    pub owner: CachedHomeOwner,
+    pub failure: OriginalGroupFailure,
+}
+
+fn original_group_conflict(
+    owner: &CachedHomeOwner,
+    failure: OriginalGroupFailure,
+) -> CertificationError {
+    CertificationError::OriginalGroupConflict(Box::new(OriginalGroupConflict {
+        owner: owner.clone(),
+        failure,
+    }))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
     #[error("unsupported {format:?} version {found}; expected {expected}")]
@@ -585,6 +659,8 @@ pub enum CertificationError {
     Mismatch(&'static str),
     #[error("compiler product certificate duplicate source binder: {0:?}")]
     DuplicateSourceBinder(Box<SourceBinderConflict>),
+    #[error("compiler product original group conflict: {0:?}")]
+    OriginalGroupConflict(Box<OriginalGroupConflict>),
     #[error("finalized module payload capture failed: {0}")]
     CapturedModulePayload(#[source] crate::recovery_artifacts::RecoveryArtifactError),
     #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
@@ -2085,7 +2161,16 @@ fn append_original_selection(
                 || current.group != group.group
                 || current.imports != group.imports
             {
-                return Err(CertificationError::Mismatch("shared original home groups"));
+                return Err(original_group_conflict(
+                    &current.owner,
+                    OriginalGroupFailure::SelectionOverlap {
+                        ordinal: current.group.original_ordinal(),
+                        current_origin: current.origin,
+                        inherited_origin: group.origin,
+                        body_matches: current.group == group.group,
+                        imports_match: current.imports == group.imports,
+                    },
+                ));
             }
             groups[*index] = group.clone();
         } else {
@@ -8450,7 +8535,15 @@ pub(crate) mod tests {
         contradictory.imports = vec![retained(99)].into();
         assert!(matches!(
             append_original_selection(&mut vec![admitted], &[contradictory], &validation.inventory),
-            Err(CertificationError::Mismatch("shared original home groups"))
+            Err(CertificationError::OriginalGroupConflict(conflict))
+                if conflict.owner == *original.owner()
+                    && conflict.failure == (OriginalGroupFailure::SelectionOverlap {
+                        ordinal: 11,
+                        current_origin: ProductOrigin::Cached,
+                        inherited_origin: ProductOrigin::Cached,
+                        body_matches: true,
+                        imports_match: false,
+                    })
         ));
     }
 
@@ -11154,20 +11247,37 @@ pub(crate) mod tests {
             .map(|group| (group, vec![]))
             .collect::<Vec<_>>();
         native.validate_promoted_groups(&valid).unwrap();
-        assert!(native.validate_promoted_groups(&valid[..1]).is_err());
+        assert!(matches!(native.validate_promoted_groups(&valid[..1]),
+            Err(CertificationError::OriginalGroupConflict(conflict))
+                if conflict.owner == *prior[0].owner()
+                    && conflict.failure == (OriginalGroupFailure::PromotionCensus { current: 1, original: 2 })
+        ));
+        let duplicate_ordinal = vec![valid[0].clone(), valid[0].clone()];
+        assert!(
+            matches!(native.validate_promoted_groups(&duplicate_ordinal),
+                Err(CertificationError::OriginalGroupConflict(conflict))
+                    if conflict.failure == (OriginalGroupFailure::PromotionDuplicateOrdinal { ordinal: 7 })
+            )
+        );
         // The first collided binder can agree while a later group's body or
         // import history differs. Sharing requires the entire native witness.
         let changed =
             ParsedModuleProducts::decode(&nonempty_sidecar(1), &empty_package_bundle()).unwrap();
         let mut wrong_body = valid.clone();
         wrong_body[1].0 = &changed.products()[0].groups[1];
-        assert!(native.validate_promoted_groups(&wrong_body).is_err());
+        assert!(matches!(native.validate_promoted_groups(&wrong_body),
+            Err(CertificationError::OriginalGroupConflict(conflict))
+                if conflict.failure == (OriginalGroupFailure::PromotionBody { ordinal: 11 })
+        ));
         let mut wrong_import = valid.clone();
         wrong_import[1].1.push(PendingImportOwner::Retained {
             identity: testing::identity("Val.G1", "captured"),
             generation: 1,
         });
-        assert!(native.validate_promoted_groups(&wrong_import).is_err());
+        assert!(matches!(native.validate_promoted_groups(&wrong_import),
+            Err(CertificationError::OriginalGroupConflict(conflict))
+                if conflict.failure == (OriginalGroupFailure::PromotionImports { ordinal: 11 })
+        ));
         let canonical = prior[0].module_interface().unwrap().clone();
         packet.modules[0].origin = ProductOrigin::RetainedCore;
         packet.modules[0].module_version = None;
@@ -11296,7 +11406,9 @@ pub(crate) mod tests {
                 Some(&exact),
                 None,
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("retained promotion iteration={index} body_tag={body_tag} operation=certify_products request_groups={}: {error:?}", request.groups.len())
+            });
             assert_eq!(
                 issued
                     .source_selection

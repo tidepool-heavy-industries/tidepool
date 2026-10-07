@@ -625,6 +625,7 @@ fn recovery_validation_error(
         | CertificationError::Receipt(_)
         | CertificationError::Mismatch(_)
         | CertificationError::DuplicateSourceBinder(_)
+        | CertificationError::OriginalGroupConflict(_)
         | CertificationError::FinalizedInterfaceRequirement { .. }
         | CertificationError::OriginalInterfaceClosure { .. }
         | CertificationError::StaleEvidence
