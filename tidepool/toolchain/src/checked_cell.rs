@@ -867,7 +867,8 @@ fn decode_typed_segment_plans(
                 "typed inference segment was split without a declaration boundary",
             ));
         }
-        if items.is_empty() || digest != hex(&hash.finalize()) {
+        let expected_digest: [u8; 32] = hash.finalize().into();
+        if items.is_empty() || digest != hex(&expected_digest) {
             return Err(failure("typed segment normalization digest differs"));
         }
         plans.push(CheckedTypedSegmentPlan {
