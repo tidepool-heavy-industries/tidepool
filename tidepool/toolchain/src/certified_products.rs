@@ -1581,6 +1581,46 @@ fn resolve_receipt_owner_with_validation(
     }
 }
 
+/// Resolve a source receipt from the authenticated owner declaration. Cold
+/// recovery can authenticate that declaration without loading every original
+/// it names; exact binder and group membership are checked when a context
+/// admits the selected originals together.
+fn resolve_cold_recovery_source(
+    import: ReceiptImportOwner,
+    witness: &HomeCertification,
+) -> CertResult<PendingImportOwner> {
+    let ReceiptImportOwner::Source {
+        unit,
+        module,
+        module_version,
+        original_ordinal,
+        binder,
+    } = import
+    else {
+        return Err(CertificationError::Mismatch("expected recovery source owner"));
+    };
+    let key = (unit.clone(), module.clone());
+    let owner = if key == (witness.owner.unit.clone(), witness.owner.module.clone()) {
+        &witness.owner
+    } else {
+        witness
+            .sources
+            .get(&key)
+            .ok_or(CertificationError::Mismatch("home source witness"))?
+    };
+    if binder.unit != unit || binder.module != module {
+        return Err(CertificationError::Mismatch("home source witness"));
+    }
+    if module_version.as_ref() != Some(&owner.module_version) {
+        return Err(CertificationError::Mismatch("source module version"));
+    }
+    Ok(PendingImportOwner::Source {
+        owner: owner.clone(),
+        original_ordinal,
+        binder,
+    })
+}
+
 fn validate_package_owner(
     unit: &str,
     module: &str,
@@ -3722,16 +3762,15 @@ pub(crate) fn certify_recovery_products_with_validation(
             )
         })
         .collect::<CertResult<Vec<_>>>()?;
-    let mut originals = std::collections::HashMap::new();
+    let mut original_owners = std::collections::HashSet::new();
     for (product, witness) in &parsed {
-        if originals.insert(witness.owner.clone(), product).is_some() {
+        if !original_owners.insert(witness.owner.clone()) {
             return Err(CertificationError::Mismatch("duplicate recovery original"));
         }
         validate_inherited_group_headers(product, witness)?;
     }
     let mut resolved = Vec::with_capacity(parsed.len());
     for (product, witness) in &parsed {
-        let mut sources = SourceGroupMap::new();
         let mut scoped_owners = BTreeMap::new();
         for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
             let key = (owner.unit.clone(), owner.module.clone());
@@ -3742,22 +3781,6 @@ pub(crate) fn certify_recovery_products_with_validation(
                 return Err(CertificationError::Mismatch(
                     "ambiguous recovery source owner",
                 ));
-            }
-            let original = originals.get(owner).ok_or(CertificationError::Mismatch(
-                "recovery source owner closure",
-            ))?;
-            for group in &original.groups {
-                for binder in group.binders() {
-                    sources.insert(
-                        (
-                            owner.unit.clone(),
-                            owner.module.clone(),
-                            group.original_ordinal(),
-                            binder.clone(),
-                        ),
-                        (owner.clone(), ProductOrigin::Cached),
-                    );
-                }
             }
         }
         let mut group_imports = Vec::with_capacity(product.groups.len());
@@ -3778,18 +3801,23 @@ pub(crate) fn certify_recovery_products_with_validation(
                     group.definitions().signatures(),
                     selected,
                 )?;
-                imports.push(resolve_receipt_owner_with_validation(
-                    import,
-                    &sources,
-                    &witness.packages,
-                    validation,
-                )?);
+                let resolved_import = match import {
+                    source @ ReceiptImportOwner::Source { .. } => {
+                        resolve_cold_recovery_source(source, witness)?
+                    }
+                    other => resolve_receipt_owner_with_validation(
+                        other,
+                        &SourceGroupMap::new(),
+                        &witness.packages,
+                        validation,
+                    )?,
+                };
+                imports.push(resolved_import);
             }
             group_imports.push(imports);
         }
         resolved.push(group_imports);
     }
-    drop(originals);
     artifacts
         .into_iter()
         .zip(parsed)
@@ -7113,6 +7141,39 @@ pub(crate) mod tests {
             Err(CertificationError::Mismatch("shared original home groups"))
         ));
         println!("native witness original_decodes=2 reuse_decodes=0 nonempty_groups=2");
+    }
+
+    #[test]
+    fn cold_recovery_authenticates_full_original_without_loading_source_products() {
+        let source = inherited_owner("FutureValueSource");
+        let imports = (0..52)
+            .map(|ordinal| {
+                let owners = if ordinal == 51 {
+                    vec![PendingImportOwner::Source {
+                        owner: source.clone(),
+                        original_ordinal: 19,
+                        binder: testing::identity("FutureValueSource", "value"),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                (ordinal, owners)
+            })
+            .collect();
+        let original = original_groups_fixture("Consumer", imports, 7, &BTreeMap::new());
+
+        let recovered = recovered_witness_fixtures(&[original]);
+        let certified = &recovered[0];
+        assert_eq!(certified.requirements.sources, vec![source]);
+        let native = certified.product.original_native().unwrap();
+        assert_eq!(native.groups.len(), 52);
+        assert_eq!(native.groups[51].imports().len(), 1);
+        assert!(matches!(
+            &native.groups[51].imports()[0],
+            PendingImportOwner::Source { owner, original_ordinal: 19, binder }
+                if owner.module == "FutureValueSource"
+                    && binder == &testing::identity("FutureValueSource", "value")
+        ));
     }
 
     #[test]
