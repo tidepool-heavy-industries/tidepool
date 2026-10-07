@@ -992,9 +992,7 @@ impl exomonad_actor::JevBackend for HostJev {
                     JevFailure::CallCap => Failure::JevCallCap,
                     JevFailure::Transport(detail) => Failure::JevTransport(detail),
                     JevFailure::Timeout => Failure::JevTimeout,
-                    JevFailure::Http { status, body } => {
-                        Failure::JevHttp(i64::from(status), body)
-                    }
+                    JevFailure::Http { status, body } => Failure::JevHttp(i64::from(status), body),
                     JevFailure::CircuitOpen {
                         status,
                         retry_after_ms,
