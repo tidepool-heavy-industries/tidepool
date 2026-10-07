@@ -305,11 +305,14 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
                         prop_assert!(catalog.admit(address, &metrics).unwrap().is_none());
                     } else {
                         let actual = catalog.admit(address, &metrics);
-                        prop_assert!(matches!(
-                            actual,
-                            Err(DescriptorTraceError::InvalidManagedPointer { address: bad })
-                                if bad == address
-                        ));
+                        prop_assert!(
+                            matches!(
+                                actual,
+                                Err(DescriptorTraceError::InvalidManagedPointer { address: bad })
+                                    if bad == address
+                            ),
+                            "active interior address must report its exact invalid managed pointer"
+                        );
                         coverage.admit_interior += 1;
                     }
                 }
