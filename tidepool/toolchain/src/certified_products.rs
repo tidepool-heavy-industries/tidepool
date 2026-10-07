@@ -7213,7 +7213,16 @@ pub(crate) mod tests {
         version: u8,
         packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
-        let interface = vec![0x42];
+        original_groups_fixture_with_interface(module, groups, version, packages, vec![0x42])
+    }
+
+    fn original_groups_fixture_with_interface(
+        module: &str,
+        groups: Vec<(u32, Vec<PendingImportOwner>)>,
+        version: u8,
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+        interface: Vec<u8>,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let projected = groups
             .iter()
             .map(|(ordinal, imports)| {
@@ -8024,19 +8033,23 @@ pub(crate) mod tests {
         };
         let fixture = |module, packages: &BTreeMap<_, _>| {
             fixture_finalized_product(
-                original_witness_fixture(
+                original_groups_fixture_with_interface(
                     module,
-                    Some(PendingImportOwner::Package {
-                        unit: "external-package".into(),
-                        module: "External".into(),
-                        binder: SymbolIdentity {
+                    vec![(
+                        7,
+                        vec![PendingImportOwner::Package {
                             unit: "external-package".into(),
-                            ..testing::identity("External", "entry")
-                        },
-                        interface_digest: sha(&[0x43]),
-                    }),
+                            module: "External".into(),
+                            binder: SymbolIdentity {
+                                unit: "external-package".into(),
+                                ..testing::identity("External", "entry")
+                            },
+                            interface_digest: sha(&[0x43]),
+                        }],
+                    )],
                     7,
                     packages,
+                    format!("{module} interface").into_bytes(),
                 ),
                 [1; 32],
             )
@@ -8048,6 +8061,10 @@ pub(crate) mod tests {
         ]);
         let first_product = originals[0].product.clone();
         let second_product = originals[1].product.clone();
+        assert_ne!(
+            first_product.interface_bytes(),
+            second_product.interface_bytes()
+        );
         let legacy = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
             crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
                 product.owner().clone(),
