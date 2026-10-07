@@ -234,7 +234,7 @@ impl InvocationWork {
 
     /// Lock ancestry in one order so closing any ancestor fences child
     /// admission. The callback must neither await nor reenter this owner.
-    pub(super) fn with_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
+    pub(crate) fn with_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
         self.with_admission_state(|_| operation())
     }
 
