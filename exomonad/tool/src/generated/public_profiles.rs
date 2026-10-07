@@ -15,6 +15,7 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::WorktreeRegistry,
     ActorEffectKey::WorktreeAllocation,
     ActorEffectKey::WorktreeIntegration,
+    ActorEffectKey::Sleep,
     ActorEffectKey::Notifications,
     ActorEffectKey::Jev,
     ActorEffectKey::ModelCall,

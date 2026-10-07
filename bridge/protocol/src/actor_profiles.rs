@@ -15,6 +15,7 @@ const EFFECTS: &[&str] = &[
     "WorktreeRegistry",
     "WorktreeAllocation",
     "WorktreeIntegration",
+    "Sleep",
     "Notifications",
     "Jev",
     "ModelCall",
