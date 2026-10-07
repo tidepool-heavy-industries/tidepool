@@ -28,6 +28,7 @@ struct Host {
     scenario: Scenario,
     state: Mutex<HostState>,
     both_waiting: tokio::sync::Semaphore,
+    changed: tokio::sync::watch::Sender<()>,
 }
 
 impl Host {
@@ -36,6 +37,7 @@ impl Host {
             scenario,
             state: Mutex::new(Default::default()),
             both_waiting: tokio::sync::Semaphore::new(0),
+            changed: tokio::sync::watch::channel(()).0,
         })
     }
     fn name(state: &HostState, actor: ActorRef, mount: &str) -> Result<String, FormCause> {
@@ -47,6 +49,15 @@ impl Host {
 }
 
 impl FormHost for Host {
+    fn changed(&self) -> futures_util::future::BoxFuture<'static, Result<(), FormCause>> {
+        let mut changed = self.changed.subscribe();
+        Box::pin(async move {
+            changed
+                .changed()
+                .await
+                .map_err(|error| FormCause::FormTransportFailed(error.to_string()))
+        })
+    }
     fn open(
         &self,
         publication: &FormPublication,
@@ -72,6 +83,7 @@ impl FormHost for Host {
         let inserted = state.awaited.insert(name.clone());
         if inserted && state.awaited.len() == 2 {
             self.both_waiting.add_permits(1);
+            self.changed.send_replace(());
         }
         let ready = match self.scenario {
             Scenario::Single => true,
@@ -117,6 +129,7 @@ impl FormHost for Host {
             "native continuation must commit once"
         );
         state.committed.push(name);
+        self.changed.send_replace(());
         Ok(FormTransition::FormApplied)
     }
     fn close(&self, actor: ActorRef, mount: &str) -> Result<(), FormCause> {
@@ -127,6 +140,7 @@ impl FormHost for Host {
             "settled answer remains history, rather than closed pending input"
         );
         state.closed.insert(name);
+        self.changed.send_replace(());
         Ok(())
     }
     fn display(&self, _: &FormPublication, _: u64, _: &serde_json::Value) -> Result<(), FormCause> {
