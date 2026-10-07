@@ -10391,18 +10391,27 @@ pub(crate) mod tests {
             .extend_checked_original_products([3; 32], &[a])
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
-        assert!(matches!(
-            validate_exact_cached_closure(
-                Some(&candidates),
-                &receipt,
-                &overlapping,
-                &current,
-                &BTreeMap::new()
+        // A sealed zero-group payload without a recovered native witness is
+        // unavailable as an exact original reoffer, even for an identical owner.
+        assert!(overlapping.recovery_products()[0]
+            .original_native()
+            .is_none());
+        let refused = validate_exact_cached_closure(
+            Some(&candidates),
+            &receipt,
+            &overlapping,
+            &current,
+            &BTreeMap::new(),
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(CertificationError::Mismatch(
+                    "cached original reoffer bytes"
+                ))
             ),
-            Err(CertificationError::Mismatch(
-                "cached candidate overlaps exact owner"
-            ))
-        ));
+            "missing-native reoffer refusal: {refused:?}"
+        );
         let inherited = empty
             .clone()
             .extend_checked_original_products([3; 32], &[b])
@@ -10543,18 +10552,23 @@ pub(crate) mod tests {
         validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports)
             .unwrap();
         receipt.modules.push(accepted_b);
-        assert!(matches!(
-            validate_exact_cached_closure(
-                Some(&candidates),
-                &receipt,
-                &context,
-                &current,
-                &imports
+        assert!(b.original_native().is_none());
+        let refused = validate_exact_cached_closure(
+            Some(&candidates),
+            &receipt,
+            &context,
+            &current,
+            &imports,
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(CertificationError::Mismatch(
+                    "cached original reoffer bytes"
+                ))
             ),
-            Err(CertificationError::Mismatch(
-                "cached candidate overlaps exact owner"
-            ))
-        ));
+            "missing-native dependency reoffer refusal: {refused:?}"
+        );
         receipt.modules.pop();
         // A retained dependency additionally binds B's separately issued graph.
         let retained = crate::execution_source::test_graph_requiring_original(
