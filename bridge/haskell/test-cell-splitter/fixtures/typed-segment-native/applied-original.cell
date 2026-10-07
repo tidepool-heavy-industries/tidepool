@@ -1,0 +1,2 @@
+let applied = id (\x -> undefined `asTypeOf` x)
+answer <- pure (applied (2 :: Int))
