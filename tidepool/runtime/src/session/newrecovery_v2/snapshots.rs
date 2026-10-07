@@ -5,7 +5,7 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 
 type EdgeKey = (ArtifactId, ArtifactId, ArtifactDependency);
 
-/// A successfully checked v7 record. Cloning copies persistent tree roots;
+/// A successfully checked v8 record. Cloning copies persistent tree roots;
 /// historical node, artifact, edge and surface payloads are not cloned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecoveryGraph {
@@ -105,7 +105,7 @@ impl GraphRead for RecoveryGraph {
 }
 
 // These serializers borrow rows directly. They neither build historical Vecs
-// nor clone row payloads. Each v7 node includes its exact native selection.
+// nor clone row payloads. Each v8 node includes its exact native selection.
 macro_rules! row_serializer {
     ($name:ident, $method:ident) => {
         struct $name<'a, T: GraphRead>(&'a T);

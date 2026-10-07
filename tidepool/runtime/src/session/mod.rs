@@ -2431,6 +2431,7 @@ impl SessionLib {
                 kind: recovery::RecoveryNodeKind::Authored,
                 implementation_refs: Vec::new(),
                 artifact_refs,
+                compiler_roles: context.compiler_input_roles(),
                 native_groups: context
                     .artifact_view()
                     .selected_native_groups()

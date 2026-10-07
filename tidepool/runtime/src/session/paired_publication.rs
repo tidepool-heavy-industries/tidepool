@@ -1053,6 +1053,7 @@ impl AcceptedDeclarationPublication {
                     kind: recovery::RecoveryNodeKind::Join,
                     implementation_refs,
                     artifact_refs,
+                    compiler_roles: context.compiler_input_roles(),
                     native_groups: context
                         .artifact_view()
                         .selected_native_groups()
