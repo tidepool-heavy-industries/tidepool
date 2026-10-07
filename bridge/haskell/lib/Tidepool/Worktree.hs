@@ -78,12 +78,6 @@
 -- the resident — which knows what it already acted on — decides what the gap
 -- meant, rather than the runtime guessing on its behalf.
 --
--- HOLD: @workspaceOf :: WorktreeHandle -> Workspace@ and the coupled-spawn
--- signature are NOT exported yet — @Workspace@'s shape is still being settled
--- jointly with the agent lane, and exporting a conversion into it now would
--- freeze the wrong half of a two-sided seam.  The binding enforcement those
--- signatures rest on exists today (one worktree, one agent, explicit refusal)
--- and is tested against a scripted writer.
 module Tidepool.Worktree
   ( -- * Specs
     WorktreeSpec
@@ -100,6 +94,9 @@ module Tidepool.Worktree
 
     -- * Handles
   , WorktreeHandle
+  , WorkspaceHandle
+  , workspaceFor
+  , withWorkspace
   , WorktreeId (..)
   , BranchName
   , mkBranchName
@@ -110,7 +107,6 @@ module Tidepool.Worktree
   , worktreeBranch
   , worktreeHead
   , observeSubmission
-  , withWorktree
 
     -- * Merging (the one narrow, deliberate workflow primitive)
   , MergeRequest (..)
@@ -141,7 +137,6 @@ import Data.Proxy (Proxy (..))
 import Data.String (IsString (fromString))
 import qualified Prelude as P (error)
 import qualified Tidepool.Data.Text as T
-import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
 import Tidepool.Command.Types (Command, withEnvironment)
 import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON (..), object, withObject, withText, (.:), (.:?), (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
@@ -176,6 +171,8 @@ import Tidepool.Effects.Authored
   , observeSubmission
   , worktreeId
   )
+import Tidepool.Effects.Core (WorktreeRegistry (WorktreeRegistryWorkspace), WorkspaceHandle)
+import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorkspace)
 import Tidepool.Prelude hiding (error)
 import Tidepool.Inspection.Display (Display (..))
 import Tidepool.Inspection.Tree (DisplayTree (TextLeaf))
@@ -379,15 +376,21 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 worktreeHead :: Member Worktree effs => WorktreeHandle -> Eff effs GitOid
 worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
 
--- | Attach this exact managed worktree to an actor definition. The public
--- definition remains free of generic grant fields; the Actor runtime carries
--- this capability-specific recipe to deployment and binds it to the exact
--- child incarnation before an external application may use it.
-withWorktree
-  :: WorktreeHandle
+-- | Ask the existing workspace authority to issue a grant for an observed
+-- backing. A receipt identifies the backing; the caller's membership or
+-- repository grant determines whether issuance is allowed and its access.
+workspaceFor
+  :: Member WorktreeRegistry effects
+  => WorktreeHandle -> Eff effects (Either WorktreeError WorkspaceHandle)
+workspaceFor tree = send (WorktreeRegistryWorkspace (worktreeId tree))
+
+-- | Select an opaque grant for actor startup. Replacement keeps the active
+-- actor's existing attachment; this does not turn a receipt into authority.
+withWorkspace
+  :: WorkspaceHandle
   -> ActorDefinition startup protocol exit
   -> ActorDefinition startup protocol exit
-withWorktree tree = withLaunchWorktree (renderWorktreeId (worktreeId tree))
+withWorkspace = withLaunchWorkspace
 
 -- | Build a 'BranchName' from a plain rendered branch name — for the case
 -- (the recursive companion's fold, in particular) where a node's own domain

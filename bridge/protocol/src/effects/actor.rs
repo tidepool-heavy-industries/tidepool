@@ -199,6 +199,10 @@ pub fn actor() -> Effect {
             },
         ],
         external_types: &[crate::schema::ExternalType {
+            haskell_name: "WorkspaceHandle",
+            rust_wire: "tidepool_bridge_effects::WtWorkspaceHandle",
+            core_module: None,
+        }, crate::schema::ExternalType {
             haskell_name: "ActorEffectKey",
             rust_wire: "crate::ActorEffectKeyWire",
             core_module: None,
@@ -254,18 +258,13 @@ pub fn actor() -> Effect {
                         rust: RustBinding::HaskellValue,
                     },
                     Arg {
-                        name: "role",
-                        ty: HsType::Named("ActorLaunchRole"),
-                        rust: RustBinding::Path("crate::ActorLaunchRoleWire"),
-                    },
-                    Arg {
                         name: "profile",
                         ty: HsType::Named("ActorEffectProfile"),
                         rust: RustBinding::Path("crate::ActorEffectProfileWire"),
                     },
                     Arg {
-                        name: "launchWorktrees",
-                        ty: HsType::List(Box::new(HsType::Text)),
+                        name: "workspace",
+                        ty: HsType::Maybe(Box::new(HsType::Named("WorkspaceHandle"))),
                         rust: RustBinding::Derived,
                     },
                 ],
@@ -483,11 +482,6 @@ pub fn actor() -> Effect {
                         name: "profile",
                         ty: HsType::Named("ActorEffectProfile"),
                         rust: RustBinding::Path("crate::ActorEffectProfileWire"),
-                    },
-                    Arg {
-                        name: "launchWorktrees",
-                        ty: HsType::List(Box::new(HsType::Text)),
-                        rust: RustBinding::Derived,
                     },
                 ],
                 ret: address_type(),

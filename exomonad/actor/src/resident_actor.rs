@@ -9155,36 +9155,10 @@ where
                 );
             }
         }
-        if self.worktree_custody.is_none() {
-            match self.launch_worktrees.as_slice() {
-                [] => {}
-                [worktree] => {
-                    let admission = self.environment.fork_workspaces.as_ref().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "pre-bootstrap worktree custody is unavailable".into(),
-                        )
-                    })?;
-                    let admission = admission.clone();
-                    let actor = context.actor;
-                    let worktree = worktree.clone();
-                    let access = crate::WorkspaceAccess::ReadWrite;
-                    self.worktree_custody = Some(
-                        tidepool_runtime::spawn_blocking_in_span(move || {
-                            admission.install_custody(actor, &worktree, access)
-                        })
-                        .await
-                        .map_err(ResidentActorWorkbenchError::Join)?
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?,
-                    );
-                }
-                _ => {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor bootstrap requires at most one worktree".into(),
-                    ));
-                }
-            }
+        if self.worktree_custody.is_none() && !self.launch_worktrees.is_empty() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "workspace metadata requires an authorized prepared attachment".into(),
+            ));
         }
         if let Some(terminal) = kernel.requested_shutdown() {
             return Ok(KernelStep::Stop {

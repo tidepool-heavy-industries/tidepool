@@ -24,10 +24,10 @@ module Tidepool.Actor.Internal
   , initialization
   , behavior
   , onShutdown
-  , actorLaunchWorktrees
+  , actorWorkspace
   , actorSources
   , withSources
-  , withLaunchWorktree
+  , withLaunchWorkspace
   , tryCallUnit
   ) where
 
@@ -49,6 +49,7 @@ import Tidepool.Effects.Core
   , Notifications
   , Sleep
   , Worktree
+  , WorkspaceHandle
   )
 import Tidepool.Internal.ActorRef (ActorRef (..))
 import Tidepool.Actor.Source (Source)
@@ -100,7 +101,7 @@ data ActorDefinition startup (protocol :: Type -> Type) exit where
        , internalInitialization :: startup -> Eff actorEffs initial
        , internalBehavior :: startup -> initial -> Eff actorEffs exit
        , internalOnShutdown :: ShutdownReason -> Eff actorEffs ()
-       , internalLaunchWorktrees :: [Text]
+       , internalWorkspace :: Maybe WorkspaceHandle
        , internalSources :: [Source protocol]
        , internalReplacement :: Maybe (exit -> Eff actorEffs exit)
        }
@@ -137,16 +138,22 @@ pattern ActorDefinition
         , internalInitialization = initialization
         , internalBehavior = behavior
         , internalOnShutdown = onShutdown
-        , internalLaunchWorktrees = []
+        , internalWorkspace = Nothing
         , internalSources = []
         , internalReplacement = Nothing
         }
 
 {-# COMPLETE ActorDefinition #-}
 
-actorLaunchWorktrees :: ActorDefinition startup protocol exit -> [Text]
-actorLaunchWorktrees
-  ActorDefinitionInternal { internalLaunchWorktrees = worktrees } = worktrees
+-- | An explicitly issued resource grant selected only for startup.
+actorWorkspace :: ActorDefinition startup protocol exit -> Maybe WorkspaceHandle
+actorWorkspace ActorDefinitionInternal { internalWorkspace = workspace } = workspace
+
+withLaunchWorkspace
+  :: WorkspaceHandle
+  -> ActorDefinition startup protocol exit
+  -> ActorDefinition startup protocol exit
+withLaunchWorkspace workspace definition = definition { internalWorkspace = Just workspace }
 
 actorSources :: ActorDefinition startup protocol exit -> [Source protocol]
 actorSources ActorDefinitionInternal { internalSources = sources } = sources
@@ -156,14 +163,6 @@ withSources
   -> ActorDefinition startup protocol exit
   -> ActorDefinition startup protocol exit
 withSources sources definition = definition { internalSources = sources }
-
-withLaunchWorktree
-  :: Text
-  -> ActorDefinition startup protocol exit
-  -> ActorDefinition startup protocol exit
-withLaunchWorktree treeId
-  definition@ActorDefinitionInternal { internalLaunchWorktrees = worktrees } =
-    definition { internalLaunchWorktrees = worktrees <> [treeId] }
 
 -- | Internal unit-call boundary for protocols that can turn target lifecycle
 -- failure into their own typed control flow.

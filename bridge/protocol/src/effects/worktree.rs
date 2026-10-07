@@ -993,6 +993,14 @@ fn verbs() -> Vec<Verb> {
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
         },
         Verb {
+            ctor: "WorktreeGrantWorkspace",
+            method: "worktree_grant_workspace",
+            args: vec![tree_id_arg()],
+            ret: HsType::Named("WorkspaceHandle"),
+            errors: Some("WorktreeError"),
+            handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
+        },
+        Verb {
             ctor: "WorktreeCurrentWorkspace",
             method: "worktree_current_workspace",
             args: vec![],

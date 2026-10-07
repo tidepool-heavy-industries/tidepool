@@ -79,7 +79,7 @@ import Tidepool.Actor.Internal
   , initialization
   , behavior
   , onShutdown
-  , actorLaunchWorktrees
+  , actorWorkspace
   , actorSources
   , withSources
   , ActorRef (..)
@@ -130,6 +130,8 @@ data ActorExit exit
 -- definition's exact Haskell environment internally; authored code does not
 -- manage a separate deployment value or preparation step.
 --
+-- The actor inherits its caller's current workspace and access unless an
+-- opaque workspace grant is explicitly attached to the definition.
 -- This operation returns only after the child has installed its behavior and
 -- reached readiness.
 {-# NOINLINE startActor #-}
@@ -158,7 +160,7 @@ startActor definition@ActorDefinition
         case fillExitCell cell result of
           () -> pure ()
   (actorId, incarnation, _) <- send
-    (ActorStartWith actorLabel entry ActorInheritedRole (profileCode profile) (actorLaunchWorktrees definition))
+    (ActorStartWith actorLabel entry (profileCode profile) (actorWorkspace definition))
   pure (ActorRef actorId incarnation cell)
 
 -- | Replace a stateful handler using its committed state. The runtime retains
@@ -188,8 +190,7 @@ replaceActor previous@(ActorRef previousId previousIncarnation _) definition@Act
             case fillExitCell cell result of
               () -> pure ()
       (actorId, incarnation) <- send (ActorReplaceWith
-        (previousId, previousIncarnation) entry actorLabel (profileCode profile)
-        (actorLaunchWorktrees definition))
+        (previousId, previousIncarnation) entry actorLabel (profileCode profile))
       pure (ActorRef actorId incarnation cell)
 
 -- | Trusted context-fork launch. The runtime snapshots the caller's lexical
@@ -232,7 +233,7 @@ startActorFork launchRole forkGroup definition@ActorDefinition
         case fillExitCell cell result of
           () -> pure ()
   (actorId, incarnation, allocatedPath) <- send
-    (ActorForkWith actorLabel entry forkGroup (roleCode launchRole) (profileCode profile) (actorLaunchWorktrees definition))
+    (ActorForkWith actorLabel entry forkGroup (roleCode launchRole) (profileCode profile) [])
   pure (ActorRef actorId incarnation cell, allocatedPath)
 
 commitActorForkGroup :: Member Actor effs => Int -> Eff effs ()
@@ -373,7 +374,7 @@ stateful actorLabel profile step = ActorDefinitionInternal
   , internalInitialization = pure
   , internalBehavior = \_ -> statefulLoop step
   , internalOnShutdown = const (pure ())
-  , internalLaunchWorktrees = []
+  , internalWorkspace = Nothing
   , internalSources = []
   , internalReplacement = Just (statefulLoop step)
   }

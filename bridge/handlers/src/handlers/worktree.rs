@@ -183,15 +183,7 @@ impl ActorWorktreeAuthority {
         tree: &WorktreeId,
         requested: WorkspaceAccess,
     ) -> Result<String, DomainWorktreeError> {
-        let available = self.workspace_access(principal, tree).or_else(|| {
-            self.has_repository_access(principal).then(|| {
-                if self.grant(principal) == ActorWorktreeGrant::Repository {
-                    WorkspaceAccess::ReadWrite
-                } else {
-                    WorkspaceAccess::ReadOnly
-                }
-            })
-        });
+        let available = self.workspace_grant_access(principal, tree);
         if !available.is_some_and(|access| access.permits(requested)) {
             return Err(DomainWorktreeError::WorktreeUnauthorized(tree.clone()));
         }
@@ -205,6 +197,24 @@ impl ActorWorktreeAuthority {
         let token = uuid::Uuid::new_v4().to_string();
         grants.insert(token.clone(), (tree.clone(), requested));
         Ok(token)
+    }
+
+    /// A receipt is an observation. Only an exact attachment or an explicit
+    /// repository resource grant authorizes conversion to a shareable capability.
+    fn workspace_grant_access(
+        &self,
+        principal: tidepool_repr::PrincipalId,
+        tree: &WorktreeId,
+    ) -> Option<WorkspaceAccess> {
+        self.workspace_access(principal, tree).or_else(|| {
+            self.has_repository_access(principal).then(|| {
+                if self.grant(principal) == ActorWorktreeGrant::Repository {
+                    WorkspaceAccess::ReadWrite
+                } else {
+                    WorkspaceAccess::ReadOnly
+                }
+            })
+        })
     }
 
     pub fn workspace_capability(
@@ -458,6 +468,14 @@ impl ActorWorktreeRegistryHandler {
         self.delegate(WorktreeReq::WorktreeLookup(tree), cx)
     }
 
+    pub(crate) fn worktree_registry_workspace(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        tree: WtWorktreeId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeGrantWorkspace(tree), cx)
+    }
+
     pub(crate) fn worktree_registry_list(
         &mut self,
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
@@ -532,6 +550,25 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         let principal = cx.principal();
+        if let WorktreeReq::WorktreeGrantWorkspace(wire_tree) = &req {
+            let result = (|| {
+                let tree = worktree_id_from_wire(wire_tree)?;
+                self.inner
+                    .manager
+                    .lookup(&tree)
+                    .map_err(error_to_wire)?
+                    .ok_or_else(|| never_registered(wire_tree))?;
+                let access = self
+                    .authority
+                    .workspace_grant_access(principal, &tree)
+                    .ok_or_else(|| WorktreeError::WorktreeUnauthorized(wire_tree.clone()))?;
+                self.authority
+                    .issue_workspace(principal, &tree, access)
+                    .map(|raw| tidepool_bridge_effects::WtWorkspaceHandle { raw })
+                    .map_err(error_to_wire)
+            })();
+            return cx.respond(result);
+        }
         if matches!(&req, WorktreeReq::WorktreeCurrentWorkspace) {
             let result = (|| {
                 let (tree, access) = if let Some(tree) = self.authority.bound_worktree(principal) {
@@ -674,6 +711,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             WorktreeReq::WorktreeTryMerge(request) if integrate => Some(&request.target_worktree),
             WorktreeReq::WorktreeCreate(_)
             | WorktreeReq::WorktreeCurrentWorkspace
+            | WorktreeReq::WorktreeGrantWorkspace(_)
             | WorktreeReq::WorktreeList
             | WorktreeReq::WorktreeListMatching(..)
             | WorktreeReq::WorktreeTryMerge(..) => None,
@@ -1002,6 +1040,15 @@ impl WorktreeHandler {
 
     pub(crate) fn worktree_current_workspace(
         &mut self,
+    ) -> Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> {
+        Err(WorktreeError::WorktreeAuthorityDenied(
+            "workspace capabilities require the actor authority interpreter".into(),
+        ))
+    }
+
+    pub(crate) fn worktree_grant_workspace(
+        &mut self,
+        _tree: WtWorktreeId,
     ) -> Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> {
         Err(WorktreeError::WorktreeAuthorityDenied(
             "workspace capabilities require the actor authority interpreter".into(),
@@ -1398,6 +1445,213 @@ mod tests {
             .resolve_workspace(&token, WorkspaceAccess::ReadOnly)
             .is_err());
         peer_lease.release(&mut bindings.lock()).unwrap();
+    }
+
+    fn workspace_response_table() -> tidepool_repr::DataConTable {
+        let mut table = crate::test_support::full_effect_test_table();
+        let schema = tidepool_protocol::effects::worktree::worktree();
+        let errors = schema.errors.as_ref().unwrap();
+        let constructors = errors
+            .variants
+            .iter()
+            .map(|variant| (variant.ctor, variant.fields.len() as u32));
+        let records = [
+            ("WorkspaceHandle", 1),
+            ("WorktreeHandle", 1),
+            ("WorktreeReceipt", 6),
+            ("BranchName", 1),
+            ("GitOid", 1),
+            ("GitRef", 1),
+        ];
+        for (offset, (name, arity)) in records.into_iter().chain(constructors).enumerate() {
+            if table.get_by_name(name).is_some() {
+                continue;
+            }
+            table.insert(tidepool_repr::DataCon {
+                id: tidepool_repr::DataConId(20_000 + offset as u64),
+                name: name.into(),
+                tag: 1,
+                rep_arity: arity,
+                field_bangs: vec![],
+                qualified_name: None,
+                type_name: String::new(),
+            });
+        }
+        table
+    }
+
+    #[test]
+    fn observed_receipt_requires_live_authority_before_record_workspace_startup() {
+        use tidepool_bridge::FromHaskell;
+        use tidepool_effect::dispatch::EffectContext;
+
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "seed", "seed")
+            .unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let manager = WorktreeManager::new(
+            GitCli::new(),
+            WorktreeRegistry::open(&anchor, "registry").unwrap(),
+            storage.path().join("workspaces"),
+            repository.path(),
+        );
+        let selected = manager.register_source_checkout().unwrap();
+        let tree = selected.id().clone();
+        let bindings = Arc::new(Mutex::new(BindingTable::open(&anchor, "bindings").unwrap()));
+        let authority = ActorWorktreeAuthority::new("run", bindings.clone());
+        let principal = tidepool_repr::PrincipalId::new(2, 1);
+        let actor = WorktreePrincipal::exact_actor("run", 2, 1);
+        let mut registry = ActorWorktreeRegistryHandler::new(ActorWorktreeHandler::new(
+            WorktreeHandler::from_manager(manager.clone()),
+            authority.clone(),
+        ));
+        let table = workspace_response_table();
+        let output = tidepool_mcp::CapturedOutput::new();
+        let cx = EffectContext::with_principal(&table, principal, &output);
+        // Lookup crosses the real facet and canonical interpreter. Observation
+        // succeeds without creating an attachment or an opaque capability.
+        let response = registry
+            .worktree_registry_lookup(&cx, worktree_id_to_wire(&tree))
+            .unwrap();
+        let receipt: Result<WtWorktreeHandle, WorktreeError> = FromHaskell::from_value(
+            &crate::test_support::response_value(response, &table),
+            &table,
+        )
+        .unwrap();
+        let receipt = receipt.unwrap();
+        let response = registry
+            .worktree_registry_workspace(&cx, receipt.handle_receipt.tree_id.clone())
+            .unwrap();
+        let denied: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        assert!(matches!(
+            denied,
+            Err(WorktreeError::WorktreeUnauthorized(_))
+        ));
+        assert!(bindings.lock().membership(&tree, &actor).is_none());
+        assert!(authority.workspace_capability(tree.as_str()).is_err());
+
+        let lease = bindings
+            .lock()
+            .bind(&tree, &actor, WorkspaceAccess::ReadOnly, 1)
+            .unwrap();
+        let response = registry
+            .worktree_registry_workspace(&cx, receipt.handle_receipt.tree_id.clone())
+            .unwrap();
+        let granted: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        let granted = granted.unwrap();
+        assert_eq!(
+            authority.workspace_capability(&granted.raw).unwrap(),
+            (tree.clone(), WorkspaceAccess::ReadOnly)
+        );
+        assert!(authority
+            .resolve_workspace(&granted.raw, WorkspaceAccess::ReadWrite)
+            .is_err());
+        assert!(authority
+            .issue_workspace(principal, &tree, WorkspaceAccess::ReadWrite)
+            .is_err());
+        assert_eq!(bindings.lock().participants(&tree).unwrap().count(), 1);
+        lease.release(&mut bindings.lock()).unwrap();
+        let response = registry
+            .worktree_registry_workspace(&cx, receipt.handle_receipt.tree_id.clone())
+            .unwrap();
+        let released: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        assert!(matches!(
+            released,
+            Err(WorktreeError::WorktreeUnauthorized(_))
+        ));
+        assert_eq!(bindings.lock().participants(&tree).unwrap().count(), 0);
+
+        // Explicit repository authority can select a registered backing. The
+        // observation does not widen its read-only resource grant.
+        authority.install_grant(principal, ActorWorktreeGrant::RepositoryReadOnly);
+        let response = registry
+            .worktree_registry_workspace(&cx, worktree_id_to_wire(&tree))
+            .unwrap();
+        let repository_grant: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        assert_eq!(
+            authority
+                .workspace_capability(&repository_grant.unwrap().raw)
+                .unwrap()
+                .1,
+            WorkspaceAccess::ReadOnly
+        );
+        assert!(authority
+            .issue_workspace(principal, &tree, WorkspaceAccess::ReadWrite)
+            .is_err());
+        authority.install_grant(principal, ActorWorktreeGrant::Repository);
+        let response = registry
+            .worktree_registry_workspace(&cx, worktree_id_to_wire(&tree))
+            .unwrap();
+        let writable: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        assert_eq!(
+            authority
+                .workspace_capability(&writable.unwrap().raw)
+                .unwrap()
+                .1,
+            WorkspaceAccess::ReadWrite
+        );
+        assert_eq!(bindings.lock().participants(&tree).unwrap().count(), 0);
+
+        let response = registry
+            .worktree_registry_workspace(
+                &cx,
+                WtWorktreeId {
+                    raw: "unknown".into(),
+                },
+            )
+            .unwrap();
+        let unknown: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        assert!(matches!(
+            unknown,
+            Err(WorktreeError::WorktreeNotRegistered(_))
+        ));
+        // A previously registered backing lost from disk cannot become a
+        // capability even when the requesting actor has repository authority.
+        std::fs::remove_dir_all(repository.path()).unwrap();
+        let response = registry
+            .worktree_registry_workspace(&cx, worktree_id_to_wire(&tree))
+            .unwrap();
+        let lost: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+            FromHaskell::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap();
+        assert!(matches!(lost, Err(WorktreeError::WorktreeLost(_))));
+        assert_eq!(bindings.lock().participants(&tree).unwrap().count(), 0);
     }
 
     #[test]

@@ -133,6 +133,12 @@ pub fn worktree_registry() -> Effect {
                 result("WorktreeHandle"),
             ),
             plain(
+                "WorktreeRegistryWorkspace",
+                "worktree_registry_workspace",
+                vec![arg("treeId", "WorktreeId")],
+                result("WorkspaceHandle"),
+            ),
+            plain(
                 "WorktreeRegistryList",
                 "worktree_registry_list",
                 vec![],
