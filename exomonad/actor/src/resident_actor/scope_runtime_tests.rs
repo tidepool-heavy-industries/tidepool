@@ -115,7 +115,7 @@ struct ScopeFixture {
     forest: ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>,
     deployments: mpsc::Receiver<LocalResidentDeployment>,
     backends: VecDeque<Arc<ControlledBackend>>,
-    children: Vec<(String, LocalActorRef)>,
+    children: Vec<(String, LocalActorRef, Arc<dyn crate::ResidentToolEndpoint>)>,
     retirements: Vec<ActorRef>,
 }
 
@@ -226,8 +226,11 @@ impl ScopeFixture {
                     .expect("idle spawn admission")
                     .acknowledge(installation.actor.identity())
                     .expect("attachment acknowledgement");
-                self.children
-                    .push((installation.label.clone(), installation.actor.clone()));
+                self.children.push((
+                    installation.label.clone(),
+                    installation.actor.clone(),
+                    installation.policy.clone(),
+                ));
             }
             LocalResidentDeployment::CommandBackend(request) => {
                 let backend = self
@@ -289,9 +292,18 @@ impl ScopeFixture {
     fn child(&self, label: &str) -> LocalActorRef {
         self.children
             .iter()
-            .find(|(observed, _)| observed == label)
+            .find(|(observed, _, _)| observed == label)
             .expect("exact installed scope child")
             .1
+            .clone()
+    }
+
+    fn child_policy(&self, label: &str) -> Arc<dyn crate::ResidentToolEndpoint> {
+        self.children
+            .iter()
+            .find(|(observed, _, _)| observed == label)
+            .expect("exact installed scope child policy")
+            .2
             .clone()
     }
 
@@ -487,7 +499,7 @@ async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_wit
     // No hosted model inference participates in this retained closure call.
     let answer = tokio::time::timeout(
         Duration::from_secs(240),
-        crate::ResidentInteractivePolicy::local(survivor).dispatch_boxed(
+        fixture.child_policy("scope-retained-child").dispatch_boxed(
             exomonad_tool::ToolInvocation {
                 context: None,
                 name: "ping".into(),
