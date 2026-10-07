@@ -39,6 +39,15 @@ pub enum ParsedCellPlanKind {
     Expression,
 }
 
+/// The owning GHC parser's native bind statement form. This observation
+/// comes from the same AST as item classification, never source text matching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParsedCellBindingForm {
+    Action,
+    Let,
+    Recursive,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParsedCellPlanSpan {
     start_line: usize,
@@ -66,6 +75,7 @@ impl ParsedCellPlanSpan {
 pub struct ParsedCellPlanItem {
     index: usize,
     kind: ParsedCellPlanKind,
+    binding_form: Option<ParsedCellBindingForm>,
     binders: Vec<String>,
     source: String,
     span: ParsedCellPlanSpan,
@@ -78,6 +88,9 @@ impl ParsedCellPlanItem {
     }
     pub fn kind(&self) -> ParsedCellPlanKind {
         self.kind
+    }
+    pub fn binding_form(&self) -> Option<ParsedCellBindingForm> {
+        self.binding_form
     }
     pub fn binders(&self) -> &[String] {
         &self.binders
@@ -211,8 +224,8 @@ fn admit(
     receipt: Vec<u8>,
 ) -> Result<Arc<ParsedCellPlan>, CompileError> {
     let root = decode(&receipt)?;
-    let fields = crate::checked_cell::row(&root, 7)?;
-    if text(&fields[0])? != "TPCELLPLAN2"
+    let fields = crate::checked_cell::row(&root, 8)?;
+    if text(&fields[0])? != "TPCELLPLAN3"
         || text(&fields[1])? != crate::checked_cell::hash(specification.cell_source.as_bytes())
         || text(&fields[2])? != crate::checked_cell::hash(specification.template_source.as_bytes())
     {
@@ -264,6 +277,10 @@ fn admit(
         span(&row[0])?;
         text(&row[1])?;
     }
+    let binding_forms = texts(&fields[7], ITEM_LIMIT)?;
+    if binding_forms.len() != list(&observed[0], ITEM_LIMIT)?.len() {
+        return Err(failure("parser binding form inventory differs"));
+    }
     let mut items = Vec::new();
     let mut next_ordinal = 0;
     for (index, value) in list(&observed[0], ITEM_LIMIT)?.iter().enumerate() {
@@ -302,6 +319,18 @@ fn admit(
             ("expr", false) if binders.is_empty() => ParsedCellPlanKind::Expression,
             _ => return Err(failure("parser item kind")),
         };
+        let binding_form = match (kind, binding_forms[index].as_str()) {
+            (ParsedCellPlanKind::Bind, "action") => Some(ParsedCellBindingForm::Action),
+            (ParsedCellPlanKind::Bind, "let") => Some(ParsedCellBindingForm::Let),
+            (ParsedCellPlanKind::Bind, "recursive") => Some(ParsedCellBindingForm::Recursive),
+            (
+                ParsedCellPlanKind::Prologue
+                | ParsedCellPlanKind::Declaration
+                | ParsedCellPlanKind::Expression,
+                "none",
+            ) => None,
+            _ => return Err(failure("parser binding form differs from item kind")),
+        };
         let mut source_ordinals = Vec::new();
         for value in list(&row[4], ITEM_LIMIT)? {
             let row = crate::checked_cell::row(value, 3)?;
@@ -333,6 +362,7 @@ fn admit(
         items.push(ParsedCellPlanItem {
             index,
             kind,
+            binding_form,
             binders,
             source,
             span: span(&row[0])?,
@@ -447,7 +477,7 @@ mod tests {
             ]),
         ]);
         let receipt = a(vec![
-            t("TPCELLPLAN2"),
+            t("TPCELLPLAN3"),
             t(&crate::checked_cell::hash(
                 specification.cell_source.as_bytes(),
             )),
@@ -461,6 +491,7 @@ mod tests {
             a(vec![t("/original")]),
             a(vec![t("Tidepool.Session.Val.G7")]),
             Value::Bytes(encoded(&observations)),
+            a(vec![t("let")]),
         ]);
         (specification, vec![PathBuf::from("/original")], receipt)
     }
@@ -469,13 +500,27 @@ mod tests {
         let (specification, include, receipt) = fixture();
         let plan = admit(specification.clone(), &include, &[1; 32], encoded(&receipt)).unwrap();
         assert_eq!(plan.items()[0].binders(), ["owned"]);
-        for index in [0, 1, 2, 3, 4, 5] {
+        assert_eq!(
+            plan.items()[0].binding_form(),
+            Some(ParsedCellBindingForm::Let)
+        );
+        for index in [0, 1, 2, 3, 4, 5, 7] {
             let mut edited = receipt.clone();
             edited.as_array_mut().unwrap()[index] = Value::Null;
             assert!(admit(specification.clone(), &include, &[1; 32], encoded(&edited)).is_err());
         }
+        for forms in [vec![], vec!["none"], vec!["future"], vec!["let", "action"]] {
+            let mut edited = receipt.clone();
+            edited.as_array_mut().unwrap()[7] = Value::Array(
+                forms
+                    .into_iter()
+                    .map(|form| Value::Text(form.into()))
+                    .collect(),
+            );
+            assert!(admit(specification.clone(), &include, &[1; 32], encoded(&edited)).is_err());
+        }
         let mut old_receipt = receipt.clone();
-        old_receipt.as_array_mut().unwrap()[0] = Value::Text("TPCELLPLAN1".into());
+        old_receipt.as_array_mut().unwrap()[0] = Value::Text("TPCELLPLAN2".into());
         assert!(admit(
             specification.clone(),
             &include,

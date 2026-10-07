@@ -471,7 +471,70 @@ pub struct ExactCheckedCell {
     include: Vec<std::path::PathBuf>,
     planned_declaration: Option<PlannedCheckedDeclaration>,
     planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
+    typed_segments: Vec<CheckedTypedSegmentPlan>,
     value_inputs: Arc<CheckedValueInputs>,
+}
+
+/// Compiler-issued normalization of one ordered inference segment. This
+/// observation cannot reserve identities or construct a checked capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedTypedSegmentPlan {
+    digest: String,
+    root: String,
+    items: Vec<CheckedTypedSegmentItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedTypedSegmentItem {
+    ordinal: usize,
+    entry: String,
+    generation: u64,
+    body: CheckedTypedSegmentBody,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckedTypedSegmentBody {
+    Action {
+        step: String,
+        probe: String,
+        marker: String,
+        captures: Vec<String>,
+    },
+    Let {
+        marker: String,
+        captures: Vec<String>,
+    },
+    Observation {
+        probe: String,
+        capture: String,
+    },
+}
+
+impl CheckedTypedSegmentPlan {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+    pub fn items(&self) -> &[CheckedTypedSegmentItem] {
+        &self.items
+    }
+}
+
+impl CheckedTypedSegmentItem {
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+    pub fn entry(&self) -> &str {
+        &self.entry
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn body(&self) -> &CheckedTypedSegmentBody {
+        &self.body
+    }
 }
 
 /// Read-only original identities from a final ordered compiler receipt.
@@ -621,6 +684,205 @@ fn planned_input_rejection(message: &str) -> CompileError {
     }])
 }
 
+fn decode_typed_segment_plans(
+    value: &Value,
+    program: &CheckedPlannedCellSpecification,
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    use crate::cell_plan::ParsedCellPlanKind as Kind;
+    let expected = program
+        .parsed_plan
+        .items()
+        .iter()
+        .filter(|item| matches!(item.kind(), Kind::Bind | Kind::Expression))
+        .map(|item| item.index())
+        .collect::<Vec<_>>();
+    let mut consumed = Vec::new();
+    let mut plans = Vec::new();
+    for value in list(value, 10000)? {
+        let fields = row(value, 4)?;
+        let digest = string(&fields[0])?;
+        let reservation = string(&fields[1])?;
+        let root = string(&fields[2])?;
+        if reservation != hex(&program.reservation_digest) || root.is_empty() || root.len() > 65536
+        {
+            return Err(failure("typed segment root or reservation differs"));
+        }
+        let mut hash = Sha256::new();
+        let mut frame = |value: &str| {
+            hash.update(value.len().to_string().as_bytes());
+            hash.update(b":");
+            hash.update(value.as_bytes());
+        };
+        frame("tidepool-typed-segment-plan-v1");
+        frame(reservation);
+        frame(root);
+        let mut reserved = BTreeSet::from([root.to_owned()]);
+        let mut generations = BTreeSet::new();
+        let mut items = Vec::new();
+        for value in list(&fields[3], 10000)? {
+            let item = row(value, 8)?;
+            let integer = |value: &Value| match value {
+                Value::Integer(value) => u64::try_from(*value).map_err(failure),
+                _ => Err(failure("typed segment item number is not integer")),
+            };
+            let ordinal = usize::try_from(integer(&item[0])?).map_err(failure)?;
+            let entry = string(&item[1])?;
+            let generation = integer(&item[2])?;
+            let kind = string(&item[3])?;
+            let step = string(&item[4])?;
+            let probe = string(&item[5])?;
+            let marker = string(&item[6])?;
+            let captures = list(&item[7], 65536)?
+                .iter()
+                .map(|value| string(value).map(str::to_owned))
+                .collect::<Result<Vec<_>, _>>()?;
+            let parsed = program
+                .parsed_plan
+                .items()
+                .get(ordinal)
+                .ok_or_else(|| failure("typed segment item is outside parser plan"))?;
+            if consumed.len() >= expected.len()
+                || expected[consumed.len()] != ordinal
+                || generation == 0
+                || !generations.insert(generation)
+                || entry.is_empty()
+                || entry.len() > 65536
+                || !reserved.insert(entry.to_owned())
+                || captures
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > 65536)
+                || captures.iter().collect::<BTreeSet<_>>().len() != captures.len()
+                || items
+                    .last()
+                    .is_some_and(|prior: &CheckedTypedSegmentItem| prior.ordinal + 1 != ordinal)
+            {
+                return Err(failure("typed segment item order or identities differ"));
+            }
+            frame(&ordinal.to_string());
+            frame(entry);
+            frame(&generation.to_string());
+            frame(kind);
+            let body = match (kind, parsed.kind(), program.slots.get(ordinal)) {
+                ("action", Kind::Bind, Some(CheckedPlannedCellSlot::Bind { value }))
+                    if *value == generation
+                        && captures == parsed.binders()
+                        && matches!(
+                            parsed.binding_form(),
+                            Some(
+                                crate::cell_plan::ParsedCellBindingForm::Action
+                                    | crate::cell_plan::ParsedCellBindingForm::Recursive
+                            )
+                        ) =>
+                {
+                    for name in [step, probe, marker] {
+                        if name.is_empty()
+                            || name.len() > 65536
+                            || !reserved.insert(name.to_owned())
+                        {
+                            return Err(failure("typed action reserved names differ"));
+                        }
+                        frame(name);
+                    }
+                    frame(&captures.len().to_string());
+                    for name in &captures {
+                        frame(name);
+                    }
+                    CheckedTypedSegmentBody::Action {
+                        step: step.into(),
+                        probe: probe.into(),
+                        marker: marker.into(),
+                        captures,
+                    }
+                }
+                ("let", Kind::Bind, Some(CheckedPlannedCellSlot::Bind { value }))
+                    if *value == generation
+                        && step.is_empty()
+                        && probe.is_empty()
+                        && !captures.is_empty()
+                        && captures == parsed.binders()
+                        && parsed.binding_form()
+                            == Some(crate::cell_plan::ParsedCellBindingForm::Let) =>
+                {
+                    if marker.is_empty()
+                        || marker.len() > 65536
+                        || !reserved.insert(marker.to_owned())
+                    {
+                        return Err(failure("typed let reserved marker differs"));
+                    }
+                    frame(marker);
+                    frame(&captures.len().to_string());
+                    for name in &captures {
+                        frame(name);
+                    }
+                    CheckedTypedSegmentBody::Let {
+                        marker: marker.into(),
+                        captures,
+                    }
+                }
+                (
+                    "observation",
+                    Kind::Expression,
+                    Some(CheckedPlannedCellSlot::Expression {
+                        capture,
+                        observation_name,
+                    }),
+                ) if *capture == generation
+                    && marker == observation_name
+                    && step.is_empty()
+                    && captures.is_empty() =>
+                {
+                    for name in [probe, marker] {
+                        if name.is_empty()
+                            || name.len() > 65536
+                            || !reserved.insert(name.to_owned())
+                        {
+                            return Err(failure("typed observation reserved names differ"));
+                        }
+                        frame(name);
+                    }
+                    CheckedTypedSegmentBody::Observation {
+                        probe: probe.into(),
+                        capture: marker.into(),
+                    }
+                }
+                _ => {
+                    return Err(failure(
+                        "typed item capture plan differs from parser or reservation",
+                    ))
+                }
+            };
+            consumed.push(ordinal);
+            items.push(CheckedTypedSegmentItem {
+                ordinal,
+                entry: entry.into(),
+                generation,
+                body,
+            });
+        }
+        drop(frame);
+        if items
+            .last()
+            .is_some_and(|last| expected.get(consumed.len()) == Some(&(last.ordinal + 1)))
+        {
+            return Err(failure(
+                "typed inference segment was split without a declaration boundary",
+            ));
+        }
+        if items.is_empty() || digest != hex(&hash.finalize()) {
+            return Err(failure("typed segment normalization digest differs"));
+        }
+        plans.push(CheckedTypedSegmentPlan {
+            digest: digest.into(),
+            root: root.into(),
+            items,
+        });
+    }
+    if consumed != expected {
+        return Err(failure("typed segment inventory omits parser items"));
+    }
+    Ok(plans)
+}
+
 /// Complete immutable output of one admitted compiler transaction. Preparing
 /// interfaces never asserts that the corresponding native binding is live.
 #[derive(Debug)]
@@ -660,6 +922,37 @@ impl CellProgram {
     }
     pub fn items(&self) -> &[CellProgramItem] {
         &self.items
+    }
+    pub fn typed_segments(&self) -> &[CheckedTypedSegmentPlan] {
+        &self.checked.typed_segments
+    }
+    /// Validate the exact native entry issued for every normalized item before
+    /// the runtime opens an ordered execution prefix.
+    pub fn validate_typed_entries(&self) -> Result<(), CompileError> {
+        for plan in self.typed_segments() {
+            for planned in plan.items() {
+                let native = self
+                    .items
+                    .get(planned.ordinal())
+                    .and_then(CellProgramItem::native)
+                    .ok_or_else(|| failure("normalized item has no native entry"))?;
+                let proof = native
+                    .typed_entry()
+                    .ok_or_else(|| failure("native entry lacks its typed origin"))?;
+                if proof.plan_digest() != plan.digest()
+                    || proof.origin().occurrence != plan.root()
+                    || proof.entry().occurrence != planned.entry()
+                    || native.generation() != planned.generation()
+                    || native.item().index() != planned.ordinal()
+                    || !Arc::ptr_eq(&native.item().cell, &self.checked)
+                {
+                    return Err(failure(
+                        "native typed entry differs from the normalized ordered item",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1911,9 +2204,38 @@ pub struct ExactCompiledItem {
     observation_name: Option<String>,
     admission: CheckedExecutionAdmission,
     settled_values: CheckedSettledValues,
+    typed_entry: Option<CheckedTypedEntry>,
+}
+
+/// Read-only identity of a native entry sealed against its canonical original.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedTypedEntry {
+    plan_digest: String,
+    origin: tidepool_repr::execution_schema::SymbolIdentity,
+    entry: tidepool_repr::execution_schema::SymbolIdentity,
+    original_ordinal: u32,
+}
+
+impl CheckedTypedEntry {
+    pub fn plan_digest(&self) -> &str {
+        &self.plan_digest
+    }
+    pub fn origin(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
+        &self.origin
+    }
+    pub fn entry(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
+        &self.entry
+    }
+    pub fn original_ordinal(&self) -> u32 {
+        self.original_ordinal
+    }
 }
 
 impl ExactCompiledItem {
+    pub fn typed_entry(&self) -> Option<&CheckedTypedEntry> {
+        self.typed_entry.as_ref()
+    }
+
     /// Admit original type-interface custody only after validating the target,
     /// constructor table and complete compiler-authenticated site metadata.
     pub fn original_execution_context(
@@ -2707,11 +3029,12 @@ impl CheckedItemOffer {
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+        program_groups: Option<&[crate::certified_products::PendingCertifiedGroup]>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
-        let fields = row(&receipt, 8)?;
+        let fields = row(&receipt, if self.is_program { 9 } else { 8 })?;
         if string(&fields[0])? != "TPEXACTITEM"
-            || string(&fields[1])? != "1"
+            || string(&fields[1])? != if self.is_program { "2" } else { "1" }
             || string(&fields[2])? != request
             || string(&fields[3])? != hex(&self.item.admission_digest())
             || string(&fields[4])?
@@ -2728,6 +3051,91 @@ impl CheckedItemOffer {
                 "checked-item recipe receipt differs from its same compiler offer",
             ));
         }
+        let typed_entry = if self.is_program {
+            use tidepool_repr::execution_schema::{Group, SymbolIdentity};
+            let (plan, item) = self
+                .item
+                .cell
+                .typed_segments
+                .iter()
+                .find_map(|plan| {
+                    plan.items
+                        .iter()
+                        .find(|item| item.ordinal == self.item.index)
+                        .map(|item| (plan, item))
+                })
+                .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
+            let proof = row(&fields[8], 4)?;
+            let identity = |value: &Value| -> Result<SymbolIdentity, CompileError> {
+                let fields = row(value, 3)?;
+                let unit = string(&fields[0])?;
+                let module = string(&fields[1])?;
+                let occurrence = string(&fields[2])?;
+                if [unit, module, occurrence]
+                    .iter()
+                    .any(|value| value.is_empty() || value.len() > 65536)
+                {
+                    return Err(failure("typed native identity is incomplete"));
+                }
+                // ITEM2 identities name compiler-generated ordinary value
+                // roots; record fields and other namespaces cannot issue them.
+                Ok(SymbolIdentity {
+                    unit: unit.into(),
+                    module: module.into(),
+                    namespace: "value".into(),
+                    occurrence: occurrence.into(),
+                    record_parent: None,
+                })
+            };
+            let origin = identity(&proof[1])?;
+            let entry = identity(&proof[2])?;
+            let original_ordinal = match &proof[3] {
+                Value::Integer(value) => u32::try_from(*value).map_err(failure)?,
+                _ => return Err(failure("typed native original ordinal is not integer")),
+            };
+            let owner = original_execution.original_instance_target()?;
+            let target_entry = target
+                .bindings()
+                .iter()
+                .flat_map(|group| match group {
+                    Group::NonRecursive(binding) => std::slice::from_ref(binding),
+                    Group::Recursive(bindings) => bindings.as_slice(),
+                })
+                .find(|binding| binding.binding.id == target.entry());
+            let groups = program_groups
+                .ok_or_else(|| failure("typed native original inventory is absent"))?;
+            let matches = groups
+                .iter()
+                .filter(|group| {
+                    group.owner().unit == entry.unit
+                        && group.owner().module == entry.module
+                        && group.group().original_ordinal() == original_ordinal
+                        && group.group().binders().contains(&entry)
+                })
+                .collect::<Vec<_>>();
+            if string(&proof[0])? != plan.digest || origin.occurrence != plan.root
+                || entry.occurrence != item.entry || origin.unit != owner.unit || origin.module != owner.module
+                || entry.unit != origin.unit || entry.module != origin.module
+                || target_entry.is_none_or(|binding| binding.identity != entry) || matches.len() != 1
+                || !original_execution.artifact_view().entries().iter().any(|artifact| {
+                    matches!(&artifact.payload, crate::artifact_inventory::ArtifactPayload::Original(original)
+                        if original.owner() == matches[0].owner())
+                })
+            {
+                return Err(failure("typed native root, canonical original group or entry differs"));
+            }
+            Some(CheckedTypedEntry {
+                plan_digest: plan.digest.clone(),
+                origin,
+                entry,
+                original_ordinal,
+            })
+        } else {
+            if program_groups.is_some() {
+                return Err(failure("ordinary item was given typed program authority"));
+            }
+            None
+        };
         let turn = decode(&read(root.join("turn.cbor"), 32 * 1024 * 1024)?)?;
         let turn = row(&turn, 2)?;
         let expected_binders = if let Some(observation) = &self.observation_name {
@@ -2803,6 +3211,7 @@ impl CheckedItemOffer {
                 CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
             },
             settled_values: self.settled_values.clone(),
+            typed_entry,
         }))
     }
 }
@@ -2925,7 +3334,7 @@ pub(crate) fn admit_checked_cell(
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
-    let header = row(&value, if program.is_some() { 11 } else { 10 })?;
+    let header = row(&value, if program.is_some() { 12 } else { 10 })?;
     let observations = read(root.join("cell.cbor"), 32 * 1024 * 1024)?;
     let output = decode(&observations)?;
     let output = cell_observations(&output)?;
@@ -2936,7 +3345,7 @@ pub(crate) fn admit_checked_cell(
         } else {
             "TPEXACTCHECK"
         }
-        || string(&header[1])? != "3"
+        || string(&header[1])? != if program.is_some() { "4" } else { "3" }
         || string(&header[2])? != request_digest
         || string(&header[3])? != hex(&specification.admission_digest)
         || string(&header[4])? != hash(specification.cell_source.as_bytes())
@@ -2975,6 +3384,10 @@ pub(crate) fn admit_checked_cell(
             _ => return Err(failure("whole-cell original declaration receipt differs")),
         }
     }
+    let typed_segments = match program {
+        Some(program) => decode_typed_segment_plans(&header[11], program)?,
+        None => Vec::new(),
+    };
     let evidence = if program.is_some() {
         admissions
             .into_iter()
@@ -3146,6 +3559,7 @@ pub(crate) fn admit_checked_cell(
         include: include.to_vec(),
         planned_declaration,
         planned_declarations,
+        typed_segments,
         value_inputs,
     }))
 }
@@ -3783,6 +4197,7 @@ mod tests {
             context: enriched_context.semantic_sha256(),
             declaration_context: enriched_context,
             retained_projections: Vec::new(),
+            typed_segments: Vec::new(),
             receipt_digest: [9; 32],
             checked_source: source.into(),
             evidence: Vec::new(),

@@ -1959,6 +1959,9 @@ impl PersistentSession {
         let planned = admission
             .plan_reservation()
             .ok_or(SessionError::StaleStagedDeclaration)?;
+        program
+            .validate_typed_entries()
+            .map_err(SessionError::Compile)?;
         if program.admission_digest() != admission.digest()
             || !Arc::ptr_eq(program.parsed_plan(), planned.plan())
             || program.slots() != planned.compiler_specification().slots.as_slice()
