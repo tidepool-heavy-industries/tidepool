@@ -284,7 +284,7 @@ impl BindingTable {
             })?;
         if self.bindings[current].generation.is_some() {
             return Err(storage_failure(
-                self.path_for(worktree),
+                &self.path_for(worktree),
                 "recovery cannot duplicate a live attachment receipt",
             ));
         }
