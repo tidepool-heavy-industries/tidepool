@@ -23,7 +23,7 @@ import Control.Exception (throwIO)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Data (Data, Typeable, cast, gmapQ)
-import Data.List (foldl', nub, partition)
+import Data.List (nub, partition)
 import GHC (GhcTc, GhcRn, HsExpr(..), HsBind, HsBindLR(..), Pat(..), FixitySig(..), unLoc)
 import GHC.Hs (HsLocalBinds, HsLocalBindsLR(..), LHsExpr, LPat, ABExport(..), AbsBinds(..), XXExprGhcTc(..), MatchGroup(..), Match(..), GRHSs(..), GRHS(..))
 import GHC.Hs.Utils (collectHsBindBinders, collectHsBindsBinders, collectPatBinders, CollectFlag(..))
@@ -457,7 +457,7 @@ installTypedSegmentRoots environment pending guts = do
       mentionsPrivate ty = any (`elementOfUniqSet` tyConsOfType ty) privateTypes
       roots = typedSegmentRoots segment
       unexport (NonRec identifier rhs) = NonRec (setIdNotExported identifier) rhs
-      unexport (Rec bindings) = Rec [(setIdNotExported identifier,rhs) | (identifier,rhs) <- bindings]
+      unexport (Rec members) = Rec [(setIdNotExported identifier,rhs) | (identifier,rhs) <- members]
       bindings = map unexport (mg_binds guts) ++ roots
       identifiers = concatMap bindersOf bindings
   forM_ (typedSegmentItems segment) $ \item ->
@@ -490,7 +490,7 @@ installTypedSegmentRoots environment pending guts = do
   support <- foldM (\selected binding -> do
     let ordinal = case [plannedItemOrdinal (typedItemPlan item)
           | item <- typedSegmentItems segment, typedItemRoot item `elem` bindersOf binding] of
-          [ordinal] -> ordinal
+          [itemOrdinal] -> itemOrdinal
           _ -> -1
     checkBindingType ordinal binding
     foldM (\current core -> do
