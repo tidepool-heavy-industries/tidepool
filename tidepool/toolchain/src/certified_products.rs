@@ -5554,12 +5554,10 @@ pub(crate) fn certify_products_with_validation(
             ));
         }
     }
-    let inherited_interfaces = projected_metadata
-        .map(|metadata| metadata.descriptors())
-        .unwrap_or_default();
-    if inherited_interfaces
-        .iter()
-        .any(|entry| entry.producer_sha256 != producer_sha256)
+    if projected_metadata
+        .into_iter()
+        .flat_map(|metadata| metadata.artifacts.values())
+        .any(|entry| entry.descriptor.producer_sha256 != producer_sha256)
     {
         return Err(CertificationError::Mismatch(
             "inherited finalization producer",
@@ -5998,12 +5996,17 @@ pub(crate) fn certify_products_with_validation(
             Ok(interface)
         })
         .collect::<CertResult<Vec<_>>>()?;
-    let mut inherited_seals = inherited_interfaces
+    let mut inherited_seals = projected_metadata
         .into_iter()
+        .flat_map(|metadata| metadata.entries.values())
         .map(|entry| {
+            let descriptor = &entry.descriptor;
             (
-                (entry.owner.unit, entry.owner.module),
-                entry.interface_sha256,
+                (
+                    descriptor.owner.unit.clone(),
+                    descriptor.owner.module.clone(),
+                ),
+                descriptor.interface_sha256,
             )
         })
         .collect::<BTreeMap<_, _>>();
