@@ -4,8 +4,16 @@
 use crate::hs::HsType;
 use crate::schema::{
     Arg, AuthoredSurface, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding,
-    SumVariant, TypeDef, TypeShape, VariantFields, Verb, WireDerives,
+    SumVariant, TypeDef, TypeShape, VariantFields, Verb, WireDerive, WireDerives,
 };
+
+const CALL_ERROR_DERIVES: WireDerives = WireDerives(&[
+    WireDerive::ToHaskell,
+    WireDerive::Clone,
+    WireDerive::Debug,
+    WireDerive::PartialEq,
+    WireDerive::Eq,
+]);
 
 fn variant(ctor: &'static str, fields: Vec<HsType>) -> SumVariant {
     SumVariant {
@@ -42,8 +50,8 @@ pub fn jev() -> Effect {
         extra_imports: &[],
         type_defs: vec![TypeDef {
             name: "JevCallError",
-            wire_rust: None,
-            haskell_module: None,
+            wire_rust: Some("JevCallFailure"),
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Sum {
                 variants: vec![
                     variant("JevUnconfigured", vec![]),
@@ -58,7 +66,7 @@ pub fn jev() -> Effect {
                 ],
             },
             json: JsonInstance::None,
-            derives: WireDerives(&[]),
+            derives: CALL_ERROR_DERIVES,
             domain: None,
             doc: &[],
         }],

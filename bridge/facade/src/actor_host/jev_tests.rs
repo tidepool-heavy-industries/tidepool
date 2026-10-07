@@ -201,7 +201,7 @@ impl JevBackend for LookupScoreJev {
         let request: serde_json::Value = serde_json::from_str(&request).unwrap();
         self.requests.lock().push(request.clone());
         if *self.fail.lock() {
-            return Box::pin(async { Err(JevCallFailure::Unconfigured) });
+            return Box::pin(async { Err(JevCallFailure::JevUnconfigured) });
         }
         let score = *self.score.lock();
         let probabilities = (0..4)
@@ -1047,7 +1047,7 @@ _ <- if either (const 0) (\response -> J.handle (J.answers response) (#first id 
 async fn jev_call_failure_is_a_typed_left() {
     let backend = Arc::new(FakeJev {
         requests: Mutex::new(Vec::new()),
-        answer: Err(JevCallFailure::Unconfigured),
+        answer: Err(JevCallFailure::JevUnconfigured),
     });
     let campaign = campaign_with(backend).await;
     let failure_cell = CELL.replace(
@@ -1111,7 +1111,7 @@ _ <- if either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #l
 async fn a_per_row_battery_sends_one_request_with_one_question_per_row() {
     let backend = Arc::new(FakeJev {
         requests: Mutex::new(Vec::new()),
-        answer: Err(JevCallFailure::Unconfigured),
+        answer: Err(JevCallFailure::JevUnconfigured),
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
     let result = dispatch_haskell_script(

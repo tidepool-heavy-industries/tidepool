@@ -27,12 +27,14 @@ impl exomonad_actor::JevBackend for SuppliedCallGate {
             self.0
                 .send(HeldSuppliedCall { request, release })
                 .map_err(|_| {
-                    exomonad_actor::JevCallFailure::Transport(
+                    exomonad_actor::JevCallFailure::JevTransport(
                         "test admission observer closed".into(),
                     )
                 })?;
             held.await.map_err(|_| {
-                exomonad_actor::JevCallFailure::Transport("test abandoned admitted handler".into())
+                exomonad_actor::JevCallFailure::JevTransport(
+                    "test abandoned admitted handler".into(),
+                )
             })?;
             Ok("{}".into())
         })

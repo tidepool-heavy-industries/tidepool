@@ -5,28 +5,8 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 
-/// `Tidepool.Effects.Core.JevCallError`, constructor for constructor.
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
-pub enum JevCallFailure {
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevUnconfigured")]
-    Unconfigured,
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevCallCap")]
-    CallCap,
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevTransport")]
-    Transport(String),
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevTimeout")]
-    Timeout,
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevHttp")]
-    Http(i64, String),
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevCircuitOpen")]
-    CircuitOpen(i64, i64),
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevClientSetup")]
-    ClientSetup(String),
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevBodyLimit")]
-    BodyLimit,
-    #[haskell(module = "Tidepool.Effects.Core", name = "JevMalformed")]
-    Malformed(String),
-}
+/// The actor backend uses the canonical protocol-generated bridge error.
+pub use tidepool_bridge_effects::JevCallFailure;
 
 /// Answers `Jev` requests for every actor of a forest.
 pub trait JevBackend: Send + Sync {
@@ -61,7 +41,7 @@ struct FailedJevClientSetup(String);
 impl JevBackend for FailedJevClientSetup {
     fn ask(&self, _request: String) -> BoxFuture<'_, Result<String, JevCallFailure>> {
         let detail = self.0.clone();
-        Box::pin(async move { Err(JevCallFailure::ClientSetup(detail)) })
+        Box::pin(async move { Err(JevCallFailure::JevClientSetup(detail)) })
     }
 }
 
@@ -71,7 +51,7 @@ impl JevBackend for UnconfiguredJev {
     }
 
     fn ask(&self, _request: String) -> BoxFuture<'_, Result<String, JevCallFailure>> {
-        Box::pin(async { Err(JevCallFailure::Unconfigured) })
+        Box::pin(async { Err(JevCallFailure::JevUnconfigured) })
     }
 }
 
@@ -84,7 +64,7 @@ mod tests {
         let backend = failed_jev_client_setup("client builder rejected configuration");
         assert_eq!(
             backend.ask("{}".into()).await,
-            Err(JevCallFailure::ClientSetup(
+            Err(JevCallFailure::JevClientSetup(
                 "client builder rejected configuration".into()
             ))
         );

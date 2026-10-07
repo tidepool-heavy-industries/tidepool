@@ -984,25 +984,27 @@ impl exomonad_actor::JevBackend for HostJev {
         use tidepool_handlers::JevFailure;
         Box::pin(async move {
             let body: serde_json::Value = serde_json::from_str(&request)
-                .map_err(|error| Failure::Malformed(format!("request is not JSON: {error}")))?;
+                .map_err(|error| Failure::JevMalformed(format!("request is not JSON: {error}")))?;
             match self.0.ask(body).await {
                 Ok(response) => Ok(response.to_string()),
                 Err(failure) => Err(match failure {
-                    JevFailure::Unconfigured => Failure::Unconfigured,
-                    JevFailure::CallCap => Failure::CallCap,
-                    JevFailure::Transport(detail) => Failure::Transport(detail),
-                    JevFailure::Timeout => Failure::Timeout,
-                    JevFailure::Http { status, body } => Failure::Http(i64::from(status), body),
+                    JevFailure::Unconfigured => Failure::JevUnconfigured,
+                    JevFailure::CallCap => Failure::JevCallCap,
+                    JevFailure::Transport(detail) => Failure::JevTransport(detail),
+                    JevFailure::Timeout => Failure::JevTimeout,
+                    JevFailure::Http { status, body } => {
+                        Failure::JevHttp(i64::from(status), body)
+                    }
                     JevFailure::CircuitOpen {
                         status,
                         retry_after_ms,
-                    } => Failure::CircuitOpen(
+                    } => Failure::JevCircuitOpen(
                         i64::from(status),
                         i64::try_from(retry_after_ms).unwrap_or(i64::MAX),
                     ),
-                    JevFailure::ClientSetup(detail) => Failure::ClientSetup(detail),
-                    JevFailure::BodyLimit => Failure::BodyLimit,
-                    JevFailure::Malformed(detail) => Failure::Malformed(detail),
+                    JevFailure::ClientSetup(detail) => Failure::JevClientSetup(detail),
+                    JevFailure::BodyLimit => Failure::JevBodyLimit,
+                    JevFailure::Malformed(detail) => Failure::JevMalformed(detail),
                 }),
             }
         })
