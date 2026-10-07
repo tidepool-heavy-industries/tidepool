@@ -881,6 +881,7 @@ test-suite automation-helper-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
+    Tidepool.Agent.Contract
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Agent.Ref
@@ -888,6 +889,7 @@ test-suite automation-helper-contract
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.Session
+    Tidepool.Agent.ToolEffects
     Tidepool.Agent.Watch
     Tidepool.Agent.Watch.Internal
     Tidepool.Command
