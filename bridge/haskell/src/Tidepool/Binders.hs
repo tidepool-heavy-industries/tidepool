@@ -40,13 +40,14 @@ module Tidepool.Binders
   , declarationSourceWithTemplateFlags
   , renderDeclarationForTemplate
   , splitCellWithFlags
-  , CellAnalysisItem(..)
+  , CellAnalysisItem(..), CellBindingForm(..)
   , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
   , analyzeOrderedCell, analyzeOrderedCellWithFlags
   , defaultParserDynFlags, templateParserFlags
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset
+  , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
   , CellExpressionPlan(..), ExpressionLiftPlan(..)
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
@@ -94,6 +95,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.TypedSegment.Types
+  ( TypedSegmentPlan, typedSegmentPlan, typedSegmentPlanDigest, GeneratedSegmentOperations(..)
+  , TypedItemPlan(..), TypedItemBody(..) )
 import Tidepool.CheckedCell
   ( renderCheckedTypeWitness, renderRequestTypeSignatures
   , CellExpressionPlan(..), ExpressionLiftPlan(..) )
@@ -102,8 +106,8 @@ import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 import Tidepool.TurnSource
-  ( spliceTemplate, CompilerDefaultRecipe, emptyCompilerDefaultRecipe
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, qualifyCompilerDefaultWithLineOffset
+  ( CompilerDefaultRecipe, emptyCompilerDefaultRecipe
+  , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset
   , importQualifierNamespaces
   , prepareDeclarationTemplate, renderPreparedDeclaration )
 
@@ -572,12 +576,16 @@ blankBeforeLine firstBodyLine source =
 -- | One GHC-classified item of a notebook cell. The source and span always
 -- refer to the submitted cell; generated checking scaffolds never become the
 -- public coordinate system.
+data CellBindingForm = ActionBinding | LetBinding | RecursiveBinding
+  deriving (Eq, Show)
+
 data CellAnalysisItem = CellAnalysisItem
   { cellAnalysisSpan :: CellSourceSpan
   , cellAnalysisSource :: String
   , cellAnalysisVerdict :: StmtBinders
   , cellAnalysisSourceItems :: [CellAnalysisSourceItem]
   , cellAnalysisPrologueOnly :: Bool
+  , cellAnalysisBindingForm :: Maybe CellBindingForm
   } deriving (Eq, Show)
 
 -- | One original source item retained beneath its execution item. Declaration
@@ -663,7 +671,7 @@ analyzeCellWithGrouping ordered dflags template source = do
     -- diagnostic that names the actual operator. Other verdicts (KBind,
     -- KDecl) are spliced without an enclosing section and are not at risk.
     classify effective ordinal item =
-      let verdict = classifyWithFlagsExact effective (cellSourceText item)
+      let (verdict, bindingForm) = classifyWithFlagsExactForm effective (cellSourceText item)
        in if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
             then Left (CellUnsupportedLocalFixity (cellSourceSpan item))
             else case (sbKind verdict, cellSourceDanglingOperator item) of
@@ -681,6 +689,7 @@ analyzeCellWithGrouping ordered dflags template source = do
                       }
                   ]
               , cellAnalysisPrologueOnly = False
+              , cellAnalysisBindingForm = bindingForm
               }
     groupDeclarations headerItems classified generated =
       if ordered
@@ -720,6 +729,7 @@ analyzeCellWithGrouping ordered dflags template source = do
                 (concatMap sbDeclItems verdicts)
             , cellAnalysisSourceItems = sourceItems
             , cellAnalysisPrologueOnly = not (null headerItems) && null declarations
+            , cellAnalysisBindingForm = Nothing
             }
     locatedDeclaration item =
       "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item))
@@ -863,18 +873,74 @@ renderDeclarationForTemplate template source = do
   where
     moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 
--- | Fill the runtime-authored whole-cell checking template. The template owns
--- imports, the exact effect row, and expression admissibility; this function
--- only places GHC-classified source and compiler-reserved pin aliases.
+-- | Fill the runtime-authored whole-cell template. The template owns imports,
+-- the exact effect row, and expression admissibility; this function places
+-- GHC-classified source and reserves the parsed rewrite's item names.
 --
 -- The two literal placeholders are intentionally the entire template
 -- vocabulary. Missing or duplicate placeholders are rejected by the worker
 -- entry point before compilation.
+-- The parser's original statement form chooses the capture origin. Neither
+-- renderer nor runtime parses Haskell again to distinguish a let from a bind.
+data PreparedTypedSegmentSource = PreparedTypedSegmentSource
+  { preparedTypedSegmentPlan :: TypedSegmentPlan
+  , preparedTypedSegmentSource :: String
+  , preparedTypedSegmentTemplate :: String
+  , preparedTypedSegmentLineOffset :: Int
+  , preparedTypedSegmentOperations :: GeneratedSegmentOperations
+  }
+
+prepareTypedSegmentSource :: String -> CellSourcePlan -> String
+  -> [(Int, Word64, Maybe String)] -> Either String PreparedTypedSegmentSource
+prepareTypedSegmentSource template sourcePlan reservation slots = do
+  let items = cellPlanItems sourcePlan
+      occupied = template ++ concatMap cellAnalysisSource items
+      fresh candidate | candidate `isInfixOf` occupied = fresh (candidate ++ "X")
+                      | otherwise = candidate
+      root = fresh "__tidepool_segment_check"
+      reserve role ordinal = fresh ("__tidepool_segment_" ++ role ++ "_" ++ show ordinal)
+      namespaces = concatMap locatedImportNamespaces (prologueImports (cellPlanPrologue sourcePlan))
+      freshQualifier candidate
+        | mkModuleName candidate `elem` namespaces || candidate `isInfixOf` template =
+            freshQualifier (candidate ++ "X")
+        | otherwise = mkModuleName candidate
+      qualifier = freshQualifier "TidepoolResume"
+  if length slots /= length items || any ((== KDecl) . sbKind . cellAnalysisVerdict) items
+    then Left "typed segment reservations do not cover one executable parser segment"
+    else pure ()
+  planned <- sequence
+    [ let names = sbBinders (cellAnalysisVerdict item)
+          entry = reserve "item" ordinal
+       in case (sbKind (cellAnalysisVerdict item), cellAnalysisBindingForm item, observation) of
+        (KBind, Just LetBinding, Nothing) -> Right (TypedItemPlan ordinal entry generation
+          (LetItem (reserve "let" ordinal) names))
+        (KBind, Just ActionBinding, Nothing) -> Right (TypedItemPlan ordinal entry generation
+          (ActionItem (reserve "step" ordinal) (reserve "probe" ordinal) (reserve "match" ordinal) names))
+        (KBind, Just RecursiveBinding, Nothing) -> Right (TypedItemPlan ordinal entry generation
+          (ActionItem (reserve "step" ordinal) (reserve "probe" ordinal) (reserve "match" ordinal) names))
+        (KExpr, Nothing, Just name) | not (null name), not (name `isInfixOf` occupied) ->
+          Right (TypedItemPlan ordinal entry generation (ObservationItem (reserve "probe" ordinal) name))
+        _ -> Left "typed segment reservation differs from its parser statement form"
+    | (item, (ordinal, generation, observation)) <- zip items slots ]
+  plan <- either (Left . show) Right (typedSegmentPlan reservation root planned)
+  -- This exact private import is the existing generated-scaffold support edge.
+  -- Its source/certificate owner is authenticated before Core extraction.
+  protected <- replaceOnce "{{CELL_IMPORTS}}"
+    ("import qualified Tidepool.Internal.Resume as " ++ moduleNameString qualifier ++ "\n{{CELL_IMPORTS}}") template
+  (rendered, generatedLineOffset) <- renderCellSourceWithLineOffset False protected sourcePlan
+  renamedRoot <- replaceOnce "__tidepool_cell_check ::" (root ++ " ::") rendered
+    >>= replaceOnce "__tidepool_cell_check =" (root ++ " =")
+  let sealed = renamedRoot ++ "\n-- tidepool-typed-segment-plan-v1 " ++ typedSegmentPlanDigest plan ++ "\n"
+  pure (PreparedTypedSegmentSource plan sealed protected generatedLineOffset (GeneratedSegmentOperations qualifier))
+
 renderCellCheckSource :: String -> CellSourcePlan -> Either String String
 renderCellCheckSource template plan = fst <$> renderCellCheckSourceWithLineOffset template plan
 
 renderCellCheckSourceWithLineOffset :: String -> CellSourcePlan -> Either String (String,Int)
-renderCellCheckSourceWithLineOffset template plan = do
+renderCellCheckSourceWithLineOffset = renderCellSourceWithLineOffset True
+
+renderCellSourceWithLineOffset :: Bool -> String -> CellSourcePlan -> Either String (String,Int)
+renderCellSourceWithLineOffset checking template plan = do
   withPragmas <- replaceOnce "{{CELL_PRAGMAS}}" pragmas template
   withImports <- replaceOnce "{{CELL_IMPORTS}}" imports withPragmas
   (prepared, defaultLineOffset) <- qualifyCompilerDefaultWithLineOffset (prologueCompilerDefault (cellPlanPrologue plan))
@@ -902,6 +968,8 @@ renderCellCheckSourceWithLineOffset template plan = do
       [] -> Right "pure ()\n"
       values -> (++ "\n") . intercalate "\n; " <$> mapM renderExecutable values
 
+    renderExecutable (_, item) | not checking =
+      Right (linePragma item ++ cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item))
     renderExecutable (index, item) =
       let prefix = if sbKind (cellAnalysisVerdict item) == KExpr then "" else linePragma item
       in (prefix ++) <$> case cellAnalysisVerdict item of
@@ -935,22 +1003,24 @@ renderCellCheckSourceWithLineOffset template plan = do
     pinKey index binder = "__tidepool_cell_pin_" ++ show index ++ "_" ++ binder
     trailingNewline text = if null text || last text == '\n' then "" else "\n"
 
-    replaceOnce needle replacement haystack =
-      case breakOn needle haystack of
-        Nothing -> Left ("cell check template is missing " ++ needle)
-        Just (before, after)
-          | needle `isInfixOf` after ->
-              Left ("cell check template contains " ++ needle ++ " more than once")
-          | otherwise -> Right (before ++ replacement ++ after)
 
-    breakOn needle = go []
-      where
-        go _ [] = Nothing
-        go prefix rest
-          | needle `isPrefixOf` rest =
-              Just (reverse prefix, drop (length needle) rest)
-          | char : more <- rest = go (char : prefix) more
+replaceOnce :: String -> String -> String -> Either String String
+replaceOnce needle replacement haystack =
+  case breakOn needle haystack of
+    Nothing -> Left ("cell check template is missing " ++ needle)
+    Just (before, after)
+      | needle `isInfixOf` after ->
+          Left ("cell check template contains " ++ needle ++ " more than once")
+      | otherwise -> Right (before ++ replacement ++ after)
 
+breakOn :: Eq a => [a] -> [a] -> Maybe ([a],[a])
+breakOn needle = go []
+  where
+    go _ [] = Nothing
+    go prefix rest
+      | needle `isPrefixOf` rest =
+          Just (reverse prefix, drop (length needle) rest)
+      | char : more <- rest = go (char : prefix) more
 -- | Split a notebook cell at real tokens beginning in column one on a later
 -- line. GHC's lexer, not a second Haskell grammar, decides which newlines are
 -- inside strings, quasiquotes, comments, and pragmas.
@@ -1119,8 +1189,20 @@ classifyWithFlags dflags0 src =
   classifyWithFlagsExact (foldl' xopt_set dflags0 stmtExtensions) src
 
 classifyWithFlagsExact :: DynFlags -> String -> StmtBinders
-classifyWithFlagsExact dflags src = classifyTurn declRes stmtRes modRes
+classifyWithFlagsExact dflags src = fst (classifyWithFlagsExactForm dflags src)
+
+classifyWithFlagsExactForm :: DynFlags -> String -> (StmtBinders, Maybe CellBindingForm)
+classifyWithFlagsExactForm dflags src = (verdict, bindingForm)
   where
+    verdict = classifyTurn declRes stmtRes modRes
+    bindingForm | sbKind verdict == KBind = case stmtRes of
+      POk _ statement -> case unLoc statement of
+        BindStmt{} -> Just ActionBinding
+        LetStmt{} -> Just LetBinding
+        RecStmt{} -> Just RecursiveBinding
+        _ -> Nothing
+      _ -> Nothing
+                | otherwise = Nothing
     popts  = initParserOpts dflags
     loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
     buf    = stringToStringBuffer src

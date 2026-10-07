@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs #-}
 
-module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce) where
+module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory) where
 
 import Control.Exception (bracket, try)
 import Control.Monad (forM_, unless)
@@ -53,6 +53,7 @@ import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, doesFileExist, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
 import Tidepool.ExactHydration
@@ -513,3 +514,54 @@ postloadProviderFrontendOnce = withTiming $ withScratch $ \producerRoot -> withS
     assert (all (executable (prHscEnv (pprPipelineResult prepared))) (retained : owners))
       "native consumer lost its retained or fresh providers' real GHC bytecode"
   putStrLn "post-load providers: genuine retained root, actual quoter42 once in each checked/native cycle, canonical capture and executable bytecode passed"
+
+-- A byte-exact return to A must select its completed version, even when B was
+-- the most recent source. Diagnostic status is independent of frontend work.
+memoIngressSelectionHistory :: IO ()
+memoIngressSelectionHistory = withTiming $ bracket (lookupEnv "TIDEPOOL_MEMO_TRACE")
+  (maybe (unsetEnv "TIDEPOOL_MEMO_TRACE") (setEnv "TIDEPOOL_MEMO_TRACE")) $ \_ -> do
+  setEnv "TIDEPOOL_MEMO_TRACE" "1"
+  withScratch $ \work -> do
+    let fixture name = "test-source-boot/fixtures" </> name
+        helper = work </> "MetadataQuoteSupport.hs"
+        target = work </> "MetadataCurrentSourceTarget.hs"
+        selectionRow diagnostics = case
+            [line | line <- lines diagnostics
+            , Text.pack "tidepool-memo-cycle-graph " `Text.isPrefixOf` Text.pack line
+            , "module=MetadataQuoteSupport" `elem` words line
+            , "source_kind=OrdinaryHomeSource" `elem` words line] of
+          [line] -> pure (words line)
+          _ -> fail ("memo selection omitted its exact owner row: " ++ diagnostics)
+        observe compile expected expectedFrontends = do
+          (prepared, diagnostics) <- captureDiagnostics $
+            compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+          row <- selectionRow diagnostics
+          assert (("selection=" ++ expected) `elem` row)
+            ("memo ingress selected another state: " ++ diagnostics)
+          whenSelected expected $ assert ("executable_observation=observed" `elem` row)
+            "selected source version omitted its actual executable-capacity decision"
+          assert (length [line | line <- lines diagnostics
+              , line == "tidepool-canonical-frontend module=MetadataQuoteSupport"] == expectedFrontends)
+            "memo ingress diagnostic disagreed with actual canonical frontend work"
+          assert (isJustResult prepared) "memo history omitted its target result"
+          case [value | field <- row
+              , Just value <- [Text.stripPrefix (Text.pack "selected_originating_cycle=") (Text.pack field)]] of
+            [value] -> pure value
+            _ -> fail "memo selection omitted its originating cycle"
+        whenSelected expected action = if expected == "MemoSelected" then action else pure ()
+        isJustResult prepared = case prResultType (pprPipelineResult prepared) of
+          Just _ -> True
+          Nothing -> False
+    copyFile (fixture "MetadataCurrentSourceTarget.hs") target
+    original <- BS.readFile (fixture "MetadataQuoteSupport.hs")
+    BS.writeFile helper original
+    withResidentPipelineSelected [work] $ \compile -> do
+      _ <- observe compile "MemoOwnerAbsent" 1
+      firstA <- observe compile "MemoSelected" 0
+      copyFile (fixture "MetadataQuoteSupportChanged.hs") helper
+      _ <- observe compile "MemoIngressAbsent" 1
+      BS.writeFile helper original
+      returnedA <- observe compile "MemoSelected" 0
+      assert (firstA /= Text.pack "none" && returnedA == firstA)
+        "return to byte-exact A selected another originating cycle"
+  putStrLn "memo ingress A,A,B,A: absent/selected/changed-ingress/original-selected and actual frontend1/0/1/0 passed"

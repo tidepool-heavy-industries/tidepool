@@ -7,7 +7,7 @@ import BoundedReadTest (boundedReadChecks)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
-import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce)
+import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
 import PhysicalExecutableEpochTest (physicalExecutableEpoch)
 
@@ -21,6 +21,7 @@ tests = testGroup "source-boot"
   , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
   , testCase "post-load provider frontend once" postloadProviderFrontendOnce
+  , testCase "memo ingress selection history" memoIngressSelectionHistory
   , testCase "execution source decode" $ executionSourceDecodeChecks
   , testCase "execution source resolution budget" $ executionSourceResolutionBudgetChecks
   , testCase "exact scope binders" $ exactScopeBinders
