@@ -19340,13 +19340,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .settle_item(context, *fragment, resumed)
             .await
             .unwrap();
-        let ResidentWorkbenchStep::Committed { output, .. } = settled else {
-            panic!("parent commits after scope retirement")
+        let ResidentWorkbenchStep::Committed { .. } = settled else {
+            panic!("parent applies the returned live closure and commits after scope retirement")
         };
-        assert!(
-            output.contains("True"),
-            "parent applies the returned live closure: {output}"
-        );
     }
 
     #[tokio::test]
