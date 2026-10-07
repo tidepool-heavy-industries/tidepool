@@ -12,6 +12,7 @@ pub mod agent_tools;
 pub mod ask_user;
 pub mod bound_worktree;
 pub mod commands;
+pub mod console;
 pub mod context_read_write;
 pub mod exec;
 pub mod green;
@@ -45,6 +46,7 @@ pub use agent_tools::*;
 pub use ask_user::*;
 pub use bound_worktree::*;
 pub use commands::*;
+pub use console::*;
 pub use context_read_write::*;
 pub use exec::*;
 pub use green::*;
@@ -74,6 +76,7 @@ pub(crate) const CORE_IMPORTS: &[&str] = &[
 /// Every schema-owned Haskell effect declaration.
 pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
     vec![
+        console_decl(),
         exec_decl(),
         journal_decl(),
         worktree_decl(),
@@ -112,6 +115,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
 /// Effects with an explicitly curated authored vocabulary.
 pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "Worktree",
+    "AskUser",
     "RecipeCheck",
     "ResourceScopes",
     "Actor",
@@ -136,6 +140,39 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
 /// Hidden names grouped by their owning effect.
 pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     ("Worktree", &["WorkspaceHandle"]),
+    (
+        "AskUser",
+        &[
+            "FormLease",
+            "FormLeaseToken",
+            "FormAttemptId",
+            "FormAttemptToken",
+            "FormCause",
+            "FormNotInstalled",
+            "FormInterrupted",
+            "FormTransportFailed",
+            "FormMalformed",
+            "FormUnauthorized",
+            "FormClosed",
+            "FormCleanupUnconfirmed",
+            "FormAttempt",
+            "FormSubmitted",
+            "FormDismissed",
+            "FormTransition",
+            "FormApplied",
+            "FormStale",
+            "FormOpenWith",
+            "FormAwaitWith",
+            "FormRejectWith",
+            "FormCommitWith",
+            "FormCloseWith",
+            "formOpenRaw",
+            "formAwaitRaw",
+            "formRejectRaw",
+            "formCommitRaw",
+            "formCloseRaw",
+        ],
+    ),
     (
         "RecipeCheck",
         &[
@@ -381,6 +418,8 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "JevTransport",
             "JevTimeout",
             "JevHttp",
+            "JevCircuitOpen",
+            "JevClientSetup",
             "JevBodyLimit",
             "JevMalformed",
             "JevAskWith",
@@ -511,6 +550,8 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "EffectSleep",
             "EffectCommands",
             "EffectConsole",
+            "EffectAskUser",
+            "EffectGreen",
             "EffectNotifications",
             "EffectJev",
             "EffectModelCall",
@@ -643,6 +684,21 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
 /// Import items that hide complete private data declarations.
 pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[
     "WorkspaceHandle(..)",
+    "FormLease(..)",
+    "FormAttemptId(..)",
+    "FormCause(..)",
+    "FormAttempt(..)",
+    "FormTransition(..)",
+    "FormOpenWith",
+    "FormAwaitWith",
+    "FormRejectWith",
+    "FormCommitWith",
+    "FormCloseWith",
+    "formOpenRaw",
+    "formAwaitRaw",
+    "formRejectRaw",
+    "formCommitRaw",
+    "formCloseRaw",
     "RecipeRoot",
     "RecipeTurn",
     "RecipeActivation",

@@ -20,6 +20,8 @@ import Tidepool.Effects.Core
   , ModelCall
   , Commands
   , Console
+  , AskUser
+  , Green
   , Actor
   , Reflect
   , Lookup
@@ -29,4 +31,4 @@ import Tidepool.Effects.Core
   )
 
 type ActorEffects =
-  '[Replies, Watches, ResourceScopes, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, ModelCall, Commands, Console, Actor, Reflect, Lookup, Source, Journal, RepoEvent]
+  '[Replies, Watches, ResourceScopes, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, ModelCall, Commands, Console, AskUser, Green, Actor, Reflect, Lookup, Source, Journal, RepoEvent]

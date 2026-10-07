@@ -20,6 +20,8 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::ModelCall,
     ActorEffectKey::Commands,
     ActorEffectKey::Console,
+    ActorEffectKey::AskUser,
+    ActorEffectKey::Green,
     ActorEffectKey::Actor,
     ActorEffectKey::Reflect,
     ActorEffectKey::Lookup,

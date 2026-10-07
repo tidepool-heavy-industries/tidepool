@@ -9,8 +9,10 @@ rust_filegroup(
     name = "tidepool_bridge_effects_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/bridge-effects/Cargo.toml",
+        "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_ask_user_rs]": "tidepool/bridge-effects/src/generated/ask_user.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_commands_rs]": "tidepool/bridge-effects/src/generated/commands.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_context_read_write_rs]": "tidepool/bridge-effects/src/generated/context_read_write.rs",
+        "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_jev_rs]": "tidepool/bridge-effects/src/generated/jev.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_mod_rs]": "tidepool/bridge-effects/src/generated/mod.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_model_control_rs]": "tidepool/bridge-effects/src/generated/model_control.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_reflect_rs]": "tidepool/bridge-effects/src/generated/reflect.rs",
@@ -49,8 +51,10 @@ rust_filegroup(
     name = "tidepool_bridge_effects_unit_tests_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/bridge-effects/Cargo.toml",
+        "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_ask_user_rs]": "tidepool/bridge-effects/src/generated/ask_user.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_commands_rs]": "tidepool/bridge-effects/src/generated/commands.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_context_read_write_rs]": "tidepool/bridge-effects/src/generated/context_read_write.rs",
+        "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_jev_rs]": "tidepool/bridge-effects/src/generated/jev.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_mod_rs]": "tidepool/bridge-effects/src/generated/mod.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_model_control_rs]": "tidepool/bridge-effects/src/generated/model_control.rs",
         "//bridge/protocol:generated[tidepool_bridge-effects_src_generated_reflect_rs]": "tidepool/bridge-effects/src/generated/reflect.rs",
