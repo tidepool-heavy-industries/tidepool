@@ -3112,11 +3112,11 @@ impl ExactCheckedItem {
             }
             for value in expected {
                 let key = string(&row(value, width)?[0])?;
-                if by_key.get(key).copied() != Some(*value) {
+                if by_key.remove(key) != Some(*value) {
                     return Ok(false);
                 }
             }
-            Ok(true)
+            Ok(by_key.is_empty())
         }
         let expected = &self.cell.items[self.index];
         let expected_pins = self
