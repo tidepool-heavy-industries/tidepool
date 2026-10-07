@@ -6001,7 +6001,7 @@ mod tests {
     fn retained_materialization_nonempty_groups_select_versions_and_shared_parents() {
         let (initial, producer) = metadata_fixture();
         let product = |module, version, generation| {
-            crate::certified_products::fixture_finalized_product(
+            let original = crate::certified_products::fixture_finalized_product(
                 crate::certified_products::tests::original_witness_fixture(
                     module,
                     Some(crate::certified_products::PendingImportOwner::Retained {
@@ -6014,7 +6014,10 @@ mod tests {
                     &BTreeMap::new(),
                 ),
                 initial.producer,
-            )
+            );
+            crate::certified_products::tests::recovered_witness_fixtures(&[original])
+                .remove(0)
+                .product
         };
         let extend = |context: &Arc<ExactDeclarationContext>, product| {
             Arc::new(
@@ -6130,6 +6133,9 @@ mod tests {
             ),
             initial.producer,
         );
+        let native = crate::certified_products::tests::recovered_witness_fixtures(&[native])
+            .remove(0)
+            .product;
         let context = Arc::new(
             initial
                 .as_ref()

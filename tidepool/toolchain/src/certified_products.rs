@@ -7050,9 +7050,13 @@ pub(crate) mod tests {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Vec<CertifiedRecoveredOriginal> {
         let root = tempfile::tempdir().unwrap();
+        let producer = products
+            .first()
+            .and_then(|product| product.module_interface())
+            .map_or([1; 32], CertifiedModuleInterface::producer_sha256);
         let references = crate::recovery_artifacts::materialize_certified_products(
             root.path(),
-            [1; 32],
+            producer,
             products,
         )
         .unwrap();
