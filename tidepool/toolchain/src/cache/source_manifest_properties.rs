@@ -23,15 +23,51 @@ enum Op {
 }
 
 fn operations() -> impl Strategy<Value = Vec<Op>> {
-    prop::collection::vec(
-        prop_oneof![
-            (0u8..2, 0u8..6, 0u8..4).prop_map(|(d, n, value)| Op::Write(d, n, value)),
-            (0u8..2, 0u8..6, 0u8..6).prop_map(|(d, from, to)| Op::Rename(d, from, to)),
-            (0u8..2, 0u8..6).prop_map(|(d, n)| Op::Remove(d, n)),
-            (0u8..2, any::<bool>()).prop_map(|(alias, enabled)| Op::Alias(alias, enabled)),
-        ],
-        1..36,
+    prop_oneof![
+        prop::collection::vec(arbitrary_operation(), 1..36),
+        targeted_history(),
+    ]
+}
+
+fn arbitrary_operation() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        (0u8..2, 0u8..6, 0u8..4).prop_map(|(d, n, value)| Op::Write(d, n, value)),
+        (0u8..2, 0u8..6, 0u8..6).prop_map(|(d, from, to)| Op::Rename(d, from, to)),
+        (0u8..2, 0u8..6).prop_map(|(d, n)| Op::Remove(d, n)),
+        (0u8..2, any::<bool>()).prop_map(|(alias, enabled)| Op::Alias(alias, enabled)),
+    ]
+}
+
+// Keep the causal transitions intact while allowing unrelated filesystem
+// changes before and after them. Shrinking can remove the surroundings and
+// simplify values without deleting the interactions under test.
+fn targeted_history() -> impl Strategy<Value = Vec<Op>> {
+    (
+        prop::collection::vec(arbitrary_operation(), 0..9),
+        0u8..4,
+        prop::collection::vec(arbitrary_operation(), 0..9),
     )
+        .prop_map(|(mut prefix, value, suffix)| {
+            let next = (value + 1) % 4;
+            let later = (value + 2) % 4;
+            let recreation = (value + 3) % 4;
+            prefix.extend([
+                Op::Alias(0, false),
+                Op::Alias(1, false),
+                Op::Write(0, 0, value),
+                Op::Write(0, 0, next), // unequal, equal-size replacement
+                Op::Alias(0, true),
+                Op::Write(0, 0, later), // mutate a directory through an alias
+                Op::Write(0, 2, value),
+                Op::Rename(0, 0, 2), // replace an existing destination
+                Op::Remove(0, 2),
+                Op::Write(0, 2, recreation), // deletion followed by recreation
+                Op::Alias(1, true),
+                Op::Alias(0, false), // one alias remains active
+            ]);
+            prefix.extend(suffix);
+            prefix
+        })
 }
 
 fn property_config() -> Config {
@@ -121,11 +157,16 @@ fn with_alias(
 struct Coverage {
     writes: usize,
     replacements: usize,
+    unchanged_writes: usize,
     renames: usize,
+    rename_replacements: usize,
+    self_renames: usize,
     removes: usize,
     recreations: usize,
     alias_adds: usize,
     alias_removes: usize,
+    identity_changes: usize,
+    identity_stable_steps: usize,
     missing_renames: usize,
     missing_removals: usize,
     unchanged_aliases: usize,
@@ -142,6 +183,8 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
     let mut aliases = [false; 2];
     let mut removed_paths = std::collections::HashSet::new();
     let mut covered = Coverage::default();
+    let mut prior_expected = expected(&files, false);
+    let mut prior_identity = source_roots_identity(b"history", &[root.clone()]).unwrap();
     for op in ops {
         match *op {
             Op::Write(dir, name, value) => {
@@ -150,6 +193,8 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
                 if let Some(old) = files.get(&path) {
                     if old != &contents {
                         covered.replacements += 1;
+                    } else {
+                        covered.unchanged_writes += 1;
                     }
                 } else if removed_paths.remove(&path) {
                     covered.recreations += 1;
@@ -163,8 +208,13 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
             Op::Rename(dir, from, to) => {
                 let from = rel(dir, from);
                 let to = rel(dir, to);
-                if from != to {
+                if from == to {
+                    covered.self_renames += 1;
+                } else {
                     if let Some(contents) = files.get(&from).cloned() {
+                        if files.contains_key(&to) {
+                            covered.rename_replacements += 1;
+                        }
                         let destination = root.join(&to);
                         fs::create_dir_all(destination.parent().unwrap()).unwrap();
                         fs::rename(root.join(&from), destination).unwrap();
@@ -229,6 +279,13 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
         let manifest = SourceRootManifest::from_file_digests(expected_dependencies.clone())
             .expect("oracle paths are valid source paths");
         let identity = source_roots_identity(b"history", &[root.clone()]).unwrap();
+        if prior_expected != expected_dependencies {
+            prop_assert_ne!(identity, prior_identity, "a changed manifest changes its identity");
+            covered.identity_changes += 1;
+        } else {
+            prop_assert_eq!(identity, prior_identity, "an unchanged manifest keeps its identity");
+            covered.identity_stable_steps += 1;
+        }
         prop_assert_eq!(
             identity.clone(),
             source_manifests_identity(b"history", &[manifest.clone()])
@@ -256,6 +313,8 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
         if !manifest.files.is_empty() {
             prop_assert_ne!(forward, reverse);
         }
+        prior_expected = expected_dependencies;
+        prior_identity = identity;
     }
     Ok(covered)
 }
@@ -273,11 +332,19 @@ fn source_manifest_history_supports_replacement_rename_recreation_and_aliases() 
         Op::Remove(0, 1),
         Op::Write(0, 1, 2),
         Op::Alias(0, false),
+        // Explicitly exercise rename-over-existing with unequal contents.
+        Op::Write(1, 0, 0),
+        Op::Write(1, 1, 1),
+        Op::Rename(1, 0, 1),
+        // And distinguish a repeated identical write from a replacement.
+        Op::Write(1, 1, 1),
     ];
     let covered = replay(&ops).unwrap();
-    assert_eq!(covered.writes, 3);
+    assert_eq!(covered.writes, 5);
     assert_eq!(covered.replacements, 1);
-    assert_eq!(covered.renames, 1);
+    assert_eq!(covered.renames, 2);
+    assert_eq!(covered.rename_replacements, 1);
+    assert_eq!(covered.unchanged_writes, 1);
     assert_eq!(covered.removes, 1);
     assert_eq!(covered.recreations, 1);
     assert_eq!(covered.alias_adds, 2);
@@ -312,33 +379,51 @@ fn source_manifest_history_supports_replacement_rename_recreation_and_aliases() 
 #[test]
 fn source_manifest_generated_histories_reach_mutation_transitions() {
     let strategy = operations();
+    let targeted = targeted_history();
     let mut runner = TestRunner::deterministic();
-    let mut total = Coverage::default();
+    let mut observed = Coverage::default();
     for _ in 0..64 {
         let tree = strategy.new_tree(&mut runner).unwrap();
         let history_coverage = replay(&tree.current()).unwrap();
-        total.writes += history_coverage.writes;
-        total.replacements += history_coverage.replacements;
-        total.renames += history_coverage.renames;
-        total.removes += history_coverage.removes;
-        total.recreations += history_coverage.recreations;
-        total.alias_adds += history_coverage.alias_adds;
-        total.alias_removes += history_coverage.alias_removes;
-        total.missing_renames += history_coverage.missing_renames;
-        total.missing_removals += history_coverage.missing_removals;
-        total.unchanged_aliases += history_coverage.unchanged_aliases;
+        observed.accumulate(history_coverage);
     }
 
-    eprintln!("source manifest history coverage over 64 deterministic histories: {total:?}");
-    assert!(total.writes > 0);
-    assert!(total.replacements > 0);
-    assert!(total.renames > 0);
-    assert!(total.removes > 0);
-    assert!(total.recreations > 0);
-    assert!(total.alias_adds > 0);
-    assert!(total.alias_removes > 0);
-    assert!(total.missing_renames > 0);
-    assert!(total.missing_removals > 0);
+    let mut support = Coverage::default();
+    for _ in 0..8 {
+        let tree = targeted.new_tree(&mut runner).unwrap();
+        support.accumulate(replay(&tree.current()).unwrap());
+    }
+
+    eprintln!("source manifest generated-history observations: mixed={observed:?}, targeted={support:?}");
+    assert!(support.replacements >= 8);
+    assert!(support.rename_replacements >= 8);
+    assert!(support.renames >= 8);
+    assert!(support.removes >= 8);
+    assert!(support.recreations >= 8);
+    assert!(support.alias_adds >= 16);
+    assert!(support.alias_removes >= 8);
+    assert!(support.identity_changes > 0);
+    assert!(support.identity_stable_steps > 0);
+}
+
+impl Coverage {
+    fn accumulate(&mut self, other: Self) {
+        self.writes += other.writes;
+        self.replacements += other.replacements;
+        self.unchanged_writes += other.unchanged_writes;
+        self.renames += other.renames;
+        self.rename_replacements += other.rename_replacements;
+        self.self_renames += other.self_renames;
+        self.removes += other.removes;
+        self.recreations += other.recreations;
+        self.alias_adds += other.alias_adds;
+        self.alias_removes += other.alias_removes;
+        self.identity_changes += other.identity_changes;
+        self.identity_stable_steps += other.identity_stable_steps;
+        self.missing_renames += other.missing_renames;
+        self.missing_removals += other.missing_removals;
+        self.unchanged_aliases += other.unchanged_aliases;
+    }
 }
 
 #[cfg(unix)]
