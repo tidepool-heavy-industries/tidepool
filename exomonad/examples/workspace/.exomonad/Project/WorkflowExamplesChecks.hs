@@ -27,13 +27,12 @@ import Tidepool.Agent.Watch.Internal
   )
 import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal (..)
-  , SpawnErrorWire, WorktreeHandle
+  , SpawnErrorWire, WorktreeHandle, GitOid (..)
   , SpawnContextWire (..), SpawnWorkspaceWire (..)
   )
 import Tidepool.Agent.Launch (Workspace (..))
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Actors.Spawn (SpawnError (SpawnRefused))
-import Tidepool.Worktree (GitOid (..))
 
 data Event
   = Checkpoint Text
