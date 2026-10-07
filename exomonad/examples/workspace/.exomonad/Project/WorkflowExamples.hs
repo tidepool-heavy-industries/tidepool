@@ -6,10 +6,12 @@
 -- it can verify the source and assets and return the check appropriate to them.
 module Project.WorkflowExamples
   ( PreparedCheckIssue (..), prepareFocused, awaitFocused
-  , CandidateAdmission (..), admitCandidates, awaitCandidates, nextCandidateEvent
+  , CandidateAdmission (..), CandidateSettlement (..)
+  , admitCandidates, awaitCandidates, nextCandidateEvent, scopedCandidates
   ) where
 
 import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Commands)
 import Tidepool.Actors.Exomonad
@@ -68,7 +70,13 @@ admitCandidates
   :: (Member AgentLaunch effects, Member Replies effects)
   => [(Workspace, Task)]
   -> Eff effects (Either CheckpointRefusal ([CandidateAdmission], Either CheckpointRefusal ()))
-admitCandidates work = do
+admitCandidates = admitCandidatesWithLifetime ActorOwned
+
+admitCandidatesWithLifetime
+  :: (Member AgentLaunch effects, Member Replies effects)
+  => WorkerLifetime -> [(Workspace, Task)]
+  -> Eff effects (Either CheckpointRefusal ([CandidateAdmission], Either CheckpointRefusal ()))
+admitCandidatesWithLifetime lifetime work = do
   captured <- checkpoint "candidate coordination"
   case captured of
     Left issue -> pure (Left issue)
@@ -82,24 +90,56 @@ admitCandidates work = do
       ready <- spawnSubagent (ForkCtx context) workspace
         ((defaultSpawnOptions workspaceAgentSpec)
           { spawnModel = Just "luna", spawnEffort = Just Medium
-          , spawnInstructions = Just (taskContext task), spawnLabel = Just (taskName task) })
+          , spawnInstructions = Just (taskContext task), spawnLabel = Just (taskName task)
+          , spawnLifetime = lifetime })
       pure (task, ready)
     activate (task, Left issue) = pure (CandidateSpawnRefused task issue)
     activate (task, Right actor) = do
-      admitted <- requestWithProgress @WorkProgress @(Outcome Candidate) actor task defaultRequestOptions
+      admitted <- requestWithProgress @WorkProgress @(Outcome Candidate) actor task
+        (defaultRequestOptions { requestLifetime = lifetime })
       pure $ case admitted of
         Left issue -> CandidateRequestRefused task actor issue
         Right (reply, updates) -> CandidateRequested task actor reply updates
 
--- Traversal preserves typed correlation without interpreting completion text.
--- Refused admissions remain in the owner's original list for recovery.
+-- Admission refusals retain the original SpawnError or idle AgentRef. Terminal
+-- request failures and authored Blocked values occupy different Either layers.
+data CandidateSettlement
+  = CandidateNotRequested CandidateAdmission
+  | CandidateSettled Task AgentRef (Either ResponseFailure (Either (Text, [Text]) Candidate))
+  deriving (Show)
+
+-- Traversal retains every assignment, including a refusal between successes.
+-- A rejected observation is an AwaitError; it does not erase the input handles.
 awaitCandidates
   :: Member Watches effects
   => [CandidateAdmission]
-  -> Eff effects (Either AwaitError [(Task, Outcome Candidate)])
-awaitCandidates admissions = await (traverse observe
-  [(task, reply) | CandidateRequested task _ reply _ <- admissions])
-  where observe (task, reply) = (,) task <$> result reply
+  -> Eff effects (Either AwaitError [CandidateSettlement])
+awaitCandidates admissions = await (traverse observe admissions)
+  where
+    observe admission@(CandidateSpawnRefused _ _) = pure (CandidateNotRequested admission)
+    observe admission@(CandidateRequestRefused _ _ _) = pure (CandidateNotRequested admission)
+    observe (CandidateRequested task actor reply _) =
+      CandidateSettled task actor . fmap authoredResult <$> settlement reply
+    authoredResult (Produced candidate) = Right candidate
+    authoredResult (Blocked reason evidence) = Left (reason, evidence)
+
+-- This optional composition opts only its actors and requests into the scope.
+-- The original admissions survive an AwaitError so cleanup can be assessed
+-- against the issued handles. scopeBody and scopeCleanup remain independent.
+scopedCandidates
+  :: ( Member ResourceScopes effects, Member AgentLaunch effects
+     , Member Replies effects, Member Watches effects )
+  => [(Workspace, Task)]
+  -> Eff effects (ScopeOutcome
+       (Either CheckpointRefusal
+         ([CandidateAdmission], Either CheckpointRefusal (), Either AwaitError [CandidateSettlement])))
+scopedCandidates work = withScope $ \scope -> do
+  admitted <- admitCandidatesWithLifetime (InScope scope) work
+  case admitted of
+    Left refusal -> pure (Left refusal)
+    Right (admissions, released) -> do
+      collected <- awaitCandidates admissions
+      pure (Right (admissions, released, collected))
 
 -- The first terminal response or next progress observation resumes the owner.
 -- A result failure remains an AwaitError; authored Blocked remains a value.

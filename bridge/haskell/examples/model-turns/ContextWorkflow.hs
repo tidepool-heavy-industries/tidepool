@@ -99,7 +99,7 @@ curateAndDelegate
      , HasInstalledAgentApi tools childEffects
      )
   => AgentSpec tools childEffects
-  -> Eff effects (Either CheckpointRefusal [ContextDelegation])
+  -> Eff effects (Either CheckpointRefusal ([ContextDelegation], Either CheckpointRefusal ()))
 curateAndDelegate actualSpec = do
   curateChild
   captured <- checkpoint "curated context"
@@ -111,8 +111,8 @@ curateAndDelegate actualSpec = do
         ["review-api", "review-tests"]
       admitted <- mapM activate (zip idle
         ["Review the API against: " <> sharedFinding, "Review the tests against: " <> sharedFinding])
-      _ <- releaseCheckpoint context
-      pure (Right admitted)
+      released <- releaseCheckpoint context
+      pure (Right (admitted, released))
   where
     activate (Left issue, _) = pure (ContextSpawnRefused issue)
     activate (Right actor, input) = do
