@@ -1439,7 +1439,30 @@ data CanonicalFrontendFailure
   | OriginalNativeNameConflict Name
   | CandidateFrontendReplayRefused ModuleName
   | MissingFinalizedFacts ModuleName
-  deriving (Show)
+
+instance Show CanonicalFrontendFailure where
+  showsPrec precedence failure = case failure of
+    CustomLoadPhaseHook -> showString "CustomLoadPhaseHook"
+    CustomLoadFrontendHook -> showString "CustomLoadFrontendHook"
+    UnsupportedLoadBackend -> showString "UnsupportedLoadBackend"
+    CompilerProducerUnavailable -> showString "CompilerProducerUnavailable"
+    CompilerProducerScopeMismatch -> showString "CompilerProducerScopeMismatch"
+    LoadedFinalizationOwnerMismatch -> showString "LoadedFinalizationOwnerMismatch"
+    MissingLoadedFrontend -> showString "MissingLoadedFrontend"
+    MissingLoadedFinalization -> showString "MissingLoadedFinalization"
+    UnfinishedLoadedFrontend -> showString "UnfinishedLoadedFrontend"
+    CandidateInterfaceBytesMismatch owner -> argument "CandidateInterfaceBytesMismatch" (showsPrec 11 owner)
+    CandidateOriginalHomeMissing owner -> argument "CandidateOriginalHomeMissing" (showsPrec 11 owner)
+    OriginalNativeHomeMissing owner -> renderGhc "OriginalNativeHomeMissing" owner
+    OriginalNativeInterfaceMismatch owner -> renderGhc "OriginalNativeInterfaceMismatch" owner
+    OriginalNativeNameConflict name -> renderGhc "OriginalNativeNameConflict" name
+    CandidateFrontendReplayRefused owner -> argument "CandidateFrontendReplayRefused" (showsPrec 11 owner)
+    MissingFinalizedFacts owner -> argument "MissingFinalizedFacts" (showsPrec 11 owner)
+    where
+      argument label value = showParen (precedence > 10)
+        (showString label . showChar ' ' . value)
+      renderGhc :: Outputable a => String -> a -> ShowS
+      renderGhc label value = argument label (showString (showSDocUnsafe (ppr value)))
 
 instance Exception CanonicalFrontendFailure
 
