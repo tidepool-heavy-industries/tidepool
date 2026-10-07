@@ -239,7 +239,19 @@ mod program_source_support_history {
             assert_eq!(expected.len(), 20);
             let root = directory.path().join(format!("history-{choose_alternate}"));
             std::fs::create_dir_all(&root).unwrap();
-            let original = program_request(&root, public.clone());
+            // Promotion validates the displaced public interfaces. Materialize
+            // that baseline through the same context transition before replacing it.
+            let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+            let original = program_request(&root, empty)
+                .in_program_context(&root.join("public-input"), public.clone())
+                .unwrap();
+            assert_eq!(original.artifacts.len(), 20);
+            public
+                .validate_artifacts_from_metadata(
+                    &original.artifacts,
+                    &original.compiler_inputs().unwrap().metadata,
+                )
+                .unwrap();
             let request = original
                 .in_program_context_with_private_input(
                     &root.join("planned-input"),
