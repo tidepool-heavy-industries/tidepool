@@ -29,7 +29,7 @@ fn package_bundle() -> Vec<u8> {
             value_array([
                 value_text(UNIT),
                 value_text(module),
-                value_text(hex(&sha(&[0x42]))),
+                value_text(hex(&sha(module.as_bytes()))),
             ]),
             value_array([]),
             value_array([]),
@@ -84,13 +84,13 @@ fn raw_products(b_body: u8) -> Vec<u8> {
         RawModuleProduct {
             unit: UNIT.into(),
             module: A.into(),
-            interface: vec![0x42],
+            interface: A.as_bytes().to_vec(),
             groups: products[..2].to_vec(),
         },
         RawModuleProduct {
             unit: UNIT.into(),
             module: B.into(),
-            interface: vec![0x42],
+            interface: B.as_bytes().to_vec(),
             groups: products[2..].to_vec(),
         },
     ])
@@ -168,6 +168,7 @@ fn ordinary_receipts(
             let mut accepted = receipt(bytes, evidence, "");
             accepted.module = module.clone();
             accepted.unit = product.unit.clone();
+            accepted.skinny_iface_sha256 = sha(&product.interface);
             accepted.source_sha256 = sha(std::fs::read_to_string(&source.path).unwrap().as_bytes());
             accepted.dependency_witness_sha256 = sha(&serde_json::to_vec(evidence).unwrap());
             accepted.groups = product
@@ -200,7 +201,7 @@ fn ordinary_receipts(
             if module == A {
                 accepted
                     .interface_requirements
-                    .insert((UNIT.into(), B.into()), sha(&[0x42]));
+                    .insert((UNIT.into(), B.into()), sha(B.as_bytes()));
             }
             accepted
         })
@@ -348,20 +349,12 @@ fn certify_promotion(
         value_text(hex(&sha(target_source.as_bytes()))),
         value_text(snapshot.to_string_lossy()),
         value_text(String::from_utf8(complete_evidence).unwrap()),
-        value_array([
-            value_array([
-                value_text(UNIT),
-                value_text(A),
-                Value::Bool(false),
-                value_array([]),
-            ]),
-            value_array([
-                value_text(UNIT),
-                value_text(B),
-                Value::Bool(false),
-                value_array([]),
-            ]),
-        ]),
+        value_array([value_array([
+            value_text(UNIT),
+            value_text("Target"),
+            Value::Bool(false),
+            value_array([]),
+        ])]),
         value_array([value_array([]), Value::Null]),
     ]);
     std::fs::write(
@@ -480,7 +473,13 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         .prepare_compilation(&directory.join("inputs"), &producer)
         .unwrap();
     assert!(request.compiler_original_products().unwrap().is_empty());
-    let mut worker = initial_worker.clone();
+    // Current source owns Target only; A and B are emitted from authenticated
+    // retained Core rather than observed as fresh source modules.
+    let mut current_evidence = evidence(target_source);
+    current_evidence.modules[0].module = "Target".into();
+    let normalized =
+        CompletedSourceEvidence::from_normalized(current_evidence.clone(), target_source).unwrap();
+    let mut worker = current_evidence.clone();
     worker.sources.last_mut().unwrap().path = input.clone();
     let complete_evidence = serde_json::to_vec(&worker).unwrap();
     let receipt_root = directory.join(".exact-compilations/current");
@@ -496,20 +495,12 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         value_text(hex(&sha(target_source.as_bytes()))),
         value_text(snapshot.to_string_lossy()),
         value_text(String::from_utf8(complete_evidence.clone()).unwrap()),
-        value_array([
-            value_array([
-                value_text(UNIT),
-                value_text(A),
-                Value::Bool(false),
-                value_array([]),
-            ]),
-            value_array([
-                value_text(UNIT),
-                value_text(B),
-                Value::Bool(false),
-                value_array([]),
-            ]),
-        ]),
+        value_array([value_array([
+            value_text(UNIT),
+            value_text("Target"),
+            Value::Bool(false),
+            value_array([]),
+        ])]),
         value_array([value_array([]), Value::Null]),
     ]);
     std::fs::write(
@@ -543,6 +534,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
             accepted.origin = ProductOrigin::RetainedCore;
             accepted.unit = UNIT.into();
             accepted.module = product.module.clone();
+            accepted.skinny_iface_sha256 = sha(&product.interface);
             accepted.module_version = None;
             accepted.product_sha256 = sha(&promoted_bytes);
             accepted.source_sha256 = canonical.source_sha256();
@@ -740,7 +732,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
             &product_bytes,
             &parsed,
             &promoted_packet,
-            &initial_worker,
+            &current_evidence,
             target_source,
             &producer,
             &include,
