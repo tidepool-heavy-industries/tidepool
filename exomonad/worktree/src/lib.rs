@@ -33,7 +33,6 @@ pub mod git;
 pub mod id;
 pub mod journal;
 mod journal_version;
-pub mod label;
 pub mod merge;
 pub mod monitor;
 pub mod registry;
@@ -55,7 +54,6 @@ pub use error::{DirtySummary, GitFailureReceipt, InProgressKind, WorktreeError};
 pub use git::{GitCli, GitOutput};
 pub use id::{BranchName, EventId, GitOid, GitRef, SubscriptionId, WorktreeId};
 pub use journal::{EventJournal, ObservationBatch};
-pub use label::{sanitize_agent_label, sanitize_branch_label};
 pub use merge::{try_merge, MergeOutcome};
 pub use monitor::{
     CommitReceipt, HeadChangeKind, HeadChangeReceipt, Observed, RepositoryEvent, WorktreeMonitor,

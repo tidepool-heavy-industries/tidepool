@@ -293,24 +293,9 @@ impl AuthorizedForkWorkspace {
         &self.spec.source
     }
 
-    pub fn prepare_source(
-        &self,
-    ) -> Result<exomonad_worktree::PreparedSourceWorktree, WorktreeError> {
-        self.manager
-            .prepare_inherited_source(&self.spec.source)
-            .map_err(error_to_wire)
-    }
-
     pub fn materialize_committed(self) -> Result<WtWorktreeHandle, WorktreeError> {
         self.manager
             .create_committed_fork(&self.spec.source)
-            .map(|handle| handle_to_wire(&handle))
-            .map_err(error_to_wire)
-    }
-
-    pub fn materialize(self) -> Result<WtWorktreeHandle, WorktreeError> {
-        self.manager
-            .create(&self.spec)
             .map(|handle| handle_to_wire(&handle))
             .map_err(error_to_wire)
     }
@@ -383,54 +368,6 @@ impl ActorWorktreeHandler {
                 label: String::new(),
                 dirty_policy: exomonad_worktree::DirtyPolicy::RequireClean,
             },
-        })
-    }
-
-    /// Reserve one child workspace as part of an actor-owned
-    /// fork admission transaction. This does not consult or confer the
-    /// caller's general allocation grant.
-    pub fn admit_fork_workspace(
-        &mut self,
-        principal: tidepool_repr::PrincipalId,
-        spec: Option<WtWorktreeSpec>,
-        bound_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
-    ) -> Result<WtWorktreeHandle, WorktreeError> {
-        self.authorize_fork_workspace(principal, spec, bound_dirty_policy)?
-            .materialize()
-    }
-
-    pub fn authorize_fork_workspace(
-        &self,
-        principal: tidepool_repr::PrincipalId,
-        spec: Option<WtWorktreeSpec>,
-        bound_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
-    ) -> Result<AuthorizedForkWorkspace, WorktreeError> {
-        let spec = match spec {
-            Some(spec) => {
-                let spec = spec_from_wire(spec)?;
-                self.authorize_source(principal, &spec.source)?;
-                spec
-            }
-            None => {
-                let source = match self.authority.bound_worktree(principal) {
-                    Some(source) => WorktreeSource::Worktree(source),
-                    None if self.authority.has_repository_access(principal) => {
-                        WorktreeSource::CurrentRepository
-                    }
-                    None => return Err(WorktreeError::WorktreeAuthorityDenied(
-                        "currentCheckout requires an active bound checkout or repository authority; ask the parent to restore your checkout binding".into(),
-                    )),
-                };
-                WorktreeSpec {
-                    source,
-                    label: String::new(),
-                    dirty_policy: dirty_policy_from_wire(bound_dirty_policy),
-                }
-            }
-        };
-        Ok(AuthorizedForkWorkspace {
-            manager: self.inner.manager.clone(),
-            spec,
         })
     }
 }
@@ -1386,7 +1323,11 @@ mod tests {
         assert_eq!(fork.handle_receipt.source_head.raw, committed.as_str());
         assert_eq!(
             fork.handle_receipt.branch.as_ref().unwrap().raw,
-            format!("exomonad/{}", fork.handle_receipt.tree_id.raw)
+            format!(
+                "{}/{}",
+                exomonad_worktree::EXOMONAD_BRANCH_PREFIX,
+                fork.handle_receipt.tree_id.raw
+            )
         );
         assert_eq!(
             std::fs::read_to_string(Path::new(&fork.handle_receipt.cwd).join("README.md")).unwrap(),
