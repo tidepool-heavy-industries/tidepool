@@ -2637,27 +2637,16 @@ fn seal_turn_outputs_with_validation(
     }
     let package_closure =
         merge_package_closure_with_validation(&receipt.packages, offer.exact.as_ref(), validation)?;
-    let ordinary_imports = if typed_item.is_none() {
-        Some(
-            certified_products::certify_target_available_owners_with_validation(
-                prepared,
-                accepted,
-                &certified.recovery_products,
-                &certified.groups,
-                &package_closure,
-                validation,
-            )
-            .map_err(compiler_evidence_failure)?,
-        )
-    } else {
-        None
-    };
-    let typed_entry = typed_item
-        .map(|(plans, index, admission_digest)| {
+    enum TargetDemand {
+        Checked(crate::checked_cell::CheckedTypedEntry),
+        Ordinary(Vec<certified_products::PendingImportOwner>),
+    }
+    let target_demand = match typed_item {
+        Some((plans, index, admission_digest)) => {
             let admission = exact.as_ref().ok_or_else(|| {
                 CompileError::ExtractFailed("typed entry lacks exact source admission".into())
             })?;
-            crate::checked_cell::CheckedTypedEntry::issue_program_item(
+            TargetDemand::Checked(crate::checked_cell::CheckedTypedEntry::issue_program_item(
                 output_dir,
                 &admission.request.request_sha256,
                 admission_digest,
@@ -2671,16 +2660,27 @@ fn seal_turn_outputs_with_validation(
                     &offer.producer,
                 )
                 .sha256(),
+            )?)
+        }
+        None => TargetDemand::Ordinary(
+            certified_products::certify_target_available_owners_with_validation(
+                prepared,
+                accepted,
+                &certified.recovery_products,
+                &certified.groups,
+                &package_closure,
+                validation,
             )
-        })
-        .transpose()?;
-    let demand = match typed_entry.as_ref() {
-        Some(entry) => crate::artifact_inventory::NativeArtifactDemand::VerifiedGroupRoot(entry),
-        None => crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-            ordinary_imports
-                .as_deref()
-                .expect("ordinary target certification"),
+            .map_err(compiler_evidence_failure)?,
         ),
+    };
+    let demand = match &target_demand {
+        TargetDemand::Checked(entry) => {
+            crate::artifact_inventory::NativeArtifactDemand::VerifiedGroupRoot(entry)
+        }
+        TargetDemand::Ordinary(imports) => {
+            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(imports)
+        }
     };
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
@@ -2695,6 +2695,10 @@ fn seal_turn_outputs_with_validation(
             demand,
             validation,
         )?;
+    let typed_entry = match target_demand {
+        TargetDemand::Checked(entry) => Some(entry),
+        TargetDemand::Ordinary(_) => None,
+    };
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
         &certified.groups,
