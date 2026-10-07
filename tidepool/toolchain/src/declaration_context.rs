@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use crate::artifact_inventory::{
     admission_failure, ArtifactEntry, ArtifactId, ArtifactInventory, ArtifactInventoryFailure,
-    ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView, JoinedInterfaceRole,
+    ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView, JoinedInterfaceRole, NativeGroupKey,
 };
 use crate::certified_products::{
-    certify_owned_products_in_context_with_validation, PendingCertifiedGroup,
+    certify_selected_owned_products_in_context_with_validation, PendingCertifiedGroup,
 };
 use crate::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, DeclarationArtifact, ExactIfaceArtifact,
@@ -260,11 +260,24 @@ fn canonical_source_interface(
     }
 }
 
+#[cfg(test)]
 fn original_products(entries: &[Arc<ArtifactEntry>]) -> Vec<&CertifiedRecoveryProduct> {
     entries
         .iter()
         .filter_map(|entry| match &entry.payload {
             ArtifactPayload::Original(product) => Some(product),
+            _ => None,
+        })
+        .collect()
+}
+
+fn original_products_by_id(
+    entries: &[Arc<ArtifactEntry>],
+) -> BTreeMap<ArtifactId, &CertifiedRecoveryProduct> {
+    entries
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            ArtifactPayload::Original(product) => Some((entry.descriptor.id, product)),
             _ => None,
         })
         .collect()
@@ -839,16 +852,10 @@ impl RetainedArtifactMaterialization {
             .entries
             .values()
             .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((
-                    (
-                        product.owner().unit.as_str(),
-                        product.owner().module.as_str(),
-                    ),
-                    product.owner(),
-                )),
+                ArtifactPayload::Original(product) => Some((product.owner(), entry.descriptor.id)),
                 _ => None,
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Vec<_>>();
         let mut groups = Vec::new();
         let mut seen = BTreeSet::new();
         let mut visited = BTreeSet::new();
@@ -857,14 +864,16 @@ impl RetainedArtifactMaterialization {
                 for group in owner.groups.iter() {
                     let native = group.owner();
                     if available
-                        .get(&(native.unit.as_str(), native.module.as_str()))
-                        .is_some_and(|selected| **selected == *native)
-                        && seen.insert((
-                            native.unit.as_str(),
-                            native.module.as_str(),
-                            native.module_version.0,
-                            group.group().original_ordinal(),
-                        ))
+                        .iter()
+                        .find_map(|(selected, artifact)| {
+                            (**selected == *native).then_some(NativeGroupKey {
+                                artifact: *artifact,
+                                original_ordinal: group.group().original_ordinal(),
+                            })
+                        })
+                        .is_some_and(|key| {
+                            metadata.selected_native_groups.contains(&key) && seen.insert(key)
+                        })
                     {
                         groups.push(group);
                     }
@@ -1953,6 +1962,12 @@ impl ExactCompilationRequest {
         if !baseline_ids.is_subset(&current_ids) {
             return Err(failure("program context removed an admitted artifact"));
         }
+        if !baseline
+            .selected_native_groups
+            .is_subset(&current.selected_native_groups)
+        {
+            return Err(failure("program context removed an admitted native group"));
+        }
         let new_entries = current
             .entries
             .values()
@@ -2001,19 +2016,12 @@ impl ExactCompilationRequest {
                 .cloned(),
         );
         let certify_start = std::time::Instant::now();
-        let products = new_entries
-            .iter()
-            .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => Some(product),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let current_entries = current.artifacts.values().cloned().collect::<Vec<_>>();
-        let available = original_products(&current_entries);
-        let additional = certify_owned_products_in_context_with_validation(
-            &products,
-            &self.groups,
+        let current_entries = current.entries.values().cloned().collect::<Vec<_>>();
+        let available = original_products_by_id(&current_entries);
+        let additional = certify_selected_owned_products_in_context_with_validation(
             &available,
+            &self.groups,
+            &current.selected_native_groups,
             &mut validation,
         )
         .map_err(failure)?;
@@ -3839,8 +3847,12 @@ impl ExactDeclarationContext {
                 },
             ),
             text(hex(&sha2::Sha256::digest(
-                serde_json::to_vec(&(metadata.descriptors(), metadata.dependencies()))
-                    .expect("inventory encoding"),
+                serde_json::to_vec(&(
+                    metadata.descriptors(),
+                    metadata.dependencies(),
+                    &metadata.selected_native_groups,
+                ))
+                .expect("inventory encoding"),
             )
             .into())),
             text(hex(&self.producer)),
@@ -4421,7 +4433,7 @@ impl ExactDeclarationContext {
             start.elapsed(),
             context_bytes,
         );
-        let available = original_products(&entries);
+        let available = original_products_by_id(&entries);
         let inherited_groups = RetainedArtifactMaterialization::selected_group_refs(
             parents.iter().map(Arc::as_ref),
             metadata,
@@ -4430,12 +4442,11 @@ impl ExactDeclarationContext {
         .cloned()
         .collect::<Vec<_>>();
         let inherited_group_handle_clones = inherited_groups.len();
-        let new_products = original_products(&new_entries);
         let start = std::time::Instant::now();
-        let groups = certify_owned_products_in_context_with_validation(
-            &new_products,
-            &inherited_groups,
+        let groups = certify_selected_owned_products_in_context_with_validation(
             &available,
+            &inherited_groups,
+            &metadata.selected_native_groups,
             &mut validation,
         )
         .map_err(failure)?;

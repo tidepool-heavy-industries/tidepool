@@ -335,8 +335,8 @@ impl PendingCertifiedGroup {
 }
 
 /// Native facts admitted from these exact immutable original bytes. Construction
-/// stays in the issuer and complete recovery admission; selected contexts still
-/// check full source ownership and current package evidence before reuse.
+/// stays in the issuer and original recovery authentication; selected contexts
+/// check exact group closure and current package evidence before reuse.
 #[derive(Debug)]
 pub(crate) struct OriginalNativeWitness {
     owner: CachedHomeOwner,
@@ -3472,6 +3472,156 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
         }
     }
     Ok(result)
+}
+
+/// Admit executable groups independently of immutable original byte custody.
+/// The selection comes from the inventory's authenticated demand closure; full
+/// original witnesses remain complete and can supply later group admissions.
+pub(crate) fn certify_selected_owned_products_in_context_with_validation(
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    current_groups: &[PendingCertifiedGroup],
+    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<PendingCertifiedGroup>> {
+    let mut homes = BTreeMap::new();
+    for product in available.values() {
+        let owner = product.owner();
+        if homes
+            .insert((owner.unit.clone(), owner.module.clone()), *product)
+            .is_some_and(|previous| previous.owner() != owner)
+        {
+            return Err(CertificationError::Mismatch(
+                "ambiguous inherited/current home module",
+            ));
+        }
+    }
+    let mut originals = BTreeMap::new();
+    for key in selected {
+        let product = available
+            .get(&key.artifact)
+            .ok_or(CertificationError::Mismatch("selected original artifact"))?;
+        let witness = product
+            .original_native()
+            .ok_or(CertificationError::Mismatch(
+                "selected original native witness",
+            ))?;
+        if !witness.matches_original(product) {
+            return Err(CertificationError::Mismatch(
+                "original native witness bytes",
+            ));
+        }
+        let group = witness
+            .groups
+            .iter()
+            .find(|group| group.group().original_ordinal() == key.original_ordinal)
+            .ok_or(CertificationError::Mismatch("selected original group"))?;
+        if originals
+            .insert(
+                (
+                    witness.owner.unit.clone(),
+                    witness.owner.module.clone(),
+                    key.original_ordinal,
+                ),
+                (group, witness),
+            )
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch(
+                "duplicate selected original ordinal",
+            ));
+        }
+    }
+    let selected_groups = originals
+        .values()
+        .map(|(group, _)| (*group).clone())
+        .collect::<Vec<_>>();
+    let sources = certified_source_map(&selected_groups)?;
+    let mut inherited = BTreeSet::new();
+    for group in current_groups {
+        let key = (
+            group.owner.unit.clone(),
+            group.owner.module.clone(),
+            group.group.original_ordinal(),
+        );
+        let (original, _) = originals.get(&key).ok_or(CertificationError::Mismatch(
+            "current group outside selected closure",
+        ))?;
+        if original.owner != group.owner
+            || !(Arc::ptr_eq(&original.group, &group.group) || original.group == group.group)
+            || !(Arc::ptr_eq(&original.imports, &group.imports)
+                || original.imports == group.imports)
+        {
+            return Err(CertificationError::Mismatch("shared original home groups"));
+        }
+        if !inherited.insert(key) {
+            return Err(CertificationError::Mismatch(
+                "duplicate current original ordinal",
+            ));
+        }
+    }
+    let mut additional = Vec::new();
+    for (key, (group, witness)) in originals {
+        for import in group.imports() {
+            match import {
+                PendingImportOwner::Source {
+                    owner,
+                    original_ordinal,
+                    binder,
+                } => {
+                    if homes
+                        .get(&(owner.unit.clone(), owner.module.clone()))
+                        .is_none_or(|product| product.owner() != owner)
+                        || sources
+                            .get(&(
+                                owner.unit.clone(),
+                                owner.module.clone(),
+                                *original_ordinal,
+                                binder.clone(),
+                            ))
+                            .is_none_or(|(selected_owner, _)| selected_owner != owner)
+                    {
+                        return Err(CertificationError::Mismatch("source binder/group closure"));
+                    }
+                }
+                PendingImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    interface_digest,
+                }
+                | PendingImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    binder,
+                    interface_digest,
+                    ..
+                } => {
+                    if homes.contains_key(&(unit.clone(), module.clone())) {
+                        return Err(CertificationError::Mismatch(
+                            "home owner downgraded to package",
+                        ));
+                    }
+                    validate_package_owner(
+                        unit,
+                        module,
+                        binder,
+                        interface_digest,
+                        &sources,
+                        &witness.packages,
+                        validation,
+                    )?;
+                }
+                PendingImportOwner::Retained { .. } => {}
+            }
+        }
+        if !inherited.contains(&key) {
+            additional.push(group.clone());
+        }
+    }
+    Ok(additional)
 }
 
 fn certify_owned_uncaptured_products_with_validation(
