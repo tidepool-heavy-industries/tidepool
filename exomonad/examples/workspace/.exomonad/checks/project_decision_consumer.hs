@@ -13,7 +13,7 @@ let changedQuestions = raiseQuestion newer openQuestions
 inspectFull (map questionKey remainingQuestions == ["product-gate"], resolveQuestion acceptedDecision changedQuestions == changedQuestions, raiseQuestion semantics firstQuestions == firstQuestions, taskSource assignedWork == incorporatedHead)
 Right consumerAgent <- spawnSubagent (FreshCtx (taskContext assignedWork)) (ForkWorktree projectHead)
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just "executor", spawnEffort = Just Medium
+    { spawnModel = Just (Alias "executor"), spawnEffort = Just Medium
     , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName assignedWork) })
 Right (consumer, consumerQuestions) <- requestWithProgress @WorkProgress @(Outcome Candidate) consumerAgent assignedWork defaultRequestOptions
 pollReply sessionReply

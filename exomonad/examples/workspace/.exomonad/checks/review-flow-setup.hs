@@ -6,7 +6,7 @@ let input = ReviewRequest (AssignedTask work) (Candidate sourceHead [] ["impleme
 Right reviewerAgent <- spawnSubagent (FreshCtx (reviewContext input))
   (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just "luna", spawnEffort = Just Medium
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
     , spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just "review-produced-candidate" })
 Right (reviewer, initialReviewProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
   reviewerAgent input defaultRequestOptions

@@ -5,6 +5,6 @@ let work = (task "implement" "Implement one component" ["review-flow.txt"] "Read
 Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
   (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just "luna", spawnEffort = Just Medium
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
     , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
 Right (worker, _updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions

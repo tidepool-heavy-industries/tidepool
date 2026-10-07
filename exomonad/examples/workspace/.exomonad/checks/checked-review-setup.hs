@@ -8,7 +8,7 @@ let work = (task ("implement-" <> scenario) "Repair the recovery fixture" ["revi
 Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
   (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just "luna", spawnEffort = Just Medium
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
     , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
 Right (worker, _) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions
 let check = PlanCheck "recovery" ["scripts/cargo-focused-test"] (\oid -> FocusedSpec "recovery fixture" (renderGitOid oid) "fixture" "lib" "fixture::one" 1) (Cmd.MiB 256) WithoutPreparation

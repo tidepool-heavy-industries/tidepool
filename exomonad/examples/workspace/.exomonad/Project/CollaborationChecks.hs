@@ -51,7 +51,7 @@ collaboration = do
   assertCell owner "coalesced attention retains both unresolved questions" "case observedQuestions of { ProgressUpdate _ progress -> map questionKey (workQuestions progress) == [\"semantics\",\"product-gate\"]; _ -> False }"
   -- A separate component progresses while this review awaits its owning decision.
   void $ turn owner ("let otherTask = task \"independent-consumer\" \"Inspect an independent consumer\" [\"consumer source\"] \"return exact findings\" " <> gitOidLiteral source
-    <> "\nRight otherAgent <- spawnSubagent (FreshCtx (taskContext otherTask)) (ForkWorktree projectHead) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just \"luna\", spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just (taskName otherTask) })\nRight otherRequest <- request @Text otherAgent (taskContext otherTask) defaultRequestOptions")
+    <> "\nRight otherAgent <- spawnSubagent (FreshCtx (taskContext otherTask)) (ForkWorktree projectHead) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just (taskName otherTask) })\nRight otherRequest <- request @Text otherAgent (taskContext otherTask) defaultRequestOptions")
   otherActor <- activation
   void $ turn (checkActor otherActor) "respond (\"independent work finished\" :: Text)"
   void $ turn owner "independent <- pollResponse otherRequest"

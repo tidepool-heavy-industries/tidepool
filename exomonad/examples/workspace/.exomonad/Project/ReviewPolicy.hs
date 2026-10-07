@@ -50,7 +50,7 @@ defaultReviewFlowPolicy = ReviewFlowPolicy
             <> "\nFlow check evidence:\n" <> evidence
           source = atRef (GitRef (renderGitOid (candidateCommit (reviewInput request))))
           spawnOptions = (defaultSpawnOptions reviewerSpec)
-            { spawnModel = Just "luna"
+            { spawnModel = Just (Alias "luna")
             , spawnEffort = Just Medium
             , spawnInstructions = Just instructions
             , spawnLabel = Just "review"

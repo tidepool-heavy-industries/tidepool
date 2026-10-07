@@ -3,7 +3,7 @@ let work = (task "candidate" "Submit a candidate" ["candidate source"] "read exa
       { planPath = "plans/component.md", rationale = "Check the terminal source receipt" }
 Right workerAgent <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree projectHead)
   ((defaultSpawnOptions workspaceAgentSpec)
-    { spawnModel = Just "luna", spawnEffort = Just Medium
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
     , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
 Right (worker, updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work
   (defaultRequestOptions { requestReporting = Silent })

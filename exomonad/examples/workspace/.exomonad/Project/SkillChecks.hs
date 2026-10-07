@@ -24,7 +24,7 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner "let input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just \"luna\", spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
+  void $ turn owner "let input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
   void $ example owner "exomonad-agent-work" 0
   worker <- activation
   check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna" && "Reply to one typed request" `Text.isInfixOf` checkContext worker)
