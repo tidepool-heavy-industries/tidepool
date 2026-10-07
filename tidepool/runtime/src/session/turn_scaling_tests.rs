@@ -846,6 +846,11 @@ enum AuthorityChecks {
     SegmentWorkCounts(usize),
 }
 
+enum CellDeclarationExpectation {
+    Total(usize),
+    CapturedAt(usize),
+}
+
 // The caller supplies the response of the same physical request whose products
 // have just passed admission. Module identity comes from those products, rather
 // than a diagnostic filename or a generated-name convention.
@@ -1143,7 +1148,7 @@ where
         scenario,
         label,
         source,
-        declarations,
+        CellDeclarationExpectation::Total(declarations),
         publication_target,
         authority_checks,
         template_imports,
@@ -1159,7 +1164,7 @@ fn try_execute_cell_with_template_imports_expectation<H>(
     scenario: (usize, usize),
     label: &str,
     source: &str,
-    declarations: usize,
+    declarations: CellDeclarationExpectation,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
@@ -1206,17 +1211,50 @@ where
             .unwrap()
         },
     );
-    assert_eq!(
-        plan.items()
-            .iter()
-            .filter(|item| matches!(
-                item.kind(),
-                tidepool_toolchain::cell_plan::ParsedCellPlanKind::Prologue
-                    | tidepool_toolchain::cell_plan::ParsedCellPlanKind::Declaration
-            ))
-            .count(),
-        declarations
-    );
+    use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
+    match declarations {
+        CellDeclarationExpectation::Total(expected) => assert_eq!(
+            plan.items()
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.kind(),
+                        ParsedCellPlanKind::Prologue | ParsedCellPlanKind::Declaration
+                    )
+                })
+                .count(),
+            expected
+        ),
+        CellDeclarationExpectation::CapturedAt(line) => {
+            let declarations = plan
+                .items()
+                .iter()
+                .filter(|item| item.kind() == ParsedCellPlanKind::Declaration)
+                .collect::<Vec<_>>();
+            let [declaration] = declarations.as_slice() else {
+                panic!("history requires one authored declaration group: {declarations:?}");
+            };
+            assert_eq!(declaration.binders(), ["historyCaptured"]);
+            assert_eq!(declaration.span().start_line(), line);
+            assert_eq!(declaration.span().end_line(), line + 1);
+            assert_eq!(
+                declaration.source_ordinals().len(),
+                2,
+                "the adjacent authored signature and equation must share a declaration group"
+            );
+            let prologues = plan
+                .items()
+                .iter()
+                .filter(|item| item.kind() == ParsedCellPlanKind::Prologue)
+                .collect::<Vec<_>>();
+            assert!(prologues.len() <= 1);
+            for prologue in prologues {
+                assert!(prologue.index() < declaration.index());
+                assert_eq!(prologue.span().start_line(), 1);
+                assert!(prologue.source().is_empty() && prologue.binders().is_empty());
+            }
+        }
+    }
     let admission = resident
         .admit_planned_cell_for_execution(
             execution.clone(),
@@ -2162,7 +2200,7 @@ fn guarded_integer_capture_rejects_wrong_native_result() {
         (0, 0),
         "wrong_integer_guard",
         &source,
-        0,
+        CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &SourceImports::new(),
@@ -2274,7 +2312,7 @@ fn resident_capture_cells(count: usize, durable: bool) {
                 (0, 0),
                 "warmup",
                 &warm_source,
-                0,
+                CellDeclarationExpectation::Total(0),
                 &publication,
                 AuthorityChecks::Configured,
                 &SourceImports::new(),
@@ -2317,7 +2355,7 @@ fn resident_capture_cells(count: usize, durable: bool) {
                     (0, 0),
                     &label,
                     &source,
-                    0,
+                    CellDeclarationExpectation::Total(0),
                     &publication,
                     AuthorityChecks::Configured,
                     &SourceImports::new(),
@@ -2868,7 +2906,7 @@ fn same_cell_private_support_survives_late_type_error_retry() {
         (0, 0),
         "private_support_retained_result",
         &guarded_integer_capture_source("privateSupportSecond", 43),
-        0,
+        CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &imports,
@@ -2969,7 +3007,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
             (0, 0),
             label,
             &guarded_integer_capture_source(expression, expected),
-            0,
+            CellDeclarationExpectation::Total(0),
             &ScalePublication::Ephemeral,
             AuthorityChecks::Configured,
             &imports,
@@ -3011,7 +3049,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         (0, 0),
         "changed_source_keeps_quoted_template_original",
         &guarded_integer_capture_source("taskValue 41", 42),
-        0,
+        CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &imports,
@@ -3027,7 +3065,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
         (0, 0),
         "source_absent_quoted_template_original",
         &guarded_integer_capture_source("taskValue 41", 42),
-        0,
+        CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &imports,
