@@ -2107,9 +2107,9 @@ pub(crate) struct CheckedSettledValues {
 }
 
 impl CheckedSettledValues {
-    fn validate_required<'a>(
+    fn validate_required<'a, 'required>(
         &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
+        required: impl IntoIterator<Item = &'required tidepool_repr::execution_schema::SymbolIdentity>,
         actual: impl IntoIterator<
             Item = (
                 &'a str,
@@ -2120,11 +2120,11 @@ impl CheckedSettledValues {
         >,
     ) -> Result<(), CompileError> {
         let actual = actual.into_iter().collect::<Vec<_>>();
-        for global in target.globals() {
+        for required in required {
             let Some((name, identity, generation, identifier)) = self
                 .rows
                 .iter()
-                .find(|(_, identity, _, _)| identity == &global.identity)
+                .find(|(_, identity, _, _)| identity == required)
             else {
                 continue;
             };
@@ -2213,6 +2213,7 @@ pub struct CheckedTypedEntry {
     origin: tidepool_repr::execution_schema::SymbolIdentity,
     entry: tidepool_repr::execution_schema::SymbolIdentity,
     original_ordinal: u32,
+    artifact: crate::artifact_inventory::ArtifactId,
 }
 
 impl CheckedTypedEntry {
@@ -2227,6 +2228,12 @@ impl CheckedTypedEntry {
     }
     pub fn original_ordinal(&self) -> u32 {
         self.original_ordinal
+    }
+    pub fn native_requirement_root(&self) -> crate::artifact_inventory::NativeRequirementRoot {
+        crate::artifact_inventory::NativeRequirementRoot::Group {
+            artifact: self.artifact,
+            original_ordinal: self.original_ordinal,
+        }
     }
 }
 
@@ -2299,11 +2306,56 @@ impl ExactCompiledItem {
             ),
         >,
     ) -> Result<(), CompileError> {
-        if matches!(self.admission, CheckedExecutionAdmission::CellProgram(_)) {
-            self.settled_values.validate_required(&self.target, actual)
+        if let Some(proof) = &self.typed_entry {
+            let requirements = self
+                .original_execution
+                .artifact_view()
+                .native_requirements_from_roots(&[proof.native_requirement_root()])?;
+            self.settled_values.validate_required(
+                requirements
+                    .bindings
+                    .iter()
+                    .map(|requirement| &requirement.identity)
+                    .chain(self.target.globals().iter().map(|global| &global.identity)),
+                actual,
+            )
         } else {
             self.settled_values.validate(actual)
         }
+    }
+    /// Validate the selected original group against the admitted baseline and
+    /// completed native imports. Same-cell field identities are checked
+    /// separately by `validate_settled_native_bindings`.
+    pub fn validate_required_native_imports<'a>(
+        &self,
+        actual: impl IntoIterator<Item = (&'a tidepool_repr::execution_schema::SymbolIdentity, u64)>,
+    ) -> Result<(), CompileError> {
+        let Some(proof) = &self.typed_entry else {
+            return Ok(());
+        };
+        let requirements = self
+            .original_execution
+            .artifact_view()
+            .native_requirements_from_roots(&[proof.native_requirement_root()])?;
+        let actual = actual.into_iter().collect::<BTreeSet<_>>();
+        for (identity, generation) in requirements
+            .bindings
+            .iter()
+            .map(|requirement| (&requirement.identity, requirement.generation))
+            .chain(
+                requirements
+                    .packages
+                    .iter()
+                    .map(|requirement| (&requirement.identity, requirement.generation)),
+            )
+        {
+            if !actual.contains(&(identity, generation)) {
+                return Err(CompileError::CompilerEvidence(Box::new(
+                    crate::certified_products::CertificationError::Mismatch("typed native import"),
+                )));
+            }
+        }
+        Ok(())
     }
     pub fn target_definition_identities(
         &self,
@@ -3112,14 +3164,26 @@ impl CheckedItemOffer {
                         && group.group().binders().contains(&entry)
                 })
                 .collect::<Vec<_>>();
-            if string(&proof[0])? != plan.digest || origin.occurrence != plan.root
-                || entry.occurrence != item.entry || origin.unit != owner.unit || origin.module != owner.module
-                || entry.unit != origin.unit || entry.module != origin.module
-                || target_entry.is_none_or(|binding| binding.identity != entry) || matches.len() != 1
-                || !original_execution.artifact_view().entries().iter().any(|artifact| {
-                    matches!(&artifact.payload, crate::artifact_inventory::ArtifactPayload::Original(original)
-                        if original.owner() == matches[0].owner())
+            let artifacts = original_execution.artifact_view().entries();
+            let original_artifacts = artifacts
+                .iter()
+                .filter(|artifact| {
+                    matches.len() == 1
+                        && matches!(&artifact.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(original)
+                    if original.owner() == matches[0].owner())
                 })
+                .collect::<Vec<_>>();
+            if string(&proof[0])? != plan.digest
+                || origin.occurrence != plan.root
+                || entry.occurrence != item.entry
+                || origin.unit != owner.unit
+                || origin.module != owner.module
+                || entry.unit != origin.unit
+                || entry.module != origin.module
+                || target_entry.is_none_or(|binding| binding.identity != entry)
+                || matches.len() != 1
+                || original_artifacts.len() != 1
             {
                 return Err(CompileError::CompilerEvidence(Box::new(
                     crate::certified_products::CertificationError::Mismatch("typed native entry"),
@@ -3130,6 +3194,7 @@ impl CheckedItemOffer {
                 origin,
                 entry,
                 original_ordinal,
+                artifact: original_artifacts[0].descriptor.id,
             })
         } else {
             if program_groups.is_some() {

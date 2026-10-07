@@ -689,9 +689,16 @@ proptest::proptest! {
 #[test]
 fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() {
     let mut session = SemanticSession::new();
+    session
+        .execute(
+            "native_entry_baseline",
+            "baselinePlannedValue <- pure (2 :: Int)",
+            0,
+        )
+        .unwrap();
     try_execute_cell_with_authority_checks(
         &mut session.resident, session.public, &session.effects, &session.images, (0, 0),
-        "native_entry_refusal", "firstPlannedValue <- pure (3 :: Int); secondPlannedValue <- pure (firstPlannedValue + 1); record secondPlannedValue", 0,
+        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); secondPlannedValue <- pure (firstPlannedValue + 1); record secondPlannedValue", 0,
         &ScalePublication::Ephemeral, AuthorityChecks::TypedEntryRefusalBranches,
     ).unwrap();
     assert_eq!(session.observed(), [4]);

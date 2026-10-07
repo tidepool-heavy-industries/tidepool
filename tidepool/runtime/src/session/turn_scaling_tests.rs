@@ -1118,9 +1118,30 @@ where
             ciborium::de::from_reader(first.native_turn_bytes().unwrap()).unwrap();
         let fields = turn.as_array().unwrap()[1].as_array().unwrap();
         let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
-        first_native
+        let context = first_native
             .original_execution_context(&first_native.target_owned(), &table, &sites)
             .unwrap();
+        let requirements = context
+            .artifact_view()
+            .native_requirements_from_roots(&[first_native
+                .typed_entry()
+                .unwrap()
+                .native_requirement_root()])
+            .unwrap();
+        assert!(
+            !requirements.bindings.is_empty(),
+            "the first entry requires an actual admitted baseline binding"
+        );
+        assert!(
+            requirements
+                .bindings
+                .iter()
+                .all(
+                    |requirement| requirement.generation != first_native.generation()
+                        && requirement.generation != second.native().unwrap().generation()
+                ),
+            "selected first entry must exclude later captures in the same complete original"
+        );
         assert!(
             first_native
                 .original_execution_context(&second_target, &table, &sites)
@@ -1183,6 +1204,93 @@ where
             else {
                 panic!("checked native item did not return its binding recipe")
             };
+            if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) && index == 1
+            {
+                let proof = compiled
+                    .certification
+                    .as_ref()
+                    .unwrap()
+                    .checked_execution()
+                    .unwrap();
+                let actual = reservation
+                    .snapshot()
+                    .actual_retained_imports()
+                    .collect::<Vec<_>>();
+                proof
+                    .validate_required_native_imports(actual.iter().copied())
+                    .unwrap();
+                proof
+                    .validate_settled_native_bindings(
+                        reservation.snapshot().settled_native_bindings(),
+                    )
+                    .unwrap();
+                let context = proof
+                    .original_execution_context(&compiled.prepared, &compiled.table, &compiled.asks)
+                    .unwrap();
+                let requirements = context
+                    .artifact_view()
+                    .native_requirements_from_roots(&[proof
+                        .typed_entry()
+                        .unwrap()
+                        .native_requirement_root()])
+                    .unwrap();
+                let settled = reservation
+                    .snapshot()
+                    .settled_native_bindings()
+                    .collect::<Vec<_>>();
+                let required = requirements
+                    .bindings
+                    .iter()
+                    .find(|requirement| {
+                        settled.iter().any(|(_, identity, generation, _)| {
+                            *identity == &requirement.identity
+                                && *generation == requirement.generation
+                        })
+                    })
+                    .expect("the second entry requires a genuinely completed earlier capture");
+                assert!(compiled.prepared.globals().iter().all(|global| global.identity != required.identity),
+                    "the capture obligation must come through the selected original, not direct target globals");
+                let missing = actual
+                    .iter()
+                    .copied()
+                    .filter(|(identity, generation)| {
+                        *identity != &required.identity || *generation != required.generation
+                    })
+                    .collect::<Vec<_>>();
+                assert!(missing.len() < actual.len());
+                assert!(matches!(proof.validate_required_native_imports(missing),
+                    Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
+                let stale = actual
+                    .iter()
+                    .map(|(identity, generation)| {
+                        (
+                            *identity,
+                            *generation ^ u64::from(*identity == &required.identity),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert!(matches!(proof.validate_required_native_imports(stale),
+                    Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
+                let edited = settled
+                    .iter()
+                    .map(|(name, identity, generation, identifier)| {
+                        (
+                            *name,
+                            *identity,
+                            *generation,
+                            *identifier ^ u64::from(*identity == &required.identity),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    proof.validate_settled_native_bindings(edited).is_err(),
+                    "transitive same-cell capture must retain its exact settled native identifier"
+                );
+                proof.validate_required_native_imports(actual).unwrap();
+                proof.validate_settled_native_bindings(settled).unwrap();
+            }
             if item.kind() == CheckedItemKind::Bind {
                 assert_eq!(
                     bound

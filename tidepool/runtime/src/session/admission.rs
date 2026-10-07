@@ -1049,6 +1049,7 @@ impl RuntimeCheckedPrefix {
             .as_ref()
             .expect("checked reservation preflighted");
         execution.validate_runtime_admission(reservation.digest, self.admission.digest())?;
+        execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
         // Appending checks the compiler-owned same-cell identity and order.
         validate_private_value_overlay(
@@ -1577,6 +1578,7 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
+        execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
         // Mounting a host payload never executes or completes the placeholder.
         state.reservation = None;
