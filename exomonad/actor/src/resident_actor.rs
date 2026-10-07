@@ -28,6 +28,8 @@ mod provider_owner_tests;
 mod replacement;
 mod request_wait;
 mod scopes;
+#[cfg(test)]
+mod scope_runtime_tests;
 mod status_rendering;
 #[cfg(test)]
 mod terminal_transfer_tests;
