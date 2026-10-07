@@ -32,6 +32,7 @@ extra-source-files:
   test-prepared-stg/RecoveredBaseCaller.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
+  test-cell-splitter/fixtures/sigma-retention/*.hs
   test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
   test-cell-splitter/fixtures/quasiquote-reuse/*.hs
   test-cell-splitter/fixtures/unreachable-compile-time/*.hs

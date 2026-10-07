@@ -45,6 +45,7 @@ tests = testGroup "cell-splitter"
   , testCase "compilerDefaultRecipeChecks" compilerDefaultRecipeChecks
   , testCase "programOriginalImportsCompilation" programOriginalImportsCompilation
   , testCase "functionValueInterfaceCompilation" functionValueInterfaceCompilation
+  , testCase "sigmaValueInterfaceCompilation" sigmaValueInterfaceCompilation
   , testCase "sessionValueFinalizedDependency" sessionValueFinalizedDependency
   , testCase "sessionFixitiesCompilation" sessionFixitiesCompilation
   , testCase "unreachableCompileTimeCompilation" unreachableCompileTimeCompilation

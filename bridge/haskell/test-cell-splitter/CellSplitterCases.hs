@@ -21,16 +21,20 @@ import GHC hiding (Target)
 import GHC.Builtin.Types (intTy, intDataCon)
 import GHC.Core qualified as Core
 import GHC.Core.DataCon (dataConWorkId)
+import GHC.Core.Coercion (mkPrimEqPred)
+import GHC.Core.Type (mkInvisFunTys, isPredTy)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Unit.Module.ModGuts (CgGuts, cg_binds)
 import GHC.Stg.Syntax (CgStgTopBinding)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Var.Set (IdSet)
+import GHC.Types.Var (isId, isCoVar, varType)
 import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString)
 import GHC.Tc.Types (tcg_rn_decls, tcg_mod)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
@@ -173,6 +177,69 @@ functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $
     temporary = do
       parent <- getTemporaryDirectory
       (path,handle) <- openTempFile parent "tidepool-function-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- Exercise the tier issuer and later thin-interface consumer with the real
+-- GHC sigma type, rather than deriving expected tiers from rendered text.
+sigmaValueInterfaceCompilation :: IO ()
+sigmaValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let producerPath = root </> "SigmaValueProducer.hs"
+      fixturePath = "test-cell-splitter/fixtures/sigma-retention/SigmaValueProducer.hs"
+      owner = SessionModule ValMod (Generation 1)
+      scope = SessionScope root [owner] Nothing Nothing
+  copyFile fixturePath producerPath
+  prepared <- runPipelineSelected PreparedStg producerPath [root]
+  let result = pprPipelineResult prepared
+      environment = prTargetTcGblEnv result
+  forM_ [("scalar", True), ("plain", False), ("function", True)
+        , ("boxedEquality", True), ("erased", False)
+        , ("nested", True), ("nestedErased", False), ("recursive", True)] $ \(name, expected) -> do
+    ty <- maybe (fail ("missing sigma fixture binding: " ++ name)) pure
+      (capturedBindingType name environment)
+    assertEqual ("runtime closure classification: " ++ name) expected
+      (isClosureType ty)
+  actionType <- maybe (fail "missing monomorphic sigma producer action") pure
+    (capturedBindingType "__result" environment)
+  let (actionBinders, actionPredicates, _) = tcSplitSigmaTy actionType
+  assertEqual "producer action has no outer forall" 0 (length actionBinders)
+  assertEqual "producer action takes no dictionaries" 0 (length actionPredicates)
+  assertEqual "rank-N result contains a dictionary closure" True
+    (isClosureType (stripMonadHead actionType))
+  scalarRhs <- case [rhs | (identifier, rhs) <- Core.flattenBinds (prBinds result)
+                        , getOccString identifier == "scalar"] of
+    [rhs] -> pure rhs
+    _ -> fail "producer did not retain its original scalar Core binding"
+  let (scalarArguments, _) = Core.collectBinders scalarRhs
+  unless (any (\argument -> isId argument && not (isCoVar argument)
+                         && isPredTy (varType argument)) scalarArguments)
+    (fail "scalar Core has no runtime dictionary argument")
+  assertEqual "primitive equality evidence erases" False
+    (isClosureType (mkInvisFunTys [mkPrimEqPred intTy intTy] intTy))
+  binders <- mkBoundBinders ["capturedNumber"] 1 root result
+  case binders of
+    [binder] -> assertEqual "genuine rank-N value is retained opaque" RetainOpaque (bbTier binder)
+    _ -> fail "sigma producer did not issue exactly one captured binder"
+  -- Separate authored consumers select distinct Num dictionaries from the same
+  -- persisted value using the wrapper's source-declared rank-N accessor.
+  forM_ ["Int", "Double"] $ \numberType -> do
+    let consumerPath = root </> ("SigmaValue" ++ numberType ++ ".hs")
+    writeFile consumerPath (unlines
+      [ "module SigmaValue" ++ numberType ++ " where"
+      , "import " ++ showSDocUnsafe (ppr (renderSessionModule owner)) ++ " (capturedNumber)"
+      , "import SigmaValueProducer (sigmaNumber)"
+      , "__result :: " ++ numberType
+      , "__result = sigmaNumber capturedNumber + 2"
+      ])
+    _ <- runPipelineSessionSelected (PreparedProducts Nothing) mempty GeneralCompile
+      (Just scope) consumerPath [root] Nothing
+    pure ()
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-sigma-value-iface"
       hClose handle
       removeFile path
       createDirectory path
