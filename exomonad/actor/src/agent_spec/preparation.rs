@@ -608,7 +608,10 @@ pub(crate) mod tests {
         tokio::task::yield_now().await;
         cancelled.abort();
         history.settle_failure(waiter_task);
-        assert!(cancelled.await.unwrap_err().is_cancelled());
+        match cancelled.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("cancelled preparation waiter unexpectedly completed"),
+        }
         assert!(matches!(
             retained.await.unwrap(),
             Err(PreparationFailure::Source(detail)) if detail == format!("history failure {waiter_task}")
