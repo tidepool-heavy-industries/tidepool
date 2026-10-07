@@ -5850,7 +5850,7 @@ mod tests {
             cell_source: "let value = RootChoice.value".into(),
             template_source: include_str!("fixtures/checked-cell-template.hs").replace(
                 "{{CELL_IMPORTS}}",
-                "{{CELL_IMPORTS}}\nimport qualified RootChoice",
+                "import qualified RootChoice\n{{CELL_IMPORTS}}",
             ),
             turn_templates: Vec::new(),
             injected_modules: Vec::new(),
@@ -5970,7 +5970,7 @@ mod tests {
             cell_source: "let value = RootChoice.value".into(),
             template_source: include_str!("fixtures/checked-cell-template.hs").replace(
                 "{{CELL_IMPORTS}}",
-                "{{CELL_IMPORTS}}\nimport qualified RootChoice",
+                "import qualified RootChoice\n{{CELL_IMPORTS}}",
             ),
             turn_templates: Vec::new(),
             injected_modules: Vec::new(),
