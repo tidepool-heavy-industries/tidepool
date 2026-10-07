@@ -1280,7 +1280,6 @@ struct InteractiveApplicationOwner {
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
-    fork_gate: Option<exomonad_actor::ForkGroupGate>,
     custody: Option<Arc<dyn exomonad_actor::WorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
     embedded: EmbeddedApplicationState,
@@ -1417,7 +1416,6 @@ impl InteractiveApplicationOwner {
             cancel: None,
             native_retirement: NativeRetirement::Preserve,
             pane: Arc::new(Mutex::new(None)),
-            fork_gate: None,
             custody: None,
             scoped_retention: None,
             embedded: EmbeddedApplicationState::new(),
@@ -1427,11 +1425,6 @@ impl InteractiveApplicationOwner {
 
     fn cancel(&mut self) {
         self.creator_workspace = None;
-        if let Some(gate) = &self.fork_gate {
-            // best-effort: the fork group may already be resolved (ready or
-            // failed) by a concurrent path; there is nothing more to do here.
-            gate.mark_failed().ok();
-        }
         if let Some(cancel) = self.cancel.take() {
             // best-effort: the receiver may already have been dropped if the
             // cancellation race resolved on the other side first.
