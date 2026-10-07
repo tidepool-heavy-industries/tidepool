@@ -25,7 +25,16 @@ class BuckRunnerTests(unittest.TestCase):
         self.git = shutil.which("git")
         self.git_command("init", "-q")
         (self.root / "flake.nix").write_text("pinned toolchain\n")
-        self.commit("flake.nix")
+        self.package = self.root / "bridge/haskell/resume"
+        self.resume = self.package / "src/Tidepool/Internal/Resume.hs"
+        self.resume.parent.mkdir(parents=True)
+        self.resume.write_text("module Tidepool.Internal.Resume where\n")
+        (self.package / "tidepool-resume.cabal").write_text("name: tidepool-resume\n")
+        (self.root / "flake.lock").write_text("locked inputs\n")
+        (self.root / "rust-toolchain.toml").write_text("pinned Rust\n")
+        (self.root / "nix").mkdir()
+        (self.root / "nix/ghc.patch").write_text("pinned GHC patch\n")
+        self.commit(".")
         self.tools = self.root / "tools"
         self.tools.mkdir()
         # Launcher bootstrap receives only its declared Bash/coreutils inputs.
@@ -43,7 +52,8 @@ class BuckRunnerTests(unittest.TestCase):
         # Real declared utilities only serve the stub's Git/config checks.
         self.action_tools = self.action_output / "bin"
         self.action_tools.mkdir()
-        (self.action_tools / "git").symlink_to(shutil.which("git"))
+        for name in ("git", "mktemp", "rm"):
+            (self.action_tools / name).symlink_to(shutil.which(name))
         self.shell_log = self.root / "dev-shell.log"
         self.buck_log = self.root / "buck.json"
         self.program(self.tools / "mountpoint", 'exit "$MOUNT_EXIT"')
@@ -216,6 +226,53 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assert_refused("changed toolchain inputs")
         self.commit("flake.nix")
         self.assert_refused("changed toolchain input pin")
+
+    def input_tree(self, revision="HEAD"):
+        return subprocess.check_output(
+            ["bash", "-c", 'source scripts/toolchain-inputs.sh; toolchain_input_tree git "$1"', "bash", revision],
+            cwd=self.root, text=True,
+        ).strip()
+
+    def test_toolchain_snapshot_retains_nested_package_and_original_inputs(self):
+        index = self.root / ".git/index"
+        before_index = index.read_bytes()
+        tree = self.input_tree()
+        self.assertEqual(before_index, index.read_bytes())
+        for path in ("flake.nix", "flake.lock", "rust-toolchain.toml", "nix/ghc.patch",
+                     "bridge/haskell/resume/tidepool-resume.cabal",
+                     "bridge/haskell/resume/src/Tidepool/Internal/Resume.hs"):
+            with self.subTest(path=path):
+                self.assertEqual(self.git_command("show", f"{tree}:{path}").stdout,
+                                 (self.root / path).read_bytes())
+        self.assertEqual(self.git_command("ls-tree", "--name-only", f"{tree}:bridge/haskell").stdout,
+                         b"resume\n")
+
+    def test_package_source_changes_refuse_until_reconfiguration(self):
+        before = self.input_tree()
+        old_revision = self.git_command("rev-parse", "HEAD").stdout.decode().strip()
+        self.resume.write_text("module Tidepool.Internal.Resume where\nchanged = ()\n")
+        self.assert_refused("changed toolchain inputs")
+        self.git_command("add", "bridge/haskell/resume")
+        self.assert_refused("changed toolchain inputs")
+        self.commit("bridge/haskell/resume")
+        self.assert_refused("changed toolchain input pin")
+        self.assertNotEqual(before, self.input_tree())
+        self.assertEqual(before, self.input_tree(old_revision))
+
+    def test_untracked_package_sources_cannot_be_omitted_from_snapshot(self):
+        (self.package / "src/New.hs").write_text("module New where\n")
+        self.assert_refused("changed toolchain inputs")
+
+    def test_unrelated_bridge_source_does_not_change_toolchain_snapshot(self):
+        before = self.input_tree()
+        unrelated = self.root / "bridge/haskell/src/Compiler.hs"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("module Compiler where\n")
+        self.assertEqual(before, self.input_tree())
+        self.commit("bridge/haskell/src")
+        self.assertEqual(before, self.input_tree())
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_explicit_selection_ignores_dirty_and_changed_local_toolchain_inputs(self):
         owner = self.generation / "owner"
