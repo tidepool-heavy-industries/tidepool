@@ -48,7 +48,8 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
     forM_ (zip [0 :: Int ..] preparationCases) $ \(index, (name, expected)) -> do
       body <- readFile (fixtures </> name ++ ".hs")
       let template = preparationTemplate ("TypedPrepared" ++ show index)
-      sourcePlan <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
+      wholePlan <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
+      sourcePlan <- fixtureExecutableSegment name wholePlan
       let slots = [(ordinal, fromIntegral (index * 100 + ordinal + 1), observation ordinal item)
             | (ordinal, item) <- zip [0 ..] (cellPlanItems sourcePlan)]
           observation ordinal item = case sbKind (cellAnalysisVerdict item) of
@@ -126,6 +127,20 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
 
+-- The parser retains pragmas/imports as a prologue-only declaration receipt.
+-- Use its executable segment, as the production caller does, retaining that
+-- prologue for rendering and inference. Authored declaration barriers would
+-- need their own genuine compilation and are not part of these fixtures.
+fixtureExecutableSegment :: String -> CellSourcePlan -> IO CellSourcePlan
+fixtureExecutableSegment name whole = do
+  unless (not (any (\item -> sbKind (cellAnalysisVerdict item) == KDecl
+      && not (cellAnalysisPrologueOnly item)) (cellPlanItems whole)))
+    (fail (name ++ ": semantic fixture contains an authored declaration barrier"))
+  case [segment | segment <- cellInferenceSegments whole
+      , any ((/= KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems segment)] of
+    [segment] | cellPlanPrologue segment == cellPlanPrologue whole -> pure segment
+    _ -> fail (name ++ ": semantic fixture needs one executable segment with its original prologue")
+
 preparationCases :: [(String, PreparationExpected)]
 preparationCases =
   [(name, PrepareAccepted) | name <-
@@ -195,7 +210,8 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
           source = unlines pragmas ++ differentialBefore control
             ++ unlines statements ++ differentialAfter control
           template = oracleTemplate ordinary
-      parsed <- analyzeOrderedCellWithFlags flags template source >>= either (fail . show) pure
+      wholePlan <- analyzeOrderedCellWithFlags flags template source >>= either (fail . show) pure
+      parsed <- fixtureExecutableSegment (differentialFixture control) wholePlan
       let slots = [(ordinal, fromIntegral (ordinal + 1), Nothing)
             | ordinal <- [0 .. length (cellPlanItems parsed) - 1]]
       prepared <- either fail pure
