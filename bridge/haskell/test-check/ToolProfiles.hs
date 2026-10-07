@@ -7,6 +7,7 @@ import Control.Monad.Freer.State (State, get, modify, runState)
 import Data.List (isInfixOf)
 import Data.Text (Text)
 import GHC.Generics (Generic)
+import QuantitiesContract (quantitiesTests)
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -255,7 +256,7 @@ tests = testGroup "tool profile contract" $
       compileProfile "ConcreteNativeProfile" (Rejected ["Commands"])
   , testCase "model hook cannot borrow caller sync context authority" $
       compileProfile "ModelContext" (Rejected ["cannot be used by an asynchronous tool"])
-  ] ++ presentationTests
+  ] ++ presentationTests ++ quantitiesTests
 
 main :: IO ()
 main = runTests tests
