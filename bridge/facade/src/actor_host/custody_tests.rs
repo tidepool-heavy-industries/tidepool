@@ -332,12 +332,13 @@ async fn custody_assert_request(
 async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let first = tests::dispatch_haskell_script(
-        root.as_ref(),
-        include_str!("inherited_response_producer.hs"),
-    )
-    .await;
-    assert_eq!(first["status"], "committed", "{first:?}");
+    let producer_dispatch = tokio::spawn(async move {
+        tests::dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("inherited_response_producer.hs"),
+        )
+        .await
+    });
     let producer = campaign
         .next_deployment(
             "producer installation",
@@ -356,17 +357,24 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
             integrate: true,
         },
     );
-    producer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&producer);
+    let first = tokio::time::timeout(Duration::from_secs(120), producer_dispatch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first["status"], "committed", "{first:?}");
     custody_activation(&mut campaign).await;
 
     // The observer's inherited source tip includes `worker`, whose typed
     // ExitCell is still pending at this fork boundary.
-    let second = tests::dispatch_haskell_script(
-        root.as_ref(),
-        include_str!("inherited_response_observer.hs"),
-    )
-    .await;
-    assert_eq!(second["status"], "committed", "{second:?}");
+    let root = campaign.root_installation.policy.clone();
+    let observer_dispatch = tokio::spawn(async move {
+        tests::dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("inherited_response_observer.hs"),
+        )
+        .await
+    });
     let observer = campaign
         .next_deployment(
             "observer installation",
@@ -385,7 +393,12 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
             integrate: true,
         },
     );
-    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&observer);
+    let second = tokio::time::timeout(Duration::from_secs(120), observer_dispatch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second["status"], "committed", "{second:?}");
     custody_activation(&mut campaign).await;
 
     let watch = tests::dispatch_haskell_script(
@@ -566,27 +579,8 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                 integrate: true,
             },
         );
+        campaign.acknowledge_native_spawn(&child);
         installed.push(child);
-    }
-    // Neither child can run before the whole fork boundary is acknowledged.
-    // A child may already park and queue its activation (SessionReady only
-    // appends to its durable inbox); its provider session is bound, and so
-    // reads that inbox, only after the gate commits (the host's binding
-    // discovery waits on `wait_committed`). What must not happen yet is any
-    // child finishing or retiring.
-    let children: Vec<_> = installed
-        .iter()
-        .map(|child| child.actor.identity())
-        .collect();
-    campaign.assert_no_deployment("fork boundary not yet acknowledged", |event| match event {
-        LocalResidentDeployment::ChildExited { notice } => {
-            children.contains(&notice.child.identity())
-        }
-        LocalResidentDeployment::Retired { actor, .. } => children.contains(actor),
-        _ => false,
-    });
-    for child in &installed {
-        child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     }
     let result = tokio::time::timeout(Duration::from_secs(120), launched)
         .await
@@ -706,7 +700,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         .unwrap();
     assert_eq!(leaf_tree.source_head().as_str(), parent_head.trimmed());
     assert_ne!(parent_head.trimmed(), sibling_head.trimmed());
-    leaf.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&leaf);
     let result = tokio::time::timeout(Duration::from_secs(120), nested)
         .await
         .unwrap()
