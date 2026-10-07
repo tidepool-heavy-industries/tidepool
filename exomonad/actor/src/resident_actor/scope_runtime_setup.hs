@@ -33,7 +33,7 @@ let waitCommandRunning
         Cmd.CommandRunning -> pure ()
         Cmd.CommandStarting -> sleep (milliseconds 1) >> waitCommandRunning job
         Cmd.CommandQueued -> sleep (milliseconds 1) >> waitCommandRunning job
-        _ -> error "command did not reach its controlled execution"
+        _ -> Effects.error "command did not reach its controlled execution"
 let admitScoped
       :: forall effects.
          ( Member Core.AgentLaunch effects, Member Replies effects
@@ -42,16 +42,16 @@ let admitScoped
     admitScoped scope label = do
       admitted <- spawnScoped scope label
       child <- case admitted of
-        Left _ -> error "scope child admission refused"
+        Left _ -> Effects.error "scope child admission refused"
         Right agent -> pure agent
       requested <- Agents.request @Int scopeTarget ()
         (Agents.defaultRequestOptions { Agents.requestLifetime = Core.InScope scope })
       request <- case requested of
-        Left _ -> error "scope request admission refused"
+        Left _ -> Effects.error "scope request admission refused"
         Right pending -> pure pending
       started <- Cmd.tryStartWith (Core.InScope scope) (Cmd.argv [label])
       job <- case started of
-        Left _ -> error "scope command admission refused"
+        Left _ -> Effects.error "scope command admission refused"
         Right job -> pure job
       waitCommandRunning job
       pure (child, request, job)
