@@ -13,6 +13,10 @@ mod program_source_support_history {
         graph_refusals: usize,
         artifact_refusals: usize,
         missing_rows: usize,
+        missing_queries: usize,
+        reached_missing_frontiers: usize,
+        unreachable_deletions: usize,
+        blocked_downstream_queries: usize,
         repairs: usize,
         captured_queries: usize,
         cyclic_histories: usize,
@@ -271,14 +275,26 @@ mod program_source_support_history {
                     Arc::make_mut(&mut incomplete.imports).remove(omitted);
                     let mut incomplete_graph = graph.clone();
                     incomplete_graph.remove(omitted);
-                    assert_query(
-                        directory.path(),
-                        &incomplete,
-                        &incomplete_graph,
-                        &all_owners,
-                        omitted,
-                        &mut coverage,
-                    );
+                    for selected in &owners {
+                        assert_query(
+                            directory.path(),
+                            &incomplete,
+                            &incomplete_graph,
+                            &all_owners,
+                            selected,
+                            &mut coverage,
+                        );
+                        coverage.missing_queries += 1;
+                        if reachable(&incomplete_graph, selected).contains(omitted) {
+                            coverage.reached_missing_frontiers += 1;
+                        } else {
+                            coverage.unreachable_deletions += 1;
+                        }
+                        coverage.blocked_downstream_queries += usize::from(
+                            !reachable(&graph, selected)
+                                .is_subset(&reachable(&incomplete_graph, selected)),
+                        );
+                    }
                     coverage.missing_rows += 1;
                     let repaired = ProgramSourceSupport::extend(
                         Some(&incomplete),
@@ -346,11 +362,15 @@ mod program_source_support_history {
             }
         }
         assert_eq!(coverage.histories, 192);
-        assert_eq!(coverage.queries, 2880);
+        assert_eq!(coverage.queries, 4032);
         assert_eq!(coverage.extensions, 1344);
         assert_eq!(coverage.graph_refusals, 192);
         assert_eq!(coverage.artifact_refusals, 192);
         assert_eq!(coverage.missing_rows, 576);
+        assert_eq!(coverage.missing_queries, 1728);
+        assert_eq!(coverage.reached_missing_frontiers, 1296);
+        assert_eq!(coverage.unreachable_deletions, 432);
+        assert_eq!(coverage.blocked_downstream_queries, 576);
         assert_eq!(coverage.repairs, 576);
         assert_eq!(coverage.captured_queries, 192);
         assert_eq!(coverage.cyclic_histories, 117);
