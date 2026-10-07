@@ -24,9 +24,9 @@ where
             }),
             ResidentActorBoundary::Wait(wait) => {
                 let terminal = self.capture_exit_target(kernel, effect_owner, wait.target)?;
-                self.record_child_observation(wait.target);
                 Ok(OwnedWorkbenchWait::Exit {
                     continuation: wait.continuation,
+                    target: wait.target,
                     terminal,
                 })
             }

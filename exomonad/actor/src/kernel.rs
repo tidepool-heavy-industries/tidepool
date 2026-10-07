@@ -130,6 +130,8 @@ pub type KernelCallReply = Result<MailboxValue, KernelCallFailure>;
 pub enum KernelInvocationFailure {
     #[error("actor {0} has exited")]
     ActorExited(ActorRef),
+    #[error("actor {actor} invocation was cancelled")]
+    Cancelled { actor: ActorRef },
     #[error("actor {actor} rejected the invocation: {detail}")]
     Rejected {
         actor: ActorRef,
@@ -187,7 +189,7 @@ impl KernelInvocationFailure {
             | Self::Failed { receipts, .. }
             | Self::CleanupUnconfirmed { receipts, .. } => receipts,
             Self::TerminalTransferFailed { source, .. } => source.receipts(),
-            Self::ActorExited(_) => &[],
+            Self::ActorExited(_) | Self::Cancelled { .. } => &[],
         }
     }
 
@@ -210,7 +212,7 @@ impl KernelInvocationFailure {
             | Self::Failed { receipts, .. }
             | Self::CleanupUnconfirmed { receipts, .. } => Some(receipts),
             Self::TerminalTransferFailed { source, .. } => source.receipts_mut(),
-            Self::ActorExited(_) => None,
+            Self::ActorExited(_) | Self::Cancelled { .. } => None,
         }
     }
 }

@@ -3,8 +3,13 @@ use super::green::{GreenAdvance, GreenInvocation};
 use super::*;
 use tidepool_bridge_effects::{CleanupError, ScopeFailure};
 
+#[derive(Default)]
+struct ToolEffectCompletion {
+    observed_child: Option<ActorRef>,
+}
+
 pub(super) struct ToolCursor {
-    green: Option<GreenInvocation<()>>,
+    green: Option<GreenInvocation<ToolEffectCompletion>>,
     scopes: Vec<scopes::ScopeFrame>,
     work: Arc<InvocationWork>,
     control: Arc<crate::WorkbenchExecutionControl>,
@@ -51,9 +56,13 @@ impl ToolCursor {
             Some(terminal) => Some(ResidentActorWorkbenchError::RetiredBeforeAdmission(
                 terminal,
             )),
-            None if self.control.cancellation_requested() => Some(
-                ResidentActorWorkbenchError::ActorProtocol("tool invocation cancelled".into()),
-            ),
+            None if self
+                .control
+                .native_cancel()
+                .load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                Some(ResidentActorWorkbenchError::InvocationCancelled)
+            }
             None => None,
         };
         if let Some(error) = error {
@@ -191,7 +200,7 @@ where
                 match &mut cursor.green {
                     Some(green) => green.enqueue_frontier(
                         std::mem::take(&mut cursor.scopes),
-                        Box::pin(async move { (operation.await, ()) }),
+                        Box::pin(async move { (operation.await, ToolEffectCompletion::default()) }),
                     ),
                     None => return operation.await,
                 }
@@ -220,6 +229,7 @@ where
                     .await?;
                 match self.prepare_invocation_wait(kernel, context, &owner, boundary)? {
                     Ok(wait) => {
+                        let observed_child = wait.observe_after_resume();
                         let control = owner.control().expect("tool frontier wait owner");
                         control.arm_sleep();
                         let work = owner
@@ -248,8 +258,15 @@ where
                                 std::mem::take(&mut cursor.scopes),
                                 Box::pin(async move {
                                     let result = operation.await;
-                                    // Named notebook result bindings are never prepared by this adapter.
-                                    (result.outcome, ())
+                                    let outcome = if result.retained_job_binding.is_some() {
+                                        Err(ResidentActorWorkbenchError::ActorProtocol(
+                                            "notebook command binding reached the tool frontier"
+                                                .into(),
+                                        ))
+                                    } else {
+                                        result.outcome
+                                    };
+                                    (outcome, ToolEffectCompletion { observed_child })
                                 }),
                             );
                     }
@@ -272,7 +289,7 @@ where
     }
 
     async fn next_tool_frontier(
-        &self,
+        &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         cursor: &mut ToolCursor,
@@ -285,7 +302,7 @@ where
                 biased;
                 () = cursor.control.wait_for_cancellation() => {
                     cursor.work.close(); green.cancel_parent();
-                    return Err(ResidentActorWorkbenchError::ActorProtocol("tool invocation cancelled".into()));
+                    return Err(ResidentActorWorkbenchError::InvocationCancelled);
                 }
                 terminal = retirement.wait_requested_shutdown() => {
                     cursor.work.close(); green.cancel_parent();
@@ -295,7 +312,18 @@ where
             };
             if let Some(mut frontier) = self.apply_green_frontier(context, green, completion)? {
                 cursor.scopes = frontier.scopes;
-                return frontier.result.take().expect("ready native tool frontier");
+                let result = frontier.result.take().expect("ready native tool frontier");
+                if result.is_ok()
+                    || matches!(&result, Err(ResidentActorWorkbenchError::Delivered(_)))
+                {
+                    if let Some(child) = frontier
+                        .attachment
+                        .and_then(|attachment| attachment.observed_child)
+                    {
+                        self.record_child_observation(child);
+                    }
+                }
+                return result;
             }
         }
     }

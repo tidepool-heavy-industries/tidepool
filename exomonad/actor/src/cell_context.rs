@@ -45,6 +45,7 @@ impl CellExit {
             CellExitCause::Cancelled
         } else {
             match result {
+                Err(crate::KernelInvocationFailure::Cancelled { .. }) => CellExitCause::Cancelled,
                 Err(crate::KernelInvocationFailure::Rejected { .. }) => CellExitCause::Rejected,
                 Err(_) => CellExitCause::Failed,
                 Ok(step) => {
@@ -152,5 +153,29 @@ mod tests {
         let receipt = exit(WorkbenchRunStatus::Committed, 2, true, true);
         assert_eq!(receipt.cause, CellExitCause::Cancelled);
         assert!(!receipt.permits_context_commit());
+    }
+
+    #[test]
+    fn typed_invocation_cancellation_is_distinct_from_failure_and_requires_cleanup() {
+        let actor = crate::ActorRef::first(crate::ActorId(9));
+        let execution = WorkbenchExecutionId::from_digest([2; 16]);
+        for cleanup_confirmed in [false, true] {
+            let reply = Err(crate::KernelInvocationFailure::Cancelled { actor });
+            let exit = CellExit::from_reply(execution.clone(), &reply, cleanup_confirmed, false);
+            assert_eq!(exit.cause, CellExitCause::Cancelled);
+            assert_eq!(exit.cleanup_confirmed, cleanup_confirmed);
+            assert!(!exit.permits_context_commit());
+            assert!(reply.unwrap_err().receipts().is_empty());
+        }
+        let failure = Err(crate::KernelInvocationFailure::Failed {
+            actor,
+            diagnostic: None,
+            detail: "invalid child terminal".into(),
+            receipts: Vec::new(),
+        });
+        assert_eq!(
+            CellExit::from_reply(execution, &failure, true, false).cause,
+            CellExitCause::Failed
+        );
     }
 }

@@ -2179,7 +2179,7 @@ where
                         biased;
                         () = control.wait_for_cancellation() => {
                             green.cancel_parent();
-                            Err(ResidentActorWorkbenchError::ActorProtocol("async invocation cancelled".into()))
+                            Err(ResidentActorWorkbenchError::InvocationCancelled)
                         }
                         ready = green.next() => ready,
                     }
@@ -2734,6 +2734,7 @@ where
         OwnedWorkbenchWait::Exit {
             continuation,
             terminal,
+            ..
         } => {
             terminal_wait::await_exit(
                 environment,

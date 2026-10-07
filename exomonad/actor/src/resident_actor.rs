@@ -2587,6 +2587,7 @@ fn resident_actor_failure_layer(
                 .failure_layer()
                 .unwrap_or(WorkbenchFailureLayer::Effect),
         ),
+        ResidentActorWorkbenchError::InvocationCancelled => None,
         _ => None,
     }
 }
@@ -3180,6 +3181,7 @@ enum OwnedWorkbenchWait {
     },
     Exit {
         continuation: ResidentHole,
+        target: ActorRef,
         terminal: crate::RetainedActorExit,
     },
     PollExit {
@@ -3208,6 +3210,7 @@ enum OwnedWorkbenchWait {
 impl OwnedWorkbenchWait {
     fn observe_after_resume(&self) -> Option<ActorRef> {
         match self {
+            Self::Exit { target, .. } => Some(*target),
             Self::PollExit {
                 target,
                 terminal: Some(_),
@@ -3982,6 +3985,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn failure(detail: impl Into<String>) -> KernelBehaviorError {
         KernelBehaviorError::new(detail)
+    }
+
+    fn tool_invocation_failure(
+        actor: ActorRef,
+        error: ResidentActorWorkbenchError,
+    ) -> KernelInvocationFailure {
+        match error {
+            ResidentActorWorkbenchError::InvocationCancelled => {
+                KernelInvocationFailure::Cancelled { actor }
+            }
+            error => Self::invocation_failure(actor, error),
+        }
     }
 
     fn workbench_failure(error: ResidentActorWorkbenchError) -> KernelBehaviorError {
@@ -11293,7 +11308,9 @@ where
                         detail: format!("tool resource cleanup unconfirmed: {detail}; original outcome: {result:?}"),
                     });
                 }
-                let standing_can_transfer = !control.cancellation_requested()
+                let standing_can_transfer = !control
+                    .native_cancel()
+                    .load(std::sync::atomic::Ordering::Acquire)
                     && cleanup.uncertainty().is_none()
                     && matches!(
                         &behavior.standing,
@@ -11316,6 +11333,7 @@ where
                         )
                         .await
                 };
+                let cleanup_confirmed = cleanup.uncertainty().is_none() && custody.is_ok();
                 match custody {
                     Ok(()) => guard.disarm(),
                     Err(error) => {
@@ -11324,6 +11342,16 @@ where
                             detail: format!("tool continuation cleanup unconfirmed: {error}; original outcome: {result:?}"),
                         });
                     }
+                }
+                if cleanup_confirmed
+                    && control
+                        .native_cancel()
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    if control.cancellation_requested() {
+                        control.acknowledge_cancellation();
+                    }
+                    result = Err(KernelInvocationFailure::Cancelled { actor });
                 }
                 if result.is_err() {
                     if let Some(owner) = control.reservation_owner(actor) {
@@ -11350,6 +11378,11 @@ where
                                     | KernelStep::Stop { output: value, .. } => value.clone(),
                                 })
                                 .map_err(Clone::clone),
+                        );
+                        control.finish_cell(
+                            execution.clone(),
+                            &reply.clone().map(KernelStep::Continue),
+                            cleanup_confirmed,
                         );
                         let cancellation =
                             control.cancellation_outcome(execution.clone(), reply.clone());
@@ -11469,12 +11502,12 @@ where
                     arguments,
                 )
                 .await
-                .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
             let mut result = None;
             loop {
                 cursor
                     .check_admission(kernel)
-                    .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                    .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 let boundary = self
                     .environment
                     .runner
@@ -11484,7 +11517,7 @@ where
                         cursor.realm(context.placement.resource_scope),
                     )
                     .await
-                    .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                    .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 if !cursor.is_main_terminal()
                     && matches!(
                         &boundary,
@@ -11513,7 +11546,7 @@ where
                             .runner
                             .resume_unit(context.clone(), reply.continuation)
                             .await
-                            .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                            .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }
                     ResidentActorBoundary::ToolAwait(next) => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
@@ -11560,7 +11593,7 @@ where
                         outcome = self
                             .advance_tool_frontier(kernel, &context, &mut cursor, boundary)
                             .await
-                            .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                            .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }
                 }
             }
