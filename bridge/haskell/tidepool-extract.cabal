@@ -34,7 +34,6 @@ extra-source-files:
   test-cell-splitter/fixtures/session-fixities/*.hs
   test-cell-splitter/fixtures/sigma-retention/*.hs
   test-cell-splitter/fixtures/typed-segment-native/*.hs
-  test-cell-splitter/fixtures/typed-segment-native/*.cell
   test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
   test-cell-splitter/fixtures/quasiquote-reuse/*.hs
   test-cell-splitter/fixtures/unreachable-compile-time/*.hs
