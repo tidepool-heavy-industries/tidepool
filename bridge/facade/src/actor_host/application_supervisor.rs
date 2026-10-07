@@ -1253,6 +1253,12 @@ async fn drain_resident_shutdown(
                     let _ = gate.mark_failed();
                 }
             }
+            LocalResidentDeployment::RequestCancellation { .. } => {
+                // As in the running embedded consumer, this notice does not
+                // acknowledge a typed request. Invocation cleanup retires its
+                // owned workers and then checks RequestCleanupState::TargetClosed;
+                // an unclosed target keeps that cleanup unconfirmed.
+            }
             // These notices only wake ordinary input in the embedded host.
             // Target closure is established by the request/actor owners, never
             // by receipt of a notice or the fact that its channel closed.
@@ -1260,8 +1266,7 @@ async fn drain_resident_shutdown(
             | LocalResidentDeployment::SessionReady { .. }
             | LocalResidentDeployment::ChildExited { .. }
             | LocalResidentDeployment::WatchChanged { .. }
-            | LocalResidentDeployment::SettlementChanged { .. }
-            | LocalResidentDeployment::RequestCancellation { .. } => {}
+            | LocalResidentDeployment::SettlementChanged { .. } => {}
         }
     }
     (!failures.is_empty()).then(|| failures.join("; "))
