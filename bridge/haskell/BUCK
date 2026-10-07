@@ -37,6 +37,27 @@ export_file(
 )
 
 export_file(
+    name = "haskell_prepared_time_source",
+    src = "lib/Tidepool/Data/Time.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_typed_segment_resume_source",
+    src = "lib/Tidepool/Internal/Resume.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_host_command_types_source",
+    src = "lib/Tidepool/Command/Types.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "extract_request_source",
     src = "src/Tidepool/ExtractRequest.hs",
     out = "ExtractRequest.hs",
