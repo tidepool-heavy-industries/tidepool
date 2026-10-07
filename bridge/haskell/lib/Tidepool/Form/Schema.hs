@@ -1,29 +1,23 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The @Schema@ vocabulary behind @ask@ (`Tidepool.Effects.Core`'s @Ask@): a
--- small JSON-Schema-shaped sum, the pure recursion that renders it as an
--- actual JSON Schema 'Value', and @ask@ itself. `Tidepool.Llm`'s @llm@ shares
--- this same 'Schema' vocabulary but is NOT declared here — see that module's
--- doc for why the two are split despite sharing a schema shape.
+-- small JSON-Schema-shaped sum, the pure recursion that renders it as a
+-- 'Value', and @ask@ itself. @ask@ asks the calling agent for a structured
+-- answer. This is separate from 'Tidepool.Form', which describes a human
+-- operator form with typed controls and retains its submitted answer in the
+-- dialogue.
 --
--- Deliberately NOT under 'Tidepool.Form' proper (which builds on
--- @askUserRaw@ and only compiles in a row containing @AskUser@): @Ask@ is
--- always present in the ordinary eval\/session roster (unlike the gated
--- @AskUser@) — @EffectRoster::from_handlers@ unconditionally appends it to
--- every stack, `bridge/mcp/src/server.rs` — so this module is auto-imported
--- unconditionally whenever @Ask@ is (see @extra_imports_for!@ in
--- @bridge/mcp/src/effect_defs.rs@), independent of whether @AskUser@'s
--- @Tidepool.Form@ or @Llm@ is in the row at all. That universality is exactly
--- why this module must NOT also require @Llm@ (see the regression this split
--- fixes: a roster carrying @Ask@ without @Llm@ — e.g. `build_minimal_stack`'s
--- interposed-effects-only rosters — failed to compile this module at all when
--- @llm@ briefly lived here too).
+-- @Ask@ is always present in the ordinary eval/session roster, so this module
+-- is auto-imported wherever @Ask@ is available. The human form API belongs to
+-- the separately gated @AskUser@ effect. Keeping this schema helper in its own
+-- module lets ordinary structured questions remain available when @AskUser@
+-- or @Llm@ is absent; @Tidepool.Llm@ shares the 'Schema' vocabulary but owns
+-- its @llm@ operation separately.
 --
--- @ask@ builds on the generated module's thin @askRaw@ the same way
--- 'Tidepool.Form'\'s @askUser@ builds on @askUserRaw@: the generated
--- @Tidepool.Effects.Core@ module cannot import authored library code, so only
--- the bare @send (Ctor …)@ wrapper stays there, and anything composed on top
--- — here, JSON-Schema rendering — lives here instead.
+-- @ask@ builds on the generated module's thin @askRaw@ wrapper. The generated
+-- @Tidepool.Effects.Core@ module cannot import authored library code, so JSON
+-- Schema rendering lives here and the underlying effect constructor stays in
+-- the generated layer.
 module Tidepool.Form.Schema
   ( Schema (..)
   , schemaToValue

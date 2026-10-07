@@ -220,8 +220,11 @@ requires waiting for its recovery notice before resubmission. Keep
 `respond value` as one single-line unit with nothing after it.
 
 Data types need no deriving clause; unsupported fields stay opaque. Use
-`display value` for structured output and `expand` for detail, or
-`display (show value)` for textual output.
+`display value` for bounded structured output and `expand` for detail, or
+`display (show value)` for text. Import `Tidepool.View` as `V` to compose rich
+views. Human forms describe one submission applicatively; inspect the typed
+result before adding a dependent form in the same `Eff` program. Earlier
+answered forms stay in the conversation as later views and forms append.
 
 # Evidence and semantic judgment
 

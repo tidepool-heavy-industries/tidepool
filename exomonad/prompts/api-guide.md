@@ -13,6 +13,48 @@ and `expand handle key` displays one field independently. Use
 `display (show value)` when you want the textual `Show` form. Unsupported
 fields stay opaque.
 
+`Tidepool.View` builds pure presentation values; it does not send a message by
+itself. Compose text, Markdown, inspection, rows, columns, captions, SVG, and
+images with `V.*`, then pass the result to `display` or embed it in a form with
+`F.present`. A human form is one `Functor`/`Applicative` description and one
+submission. `F.askUser` returns `Submitted value`, `Dismissed`, or
+`FormUnavailable cause`; branch on that result before constructing a dependent
+next form. The answered card and its answer remain in chat, and later views or
+forms append as the cell continues.
+`F.note` posts non-blocking narration through `Console`; `F.askUser` suspends
+on `AskUser` until its mounted form is submitted, dismissed, or unavailable.
+
+```haskell
+import qualified Tidepool.Form as F
+import qualified Tidepool.View as V
+
+let evidence = [True, False]
+F.note "I will ask two related questions."
+display (V.column [V.markdown "Review the current evidence.", V.inspect evidence])
+first <- F.askUser $
+  (\() scope -> scope) <$> F.present (V.markdown "Which part should I check?")
+    <*> F.textInput "Scope" Nothing
+case first of
+  F.Submitted scope -> do
+    second <- F.askUser $
+      (\() reason -> (scope, reason))
+        <$> F.present (V.column [V.markdown "Why this part?", V.text scope])
+        <*> F.textInput "Reason" Nothing
+    case second of
+      F.Submitted (chosenScope, reason) ->
+        display (V.column [V.markdown "Recorded", V.text chosenScope, V.text reason])
+      F.Dismissed -> display (V.text "The second form was dismissed.")
+      F.FormUnavailable _ -> display (V.text "The second form is unavailable.")
+  F.Dismissed -> display (V.text "The first form was dismissed.")
+  F.FormUnavailable _ -> display (V.text "The first form is unavailable.")
+```
+
+The form builders are pure, so independent fields use ordinary Applicative
+composition. An answer-dependent question belongs after the submission in the
+same `Eff` program. Independent blocking forms can use `concurrently` from
+`Tidepool.Async` when the row admits `Green`; a Jev-selected branch can return a
+continuation that performs the next form.
+
 ## Compose the program
 
 Compose effectful functions with `>=>` or `do`; use the notebook's `&&&`, `***`
