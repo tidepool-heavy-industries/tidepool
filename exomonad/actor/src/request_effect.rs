@@ -621,7 +621,83 @@ impl ToHaskell for WatchId {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestDuration;
+    use super::{RequestDuration, RequestError};
+    use crate::{ReplyError, RequestId};
+    use tidepool_bridge::{BridgeError, HaskellValue, ToHaskell};
+    use tidepool_repr::{DataCon, DataConId, DataConTable, Literal};
+
+    fn reservation_answer_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        for (id, qualified_name, rep_arity) in [
+            (1, "Data.Either.Right", 1),
+            (2, "Data.Either.Left", 1),
+            (18344204870309087082, "GHC.Types.I#", 1),
+            (18325893844472449494, "GHC.Types.W#", 1),
+            (
+                5,
+                "Tidepool.Agent.Reply.Internal.RequestReservationRejected",
+                1,
+            ),
+            (6, "Tidepool.Agent.Reply.Internal.ReplyStale", 0),
+        ] {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: qualified_name.rsplit('.').next().unwrap().into(),
+                tag: 1,
+                rep_arity,
+                field_bangs: Vec::new(),
+                qualified_name: Some(qualified_name.into()),
+                type_name: String::new(),
+            });
+        }
+        table
+    }
+
+    #[test]
+    fn reservation_reply_emits_int_carrier_and_preserves_typed_refusal() {
+        let table = reservation_answer_table();
+        for value in [1_i64, i64::MAX] {
+            let answer: Result<RequestId, RequestError> =
+                Ok(RequestId(u64::try_from(value).unwrap()));
+            let encoded = answer.to_value(&table).unwrap();
+            let HaskellValue::Con(right, fields) = encoded else {
+                panic!("reservation reply must be Right")
+            };
+            assert_eq!(right, DataConId(1));
+            let [HaskellValue::Con(integer, payload)] = fields.as_slice() else {
+                panic!("reservation reply must contain a boxed Int")
+            };
+            assert_eq!(*integer, DataConId(18344204870309087082));
+            assert!(
+                matches!(payload.as_slice(), [HaskellValue::Lit(Literal::LitInt(actual))] if *actual == value)
+            );
+        }
+
+        let rejected: Result<RequestId, RequestError> =
+            Err(RequestError::RequestReservationRejected(ReplyError::Stale));
+        let encoded = rejected.to_value(&table).unwrap();
+        let HaskellValue::Con(left, fields) = encoded else {
+            panic!("reservation refusal must be Left")
+        };
+        assert_eq!(left, DataConId(2));
+        let [HaskellValue::Con(rejection, fields)] = fields.as_slice() else {
+            panic!("reservation refusal must retain RequestError")
+        };
+        assert_eq!(*rejection, DataConId(5));
+        assert!(
+            matches!(fields.as_slice(), [HaskellValue::Con(stale, fields)] if *stale == DataConId(6) && fields.is_empty())
+        );
+    }
+
+    #[test]
+    fn reservation_reply_refuses_request_id_above_haskell_int_max() {
+        let answer: Result<RequestId, RequestError> =
+            Ok(RequestId(u64::try_from(i64::MAX).unwrap() + 1));
+        assert!(matches!(
+            answer.to_value(&reservation_answer_table()),
+            Err(BridgeError::UnsupportedType(_))
+        ));
+    }
 
     #[test]
     fn request_duration_preserves_authored_units_and_checks_conversion() {

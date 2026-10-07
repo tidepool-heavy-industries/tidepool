@@ -27,9 +27,9 @@ mod owned_workbench;
 mod provider_owner_tests;
 mod replacement;
 mod request_wait;
-mod scopes;
 #[cfg(test)]
 mod scope_runtime_tests;
+mod scopes;
 mod status_rendering;
 #[cfg(test)]
 mod terminal_transfer_tests;
@@ -6478,7 +6478,9 @@ where
                                 .resume_value(
                                     context.clone(),
                                     reservation.continuation,
-                                    Err::<i64, _>(RequestError::RequestReservationRejected(error)),
+                                    Err::<crate::RequestId, _>(
+                                        RequestError::RequestReservationRejected(error),
+                                    ),
                                 )
                                 .await
                         }
@@ -6490,7 +6492,7 @@ where
                         .resume_value(
                             context.clone(),
                             reservation.continuation,
-                            Err::<i64, _>(RequestError::RequestReservationRejected(
+                            Err::<crate::RequestId, _>(RequestError::RequestReservationRejected(
                                 crate::ReplyError::Stale,
                             )),
                         )
@@ -6516,15 +6518,14 @@ where
                         cleanup_owner,
                     )
                 };
-                let admitted = match owner {
+                let admitted: Result<crate::RequestId, RequestError> = match owner {
                     Some(owner) => owner.with_admission(reserve).map_err(|_| {
                         RequestError::RequestReservationRejected(
                             crate::ReplyError::CancellationRequested,
                         )
                     }),
                     None => Ok(reserve()),
-                }
-                .map(|request| request.0);
+                };
                 self.environment
                     .runner
                     .resume_value(context.clone(), reservation.continuation, admitted)
