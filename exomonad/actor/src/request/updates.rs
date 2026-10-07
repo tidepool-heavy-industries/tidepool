@@ -248,11 +248,23 @@ impl RequestUpdatePresentation {
                 .updates
                 .get_mut(self.delivery.id.sequence as usize - 1)
             {
-                update.phase = match outcome {
-                    PresentationOutcome::Presented => UpdatePhase::Presented,
-                    PresentationOutcome::Unconfirmed(reason) => UpdatePhase::Unconfirmed(reason),
-                    PresentationOutcome::NotPresented(reason) => UpdatePhase::NotPresented(reason),
-                };
+                // A retained native reconciler can settle while this lease
+                // still exists. Its definitive evidence survives late lease
+                // completion, including uncertainty from this guard's Drop.
+                if matches!(
+                    update.phase,
+                    UpdatePhase::Presenting | UpdatePhase::Unconfirmed(_)
+                ) {
+                    update.phase = match outcome {
+                        PresentationOutcome::Presented => UpdatePhase::Presented,
+                        PresentationOutcome::Unconfirmed(reason) => {
+                            UpdatePhase::Unconfirmed(reason)
+                        }
+                        PresentationOutcome::NotPresented(reason) => {
+                            UpdatePhase::NotPresented(reason)
+                        }
+                    };
+                }
             }
         }
         self.finished = true;
