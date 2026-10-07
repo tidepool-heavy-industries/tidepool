@@ -46,11 +46,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         tidepool_mcp::sleep_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("effect module");
-    let mut include = effects.include_paths().to_vec();
-    include.push(eval_harness::prelude_path());
-    include.push(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"),
-    );
+    let include = crate::resident_workbench::request_tests::fixture_include_roots(&effects);
     let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
     for import in [
         "qualified Tidepool.Actor as Mailbox",
