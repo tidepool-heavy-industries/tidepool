@@ -704,6 +704,14 @@ impl ActorWorkbenchSource {
         imports.extend_text("qualified Tidepool.Effects.Core");
         imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
         imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+        if effects.iter().any(|key| {
+            matches!(
+                key,
+                crate::ActorEffectKey::Replies | crate::ActorEffectKey::Watches
+            )
+        }) {
+            imports.extend_text("qualified Tidepool.Actors.Exomonad");
+        }
         Ok((
             crate::agent_spec::preparation::InstallerRecipe {
                 source_authority: source.semantic_digest(),
@@ -12248,10 +12256,20 @@ pub(crate) mod request_tests {
                 tidepool_runtime::session::render_template(&template.source, "pure ()", &[]);
             assert!(notebook.contains("import qualified PublicNotebook"));
             assert!(!notebook.contains("PrivatePolicy"));
+            assert!(!notebook.contains("Tidepool.Actors.Exomonad"));
         }
 
+        let effects = [
+            crate::ActorEffectKey::Replies,
+            crate::ActorEffectKey::Watches,
+        ];
+        let supported = effects.map(exomonad_tool::ToolEffectKey::Actor);
         let (recipe, resolved) = selected
-            .installer_recipe(&crate::CheckpointSourceLayer::default(), &[], &[])
+            .installer_recipe(
+                &crate::CheckpointSourceLayer::default(),
+                &effects,
+                &supported,
+            )
             .unwrap();
         assert_eq!(resolved.entry.as_deref(), Some("PrivatePolicy.agentSpec"));
         assert_eq!(recipe.entry, "PrivatePolicy.agentSpec");
@@ -12275,6 +12293,9 @@ pub(crate) mod request_tests {
         );
         assert!(installer.contains("import qualified PrivatePolicy"));
         assert!(installer.contains("import qualified Tidepool.Agent.Contract"));
+        assert!(installer.contains("import qualified Tidepool.Actors.Exomonad"));
+        assert!(installer.contains("Tidepool.Actors.Exomonad.Replies"));
+        assert!(installer.contains("Tidepool.Actors.Exomonad.Watches"));
         assert!(installer.contains("PrivatePolicy.agentSpec"));
         assert!(installer.contains("import qualified PublicNotebook"));
     }
