@@ -242,7 +242,7 @@ def analyze(events):
                          'transaction': row.get('transaction'), 'start_row': index,
                          'terminal_rows': [], 'service_ms': None, 'phases_ms': {},
                          'timing_details': [],
-                         'legacy_counts': {}, 'legacy_compile_summaries': [],
+                         'legacy_counts': {}, 'legacy_compile_summaries': [], 'legacy_observations': [],
                          'events': [], 'stages': {}, 'parse_problems': []}
     for index, row in enumerate(normalized):
         key = identity(row)
@@ -253,13 +253,16 @@ def analyze(events):
         is_reuse = line.startswith(PREFIX)
         detail = parse_timing_detail(line)
         is_task_detail = detail is not None
+        phase = re.fullmatch(r'tidepool-timing phase=([a-zA-Z0-9_]+) ms=([0-9]+)', line)
+        count = re.fullmatch(r'tidepool-count name=([a-zA-Z0-9_.]+) count=([0-9]+)(?: count_ns=[0-9]+)?', line)
+        is_legacy = phase is not None or count is not None or line.startswith('tidepool-compile-summary ')
         if not request:
-            if is_reuse or is_task_detail:
+            if is_reuse or is_task_detail or is_legacy:
                 unlinked.append({'row': index, 'line': line, 'envelope': row})
                 problems.append(f'row {index}: diagnostic event lacks exact request linkage')
             continue
         if row.get('compile_request') != request['compile_request']:
-            if is_reuse or is_task_detail or row.get('message', '').startswith('compiler request '):
+            if is_reuse or is_task_detail or is_legacy or row.get('message', '').startswith('compiler request '):
                 problems.append(f'row {index}: request digest conflicts with physical invocation')
                 request['parse_problems'].append(f'row {index}: request digest conflicts with physical invocation')
             continue
@@ -269,14 +272,14 @@ def analyze(events):
             request['service_ms'] = row.get('elapsed_ms')
             request['exit_code'] = row.get('exit_code')
             request['terminal_message'] = row['message']
-        phase = re.fullmatch(r'tidepool-timing phase=([a-zA-Z0-9_]+) ms=([0-9]+)', line)
         if phase:
-            request['phases_ms'].setdefault(phase[1], []).append(int(phase[2]))
+            request['legacy_observations'].append({'row': index, 'line': line,
+                                                  'kind': 'phase', 'name': phase[1], 'value': int(phase[2])})
         if detail is not None:
             request['timing_details'].append({'row': index, 'line': line, 'parsed': detail})
-        count = re.fullmatch(r'tidepool-count name=([a-zA-Z0-9_.]+) count=([0-9]+)(?: count_ns=[0-9]+)?', line)
         if count:
-            request['legacy_counts'][count[1]] = request['legacy_counts'].get(count[1], 0) + int(count[2])
+            request['legacy_observations'].append({'row': index, 'line': line,
+                                                  'kind': 'count', 'name': count[1], 'value': int(count[2])})
         if line.startswith('tidepool-compile-summary '):
             request['legacy_compile_summaries'].append({
                 'row': index, 'line': line,
@@ -304,6 +307,22 @@ def analyze(events):
         elif (request.get('terminal_message') != 'compiler request finished'
                 or type(request.get('exit_code')) is not int or request['exit_code'] != 0):
             request_problems.append('request did not finish successfully')
+        legacy_problems = []
+        for observation in request['legacy_observations'] + request['legacy_compile_summaries']:
+            bounded = (len(terminals) == 1 and request['start_row'] < observation['row'] < terminals[0])
+            observation['boundary_status'] = 'observed' if bounded else 'UNKNOWN'
+            if not bounded:
+                legacy_problems.append(f"row {observation['row']}: legacy diagnostic outside request boundaries")
+        request['legacy_status'] = 'UNKNOWN'
+        if request['legacy_observations'] and not legacy_problems and not request_problems:
+            request['legacy_status'] = 'observed'
+            for observation in request['legacy_observations']:
+                name, value = observation['name'], observation['value']
+                if observation['kind'] == 'phase':
+                    request['phases_ms'].setdefault(name, []).append(value)
+                else:
+                    request['legacy_counts'][name] = request['legacy_counts'].get(name, 0) + value
+        request_problems.extend(legacy_problems)
         for detail in request['timing_details']:
             if detail['row'] <= request['start_row']:
                 detail['_boundary_problem'] = 'task timing detail outside request boundaries'

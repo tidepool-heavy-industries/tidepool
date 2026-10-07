@@ -129,6 +129,12 @@ from those cycle views. Missing, duplicate or nonfinal stage completion is
 qualify a frontend work total, even if an earlier cycle completed. Successful
 output alone supplies no reuse evidence. Capture truncation and recovery errors
 remain report errors alongside any individually completed requests.
+Legacy count and flat-timer aggregates require one successful request terminal
+and diagnostic rows strictly between the unique start and that terminal. Before
+start, after terminal, missing-terminal and duplicate-terminal histories leave
+these quantities unknown. The shared reuse report retains indexed raw legacy
+observations and their boundary status; it does not present an incomplete
+subtotal as a full request count.
 
 `source_frontend_work_items` counts actual completed stage work items, not a
 whole-request cache status. `activation_preview_frontends` is a separate
@@ -144,7 +150,10 @@ never equate selected executable owners with linked or demanded bytecode.
 Each request lists completed resource spans with their parent, monotonic
 boundaries and available process CPU, RTS allocation and GC counters. It does
 not add child counters to parent counters or manufacture request resource
-totals. Missing RTS fields are unknown; allocation counters can lag until a GC
+totals. Explicit `unavailable` RTS counters and GC gauges become null in JSON
+and `UNKNOWN` in the readable counter view while available wall/CPU measurements
+are retained. Required timing fields still reject nonnumeric values.
+Missing RTS fields are unknown; allocation counters can lag until a GC
 accounting boundary. Request RSS observations select worker samples inside the
 union of its completed resource spans, count each sample once and explicitly
 describe that scope. Their sampled peak is not the full request peak, retained

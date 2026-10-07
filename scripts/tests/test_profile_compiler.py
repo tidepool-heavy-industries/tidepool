@@ -412,6 +412,69 @@ class RequestAccountingTests(unittest.TestCase):
         self.assertEqual(report["requests"][0]["status"], "observed")
         self.assertTrue(any("capture/recovery incomplete" in problem for problem in report["problems"]))
 
+    def test_selected_activation_and_reconstruction_totals_require_enclosing_boundaries(self):
+        lines = ["tidepool-count name=activation_preview_frontends count=9",
+                 "tidepool-count name=exact_execution_original_load_owners count=9",
+                 "tidepool-timing phase=retained_finalized_bytecode ms=2"]
+        for placement in ("before", "after", "missing_terminal", "duplicate_terminal"):
+            with self.subTest(placement=placement):
+                rows = self.history([self.event(), self.event("complete")])
+                diagnostics = [{"fields": {"line": line}, "span": self.span()} for line in lines]
+                if placement == "before":
+                    rows[0:0] = diagnostics
+                elif placement == "after":
+                    rows.extend(diagnostics)
+                else:
+                    rows[1:1] = diagnostics
+                    if placement == "missing_terminal":
+                        rows.pop()
+                    else:
+                        rows.append(rows[-1])
+                report = self.analyze(rows)
+                request = report["requests"][0]
+                self.assertEqual(report["status"], "incomplete")
+                self.assertEqual(request["legacy_status"], "UNKNOWN")
+                self.assertIsNone(request["activation_preview_frontends"])
+                self.assertIsNone(request["bytecode"]["selected"])
+                self.assertIsNone(request["bytecode"]["reconstructed"])
+
+    def test_valid_interleaved_legacy_totals_remain_per_physical_request(self):
+        first = self.history([self.event(cycle=1), self.event("complete", cycle=1)])
+        second = self.history([self.event(cycle=2), self.event("complete", cycle=2)], ordinal=2)
+        one = {"fields": {"line": "tidepool-count name=activation_preview_frontends count=1"}, "span": self.span()}
+        two = {"fields": {"line": "tidepool-count name=activation_preview_frontends count=2"}, "span": self.span(2)}
+        report = self.analyze([first[0], second[0], first[1], second[1], one, two,
+                               first[2], second[2], first[3], second[3]])
+        self.assertEqual(report["status"], "observed")
+        self.assertEqual([request["activation_preview_frontends"] for request in report["requests"]], [1, 2])
+
+    def test_unavailable_rts_preserves_wall_cpu_and_nullable_counter_observations(self):
+        rows = self.history([self.event(), self.event("complete")])
+        detail = ("tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=20 "
+                  "wall_ns=10 cpu_ns=7 rts=unavailable rts_scope=process_delta "
+                  "allocated_bytes=unavailable gc_cpu_ns=unavailable gc_elapsed_ns=unavailable gcs=unavailable "
+                  "major_gcs=unavailable minor_gcs=unavailable last_gc_epoch_before=unavailable "
+                  "last_gc_live_bytes_after=unavailable process_highwater_major_gc_live_bytes=unavailable")
+        rows.insert(1, {"fields": {"line": detail}, "span": self.span()})
+        report = self.analyze(rows)
+        self.assertEqual(report["status"], "observed")
+        resource_span = report["requests"][0]["resource_spans"][0]
+        self.assertEqual(resource_span["wall_ns"], 10)
+        self.assertEqual(resource_span["cpu_ns"], 7)
+        self.assertEqual(resource_span["rts"], "unavailable")
+        for name in ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs", "major_gcs", "minor_gcs"):
+            self.assertIsNone(resource_span[name])
+        human = profile.render_request_accounting(report)
+        self.assertIn("wall_ns=10 cpu_ns=7 allocated_bytes=UNKNOWN gcs=UNKNOWN", human)
+        for required_field in ("start_ns", "end_ns", "wall_ns", "cpu_ns"):
+            with self.subTest(required_field=required_field):
+                invalid = detail.replace(f"{required_field}={resource_span[required_field]}", f"{required_field}=unavailable")
+                bad = self.history([self.event(), self.event("complete")])
+                bad.insert(1, {"fields": {"line": invalid}, "span": self.span()})
+                rejected = self.analyze(bad)
+                self.assertEqual(rejected["status"], "incomplete")
+                self.assertEqual(rejected["requests"][0]["resource_spans"], [])
+
     def test_invalid_or_unenclosed_resource_span_does_not_become_request_measurement(self):
         for line in (
             "tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=20 wall_ns=99",

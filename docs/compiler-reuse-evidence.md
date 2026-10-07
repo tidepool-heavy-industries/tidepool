@@ -83,7 +83,13 @@ The report retains each raw parsed event and source row, per-request stage count
 accounted bytes, reasons, purpose/cycle, service time, admission queue time and
 flat phase totals. Input trace path and SHA bind retained raw details. Legacy
 counts and compile summaries remain diagnostic data, never substitutes for a
-completed stage. Timers lacking interval boundaries (including legacy lowering)
+completed stage. Indexed `legacy_observations` retain count and flat-timer rows;
+`boundary_status` qualifies each against the request's start and sole terminal.
+`legacy_status` qualifies aggregates only for one successful request with no
+invalid legacy boundary observations. Missing, duplicate, pre-start or
+post-terminal boundaries leave aggregates empty/unknown, including when a
+valid earlier observation would otherwise supply a misleading partial subtotal.
+Timers lacking interval boundaries (including legacy lowering)
 are preserved as nonexclusive totals; do not sum overlapping phases. Queue time
 belongs to admission and is not additive across requests sharing a transaction.
 The current `lowering` owner times `hscDesugar` plus `hscSimplify`; it is not

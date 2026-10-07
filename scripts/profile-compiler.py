@@ -35,8 +35,11 @@ CGROUP_FILES = ("cpu.stat", "memory.events", "memory.current", "memory.max", "me
 IDENTITY_FIELDS = ("compile_request", "worker_pid", "run_id", "daemon_epoch", "admission_id",
                    "request_ordinal", "served", "transaction", "transport", "daemon_pid", "worker")
 NUMERIC_IDENTITY_FIELDS = {"worker_pid", "admission_id", "request_ordinal", "served", "daemon_pid", "worker"}
-NUMERIC_DETAIL_FIELDS = {"ms", "start_ns", "end_ns", "wall_ns", "cpu_ns", "allocated_bytes",
-                         "gc_cpu_ns", "gc_elapsed_ns", "gcs"}
+RTS_DETAIL_FIELDS = {"allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs", "major_gcs", "minor_gcs",
+                     "process_highwater_major_gc_live_bytes", "process_highwater_rts_mem_in_use_bytes"} | {
+                         f"{field}_{point}" for field in ("last_gc_epoch", "last_gc_gen", "last_gc_live_bytes",
+                                                          "last_gc_mem_in_use_bytes") for point in ("before", "after")}
+NUMERIC_DETAIL_FIELDS = {"ms", "start_ns", "end_ns", "wall_ns", "cpu_ns"} | RTS_DETAIL_FIELDS
 REQUEST_MESSAGES = {"compiler request started", "compiler request finished",
                     "compiler request failed", "compiler request abandoned by client"}
 REUSE_SPEC = importlib.util.spec_from_file_location(
@@ -356,7 +359,8 @@ def parsed_detail_rows(events):
         identity["diagnostic_row"] = index
         if "tidepool-timing-detail " in line:
             fields = dict(re.findall(r"(\w+)=([^\s]+)", line))
-            if any(not re.fullmatch(r"\d+", fields[key]) for key in NUMERIC_DETAIL_FIELDS & fields.keys()):
+            if any(not re.fullmatch(r"\d+", fields[key]) and not (key in RTS_DETAIL_FIELDS and fields[key] == "unavailable")
+                   for key in NUMERIC_DETAIL_FIELDS & fields.keys()):
                 invalid += 1
                 continue
             if "start_ns" in fields and "end_ns" in fields:
@@ -366,6 +370,9 @@ def parsed_detail_rows(events):
                 if "wall_ns" in fields and int(fields["wall_ns"]) != int(fields["end_ns"]) - int(fields["start_ns"]):
                     invalid += 1
                     continue
+                for key in RTS_DETAIL_FIELDS & fields.keys():
+                    if fields[key] == "unavailable":
+                        fields[key] = None
                 rows.append({**fields, "trace": identity})
     return rows, invalid
 
@@ -411,7 +418,7 @@ def request_accounting(path, worker_pid, rss_rows, log_complete=True):
             resource_problems.append("resource spans lack one enclosing request boundary")
             problems.append(f"{key}: {resource_problems[0]}")
         spans = bounded_spans
-        resources = [{**{field: int(value) if field in NUMERIC_DETAIL_FIELDS else value
+        resources = [{**{field: int(value) if field in NUMERIC_DETAIL_FIELDS and value is not None else value
                          for field, value in span.items() if field != "trace"},
                       "scope": "process counter delta over completed span; nested spans are not additive"}
                      for span in spans]
@@ -432,7 +439,7 @@ def request_accounting(path, worker_pid, rss_rows, log_complete=True):
             "scope": "selected counts describe executable requirements/owners, reconstruction counts completed operations; actual linkage has no owning event"}
         requests.append({key: request[key] for key in (
             "identity", "compile_request", "transaction", "status", "service_ms", "admission_queue_ms",
-            "cycles", "cycle_stages", "stages", "phases_ms", "problems")}
+            "cycles", "cycle_stages", "stages", "phases_ms", "legacy_status", "problems")}
             | {"terminal_message": request.get("terminal_message"), "exit_code": request.get("exit_code"),
                "source_frontend_work_items": frontend["counts"].get("work", 0)
                    if frontend["status"] == "observed" and request["status"] == "observed" else None,
@@ -475,7 +482,7 @@ def render_request_accounting(report):
                   f"  Bytecode reconstruction observations: {json.dumps(bytecode['reconstructed']) if bytecode['reconstructed'] is not None else 'UNKNOWN'}",
                   "  Actually linked bytecode: UNKNOWN (no owning event)"]
         for span in request["resource_spans"]:
-            metrics = " ".join(f"{field}={span.get(field, 'UNKNOWN')}" for field in (
+            metrics = " ".join(f"{field}={span[field] if span.get(field) is not None else 'UNKNOWN'}" for field in (
                 "wall_ns", "cpu_ns", "allocated_bytes", "gcs", "gc_cpu_ns", "gc_elapsed_ns"))
             owner_scope = f" owner={span['owner_unit']}/{span['owner_module']}" if span.get("owner_unit") and span.get("owner_module") else ""
             lines.append(f"  Resource span parent={span['parent']} phase={span['phase']}{owner_scope} "

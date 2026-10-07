@@ -105,6 +105,42 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(request['cycle_stages'][1]['stages']['source_frontend']['status'], 'UNKNOWN')
         self.assertIsNone(request['cycle_stages'][1]['stages']['source_frontend']['counts'])
 
+    def test_legacy_diagnostics_before_start_or_after_terminal_are_unqualified(self):
+        for line in ('tidepool-count name=activation_preview_frontends count=9',
+                     'tidepool-count name=exact_execution_original_load_owners count=9',
+                     'tidepool-timing phase=retained_finalized_bytecode ms=2'):
+            for position in ('before', 'after'):
+                with self.subTest(line=line, position=position):
+                    rows = trace(completed([packet()]))
+                    diagnostic = {'fields': {'line': line}, 'span': rows[0]['span']}
+                    rows.insert(0 if position == 'before' else len(rows), diagnostic)
+                    report = REPORT.analyze(rows)
+                    request = report['requests'][0]
+                    self.assertEqual(report['status'], 'incomplete')
+                    self.assertEqual(request['legacy_status'], 'UNKNOWN')
+                    self.assertEqual(request['legacy_counts'], {})
+                    self.assertEqual(request['phases_ms'], {})
+                    self.assertEqual(request['legacy_observations'][0]['boundary_status'], 'UNKNOWN')
+                    self.assertTrue(any('legacy diagnostic outside request boundaries' in problem
+                                        for problem in request['problems']))
+
+    def test_legacy_totals_need_one_terminal_and_do_not_hide_partial_subtotals(self):
+        for terminal in ('missing', 'duplicate', 'after'):
+            with self.subTest(terminal=terminal):
+                rows = trace(completed([packet()]))
+                diagnostic = {'fields': {'line': 'tidepool-count name=activation_preview_frontends count=1'}, 'span': rows[0]['span']}
+                rows.insert(1, diagnostic)
+                if terminal == 'missing':
+                    rows.pop()
+                elif terminal == 'duplicate':
+                    rows.append(rows[-1])
+                else:
+                    rows.append(diagnostic)
+                request = REPORT.analyze(rows)['requests'][0]
+                self.assertEqual(request['legacy_status'], 'UNKNOWN')
+                self.assertEqual(request['legacy_counts'], {})
+                self.assertTrue(request['legacy_observations'])
+
     def test_checked_then_native_cycle_preserves_actual_work(self):
         stages = ('prepared_body', 'site_witness', 'original_recovery', 'raw_projection')
         checked = [packet('complete', items=0)]
