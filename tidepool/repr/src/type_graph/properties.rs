@@ -31,6 +31,7 @@ struct Model {
     edges: Vec<(usize, usize, TypeEdge)>,
     inventory: Vec<ConstructorDecl>,
     root: usize,
+    roots: Vec<usize>,
     declaration: usize,
     argument: usize,
 }
@@ -156,6 +157,7 @@ fn build(families: &[Family]) -> Model {
         edges: Vec::new(),
         inventory: Vec::new(),
         root: 0,
+        roots: Vec::new(),
         declaration: 0,
         argument: 0,
     };
@@ -272,6 +274,7 @@ fn build(families: &[Family]) -> Model {
         binders: Vec::new(),
         rendered: "generated closed data application".into(),
     });
+    model.roots.push(model.root);
     let body = model.node(TypeNode::NominalApplication);
     model.edge(model.root, body, TypeEdge::Body);
     model.edge(body, declarations[0], TypeEdge::Head);
@@ -321,6 +324,7 @@ fn remap(model: &Model, seed: u64) -> Model {
     permute(&mut changed.edges, seed.rotate_left(17));
     changed.inventory.reverse();
     changed.root = positions[model.root];
+    changed.roots = model.roots.iter().map(|&root| positions[root]).collect();
     changed.declaration = positions[model.declaration];
     changed.argument = positions[model.argument];
     changed
@@ -356,6 +360,7 @@ fn copy_expressions(model: &Model) -> Model {
         }
     }
     result.root = map[model.root];
+    result.roots = model.roots.iter().map(|&root| map[root]).collect();
     result.declaration = map[model.declaration];
     // This variant is only an identity comparison target, not a mutation input.
     result.argument = usize::MAX;
@@ -417,6 +422,100 @@ proptest! {
         let c = copied.publish();
         prop_assert!(a.rooted_identity_eq(TypeNodeId::new(first.root), &c, TypeNodeId::new(copied.root), &mut TypeWorkBudget::new(1_000_000))?);
         prop_assert!(a.declaration_identity_eq(TypeNodeId::new(first.declaration), &c, TypeNodeId::new(copied.declaration), &mut TypeWorkBudget::new(1_000_000))?);
+    }
+
+    #[test]
+    fn shared_body_roots_match_relation_and_cursor_instantiation(
+        families in cases(), seed in any::<u64>(),
+    ) {
+        let mut families = families;
+        if families[0].constructors[0].is_empty() {
+            families[0].constructors[0].push(0);
+        }
+        let mut model = build(&families);
+        let Some(body) = model.edges.iter().find_map(|&(source, target, role)| {
+            (source == model.root && role == TypeEdge::Body).then_some(target)
+        }) else {
+            return Err(TestCaseError::fail("constructed root must have one body"));
+        };
+        let second_root = model.node(TypeNode::Root {
+            domain: RootDomain::Closed,
+            binders: Vec::new(),
+            rendered: "second diagnostic label for shared body".into(),
+        });
+        model.edge(second_root, body, TypeEdge::Body);
+        model.roots.push(second_root);
+
+        let reordered = remap(&model, seed);
+        let expected = relation(&model, &reordered);
+        let first = Arc::new(model.publish());
+        let second = Arc::new(reordered.publish());
+        for &first_root in &model.roots {
+            for &second_root in &reordered.roots {
+                let expected_equal = expected[first_root][second_root];
+                prop_assert!(expected_equal, "shared-body roots differ only in diagnostics and node layout");
+                prop_assert_eq!(
+                    first.rooted_identity_eq(
+                        TypeNodeId::new(first_root),
+                        &second,
+                        TypeNodeId::new(second_root),
+                        &mut TypeWorkBudget::new(1_000_000),
+                    )?,
+                    expected_equal,
+                );
+                prop_assert_eq!(
+                    first.rooted_compatible(
+                        crate::execution_schema::TypeNodeId(first_root as u32),
+                        &second,
+                        crate::execution_schema::TypeNodeId(second_root as u32),
+                        &mut TypeWorkBudget::new(1_000_000),
+                    )?,
+                    expected_equal,
+                );
+            }
+        }
+
+        let primary = first.open_root(
+            crate::execution_schema::TypeNodeId(model.roots[0] as u32),
+            &mut TypeWorkBudget::new(1_000_000),
+        )?;
+        let sibling = first.open_root(
+            crate::execution_schema::TypeNodeId(model.roots[1] as u32),
+            &mut TypeWorkBudget::new(1_000_000),
+        )?;
+        prop_assert_eq!(primary.expression().index(), body);
+        prop_assert_eq!(sibling.expression().index(), body);
+        prop_assert_eq!(primary.rendered(), "generated closed data application");
+        prop_assert_eq!(sibling.rendered(), "second diagnostic label for shared body");
+        prop_assert!(Arc::ptr_eq(primary.owner(), sibling.owner()));
+        let TypeView::Data(primary_data) = primary.view(&mut TypeWorkBudget::new(1_000_000))? else {
+            return Err(TestCaseError::fail("shared saturated body must yield a data view"));
+        };
+        let TypeView::Data(sibling_data) = sibling.view(&mut TypeWorkBudget::new(1_000_000))? else {
+            return Err(TestCaseError::fail("shared saturated body must yield a data view"));
+        };
+        prop_assert_eq!(primary_data.family(), sibling_data.family());
+        prop_assert_eq!(primary_data.argument_count(), sibling_data.argument_count());
+        let constructor = primary_data.constructors().next().unwrap();
+        let primary_fields = primary_data.fields(constructor, &mut TypeWorkBudget::new(1_000_000))?.unwrap();
+        let sibling_fields = sibling_data.fields(constructor, &mut TypeWorkBudget::new(1_000_000))?.unwrap();
+        prop_assert!(!primary_fields.is_empty(), "targeted constructor must exercise a field closure");
+        prop_assert_eq!(primary_fields.len(), sibling_fields.len());
+        for (primary_field, sibling_field) in primary_fields.iter().zip(&sibling_fields) {
+            prop_assert_eq!(primary_field.expression(), sibling_field.expression());
+            prop_assert!(Arc::ptr_eq(primary_field.owner(), sibling_field.owner()));
+            prop_assert_eq!(
+                view_class(&primary_field.view(&mut TypeWorkBudget::new(1_000_000))?),
+                view_class(&sibling_field.view(&mut TypeWorkBudget::new(1_000_000))?),
+            );
+        }
+
+        let mut invalid = model.clone();
+        invalid.edge(second_root, body, TypeEdge::Body);
+        prop_assert_eq!(
+            TypeGraph::validate(invalid.storage(), &invalid.inventory, GraphLimits::default()),
+            Err(TypeGraphError::InvalidCardinality(second_root)),
+        );
     }
 
     #[test]
