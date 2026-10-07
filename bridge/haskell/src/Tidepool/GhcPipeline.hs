@@ -127,10 +127,10 @@ import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (is_cls, is_tys)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
-import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
+import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe, isCoVarType)
 import GHC.Builtin.Names (gHC_PRIM, fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
 import GHC.Builtin.Types (zonkAnyTyCon)
-import GHC.Core.DataCon (dataConOrigArgTys)
+import GHC.Core.DataCon (dataConRepArgTys)
 import GHC.Data.Bag (listToBag)
 import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
@@ -5884,7 +5884,7 @@ stripMonadHead ty =
 -- instantiated at a partially-applied arrow (@data Box f = Box (f Int)@ at
 -- @f = (->) Bool@) reaches 'goT' as one of @Box@'s own outer type
 -- arguments — the CONCRETE @(->) Bool@, not @Box@'s abstract, unsubstituted
--- field declaration @f Int@ (which 'dataConOrigArgTys' can never resolve to
+-- field declaration @f Int@ (which 'dataConRepArgTys' can never resolve to
 -- a function regardless of what @f@ is instantiated to, and correctly so —
 -- it is genuinely opaque without that instantiation). A SATURATED arrow
 -- always normalizes to GHC's own @FunTy@ sugar (an invariant GHC itself
@@ -5896,12 +5896,19 @@ stripMonadHead ty =
 -- 'False', misclassifying the whole @Box@ value as Tier0 and crashing the
 -- same deep-force this function exists to prevent.
 isClosureType :: Type -> Bool
-isClosureType ty0 =
-  let (_, _, body) = tcSplitSigmaTy ty0
-  in goT emptyUniqSet body
+isClosureType = goT emptyUniqSet
   where
     goT :: UniqSet TyCon -> Type -> Bool
-    goT visited ty
+    goT visited ty =
+      let (_, constraints, body) = tcSplitSigmaTy ty
+      -- Class dictionaries are value arguments even when the result is a
+      -- scalar (@forall a. Num a => a@). Type binders and primitive equality
+      -- evidence erase; they alone do not make a runtime closure. Inspect
+      -- nested sigma types too, including polymorphic constructor fields.
+      in any (not . isCoVarType) constraints || goBody visited body
+
+    goBody :: UniqSet TyCon -> Type -> Bool
+    goBody visited ty
       | Just{} <- splitFunTy_maybe ty = True
       | Just (tc, tyArgs) <- splitTyConApp_maybe ty = any (goT visited) tyArgs || goTc visited tc
       | otherwise = False
@@ -5915,9 +5922,12 @@ isClosureType ty0 =
               newtypeHit = case unwrapNewTyCon_maybe tc of
                 Just (_tvs, reprTy, _coax) -> goT visited' reprTy
                 Nothing -> False
+              -- The worker fields include stored constructor dictionaries;
+              -- source argument types omit them. Primitive coercion evidence
+              -- has zero runtime width and does not need opaque retention.
               fieldHit = case tyConDataCons_maybe tc of
-                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> goT visited' ft)
-                                             (dataConOrigArgTys dc)) dcs
+                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> not (isCoVarType ft) && goT visited' ft)
+                                             (dataConRepArgTys dc)) dcs
                 Nothing -> False
           in newtypeHit || fieldHit
 
