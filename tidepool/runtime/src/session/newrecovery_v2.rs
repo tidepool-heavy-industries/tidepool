@@ -2875,18 +2875,18 @@ mod tests {
             "recovery node 1 has a value interface requirement without its direct artifact edge"
         );
         let mut native_id_orders = [false; 2];
-        for version in 0..=u8::MAX {
+        // These product digests place the fixture's native descriptor on each
+        // side of its unchanged canonical interface descriptor.
+        for (product_digest, native_after_canonical) in [(0, false), (1, true)] {
             let RecoveryArtifactClosure::Home(mut native) = home_artifact(&wire).clone() else {
                 unreachable!()
             };
-            native.module_version = [version; 32];
+            native.product_sha256 = [product_digest; 32];
             let native = RecoveryArtifactClosure::Home(native);
             let native_id = native.artifact_id();
             assert_ne!(native_id, canonical_id);
-            let order = usize::from(native_id > canonical_id);
-            if native_id_orders[order] {
-                continue;
-            }
+            assert_eq!(native_id > canonical_id, native_after_canonical);
+            let order = usize::from(native_after_canonical);
             let mut ordered = wire.clone();
             *home_artifact_mut(&mut ordered) = native;
             for node in &mut ordered.nodes {
@@ -2913,9 +2913,6 @@ mod tests {
             ordered.seal().unwrap();
             snapshot(&ordered).validate().unwrap();
             native_id_orders[order] = true;
-            if native_id_orders == [true; 2] {
-                break;
-            }
         }
         assert_eq!(
             native_id_orders, [true; 2],
