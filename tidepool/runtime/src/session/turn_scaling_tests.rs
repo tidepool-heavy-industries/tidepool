@@ -876,6 +876,75 @@ pub(super) fn assert_compiler_work(
             count,
             "each item must have its own actual entry"
         );
+        for (index, item) in program.items().iter().enumerate() {
+            let native = item.native().unwrap();
+            let target = native.target_owned();
+            let dependencies = target
+                .globals()
+                .iter()
+                .filter(|global| global.required_generation.is_some())
+                .collect::<Vec<_>>();
+            let prior_captures = program.items()[..index]
+                .iter()
+                .flat_map(|prior| {
+                    let DecodedTurnOut::Bind { bound, .. } =
+                        decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
+                    else {
+                        panic!("the count gate's prior action must issue actual bindings");
+                    };
+                    let prior_native = prior.native().unwrap();
+                    let unit = prior_native.typed_entry().unwrap().entry().unit.clone();
+                    bound.into_iter().map(move |binder| {
+                        (
+                            unit.clone(),
+                            binder.module,
+                            binder.name,
+                            prior_native.generation(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                dependencies.iter().all(|global| {
+                    prior_captures
+                        .iter()
+                        .any(|(unit, module, name, generation)| {
+                            global.identity.unit == *unit
+                                && global.identity.module == *module
+                                && global.identity.occurrence == *name
+                                && global.required_generation == Some(*generation)
+                        })
+                }),
+                "the actual item target must demand only exact captures from its prior plan prefix"
+            );
+            if index == 0 {
+                assert!(
+                    dependencies.is_empty(),
+                    "the first action has no produced inputs"
+                );
+            } else {
+                let prior = &program.items()[index - 1];
+                let DecodedTurnOut::Bind { bound, .. } =
+                    decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
+                else {
+                    panic!("the count gate's prior action must issue an actual binding");
+                };
+                assert_eq!(bound.len(), 1);
+                let matching = dependencies
+                    .iter()
+                    .filter(|global| {
+                        global.identity.unit
+                            == prior.native().unwrap().typed_entry().unwrap().entry().unit
+                            && global.identity.module == bound[0].module
+                            && global.identity.occurrence == bound[0].name
+                            && global.required_generation
+                                == Some(prior.native().unwrap().generation())
+                    })
+                    .count();
+                assert_eq!(matching, 1,
+                    "the actual item root must retain the exact prior compiler-issued capture generation");
+            }
+        }
     }
 
     let mut owners = std::collections::BTreeMap::new();

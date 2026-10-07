@@ -78,7 +78,7 @@ import Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCache
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
-  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, selectPreparedOriginalSessionOutputs
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
@@ -162,7 +162,8 @@ import Tidepool.SessionArtifacts
   , emitHostBindingInterface
   , prepareTypedSegmentSessionBindings
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals, typedSegmentSessionInterfaces
-  , typedSegmentSessionBinders, typedSegmentSessionBindingRepresentations, withTypedSegmentSessionPublication )
+  , typedSegmentSessionBinders, typedSegmentSessionRetainedGlobals, typedSegmentSessionInterfacesThrough
+  , typedSegmentSessionBindingRepresentations, withTypedSegmentSessionPublication )
 import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder)
 import Tidepool.Timing (readTimingEnabled, timePhase, emitCount)
@@ -1477,9 +1478,15 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                   (nominalHeadsOfType (typedObservationValueType observation))
                 | item <- items, Just observation <- [typedItemObservation item]]
           originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
+          let producedGenerations = Map.fromList
+                [(preparedRootIdentity global,generation)
+                | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
+          unless (Map.null (Map.intersection producedGenerations (programRetained state)))
+            (fail "typed segment output collides with a retained generation")
+          let projectionGenerations = Map.union producedGenerations (programRetained state)
           (artifacts,productContext) <- timePhase timing "cell_program_segment_project" $
             prepareArtifacts originalInterfaces directory caches prepared targets (standardAuxiliaryRoots binds)
-              (programRetained state) (typedSegmentSessionBindingRepresentations batch)
+              projectionGenerations (typedSegmentSessionBindingRepresentations batch)
           unless (length artifacts == length items) (fail "typed segment projection lost an entry")
           emitted <- forM (zip3 items artifacts (cellPlanItems finalized)) $ \(item,artifact,sourceItem) -> do
             let itemPlan = typedItemPlan item
@@ -1507,7 +1514,10 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             writePreparedSidecars InlineYieldSites itemDirectory binds (prTyCons result)
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             writePreparedArtifacts itemDirectory [outputArtifact]
-            certified <- writeRequestProducts localArgs originalInterfaces itemDirectory prepared productContext [outputArtifact]
+            currentProducts <- maybe (fail "typed item has no admitted original inventory") pure productContext
+            selectedProducts <- selectPreparedOriginalSessionOutputs originalInterfaces
+              (typedSegmentSessionInterfacesThrough index batch) currentProducts
+            certified <- writeRequestProducts localArgs originalInterfaces itemDirectory prepared (Just selectedProducts) [outputArtifact]
             ordinal <- typedEntryOriginalOrdinal certified (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan

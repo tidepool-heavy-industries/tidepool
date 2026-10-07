@@ -8,6 +8,7 @@ module Tidepool.SessionArtifacts
   , prepareTypedSegmentSessionBindings
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals
   , typedSegmentSessionInterfaces, typedSegmentSessionBinders
+  , typedSegmentSessionRetainedGlobals, typedSegmentSessionInterfacesThrough
   , typedSegmentSessionBindingRepresentations
   , withTypedSegmentSessionPublication
   , emitHostBindingInterface
@@ -141,6 +142,20 @@ typedSegmentSessionEnvironment (PreparedTypedSegmentBindings env _ _) = env
 typedSegmentSessionGlobals :: PreparedTypedSegmentBindings -> [(Id, Id)]
 typedSegmentSessionGlobals (PreparedTypedSegmentBindings _ items _) =
   concat [globals | CapturedTypedItem _ _ _ globals _ <- items]
+
+-- Native projection records these compiler-hydrated capture references as
+-- runtime generations. The batch grants no completed value or source body.
+typedSegmentSessionRetainedGlobals :: PreparedTypedSegmentBindings -> [(Id, Word64)]
+typedSegmentSessionRetainedGlobals (PreparedTypedSegmentBindings _ items _) =
+  [(global,generation)
+  | CapturedTypedItem _ (SessionModule _ (Generation generation)) _ globals _ <- items
+  , (_,global) <- globals]
+
+-- A packet can publish only current/prior outputs from its exact ordered batch;
+-- all binders of the same item/generation stay together.
+typedSegmentSessionInterfacesThrough :: Int -> PreparedTypedSegmentBindings -> [CapturedSessionInterface]
+typedSegmentSessionInterfacesThrough ordinal (PreparedTypedSegmentBindings _ items _) =
+  [snapshot | CapturedTypedItem index _ _ _ snapshot <- items, index <= ordinal]
 
 typedSegmentSessionInterfaces :: PreparedTypedSegmentBindings -> [CapturedSessionInterface]
 typedSegmentSessionInterfaces (PreparedTypedSegmentBindings _ items _) =
