@@ -37,5 +37,5 @@ do
   case (inheritedRefusal, deferredRefusal, result) of
     (Left (UnfoldUncapturedContext _), Left (UnfoldDeferredInvocationOwned _), Right (42, 42)) ->
       error "M2_INTENTIONAL_PARENT_EXECUTION_FAILURE" >> pure True
-    _ -> display False
+    _ -> pure False
 capturedSuffix <- pure (99 :: Int)

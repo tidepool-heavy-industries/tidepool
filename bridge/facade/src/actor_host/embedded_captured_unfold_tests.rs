@@ -1483,9 +1483,11 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .expect("failed creator retains structured publication");
                     assert_eq!(metadata["publication"]["status"], "notPublished");
                     assert_eq!(metadata["publication"]["reason"], "failed");
-                    assert_eq!(metadata["diagnostic"]["class"], "runtime", "{metadata}");
-                    assert_eq!(metadata["diagnostic"]["phase"], "run", "{metadata}");
-                    assert!(failure.to_string().contains(INTENTIONAL_PARENT_FAILURE));
+                    // provider_tool_error starts metadata with the serialized
+                    // FailureEnvelope itself, then adds publication and items.
+                    assert_eq!(metadata["class"], "runtime", "{metadata}");
+                    assert_eq!(metadata["phase"], "run", "{metadata}");
+                    assert!(failure.message().contains(INTENTIONAL_PARENT_FAILURE));
                     assert!(metadata["items"]
                         .as_array()
                         .is_some_and(|items| items.iter().any(|item| item["operations"]

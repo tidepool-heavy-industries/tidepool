@@ -1028,18 +1028,30 @@ mod tests {
         });
         assert!(require_ghc_compile_rejection(&response, &["Bool", "Int"]).is_ok());
 
-        let wrong_cause = serde_json::json!({
-            "items": [{
-                "status": "rejected",
-                "failureLayer": "install",
-                "diagnostics": [{
-                    "severity": "error",
-                    "location": {"kind": "foreign", "file": "Generated.hs"},
-                    "message": "Couldn't match type Bool with Int"
-                }]
-            }]
-        });
-        assert!(require_ghc_compile_rejection(&wrong_cause, &["Bool", "Int"]).is_err());
+        let mut wrong_layer = response.clone();
+        wrong_layer["items"][0]["failureLayer"] = serde_json::json!("install");
+        assert!(require_ghc_compile_rejection(&wrong_layer, &["Bool", "Int"]).is_err());
+
+        let mut wrong_location = response.clone();
+        wrong_location["items"][0]["diagnostics"][0]["location"]["kind"] =
+            serde_json::json!("foreign");
+        assert!(require_ghc_compile_rejection(&wrong_location, &["Bool", "Int"]).is_err());
+
+        let mut wrong_severity = response.clone();
+        wrong_severity["items"][0]["diagnostics"][0]["severity"] = serde_json::json!("warning");
+        assert!(require_ghc_compile_rejection(&wrong_severity, &["Bool", "Int"]).is_err());
+
+        let mut wrong_message = response.clone();
+        wrong_message["items"][0]["diagnostics"][0]["message"] =
+            serde_json::json!("Couldn't match type Char with Word");
+        assert!(require_ghc_compile_rejection(&wrong_message, &["Bool", "Int"]).is_err());
+
+        let mut missing_diagnostics = response;
+        missing_diagnostics["items"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("diagnostics");
+        assert!(require_ghc_compile_rejection(&missing_diagnostics, &["Bool", "Int"]).is_err());
     }
     use harness::transport::{ResponsesRequest, TransportError};
 
