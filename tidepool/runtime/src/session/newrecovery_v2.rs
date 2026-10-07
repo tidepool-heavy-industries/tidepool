@@ -2071,10 +2071,13 @@ mod tests {
             for node in &mut wire.nodes {
                 if node.artifact_refs.contains(&native) {
                     node.artifact_refs.push(canonical);
-                    node.compiler_roles.push(tidepool_toolchain::artifact_inventory::CompilerInputRole::ReusableOriginal {
+                    let role = tidepool_toolchain::artifact_inventory::CompilerInputRole::ReusableOriginal {
                         interface: canonical,
                         original: native,
-                    });
+                    };
+                    if !node.compiler_roles.contains(&role) {
+                        node.compiler_roles.push(role);
+                    }
                 }
             }
         }
@@ -2890,6 +2893,15 @@ mod tests {
                 for id in &mut node.artifact_refs {
                     if *id == home_id {
                         *id = native_id;
+                    }
+                }
+                for role in &mut node.compiler_roles {
+                    if let tidepool_toolchain::artifact_inventory::CompilerInputRole::ReusableOriginal {
+                        original, ..
+                    } = role {
+                        if *original == home_id {
+                            *original = native_id;
+                        }
                     }
                 }
             }
@@ -4025,6 +4037,11 @@ mod tests {
         let product_path = home.product_path.clone();
         let canonical = RecoveryArtifactClosure::ModuleInterface(interface.clone());
         wire.nodes[0].artifact_refs = vec![canonical.artifact_id()];
+        wire.nodes[0].compiler_roles = vec![
+            tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                interface: canonical.artifact_id(),
+            },
+        ];
         wire.nodes[0].native_groups.clear();
         wire.artifacts = vec![canonical];
         wire.artifact_dependencies.clear();
@@ -4080,8 +4097,15 @@ mod tests {
             safe.nodes[0].artifact_refs = vec![original.artifact_id()];
             safe.artifacts = vec![original.clone()];
             safe.artifact_dependencies.clear();
+            safe.nodes[0].compiler_roles.clear();
             if matches!(original, RecoveryArtifactClosure::Home(_)) {
                 install_fixture_canonical_interfaces(&mut safe);
+            } else {
+                safe.nodes[0].compiler_roles = vec![
+                    tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                        interface: original.artifact_id(),
+                    },
+                ];
             }
             safe.seal().unwrap();
             for (component, path) in original.component_paths() {
@@ -4121,14 +4145,22 @@ mod tests {
                     graph.nodes[0].artifact_refs = vec![changed.artifact_id()];
                     graph.artifacts = vec![changed];
                     graph.artifact_dependencies.clear();
-                    // The safe baseline below proves failure is caused by the
-                    // path; unsafe native rows keep their original companion.
+                    graph.nodes[0].compiler_roles.clear();
+                    // The matching safe baseline proves failure is caused by
+                    // the path; unsafe native rows keep their companion.
                     if matches!(original, RecoveryArtifactClosure::Home(_)) {
                         install_fixture_canonical_interfaces(&mut graph);
+                    } else {
+                        graph.nodes[0].compiler_roles = vec![
+                            tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                                interface: graph.artifacts[0].artifact_id(),
+                            },
+                        ];
                     }
-                    assert!(
-                        graph.seal().is_err(),
-                        "accepted unsafe {component:?} path {unsafe_path:?}"
+                    assert_eq!(
+                        graph.seal().unwrap_err().detail,
+                        "invalid recovery artifact reference",
+                        "unsafe {component:?} path {unsafe_path:?}"
                     );
                 }
             }
@@ -4512,6 +4544,11 @@ mod tests {
         wire.nodes[0].artifact_refs = vec![home_id];
         install_fixture_canonical_interfaces(&mut wire);
         wire.nodes[1].artifact_refs = vec![join_id];
+        wire.nodes[1].compiler_roles = vec![
+            tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                interface: join_id,
+            },
+        ];
         wire.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         wire.artifacts.push(join);
         wire.seal().unwrap();
@@ -4790,6 +4827,7 @@ mod tests {
         graph.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.nodes[1].native_groups = graph.nodes[0].native_groups.clone();
+        graph.nodes[1].compiler_roles = graph.nodes[0].compiler_roles.clone();
         graph.seal().unwrap();
         let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
@@ -4818,6 +4856,7 @@ mod tests {
         graph.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.nodes[1].native_groups = graph.nodes[0].native_groups.clone();
+        graph.nodes[1].compiler_roles = graph.nodes[0].compiler_roles.clone();
         graph.seal().unwrap();
         let manifest_path = dir.path().join("recovery.json");
         match stage_v2(&manifest_path, dir.path(), snapshot(&graph))
