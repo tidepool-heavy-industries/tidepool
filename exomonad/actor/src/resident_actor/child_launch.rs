@@ -6,6 +6,8 @@ use super::*;
 enum ChildPlacementPhase {
     Prepared(crate::ActorPlacement),
     ActorOwned(ActorRef),
+    Reclaiming(crate::ActorPlacement),
+    CleanupRetained(crate::ActorPlacement),
     Released,
 }
 
@@ -49,12 +51,37 @@ impl ChildPlacementCustody {
     fn take_unadmitted(&self) -> Option<crate::ActorPlacement> {
         let mut phase = self.0.lock();
         match *phase {
-            ChildPlacementPhase::Prepared(placement) => {
-                *phase = ChildPlacementPhase::Released;
+            ChildPlacementPhase::Prepared(placement)
+            | ChildPlacementPhase::CleanupRetained(placement) => {
+                *phase = ChildPlacementPhase::Reclaiming(placement);
                 Some(placement)
             }
-            ChildPlacementPhase::ActorOwned(_) | ChildPlacementPhase::Released => None,
+            ChildPlacementPhase::ActorOwned(_)
+            | ChildPlacementPhase::Reclaiming(_)
+            | ChildPlacementPhase::Released => None,
         }
+    }
+    fn finish_reclaim(&self, placement: crate::ActorPlacement, confirmed: bool) {
+        let mut phase = self.0.lock();
+        if *phase == ChildPlacementPhase::Reclaiming(placement) {
+            *phase = if confirmed {
+                ChildPlacementPhase::Released
+            } else {
+                ChildPlacementPhase::CleanupRetained(placement)
+            };
+        }
+    }
+}
+
+struct PlacementReclaimAttempt {
+    custody: ChildPlacementCustody,
+    placement: crate::ActorPlacement,
+    confirmed: bool,
+}
+
+impl Drop for PlacementReclaimAttempt {
+    fn drop(&mut self) {
+        self.custody.finish_reclaim(self.placement, self.confirmed);
     }
 }
 
@@ -68,12 +95,18 @@ where
     O: OutputSink + Sync + 'static,
 {
     if let Some(placement) = custody.take_unadmitted() {
+        let mut attempt = PlacementReclaimAttempt {
+            custody: custody.clone(),
+            placement,
+            confirmed: false,
+        };
         // A dedicated machine belongs to its original startup lease until
         // admission. Its drop removes that machine; shared machines need only
         // this actual lexical scope/realm retired.
         if placement.session == parent_session {
             runner.retire_root_placement(placement).await?;
         }
+        attempt.confirmed = true;
     }
     Ok(())
 }
