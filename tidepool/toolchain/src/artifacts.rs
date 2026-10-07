@@ -2962,7 +2962,7 @@ fn merge_package_closure_with_validation(
     let mut selected = packages.clone();
     if let Some(request) = exact {
         let inherited = certified_products::inherited_package_witnesses_with_validation(
-            &request.compiler_original_products()?,
+            &request.context.recovery_products(),
             validation,
         )
         .map_err(compiler_evidence_failure)?;

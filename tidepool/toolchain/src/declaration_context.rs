@@ -1861,15 +1861,15 @@ impl ExactProductAdmission<'_> {
             }
         }
         self.request.checked_value_imports.validate()?;
+        let retained_interfaces = CompilerInputProjection::from_interface_view(artifacts)?
+            .project_metadata(artifacts.metadata_snapshot())?
+            .entries;
         for (unit, module) in self.request.checked_value_imports.owners() {
             let owner = identity(unit, module);
             if !exact_roots.contains(&owner) || imports.contains_key(&owner) {
                 continue;
             }
-            let retained = CompilerInputProjection::from_interface_view(artifacts)?
-                .project_metadata(artifacts.metadata_snapshot())?
-                .entries;
-            if let Some(entry) = retained.get(&owner) {
+            if let Some(entry) = retained_interfaces.get(&owner) {
                 match &entry.payload {
                     ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
                         if self.request.checked_value_imports.matches_interface(interface) => {
