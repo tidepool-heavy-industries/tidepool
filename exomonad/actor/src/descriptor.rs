@@ -220,9 +220,13 @@ impl ActorDescriptor {
         self.actor_path.as_ref()
     }
 
+    /// Canonical identity is independent of the authored descriptive label.
+    /// An unlabeled actor uses its generated path as a display fallback.
     #[must_use]
     pub fn with_actor_path(mut self, path: tidepool_repr::ActorPath) -> Self {
-        self.label = path.to_string();
+        if self.label.is_empty() {
+            self.label = path.to_string();
+        }
         self.actor_path = Some(path);
         self
     }
@@ -335,6 +339,28 @@ mod tests {
                 resource_scope: tidepool_codegen::suspension::RealmId(1),
             },
         )
+    }
+
+    #[test]
+    fn canonical_path_admission_preserves_authored_labels() {
+        let first_path = tidepool_repr::ActorPath::parse("spawn-first").unwrap();
+        let second_path = tidepool_repr::ActorPath::parse("spawn-second").unwrap();
+        let first = descriptor().with_actor_path(first_path.clone());
+        let second = descriptor().with_actor_path(second_path.clone());
+        assert_eq!(first.label(), "an arbitrary human label");
+        assert_eq!(second.label(), first.label());
+        assert_eq!(first.actor_path(), Some(&first_path));
+        assert_eq!(second.actor_path(), Some(&second_path));
+        assert_ne!(first.actor_path(), second.actor_path());
+    }
+
+    #[test]
+    fn unlabeled_actor_displays_its_canonical_path() {
+        let path = tidepool_repr::ActorPath::parse("spawn-unlabeled").unwrap();
+        let unlabeled =
+            ActorDescriptor::new("", descriptor().placement()).with_actor_path(path.clone());
+        assert_eq!(unlabeled.label(), "spawn-unlabeled");
+        assert_eq!(unlabeled.actor_path(), Some(&path));
     }
 
     #[test]
