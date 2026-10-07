@@ -32,11 +32,12 @@ import GHC.Stg.Syntax (CgStgTopBinding)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Var.Set (IdSet)
-import GHC.Types.Var (isId, isCoVar, varType)
+import GHC.Types.Var (isId, isCoVar, varType, varName)
 import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString)
-import GHC.Tc.Types (tcg_rn_decls, tcg_mod)
+import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env)
+import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
@@ -185,6 +186,14 @@ functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $
       createDirectory path
       pure path
 
+fixtureBindingType :: String -> TcGblEnv -> IO Type
+fixtureBindingType name environment = case
+    [varType identifier | identifier <- typeEnvIds (tcg_type_env environment)
+      , getOccString identifier == name
+      , nameModule_maybe (varName identifier) == Just (tcg_mod environment)] of
+  [ty] -> pure ty
+  _ -> fail ("missing or ambiguous original fixture binding: " ++ name)
+
 -- Exercise the tier issuer and later thin-interface consumer with the real
 -- GHC sigma type, rather than deriving expected tiers from rendered text.
 sigmaValueInterfaceCompilation :: IO ()
@@ -200,12 +209,10 @@ sigmaValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \r
   forM_ [("scalar", True), ("plain", False), ("function", True)
         , ("boxedEquality", True), ("erased", False)
         , ("nested", True), ("nestedErased", False), ("recursive", True)] $ \(name, expected) -> do
-    ty <- maybe (fail ("missing sigma fixture binding: " ++ name)) pure
-      (capturedBindingType name environment)
+    ty <- fixtureBindingType name environment
     assertEqual ("runtime closure classification: " ++ name) expected
       (isClosureType ty)
-  actionType <- maybe (fail "missing monomorphic sigma producer action") pure
-    (capturedBindingType "__result" environment)
+  actionType <- fixtureBindingType "__result" environment
   let (actionBinders, actionPredicates, _) = tcSplitSigmaTy actionType
   assertEqual "producer action has no outer forall" 0 (length actionBinders)
   assertEqual "producer action takes no dictionaries" 0 (length actionPredicates)
@@ -258,8 +265,7 @@ constructorEvidenceClassification = bracket temporary removeDirectoryRecursive $
   prepared <- runPipelineSelected PreparedStg path [root]
   let result = pprPipelineResult prepared
       environment = prTargetTcGblEnv result
-      bindingType name = maybe (fail ("missing constructor evidence fixture binding: " ++ name)) pure
-        (capturedBindingType name environment)
+      bindingType name = fixtureBindingType name environment
       constructorFields ty = case splitTyConApp_maybe ty of
         Just (constructor, _) -> pure (concatMap dataConRepArgTys (tyConDataCons constructor))
         _ -> fail "constructor evidence fixture has no nominal type"

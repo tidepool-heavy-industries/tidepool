@@ -5,7 +5,6 @@ import Control.Monad (forM, forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (isPrefixOf)
 import GHC
-import GHC.Driver.Backend (interpreterBackend)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
 import GHC.Builtin.Types (intTy)
 import GHC.Core.TyCo.Compare (eqType)
