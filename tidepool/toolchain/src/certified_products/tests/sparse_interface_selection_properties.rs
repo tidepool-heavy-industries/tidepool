@@ -5,6 +5,7 @@ use crate::artifact_inventory::{
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{CachedHomeOwner, InventoryOperation, NativeGroupKey};
@@ -18,7 +19,7 @@ struct RoleFacts {
     native_owner: Option<CachedHomeOwner>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 struct Coverage {
     histories: usize,
     reconstructions: usize,
@@ -292,68 +293,94 @@ fn generated_archive_histories_keep_sparse_selection_exact() {
         prop::collection::vec(0u8..16, 0..8),
         prop::collection::vec(0u8..16, 0..8),
     );
-    let mut runner = TestRunner::new(property_config());
-    let mut coverage = Coverage::default();
+    let mut config = proptest::test_runner::contextualize_config(property_config());
+    // Match proptest!'s Cargo source/test identity while preserving Tidepool's
+    // configured persistence and runner controls.
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::generated_archive_histories_keep_sparse_selection_exact"
+    ));
+    let configured_cases = config.cases;
+    let configured_max_shrink_iters = config.max_shrink_iters;
+    let configuration = format!("{config:?}");
+    let mut runner = TestRunner::new(config);
+    let coverage = RefCell::new(Coverage::default());
 
-    runner
-        .run(&history, |(selected, prefix, suffix)| {
-            let issued = issued_projection(&entries, selected);
-            let expected = expected_roles(&entries, selected);
-            let selection = source_selection(&issued, &available);
+    let result = runner.run(&history, |(selected, prefix, suffix)| {
+        let issued = issued_projection(&entries, selected);
+        let expected = expected_roles(&entries, selected);
+        let selection = source_selection(&issued, &available);
 
-            // Keep the sequence valid by always retaining every selected role.
-            // The fixed 0 -> all -> 0 segment embeds unrelated-archive add and
-            // remove transitions in arbitrary prefixes and suffixes.
-            let mut archive_states = prefix;
-            archive_states.extend([0, 15, 0]);
-            archive_states.extend(suffix);
-            let mut previous_extras = None;
-            for raw_archive in archive_states {
-                let archived_interfaces = selected | (raw_archive & 3);
-                let archived_native = raw_archive >> 2;
-                let extras = (archived_interfaces & !selected) | (archived_native << 2);
-                if let Some(previous) = previous_extras {
-                    coverage.extra_additions += (extras & !previous).count_ones() as usize;
-                    coverage.extra_removals += (previous & !extras).count_ones() as usize;
-                }
-                previous_extras = Some(extras);
-                let view = archive_view(
-                    &available,
-                    &entries,
-                    &native_extras,
-                    true,
-                    archived_interfaces,
-                    archived_native,
-                );
-
-                let restored = CompilerInputProjection::restore(&view, &issued.roles())
-                    .map_err(|error| TestCaseError::fail(format!("restore failed: {error:?}")))?;
-                let restored_roles =
-                    observed_roles(&restored, &view).map_err(TestCaseError::fail)?;
-                prop_assert_eq!(restored_roles, expected.clone());
-
-                let reconstructed = selection.compiler_projection(&view).map_err(|error| {
-                    TestCaseError::fail(format!("reconstruction failed: {error:?}"))
-                })?;
-                let actual = observed_roles(&reconstructed, &view).map_err(TestCaseError::fail)?;
-                prop_assert_eq!(actual, expected.clone());
-                let repeated = selection.compiler_projection(&view).map_err(|error| {
-                    TestCaseError::fail(format!("repeat reconstruction failed: {error:?}"))
-                })?;
-                prop_assert_eq!(repeated, reconstructed);
-                coverage.reconstructions += 2;
+        // Keep the sequence valid by always retaining every selected role.
+        // The fixed 0 -> all -> 0 segment embeds unrelated-archive add and
+        // remove transitions in arbitrary prefixes and suffixes.
+        let mut archive_states = prefix;
+        archive_states.extend([0, 15, 0]);
+        archive_states.extend(suffix);
+        let mut previous_extras = None;
+        for raw_archive in archive_states {
+            let archived_interfaces = selected | (raw_archive & 3);
+            let archived_native = raw_archive >> 2;
+            let extras = (archived_interfaces & !selected) | (archived_native << 2);
+            if let Some(previous) = previous_extras {
+                let mut observed = coverage.borrow_mut();
+                observed.extra_additions += (extras & !previous).count_ones() as usize;
+                observed.extra_removals += (previous & !extras).count_ones() as usize;
             }
-            coverage.histories += 1;
-            Ok(())
-        })
-        .unwrap();
+            previous_extras = Some(extras);
+            let view = archive_view(
+                &available,
+                &entries,
+                &native_extras,
+                true,
+                archived_interfaces,
+                archived_native,
+            );
 
-    eprintln!("sparse interface archive history coverage: {coverage:?}");
-    assert!(coverage.histories > 0, "no generated histories executed");
-    assert!(
-        coverage.reconstructions >= coverage.histories * 6,
-        "{coverage:?}"
+            let restored = CompilerInputProjection::restore(&view, &issued.roles())
+                .map_err(|error| TestCaseError::fail(format!("restore failed: {error:?}")))?;
+            let restored_roles = observed_roles(&restored, &view).map_err(TestCaseError::fail)?;
+            prop_assert_eq!(restored_roles, expected.clone());
+
+            let reconstructed = selection.compiler_projection(&view).map_err(|error| {
+                TestCaseError::fail(format!("reconstruction failed: {error:?}"))
+            })?;
+            let actual = observed_roles(&reconstructed, &view).map_err(TestCaseError::fail)?;
+            prop_assert_eq!(actual, expected.clone());
+            let repeated = selection.compiler_projection(&view).map_err(|error| {
+                TestCaseError::fail(format!("repeat reconstruction failed: {error:?}"))
+            })?;
+            prop_assert_eq!(repeated, reconstructed);
+            coverage.borrow_mut().reconstructions += 2;
+        }
+        coverage.borrow_mut().histories += 1;
+        Ok(())
+    });
+
+    // Counts are runner callbacks in this process, including persisted replay
+    // and shrinking; they do not claim fresh case generation. Emit before
+    // propagating a failure so a minimal counterexample retains its coverage.
+    eprintln!(
+        "sparse_interface_archive_campaign={}",
+        serde_json::json!({
+            "configured_cases": configured_cases,
+            "configured_max_shrink_iters": configured_max_shrink_iters,
+            "configuration": configuration,
+            "observation_scope": "runner callbacks in this process, including replay and shrinking",
+            "observed": &*coverage.borrow(),
+        })
     );
-    assert!(coverage.extra_additions > 0, "{coverage:?}");
-    assert!(coverage.extra_removals > 0, "{coverage:?}");
+    if let Err(error) = result {
+        panic!("sparse interface archive property failed: {error}");
+    }
+    let observed = coverage.into_inner();
+    if observed.histories > 0 {
+        assert!(
+            observed.reconstructions >= observed.histories * 6,
+            "{observed:?}"
+        );
+        assert!(observed.extra_additions > 0, "{observed:?}");
+        assert!(observed.extra_removals > 0, "{observed:?}");
+    }
 }
