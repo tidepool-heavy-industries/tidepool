@@ -155,7 +155,6 @@ pub fn agent_inspection() -> Effect {
                         field("rosterCurrentRequests", HsType::list(HsType::Int)),
                         field("rosterQueuedRequests", HsType::list(HsType::Int)),
                         field("rosterBoundWorktree", HsType::maybe(HsType::Text)),
-                        field("rosterForkGroup", HsType::maybe(HsType::Int)),
                         field("rosterHaskellScope", HsType::Int),
                         field("rosterProviderThread", HsType::maybe(HsType::Text)),
                         field("rosterProviderParentThread", HsType::maybe(HsType::Text)),
