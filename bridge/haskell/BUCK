@@ -44,13 +44,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_typed_segment_resume_source",
-    src = "lib/Tidepool/Internal/Resume.hs",
-    mode = "reference",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_host_command_types_source",
     src = "lib/Tidepool/Command/Types.hs",
     mode = "reference",
@@ -632,7 +625,7 @@ tidepool_corpus_test(
 
 filegroup(
     name = "qualification_compiler_inputs",
-    srcs = {"bridge/haskell/" + source: source for source in glob(["BUCK", "*.bzl", "tidepool-extract.cabal", "src/**/*.hs", "app/**/*.hs", "lib/**/*.hs", "actors/**/*.hs", "test*/**/*.hs", "test*/**/*.hs-boot", "test*/**/*.json", "test*/**/*.cbor", "test*/**/*.txt"])},
+    srcs = {"bridge/haskell/" + source: source for source in glob(["BUCK", "*.bzl", "tidepool-extract.cabal", "resume/*.cabal", "resume/src/**/*.hs", "src/**/*.hs", "app/**/*.hs", "lib/**/*.hs", "actors/**/*.hs", "test*/**/*.hs", "test*/**/*.hs-boot", "test*/**/*.json", "test*/**/*.cbor", "test*/**/*.txt"])},
     visibility = ["PUBLIC"],
 )
 
