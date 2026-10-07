@@ -65,8 +65,9 @@ import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Tc.Types (TcGblEnv, tcg_mod, tcg_type_env, tcg_binds, tcg_rn_decls, tcg_ev_binds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Avail (AvailInfo(..), availNames)
-import GHC.Types.Id (Id, idName, idType, isLocalId, mkExportedVanillaId, mkLocalId, setIdType, setIdNotExported, isClassOpId_maybe)
+import GHC.Types.Id (Id, idName, idType, isLocalId, mkExportedVanillaId, mkLocalId, setIdType, setIdExported, setIdNotExported, isClassOpId_maybe)
 import GHC.Core.Class (className)
+import GHC.Core.InstEnv (instanceDFunId)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -456,8 +457,15 @@ installTypedSegmentRoots environment pending guts = do
       privateTypes = filter synthetic (mg_tcs guts)
       mentionsPrivate ty = any (`elementOfUniqSet` tyConsOfType ty) privateTypes
       roots = typedSegmentRoots segment
-      unexport (NonRec identifier rhs) = NonRec (setIdNotExported identifier) rhs
-      unexport (Rec members) = Rec [(setIdNotExported identifier,rhs) | (identifier,rhs) <- members]
+      metadataIds = map instanceDFunId (mg_insts guts)
+      metadataRoots = foldl' extendVarSet emptyVarSet metadataIds
+      -- Tidy resolves every retained instance through an external final Id.
+      -- These actual metadata roots are retained without adding source exports.
+      retain identifier
+        | identifier `elemVarSet` metadataRoots = setIdExported identifier
+        | otherwise = setIdNotExported identifier
+      unexport (NonRec identifier rhs) = NonRec (retain identifier) rhs
+      unexport (Rec members) = Rec [(retain identifier,rhs) | (identifier,rhs) <- members]
       bindings = map unexport (mg_binds guts) ++ roots
       identifiers = concatMap bindersOf bindings
   forM_ (typedSegmentItems segment) $ \item ->
@@ -467,6 +475,9 @@ installTypedSegmentRoots environment pending guts = do
   graph <- foldM addDefinition emptyVarEnv
     [(identifier,index,binding) | (index,binding) <- zip [0 :: Int ..] bindings
       , identifier <- bindersOf binding]
+  forM_ metadataIds $ \identifier -> case lookupVarEnv graph identifier of
+    Just (actual,_,_) | eqType (idType actual) (idType identifier) -> pure ()
+    _ -> throwIO (OpenItemCore (-1) [occurrence identifier])
   let reverseReferences = foldl' addReverse emptyVarEnv
         [(identifier,rhs) | binding <- bindings, (identifier,rhs) <- bindingPairs binding]
       originalDependents = findDependents reverseReferences emptyVarSet
@@ -486,7 +497,8 @@ installTypedSegmentRoots environment pending guts = do
           (nonDetEltsUniqSet (foldl' unionVarSet (bindFreeVars binding)
             (map varTypeTyCoVars (bindersOf binding))) ++ rest)
   -- Keep the whole compiler graph, including support SCCs. Only issued roots
-  -- remain exported; ordinary GHC DCE owns unused inference scaffolding.
+  -- and metadata-mandated dfuns remain externally retained. Ordinary GHC DCE
+  -- owns unused inference scaffolding; mg_exports names only the issued roots.
   support <- foldM (\selected binding -> do
     let ordinal = case [plannedItemOrdinal (typedItemPlan item)
           | item <- typedSegmentItems segment, typedItemRoot item `elem` bindersOf binding] of
