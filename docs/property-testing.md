@@ -5,6 +5,16 @@ the code. Test small component clusters through their real boundaries as well
 as individual algorithms. End-to-end acceptance exercises the assembled product
 path; cheap generated histories explore interactions that a few full runs cannot.
 
+Aim for maintained property coverage everywhere it provides a useful check,
+including non-engine components and their interactions. Inventory active
+production contracts, existing oracles, reachable histories and remaining gaps;
+use that inventory to select subsequent investigations. A property in each crate
+is not completeness: review the operations, construction paths, failure paths
+and component boundaries it can actually observe. Record why a target needs a
+different technique when an independent, meaningful property is impractical.
+Keep expanding useful coverage alongside delivery, with explicit owners and
+execution evidence rather than silently treating source-only suites as complete.
+
 ## Recognize targets and choose the claim
 
 Look for complex construction with a simpler independent check, many histories
