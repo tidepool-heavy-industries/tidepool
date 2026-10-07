@@ -1301,7 +1301,20 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   writeFile shadowPath "module Tidepool.Internal.Resume where\nshadow = error \"home source shadow selected\"\n"
   withResidentPipelineSelected includes $ \compile -> do
     admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $ do
+      let resultBindings = [(identifier,body)
+            | (identifier,body) <- Core.flattenBinds (prBinds (pprPipelineResult admitted))
+            , getOccString identifier == "__result"]
+          supportBindings = [(identifier,body)
+            | (identifier,body) <- Core.flattenBinds (prBinds (pprPipelineResult original))
+            , getOccString identifier == "answer"]
+          originalNames = [(showSDocUnsafe (ppr name),identity)
+            | (name,identity) <- Map.toList (pprOriginalBindings admitted)]
+      hPutStrLn stderr ("scaffold result Core: " ++ take 8192 (showSDocUnsafe (ppr resultBindings)))
+      hPutStrLn stderr ("scaffold original support Core: " ++ take 8192 (showSDocUnsafe (ppr supportBindings)))
+      hPutStrLn stderr ("scaffold retained bindings: " ++ show (take 32 originalNames))
+      hPutStrLn stderr ("scaffold package roots: " ++ show
+        (concatMap packageInterfaces (Map.elems (pprPackageImports admitted))))
       fail "pinned Resume package did not settle the generated result"
     supportText <- T.unpack . TE.decodeUtf8 <$> BS.readFile supportPath
     writeFile supportPath (T.unpack (T.replace "answer = 42" "answer = 43" (T.pack supportText)))
