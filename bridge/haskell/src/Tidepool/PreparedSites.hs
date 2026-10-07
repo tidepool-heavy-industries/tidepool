@@ -710,8 +710,6 @@ requestProgressType spec inputs = do
     ("Tidepool.Actors.Internal.Agent", "request") -> Right ([1], FirstTypeArgument, False)
     ("Tidepool.Actors.Internal.Agent", "requestWithProgress") -> Right ([2, 0], TypeArgument 1, True)
     ("Tidepool.Actors.Internal.Agent", "requestWithProgressInto") -> Right ([2, 0], TypeArgument 1, True)
-    ("Tidepool.Actors.Unfold", "child") -> Right ([2], TypeArgument 0, False)
-    ("Tidepool.Actors.Unfold", "childWithProgress") -> Right ([3, 0], TypeArgument 1, True)
     _ -> Left "request site lacks known reply/progress semantics"
   if vsInputTypeArgs spec /= indices || vsAnswerSource spec /= answer
       || vsDerivedInput spec /= Nothing || vsListAnswer spec
