@@ -37,7 +37,7 @@ import GHC.Core.Lint (lintExpr)
 import GHC.Data.Bag (bagToList)
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Core.Make (mkCoreLets, mkCoreTup, mkCoreConApps)
-import GHC.Core.FVs (bindFreeVars, exprFreeVars)
+import GHC.Core.FVs (bindFreeVars, exprFreeVars, varTypeTyCoVars)
 import GHC.Core.Subst (mkEmptySubst, extendSubst, substExpr)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Types.Var.Set (unionVarSet)
@@ -306,7 +306,8 @@ captureTypedSegment plan environment admitted checked = do
 keepRequiredEvidence :: [CoreBind] -> CoreExpr -> CoreExpr
 keepRequiredEvidence bindings body = mkCoreLets (filter (demanded required) bindings) body
   where
-    groups = [(binding, bindFreeVars binding) | binding <- bindings]
+    groups = [(binding, foldl' unionVarSet (bindFreeVars binding)
+      (map varTypeTyCoVars (bindersOf binding))) | binding <- bindings]
     required = close (exprFreeVars body) groups
     demanded names binding = any (`elementOfUniqSet` names) (bindersOf binding)
     close names remaining = case partition (demanded names . fst) remaining of
