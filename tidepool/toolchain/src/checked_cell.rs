@@ -992,6 +992,32 @@ pub(crate) struct CheckedValueInputs {
     output_bytes_hashed: AtomicU64,
 }
 
+/// Same-request type outputs captured from the reserved checked-value owner.
+/// These are not submitted inputs and grant no live native values.
+pub(crate) struct ProducedValueTypeInterfaces {
+    interfaces: Vec<(
+        Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+        bool,
+    )>,
+}
+
+impl ProducedValueTypeInterfaces {
+    pub(crate) fn interfaces(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
+        self.interfaces.iter().map(|(interface, _)| interface)
+    }
+
+    pub(crate) fn required(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
+        self.interfaces
+            .iter()
+            .filter(|(_, required)| *required)
+            .map(|(interface, _)| interface)
+    }
+}
+
 /// Work performed by the immutable checked input owner. These observations
 /// exclude compiler-side reads and publication copies and grant no authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1552,6 +1578,77 @@ impl CheckedValueImportAuthority {
 }
 
 impl CheckedValueInputs {
+    pub(crate) fn capture_produced_types(
+        &self,
+        producer: [u8; 32],
+        planned: &CheckedPlannedCellSpecification,
+        segment: std::ops::Range<usize>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<ProducedValueTypeInterfaces, CompileError> {
+        use crate::cell_plan::ParsedCellPlanKind;
+        if producer != planned.parsed_plan.producer_sha256()
+            || segment.start > segment.end
+            || segment.end > planned.slots.len()
+            || planned.slots.len() != planned.parsed_plan.items().len()
+        {
+            return Err(failure(
+                "produced type outputs differ from the reserved segment",
+            ));
+        }
+        let mut interfaces = Vec::new();
+        for (ordinal, (item, slot)) in planned.parsed_plan.items()[..segment.end]
+            .iter()
+            .zip(&planned.slots)
+            .enumerate()
+        {
+            let generation = match (item.kind(), slot) {
+                (ParsedCellPlanKind::Bind, CheckedPlannedCellSlot::Bind { value })
+                    if !item.binders().is_empty() =>
+                {
+                    *value
+                }
+                (
+                    ParsedCellPlanKind::Expression,
+                    CheckedPlannedCellSlot::Expression { capture, .. },
+                ) => *capture,
+                _ => continue,
+            };
+            let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
+            if self
+                .baseline
+                .iter()
+                .any(|value| value.input().owner == owner)
+            {
+                return Err(failure("produced type output replaces a submitted value"));
+            }
+            let path = self.root().join(owner.relative_hi_path());
+            let captured = CapturedValueInterfaceOutput::capture(&path)?;
+            validation
+                .inventory
+                .reserve::<(
+                    Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+                    bool,
+                )>(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            validation
+                .inventory
+                .charge(
+                    captured
+                        .interface
+                        .len()
+                        .checked_add(captured.packages.len())
+                        .and_then(|bytes| bytes.checked_add(captured.requirements.len()))
+                        .ok_or_else(|| failure("produced type output accounting overflow"))?,
+                )
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            interfaces.push((
+                captured.certify(producer, owner, None)?,
+                ordinal >= segment.start,
+            ));
+        }
+        Ok(ProducedValueTypeInterfaces { interfaces })
+    }
+
     pub(crate) fn capture_checked(
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<CheckedValueArtifact>],

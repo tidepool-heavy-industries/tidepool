@@ -1476,7 +1476,13 @@ impl ModuleCandidateOffer {
         let specification = self.checked_cell.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("ordinary compile offer cannot admit a checked cell".into())
         })?;
-        let planned = self.admit_planned_declaration(root, exact, specification)?;
+        let planned = self.admit_planned_declaration(
+            root,
+            exact,
+            specification,
+            None,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )?;
         crate::checked_cell::admit_checked_cell(
             root,
             &self.producer,
@@ -1559,11 +1565,19 @@ impl ModuleCandidateOffer {
                         tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
                             .module_name(),
                     ];
+                let produced_types = values.capture_produced_types(
+                    initial.producer_sha256,
+                    planned,
+                    index..index,
+                    &mut validation,
+                )?;
                 let original = effective
                     .admit_planned_declaration(
                         &segment_root,
                         effective.exact.as_ref().expect("exact program offer"),
                         &source_spec,
+                        Some(&produced_types),
+                        &mut validation,
                     )?
                     .ok_or_else(|| {
                         CompileError::ExtractFailed(
@@ -1655,6 +1669,12 @@ impl ModuleCandidateOffer {
                     .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
                 admissions
                     .extend(program_request.validate_outputs_in_context(&segment_root, &context)?);
+                let produced_types = values.capture_produced_types(
+                    initial.producer_sha256,
+                    planned,
+                    index..end,
+                    &mut validation,
+                )?;
                 while index < end {
                     program_request = program_request
                         .in_program_context(&root.join("program-inputs"), context.clone())?;
@@ -1663,6 +1683,7 @@ impl ModuleCandidateOffer {
                     let output = effective.read_program_output(
                         &directory,
                         &segment_root,
+                        &produced_types,
                         &mut validation,
                     )?;
                     let source_admissions = effective
@@ -1821,6 +1842,7 @@ impl ModuleCandidateOffer {
         &self,
         directory: &Path,
         source_directory: &Path,
+        produced_types: &crate::checked_cell::ProducedValueTypeInterfaces,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -1851,6 +1873,7 @@ impl ModuleCandidateOffer {
                 None,
                 None,
                 OriginalOutputPublication::Transaction,
+                Some(produced_types),
                 validation,
             )?
             .ok_or_else(|| {
@@ -1932,6 +1955,8 @@ impl ModuleCandidateOffer {
         root: &Path,
         exact: &crate::declaration_context::ExactCompilationRequest,
         specification: &crate::checked_cell::CheckedCellSpecification,
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Option<crate::checked_cell::PlannedCheckedDeclaration>, CompileError> {
         use sha2::{Digest, Sha256};
         let receipt_path = root.join("planned-declaration.cbor");
@@ -1992,7 +2017,7 @@ impl ModuleCandidateOffer {
         let authored = crate::declaration_join::NativeAuthoredDeclarationAdmission::from_planned(
             &module, &admission,
         )?;
-        let sealed = seal_turn_outputs_inner(
+        let sealed = seal_turn_outputs_with_validation(
             self,
             &directory,
             &source_path,
@@ -2002,6 +2027,8 @@ impl ModuleCandidateOffer {
             None,
             Some(&authored),
             OriginalOutputPublication::Transaction,
+            produced_types,
+            validation,
         )?
         .ok_or_else(fail)?;
         let products = sealed
@@ -2407,6 +2434,7 @@ fn seal_turn_outputs_inner(
         identity_metadata,
         authored,
         publication,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -2422,6 +2450,7 @@ fn seal_turn_outputs_with_validation(
     identity_metadata: Option<(&DataConTable, &[YieldSite])>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     publication: OriginalOutputPublication,
+    produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -2536,6 +2565,7 @@ fn seal_turn_outputs_with_validation(
             .selected_session_values
             .get()
             .map_or(&[], Vec::as_slice),
+        produced_types,
         validation,
     )
     .map_err(compiler_evidence_failure)?;
@@ -3751,6 +3781,7 @@ fn compile_invocation_inner(
                 exact.as_ref(),
                 authored,
                 &selected_session_value_modules(&cmd)?,
+                None,
                 &mut validation,
             )
             .map_err(compiler_evidence_failure)?;

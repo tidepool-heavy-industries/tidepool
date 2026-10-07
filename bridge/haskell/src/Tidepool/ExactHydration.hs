@@ -3,7 +3,8 @@
 
 module Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
-  , originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, serializeOriginalInterface
+  , newOriginalInterfaceArtifactsWithSessionOutputs
+  , originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , freshExactState, freshExactContext, forkExactContext
   , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
@@ -836,8 +837,13 @@ serializeOriginalInterface env directory interface =
 -- and immutable bytes. This cache belongs only to the completed transaction;
 -- it neither consults source nor survives in a worker-global map.
 data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
-  HscEnv (Map.Map Module FinalizedModule) (Map.Map Module BS.ByteString) [CapturedSessionInterface] FilePath
+  HscEnv (Map.Map Module FinalizedModule) (Map.Map Module BS.ByteString) [OriginalSessionInterface] FilePath
   (IORef (Map.Map Module (Maybe (BS.ByteString, String))))
+
+data SessionCaptureOrigin = ImportedSessionCapture | ProducedSessionCapture
+  deriving Eq
+
+data OriginalSessionInterface = OriginalSessionInterface SessionCaptureOrigin CapturedSessionInterface
 
 -- Only finalization products and explicit admitted captures can supply a home
 -- owner. A checking HPT entry is provisional and cannot issue original bytes.
@@ -846,11 +852,18 @@ newOriginalInterfaceArtifacts :: HscEnv -> Map.Map ModuleName FinalizedModule
 newOriginalInterfaceArtifacts env finalized retained =
   newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained []
 
--- | Selected session snapshots supply type-dependency seals alongside exact
--- captures. They do not enter the finalized-source or executable inventory.
+-- | Hydrated session snapshots supply type-dependency seals alongside exact
+-- captures, including compiler-produced typed outputs. They do not enter the
+-- finalized-source or executable inventory or authorize live values.
 newOriginalInterfaceArtifactsWithSessionCaptures :: HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> FilePath -> IO OriginalInterfaceArtifacts
-newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected directory = do
+newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected =
+  newOriginalInterfaceArtifactsWithSessionOutputs env finalized retained injected []
+
+newOriginalInterfaceArtifactsWithSessionOutputs :: HscEnv -> Map.Map ModuleName FinalizedModule
+  -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
+  -> FilePath -> IO OriginalInterfaceArtifacts
+newOriginalInterfaceArtifactsWithSessionOutputs env finalized retained injected produced directory = do
   captures <- forM retained $ \artifact -> do
     bytes <- BS.readFile (exactPath artifact)
     unless (hexBytes (SHA256.hash bytes) == exactSha256 artifact) $
@@ -860,21 +873,30 @@ newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected
   let originals = Map.fromList
         [(mi_module (hm_iface (finalizedHomeModInfo original)), original)
         | original <- Map.elems finalized]
-      selected = captures ++ map capturedSessionInterface injected
+      snapshotsWithOrigin = [(ImportedSessionCapture,snapshot) | snapshot <- injected]
+        ++ [(ProducedSessionCapture,snapshot) | snapshot <- produced]
+      selected = captures ++ map (capturedSessionInterface . snd) snapshotsWithOrigin
       admitted = Map.fromList selected
   unless (all (\(owner,bytes) -> Map.lookup owner admitted == Just bytes) selected) $
     throwIO ConflictingOriginalInterfaces
-  let snapshots = Map.fromList [(owner,snapshot) | snapshot <- injected
+  let snapshots = Map.fromList [(owner,(origin,snapshot)) | (origin,snapshot) <- snapshotsWithOrigin
         , let (owner,_) = capturedSessionInterface snapshot]
-  unless (all (\snapshot -> let (owner,bytes) = capturedSessionInterface snapshot
+  unless (all (\(origin,snapshot) -> let (owner,bytes) = capturedSessionInterface snapshot
           in case Map.lookup owner snapshots of
-            Just selectedSnapshot -> capturedSessionInterface selectedSnapshot == (owner,bytes)
+            Just (selectedOrigin,selectedSnapshot) -> selectedOrigin == origin
+              && capturedSessionInterface selectedSnapshot == (owner,bytes)
               && capturedSessionInterfaceEvidence selectedSnapshot == capturedSessionInterfaceEvidence snapshot
-            Nothing -> False) injected) $ throwIO ConflictingOriginalInterfaces
-  OriginalInterfaceArtifacts env originals admitted (Map.elems snapshots) directory <$> newIORef Map.empty
+            Nothing -> False) snapshotsWithOrigin) $ throwIO ConflictingOriginalInterfaces
+  let paired = [OriginalSessionInterface origin snapshot | (origin,snapshot) <- Map.elems snapshots]
+  OriginalInterfaceArtifacts env originals admitted paired directory <$> newIORef Map.empty
 
 originalSessionInterfaces :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
-originalSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _) = selected
+originalSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _) =
+  [snapshot | OriginalSessionInterface ImportedSessionCapture snapshot <- selected]
+
+originalProducedSessionInterfaces :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
+originalProducedSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _) =
+  [snapshot | OriginalSessionInterface ProducedSessionCapture snapshot <- selected]
 
 originalInterfaceBytes :: OriginalInterfaceArtifacts -> Module -> IO (Maybe BS.ByteString)
 originalInterfaceBytes artifacts owner = fmap fst <$> originalInterfaceArtifact artifacts owner

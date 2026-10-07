@@ -754,6 +754,7 @@ pub(super) fn issue_value_interfaces(
     root: &Path,
     producer: [u8; 32],
     selected: &[tidepool_repr::SessionModule],
+    produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     inherited: &BTreeMap<(String, String), [u8; 32]>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<crate::recovery_artifacts::CertifiedValueInterface>> {
@@ -780,10 +781,25 @@ pub(super) fn issue_value_interfaces(
         }
     }
     let mut issued = Vec::new();
+    for output in produced.into_iter().flat_map(|output| output.required()) {
+        if !envelope.value_interfaces.keys().any(|(unit, name)| {
+            unit == output.interface().unit() && name == output.interface().module()
+        }) {
+            return Err(CertificationError::Mismatch(
+                "produced value type output is missing",
+            ));
+        }
+    }
     for (key, value) in &envelope.value_interfaces {
         let owner = tidepool_repr::SessionModule::from_module_name(&key.1)
             .ok_or(CertificationError::Receipt("captured value session owner"))?;
-        if !selected.contains(&owner) {
+        let output = produced
+            .into_iter()
+            .flat_map(|output| output.interfaces())
+            .find(|output| {
+                output.interface().unit() == key.0 && output.interface().module() == key.1
+            });
+        if !selected.contains(&owner) && output.is_none() {
             return Err(CertificationError::Mismatch(
                 "captured value was not selected by the request",
             ));
@@ -804,6 +820,29 @@ pub(super) fn issue_value_interfaces(
             COMPILER_RECEIPT_BYTES_LIMIT as u64,
             validation,
         )?;
+        if let Some(output) = output {
+            let expected = output.interface();
+            let requirements = output
+                .requirements()
+                .iter()
+                .map(|owner| (owner.unit.clone(), owner.module.clone()))
+                .collect::<BTreeSet<_>>();
+            if selected.contains(&owner)
+                || expected.toolchain_identity_sha256() != producer
+                || bytes.as_slice() != expected.interface_bytes()
+                || packages.as_slice() != expected.package_imports_bytes()
+                || value
+                    .interface_requirements
+                    .keys()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    != requirements
+            {
+                return Err(CertificationError::Mismatch(
+                    "produced value type output differs from its reserved capture",
+                ));
+            }
+        }
         let interface = crate::recovery_artifacts::CertifiedJoinedInterface::from_certification_with_validation(
             producer,key.0.clone(),key.1.clone(),bytes,packages,validation)
             .map_err(CertificationError::CapturedModulePayload)?;
@@ -1873,6 +1912,7 @@ mod tests {
                 root.path(),
                 nominal.producer_sha256(),
                 selected,
+                None,
                 inherited,
                 &mut PackageInterfaceValidation::default(),
             )

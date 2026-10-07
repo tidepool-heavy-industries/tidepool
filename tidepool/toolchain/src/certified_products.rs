@@ -4297,6 +4297,7 @@ pub(crate) fn certify_products(
         exact,
         authored,
         &[],
+        None,
         &mut PackageInterfaceValidation::with_inventory(fresh_products.operation().clone()),
     )
 }
@@ -4315,6 +4316,7 @@ pub(crate) fn certify_products_with_validation(
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     selected_session_values: &[tidepool_repr::SessionModule],
+    produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedProducts> {
     if !Arc::ptr_eq(&validation.inventory, fresh_products.operation()) {
@@ -4894,6 +4896,7 @@ pub(crate) fn certify_products_with_validation(
         captured_payload_root,
         producer_sha256,
         selected_session_values,
+        produced_types,
         &inherited_seals,
         validation,
     )?;
