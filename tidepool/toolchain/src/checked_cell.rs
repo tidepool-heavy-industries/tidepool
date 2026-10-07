@@ -4249,9 +4249,8 @@ mod tests {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, NativeArtifactDemand, NativeGroupKey,
         };
-        use crate::certified_products::{
-            self, AcceptedGlobal, PackageInterfaceValidation, ReceiptImportOwner,
-        };
+        use crate::certified_products::{self, AcceptedGlobal, ReceiptImportOwner};
+        use crate::recovery_artifacts::PackageInterfaceValidation;
         use tidepool_repr::execution_schema::{
             testing, GlobalDecl, Group, ModuleVersion, RuntimeRep,
         };
