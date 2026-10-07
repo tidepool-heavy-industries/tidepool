@@ -332,3 +332,36 @@ impl ActorDescriptor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> ActorDescriptor {
+        ActorDescriptor::new(
+            "an arbitrary human label",
+            ActorPlacement {
+                session: tidepool_repr::SessionId(1),
+                lexical_scope: tidepool_codegen::scope::ScopeId(1),
+                resource_scope: tidepool_codegen::suspension::RealmId(1),
+            },
+        )
+    }
+
+    #[test]
+    fn root_identity_requires_canonical_path_and_independent_ancestry() {
+        let unbound = descriptor();
+        assert!(!unbound.is_root());
+        let root = unbound
+            .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap())
+            .with_capabilities(ActorCapabilities::default().with_effect_keys(Vec::new()));
+        assert!(
+            root.is_root(),
+            "effect availability does not identify the root"
+        );
+        let parent = ActorRef::first(crate::ActorId(1));
+        assert!(!root.clone().with_creator(parent).is_root());
+        assert!(!root.clone().with_supervisor_parent(parent).is_root());
+        assert!(!root.with_context_parent(parent).is_root());
+    }
+}
