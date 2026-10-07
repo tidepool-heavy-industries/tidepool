@@ -928,6 +928,7 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
+    assert_eq!(before.machine_incarnation, None);
     let error = session.execute("zero_bang_let", "{-# LANGUAGE BangPatterns #-}\nsegmentRecord 1\nlet !_ = (error \"strict discarded let\" :: Int)\nsegmentRecord 2", 1).unwrap_err();
     assert!(
         is_raised_exception(&error),
@@ -935,17 +936,28 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
     );
     assert_eq!(session.observed(), [1]);
     session.assert_no_compiler_since_last_effect();
-    assert_eq!(
-        session
-            .resident
-            .public_visibility_snapshot_in(session.public)
-            .unwrap(),
-        before
-    );
+    let failed = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let incarnation = failed
+        .machine_incarnation
+        .expect("first native execution establishes a machine even when its cell fails");
+    let mut initialized = before;
+    initialized.machine_incarnation = Some(incarnation);
+    assert_eq!(failed, initialized);
     session
         .execute("zero_bang_retry", "segmentRecord (3 :: Int)", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
+    assert_eq!(
+        session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap()
+            .machine_incarnation,
+        Some(incarnation)
+    );
 }
 
 #[test]
@@ -961,10 +973,14 @@ fn zero_capture_action_runs_once_before_the_next_item() {
 #[test]
 fn strict_let_group_forces_before_retaining_its_closure_capture() {
     let mut session = SemanticSession::new();
+    session
+        .execute("strict_closure_prior", "let preservedStrictValue = (3 :: Int)", 0)
+        .unwrap();
     let before = session
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
+    assert!(before.machine_incarnation.is_some());
     let error = session
         .execute(
             "strict_closure_let",
@@ -986,7 +1002,7 @@ fn strict_let_group_forces_before_retaining_its_closure_capture() {
         before
     );
     session
-        .execute("strict_closure_retry", "segmentRecord (3 :: Int)", 0)
+        .execute("strict_closure_retry", "segmentRecord preservedStrictValue", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
 }
