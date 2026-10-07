@@ -60,7 +60,7 @@ class WorkbenchDisplay a where
 class Display a where
   displayWith :: Int -> a -> (Text, Bool)
   displayWith budget value =
-    let (rendered, remaining, unavailable) = renderTree budget (displayTree value)
+    let (rendered, remaining, unavailable) = renderTree budget (viewTree (displayView value))
     in (rendered, maybe False (const True) remaining || unavailable)
 
   -- | Structural renderers retain the unconsumed tree. Existing custom

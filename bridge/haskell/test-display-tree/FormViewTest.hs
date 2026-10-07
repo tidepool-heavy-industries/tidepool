@@ -41,6 +41,7 @@ formViewTests = testGroup "form-view"
   , testCase "nested optional unit has distinct states" optionalUnit
   , testCase "rich rendering bounds infinite layout and lazy inspection" lazyRichView
   , testCase "single Display defaults are acyclic" acyclicDisplay
+  , testCase "rich-only Display gets a bounded text interpretation" richDisplayText
   , testCase "standalone text is raw and nested text is quoted" textInterpretations
   , testCase "SVG source remains explicit and is forwarded intact" svgSource
   ]
@@ -191,3 +192,9 @@ integerSeed = do
   assertEqual "seed is decimal text" (Just (String "9007199254740993")) (nodeValue "initial" leaf)
   assertEqual "browser passes the unchanged initial lexeme" (Right original)
     (decodeSubmission p (draft [("f0",maybe Null id (nodeValue "initial" leaf))]))
+
+data RichOnly = RichOnly
+instance Display RichOnly where
+  displayView _ = text "rich preview"
+richDisplayText :: IO ()
+richDisplayText = assertEqual "text interpretation follows rich view without a new class" ("rich",True) (displayWith 4 RichOnly)
