@@ -144,7 +144,15 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
         )
         .unwrap();
         let private = OriginalCompilerInputs::from_selection(&selection, &view).unwrap();
-        let public = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let producer =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[3; 32])
+                .sha256();
+        let public = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(producer, &[])
+                .unwrap(),
+        );
         let request = public
             .prepare_compilation(&root.path().join(format!("seed-{chosen}")), &[3; 32])
             .unwrap()
