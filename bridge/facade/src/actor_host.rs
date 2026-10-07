@@ -433,15 +433,6 @@ impl ActorWorkspaceAdmission {
 }
 
 impl WorkspaceAdmission for ActorWorkspaceAdmission {
-    fn install_custody(
-        &self,
-        actor: ActorRef,
-        worktree: &str,
-        access: exomonad_actor::WorkspaceAccess,
-    ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
-        self.bind_workspace(actor, worktree, access, None, None)
-    }
-
     fn prepare(
         &self,
         owner: ActorRef,
