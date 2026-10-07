@@ -345,7 +345,7 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
     let policy = campaign.root_installation.policy.as_ref();
     let helpers = dispatch_haskell_script(
         policy,
-        "if LookupFixture.rankingCheck then pure () else error \"lookup ranking contract failed\"\nif LookupFixture.packingCheck then pure () else error \"lookup packing contract failed\"",
+        "_ <- if LookupFixture.rankingCheck then pure () else error \"lookup ranking contract failed\"\n_ <- if LookupFixture.packingCheck then pure () else error \"lookup packing contract failed\"",
     )
     .await;
     assert_eq!(
@@ -361,7 +361,7 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
     ] {
         let checked = dispatch_haskell_script(
             policy,
-            &format!("checked <- LookupFixture.{check}\nif checked then pure () else error \"{check} failed\""),
+            &format!("checked <- LookupFixture.{check}\n_ <- if checked then pure () else error \"{check} failed\""),
         )
         .await;
         assert_eq!(checked["status"], "committed", "{check}: {checked}");
@@ -624,7 +624,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     let short_page = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         &format!(
-            "import qualified Tidepool.Command as Cmd\npage <- Project.Shell.sectionPage (Project.Shell.outputSnapshot {binding} {} {}) (Project.Shell.SectionId 1)\ncase page of {{ Left (Project.Shell.SnapshotExpired Cmd.Stdout _) -> pure (); _ -> error \"short section reread did not report expired stdout\" }}",
+            "import qualified Tidepool.Command as Cmd\npage <- Project.Shell.sectionPage (Project.Shell.outputSnapshot {binding} {} {}) (Project.Shell.SectionId 1)\n_ <- case page of {{ Left (Project.Shell.SnapshotExpired Cmd.Stdout _) -> pure (); _ -> error \"short section reread did not report expired stdout\" }}",
             command_output.len(),
             "ESSENTIAL-diagnostic\n".len()
         ),
@@ -965,7 +965,7 @@ const CELL: &str = r#"answer <- J.ask1 (J.rawState (String "retry loop in fetch;
      (J.alt #not_here "The branch is not in this file" (0 :: Int)
         J..| J.many #line (\(k, _, _) -> k) (\(_, w, _) -> w)
                [("line-4", "if attempts > 3", 4), ("line-12", "if elapsed > timeout", 12)]))
-if either (const 0) (\a -> J.handle a (#not_here id J..| #line (\_ (_, _, n) -> n))) answer == 12 then pure () else error "choice did not select line 12""#;
+_ <- if either (const 0) (\a -> J.handle a (#not_here id J..| #line (\_ (_, _, n) -> n))) answer == 12 then pure () else error "choice did not select line 12""#;
 
 #[tokio::test]
 async fn jev_choice_round_trips_through_the_host_backend() {
@@ -1009,7 +1009,7 @@ async fn score_then_choice_packets_with_alternatives_install_on_one_machine() {
         campaign.root_installation.policy.as_ref(),
         r#"let rubric = J.level #low "low" (0 :: Int) J..| J.level #high "high" 1
 answer <- J.ask (J.rawState (String "one machine regression")) (#q := J.score "How important is this?" rubric)
-if either (const False) (\a -> a.q.expectation == 1) answer then pure () else error "score did not select the high criterion""#,
+_ <- if either (const False) (\a -> a.q.expectation == 1) answer then pure () else error "score did not select the high criterion""#,
     )
     .await;
     assert_eq!(score["status"], "committed", "Score packet failed: {score}");
@@ -1018,7 +1018,7 @@ if either (const False) (\a -> a.q.expectation == 1) answer then pure () else er
         campaign.root_installation.policy.as_ref(),
         r#"answer <- J.ask1 (J.rawState (String "one machine regression"))
   (J.choice "Which branch?" (J.alt #first "First branch" (1 :: Int) J..| J.alt #second "Second branch" 2))
-if either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) answer == 2 then pure () else error "choice did not select the second branch""#,
+_ <- if either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) answer == 2 then pure () else error "choice did not select the second branch""#,
     )
     .await;
     assert_eq!(
@@ -1051,8 +1051,8 @@ async fn jev_call_failure_is_a_typed_left() {
     });
     let campaign = campaign_with(backend).await;
     let failure_cell = CELL.replace(
-        "if either (const 0) (\\a -> J.handle a (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer == 12 then pure () else error \"choice did not select line 12\"",
-        "case answer of { Left _ -> pure (); Right _ -> error \"unconfigured Jev did not return a typed Left\" }",
+        "_ <- if either (const 0) (\\a -> J.handle a (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer == 12 then pure () else error \"choice did not select line 12\"",
+        "_ <- case answer of { Left _ -> pure (); Right _ -> error \"unconfigured Jev did not return a typed Left\" }",
     );
     assert_ne!(
         failure_cell, CELL,
@@ -1094,7 +1094,7 @@ async fn retained_packet_bindings_reach_a_later_statement() {
         r#"let offers = J.alt #line_4 "if attempts > 3" (4 :: Int) J..| J.alt #line_12 "if elapsed > timeout" 12
 let packet = #place := J.choice "Which line begins the retry-timeout branch?" offers :& #enough := J.noul "Is the branch visible?"
 answer <- J.ask (J.rawState (String "retry loop in fetch")) packet
-if either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #line_12 id)) answer == 12 then pure () else error "retained record-dot packet did not select line 12""#,
+_ <- if either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #line_12 id)) answer == 12 then pure () else error "retained record-dot packet did not select line 12""#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
@@ -1120,7 +1120,7 @@ async fn a_per_row_battery_sends_one_request_with_one_question_per_row() {
 answer <- J.ask (J.rawState (String "choosing what to read next"))
   ( #enough := J.noul "Is the listing enough to choose from?"
  :& #worth_reading := J.each fst (\(_, body) -> J.noul ("Worth reading in full? " <> body)) previews )
-case answer of
+_ <- case answer of
   Left problem | T.isInfixOf "no Jev endpoint is configured" (T.pack (show problem)) -> pure ()
   _ -> error "per-row battery did not retain the unconfigured Jev failure""##,
     )
@@ -1170,7 +1170,7 @@ async fn live_jev_from_a_haskell_cell() {
      (J.alt #windowsill "On a windowsill" (1 :: Int)
         J..| J.alt #roof "On a roof" 2
         J..| J.alt #bed "In a bed" 3))
-if either (const 0) (\a -> J.handle a (#windowsill id J..| #roof id J..| #bed id)) answer == 1 then pure () else error "live Jev did not select the windowsill""#,
+_ <- if either (const 0) (\a -> J.handle a (#windowsill id J..| #roof id J..| #bed id)) answer == 1 then pure () else error "live Jev did not select the windowsill""#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
@@ -1961,9 +1961,9 @@ import Tidepool.Aeson.Value (Value (String, Null), encodeValue)
 let sent = ToolCall "haskell" (String "Right receipt <- sendMessage p \"reset: git reset --hard master && rm -rf target\"")
 annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haskell" "toolResult1" 1 Null "Right (NotificationReceipt ((2,1),((1,1),(\"run:1:1\",7))))")
 let rendered = encodeValue (annotationToJson annotation)
-if T.isInfixOf "abstained" rendered && T.isInfixOf "message send: sendMessage" rendered then pure () else error "watchdog did not abstain on the message-send cell"
+_ <- if T.isInfixOf "abstained" rendered && T.isInfixOf "message send: sendMessage" rendered then pure () else error "watchdog did not abstain on the message-send cell"
 let facts = (Watchdog.messageSend (ToolCall "haskell" (String "_ <- command \"rm -rf x\"\nsendMessage p \"done\"")), Watchdog.messageSend (ToolCall "bash" (String "sendMessage p \"x\"")), Watchdog.hostSettlementRefusal "reply not settled: your parent sent an update to request 2 that has not been confirmed as shown to you yet. Nothing was sent.", Watchdog.hostSettlementRefusal "error: build failed")
-if facts == (Nothing, Nothing, True, False) then pure () else error "watchdog message/refusal classification changed""#,
+_ <- if facts == (Nothing, Nothing, True, False) then pure () else error "watchdog message/refusal classification changed""#,
     )
     .await;
     assert_eq!(judged["status"], "committed", "{judged}");
@@ -2006,7 +2006,7 @@ display (Watchdog.trivialCall call (ToolResult "bash" "toolResult2" 2 (toJSON fa
 import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..))
 import Tidepool.Aeson.Value (Value (String, Null))
 let retainedEvidence = Watchdog.escalationEvidence (ToolCall "haskell" (String "build")) (ToolResult "haskell" "toolResult4" 4 Null {output})
-if {check} then pure () else error "watchdog escalation evidence contract failed""#
+_ <- if {check} then pure () else error "watchdog escalation evidence contract failed""#
                 ),
             )
             .await
