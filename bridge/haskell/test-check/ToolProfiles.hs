@@ -211,11 +211,11 @@ retainedReceiptProjection = do
 receiptFailureProjection :: IO ()
 receiptFailureProjection = do
   let requestId = Reply.RequestId 19
-      (pending, _) = Reply.newRequestHandles () requestId (internalAgentRef 31 41)
+      ((pending :: Reply.Request Int), _) = Reply.newRequestHandles () requestId (internalAgentRef 31 41)
       failure = Reply.ResponseTargetFailed "controlled terminal failure"
       unavailable = Watch.RawWatchUnavailable requestId failure
       captured = Watch.RawWatchReady (Watch.AwaitDecision [(0, Just failure)] [])
-      (full, _) = observeOnce unavailable (Watch.response (pending :: Reply.Request Int))
+      (full, _) = observeOnce unavailable (Watch.response pending)
       (value, _) = observeOnce unavailable (Watch.result pending)
       (settled, _) = observeOnce captured (Watch.settledResponse pending)
       (settledValue, _) = observeOnce captured (Watch.settlement pending)
