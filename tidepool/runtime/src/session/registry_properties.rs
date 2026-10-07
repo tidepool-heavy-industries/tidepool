@@ -3,8 +3,8 @@ use super::*;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 const IDS: usize = 3;
 const HOLES: usize = 4;
@@ -930,11 +930,27 @@ proptest! {
         prop_assert!(coverage.checkout_refusals.iter().sum::<usize>() <= ops.len());
         prop_assert!(coverage.tombstone_evictions <= ops.len());
     }
+}
 
-    #[test]
-    fn generated_tombstone_histories_evict_by_retirement_event(
-        extra_events in super::TOMBSTONE_CAPACITY..(super::TOMBSTONE_CAPACITY + 12),
-    ) {
+#[test]
+fn deterministic_tombstone_histories_cover_retirement_event_horizon() {
+    let mut below_boundary = vec![Op::Insert(0, 0, 0), Op::Remove(0, 0)];
+    for event in 0..(super::TOMBSTONE_CAPACITY - 1) {
+        below_boundary.push(Op::Insert(1, event as u8, event as i16));
+        below_boundary.push(Op::Remove(1, event as u8));
+    }
+    below_boundary.push(Op::Checkout(
+        0,
+        Request::Run,
+        Completion::DropRestore,
+        vec![],
+        0,
+    ));
+    let coverage = replay(&below_boundary);
+    assert_eq!(coverage.tombstone_evictions, 0, "{coverage:?}");
+    assert!(coverage.checkout_refused[3] > 0, "{coverage:?}");
+
+    for extra_events in super::TOMBSTONE_CAPACITY..(super::TOMBSTONE_CAPACITY + 12) {
         let mut ops = vec![Op::Insert(0, 0, 0), Op::Remove(0, 0)];
         for event in 0..extra_events {
             ops.push(Op::Insert(1, event as u8, event as i16));
@@ -948,7 +964,7 @@ proptest! {
             0,
         ));
         let coverage = replay(&ops);
-        prop_assert!(coverage.tombstone_evictions > 0, "{coverage:?}");
-        prop_assert!(coverage.checkout_refused[2] > 0, "{coverage:?}");
+        assert!(coverage.tombstone_evictions > 0, "{coverage:?}");
+        assert!(coverage.checkout_refused[2] > 0, "{coverage:?}");
     }
 }
