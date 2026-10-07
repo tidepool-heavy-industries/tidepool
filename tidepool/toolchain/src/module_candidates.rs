@@ -2869,6 +2869,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use proptest::prelude::*;
+    use proptest::strategy::ValueTree;
     use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 
     #[test]
