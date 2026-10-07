@@ -7385,6 +7385,33 @@ pub(crate) mod tests {
         assert!(
             available_original_source_map(&[original.clone(), other], &[], &operation).is_err()
         );
+        let empty = full_native_fixture("EmptyNative", vec![], 7);
+        let empty_sources = available_original_source_map(&[empty], &[], &operation).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let selected_path = directory.path().join("EmptyNative.hi");
+        std::fs::write(&selected_path, b"otherwise valid package interface").unwrap();
+        let interface_digest = sha(b"otherwise valid package interface");
+        let packages = BTreeMap::from([(
+            ("fixture".into(), "EmptyNative".into()),
+            PackageInterfaceWitness {
+                selected_path,
+                sha256: interface_digest,
+            },
+        )]);
+        let package = ReceiptImportOwner::Package {
+            unit: "fixture".into(),
+            module: "EmptyNative".into(),
+            binder: testing::identity("EmptyNative", "unavailable"),
+            interface_digest,
+        };
+        resolve_receipt_owner(package.clone(), &SourceGroupMap::new(), &packages).unwrap();
+        assert!(matches!(
+            resolve_receipt_owner(package, &empty_sources, &packages),
+            Err(CertificationError::Mismatch(
+                "home owner downgraded to package"
+            ))
+        ));
+        assert!(operation.work_usage().unwrap().0 > 0);
         let exhausted = InventoryOperation::new(InventoryDecodeLimits {
             max_work: 0,
             ..Default::default()
