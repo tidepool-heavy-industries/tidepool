@@ -184,6 +184,12 @@ pub enum ArtifactInventoryFailure {
     OwnerConflict { owner: ExactModuleIdentity },
     #[error("owner {owner:?} selects multiple native implementations")]
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
+    #[error("compiler owner {owner:?} selects original {existing:?} and {incoming:?}")]
+    CompilerOriginalOfferConflict {
+        owner: ExactModuleIdentity,
+        existing: ArtifactId,
+        incoming: ArtifactId,
+    },
     #[error("authored generation {generation} requires one certified native root; found {found}")]
     AuthoredNativeRoot { generation: u64, found: usize },
     #[error("native root {artifact:?} is outside its retained view")]
@@ -1124,7 +1130,7 @@ impl ArtifactInventory {
             roots,
             parents,
             materialization_parents,
-            materialization: Mutex::new(None),
+            materialization: Mutex::new(BTreeMap::new()),
         }))
     }
     pub(crate) fn admit(
@@ -1335,7 +1341,7 @@ impl ArtifactInventory {
             roots,
             parents: vec![parent.clone()],
             materialization_parents,
-            materialization: Mutex::new(None),
+            materialization: Mutex::new(BTreeMap::new()),
         })))
     }
     pub fn metrics(&self) -> ArtifactInventoryMetrics {
@@ -1366,7 +1372,7 @@ struct ViewLease {
     // source view's selection roots or executable authority.
     materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     materialization:
-        Mutex<Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
+        Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
 }
 impl Drop for ViewLease {
     fn drop(&mut self) {
@@ -1482,6 +1488,18 @@ pub(crate) struct ArtifactMetadataSnapshot {
 }
 
 impl ArtifactMetadataSnapshot {
+    pub(crate) fn materialization_key(&self) -> [u8; 32] {
+        digest(
+            &serde_json::to_vec(&(
+                self.entries
+                    .values()
+                    .map(|entry| entry.descriptor.id)
+                    .collect::<Vec<_>>(),
+                &self.selected_native_groups,
+            ))
+            .expect("compiler projection materialization key"),
+        )
+    }
     pub(crate) fn validate_native_selection(&self) -> Result<(), CompileError> {
         if let Some(owner) = self.ambiguous_native_owners.first() {
             return Err(admission_failure(
@@ -1519,6 +1537,7 @@ impl ArtifactView {
     /// preparation leaves no retained entry; descendants borrow completed owners.
     pub(crate) fn retain_materialization(
         &self,
+        metadata: &ArtifactMetadataSnapshot,
         prepare: impl FnOnce(
             Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
         ) -> Result<
@@ -1528,7 +1547,8 @@ impl ArtifactView {
     ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
     {
         let mut retained = self.0.materialization.lock().expect("materialization lock");
-        if let Some(materialization) = retained.as_ref() {
+        let key = metadata.materialization_key();
+        if let Some(materialization) = retained.get(&key) {
             return Ok(Arc::clone(materialization));
         }
         let mut parents = self.0.materialization_parents.clone();
@@ -1537,7 +1557,7 @@ impl ArtifactView {
             parent.collect_materializations(&mut parents, &mut visited);
         }
         let materialization = Arc::new(prepare(parents)?);
-        *retained = Some(Arc::clone(&materialization));
+        retained.insert(key, Arc::clone(&materialization));
         Ok(materialization)
     }
 
@@ -1553,12 +1573,15 @@ impl ArtifactView {
             if !visited.insert(Arc::as_ptr(&view.0) as usize) {
                 continue;
             }
-            if let Some(materialization) = view.retained_materialization() {
-                if !materializations
-                    .iter()
-                    .any(|existing| Arc::ptr_eq(existing, &materialization))
-                {
-                    materializations.push(materialization);
+            let retained = view.0.materialization.lock().expect("materialization lock");
+            if !retained.is_empty() {
+                for materialization in retained.values() {
+                    if !materializations
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, materialization))
+                    {
+                        materializations.push(Arc::clone(materialization));
+                    }
                 }
             } else {
                 for materialization in &view.0.materialization_parents {
@@ -1576,12 +1599,14 @@ impl ArtifactView {
 
     pub(crate) fn retained_materialization(
         &self,
+        metadata: &ArtifactMetadataSnapshot,
     ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
         self.0
             .materialization
             .lock()
             .expect("materialization lock")
-            .clone()
+            .get(&metadata.materialization_key())
+            .cloned()
     }
 
     pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
@@ -1924,7 +1949,7 @@ impl ArtifactView {
                 roots: Vec::new(),
                 parents: vec![self.clone(), other.clone()],
                 materialization_parents: Vec::new(),
-                materialization: Mutex::new(None),
+                materialization: Mutex::new(BTreeMap::new()),
             })))
         } else {
             self.0.inventory.admit_selected(
@@ -2036,9 +2061,9 @@ impl ArtifactView {
     }
 
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
-        self.metadata_snapshot()
-            .entries
-            .values()
+        self.entries()
+            .into_iter()
+            .filter(|entry| !entry.is_native())
             .map(|entry| ExactInterfaceOwner {
                 owner: entry.descriptor.owner.clone(),
                 requirements: entry.requirements.clone(),

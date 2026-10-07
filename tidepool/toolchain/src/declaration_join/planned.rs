@@ -820,9 +820,12 @@ pub(crate) fn certify_same_offer_planned_declaration(
         &sealed.artifact_view,
         Some(artifact_context.as_ref()),
     )?;
+    let compiler_projection =
+        authored_compiler_projection(&artifact_context, &artifacts, selected)?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
         artifacts,
+        compiler_projection,
         lexical_exports: inventory.selection.exports.clone(),
         introduced_exports: inventory.selection.exports,
         instances: inventory.selection.instances,

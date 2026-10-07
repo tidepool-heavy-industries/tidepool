@@ -78,6 +78,44 @@ impl CompilerInputProjection {
         Ok(projection)
     }
 
+    /// Issue only type roles from an authenticated interface closure. Native
+    /// carriers in the view never become reuse offers through this operation.
+    pub(crate) fn from_interface_view(view: &ArtifactView) -> Result<Self, CompileError> {
+        let entries = view
+            .entries()
+            .into_iter()
+            .filter(|entry| !entry.is_native())
+            .collect::<Vec<_>>();
+        Self::from_issued_entries(&entries)
+    }
+
+    /// Restrict already issued roles to a proved retained surface. An original
+    /// absent from that surface loses its reuse offer, never its exact type role.
+    pub(crate) fn within_view(&self, view: &ArtifactView) -> Self {
+        let ids = view
+            .descriptors()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<BTreeSet<_>>();
+        Self {
+            roles: self
+                .roles
+                .iter()
+                .filter_map(|(owner, role)| {
+                    ids.contains(&role.interface()).then(|| {
+                        let selected = match role.original() {
+                            Some(original) if ids.contains(&original) => role.clone(),
+                            _ => CompilerInputRole::InterfaceOnly {
+                                interface: role.interface(),
+                            },
+                        };
+                        (owner.clone(), selected)
+                    })
+                })
+                .collect(),
+        }
+    }
+
     fn admit_role(
         &mut self,
         owner: ExactModuleIdentity,
@@ -92,7 +130,11 @@ impl CompilerInputProjection {
             match (previous.original(), incoming.original()) {
                 (Some(old), Some(new)) if old != new => {
                     return Err(admission_failure(
-                        ArtifactInventoryFailure::NativeOwnerAmbiguity { owner },
+                        ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                            owner,
+                            existing: old,
+                            incoming: new,
+                        },
                     ));
                 }
                 (None, Some(_)) => *previous = incoming,
@@ -127,6 +169,37 @@ impl CompilerInputProjection {
                 })
                 .collect(),
         }
+    }
+
+    /// Importing a proved source surface preserves exact interface custody.
+    /// Only its issued source roles offer native originals in the new compiler
+    /// namespace; unrelated executable dependencies remain retained originals.
+    pub(crate) fn for_source_owners(&self, owners: &BTreeSet<ExactModuleIdentity>) -> Self {
+        Self {
+            roles: self
+                .roles
+                .iter()
+                .map(|(owner, role)| {
+                    let selected = if owners.contains(owner) {
+                        role.clone()
+                    } else {
+                        CompilerInputRole::InterfaceOnly {
+                            interface: role.interface(),
+                        }
+                    };
+                    (owner.clone(), selected)
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn project_metadata(
+        &self,
+        mut metadata: ArtifactMetadataSnapshot,
+    ) -> Result<ArtifactMetadataSnapshot, CompileError> {
+        metadata.entries = self.entries_from_metadata(&metadata)?;
+        metadata.ambiguous_native_owners.clear();
+        Ok(metadata)
     }
 
     /// Restoration consumes already authenticated original inventory, never a
@@ -234,9 +307,55 @@ impl TargetNativeSelection {
 }
 
 impl ArtifactView {
-    pub fn target_native_selection(&self) -> TargetNativeSelection {
-        TargetNativeSelection {
-            groups: self.selected_native_groups(),
+    /// Resolve a target's already certified roots inside this admitted view.
+    /// This closes exact group edges; it does not grant a checked entry or infer
+    /// target demand from the compiler's original offers.
+    pub(crate) fn target_native_selection(
+        &self,
+        roots: &[NativeRequirementRoot],
+    ) -> Result<TargetNativeSelection, CompileError> {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let owned = admitted_closure(&state, self.roots().into_iter());
+        let mut selected = BTreeSet::new();
+        for root in roots {
+            let (artifact, ordinals) = match root {
+                NativeRequirementRoot::AllGroups(artifact) => (
+                    *artifact,
+                    state
+                        .payloads
+                        .get(artifact)
+                        .map(|entry| entry.native_group_ordinals.clone())
+                        .unwrap_or_default(),
+                ),
+                NativeRequirementRoot::Group {
+                    artifact,
+                    original_ordinal,
+                } => (*artifact, BTreeSet::from([*original_ordinal])),
+            };
+            if !owned.contains(&InventoryNodeKey::Artifact(artifact)) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView { artifact },
+                ));
+            }
+            for ordinal in ordinals {
+                let key = NativeGroupKey {
+                    artifact,
+                    original_ordinal: ordinal,
+                };
+                if !owned.contains(&InventoryNodeKey::Group(key)) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact,
+                            original_ordinal: ordinal,
+                        },
+                    ));
+                }
+                selected.insert(InventoryNodeKey::Group(key));
+            }
         }
+        let closure = admitted_closure(&state, selected.into_iter());
+        Ok(TargetNativeSelection {
+            groups: native_groups(&closure),
+        })
     }
 }

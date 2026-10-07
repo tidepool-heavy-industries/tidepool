@@ -1191,6 +1191,7 @@ pub struct CheckedValueArtifact {
     authority: ([u8; 32], [u8; 32]),
     certified_interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     artifact_view: crate::artifact_inventory::ArtifactView,
+    compiler_projection: crate::artifact_inventory::CompilerInputProjection,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
     directory: Arc<ValueInterfaceDirectory>,
@@ -1619,6 +1620,10 @@ impl HostBindingInterfaceOffer {
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
             certified_interface: certificate,
+            compiler_projection: context
+                .compiler_input_projection()
+                .interface_only()
+                .within_view(&artifact_view),
             artifact_view,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -1971,6 +1976,21 @@ impl CheckedValueInputs {
             Some(retained) => retained.retain_in(&artifact_view)?,
             None => artifact_view,
         };
+        let compiler_projection = context
+            .compiler_input_projection()
+            .for_source_owners(
+                &source_lexical
+                    .iter()
+                    .map(|node| node.owner.clone())
+                    .collect(),
+            )
+            .within_view(&artifact_view)
+            .merge(
+                &crate::artifact_inventory::CompilerInputProjection::from_interface_view(
+                    &artifact_view,
+                )?,
+            )?;
+        compiler_projection.validate(&artifact_view)?;
         self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1985,6 +2005,7 @@ impl CheckedValueInputs {
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate,
             artifact_view,
+            compiler_projection,
             source_lexical,
             template_imports,
             directory: self.directory.clone(),
@@ -1994,6 +2015,11 @@ impl CheckedValueInputs {
 }
 
 impl CheckedValueArtifact {
+    pub(crate) fn compiler_input_projection(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerInputProjection {
+        &self.compiler_projection
+    }
     pub fn owner(&self) -> tidepool_repr::SessionModule {
         self.interface.owner
     }
