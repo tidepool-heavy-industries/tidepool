@@ -290,12 +290,7 @@ impl ActorAdmissionRegistry {
         let token = format!("{}:{}", self.checkpoint_namespace, uuid::Uuid::new_v4());
         let (phase, _) = tokio::sync::watch::channel(CheckpointPhase::Pending);
         let mut state = self.state.lock();
-        let mut budget_sponsors = Vec::new();
-        let mut ancestor = Some(issuer);
-        while let Some(actor) = ancestor {
-            budget_sponsors.push(actor);
-            ancestor = state.parents.get(&actor).copied();
-        }
+        let budget_sponsors = spawn_admission::actor_budget_sponsors(&state, issuer);
         if let Some(limit) = issuer_capabilities.descendants().maximum_active_children {
             state
                 .descendant_limits

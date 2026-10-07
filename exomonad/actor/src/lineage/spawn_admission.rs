@@ -53,6 +53,35 @@ pub(crate) enum SpawnClaimError {
     DescendantLimit { sponsor: ActorRef, maximum: usize },
 }
 
+/// A descendant keeps both its creator ancestry and every checkpoint sponsor
+/// charged by its own admission, even after release or intermediate retirement.
+/// The source records are retained under the same lock as new admissions.
+pub(super) fn actor_budget_sponsors(
+    state: &ActorAdmissionsState,
+    owner: ActorRef,
+) -> Vec<ActorRef> {
+    let mut sponsors = Vec::new();
+    let mut ancestor = Some(owner);
+    while let Some(actor) = ancestor {
+        if !sponsors.contains(&actor) {
+            sponsors.push(actor);
+        }
+        for record in state
+            .spawns
+            .values()
+            .filter(|record| record.child == Some(actor))
+        {
+            for &sponsor in &record.sponsors {
+                if !sponsors.contains(&sponsor) {
+                    sponsors.push(sponsor);
+                }
+            }
+        }
+        ancestor = state.parents.get(&actor).copied();
+    }
+    sponsors
+}
+
 impl ActorAdmissionRegistry {
     pub(crate) fn claim_spawn(
         &self,
@@ -79,12 +108,10 @@ impl ActorAdmissionRegistry {
             .as_ref()
             .map(|(lease, _)| lease.budget_sponsors.clone())
             .unwrap_or_default();
-        let mut ancestor = Some(owner);
-        while let Some(actor) = ancestor {
-            if !sponsors.contains(&actor) {
-                sponsors.push(actor);
+        for sponsor in actor_budget_sponsors(&state, owner) {
+            if !sponsors.contains(&sponsor) {
+                sponsors.push(sponsor);
             }
-            ancestor = state.parents.get(&actor).copied();
         }
         for sponsor in &sponsors {
             if let Some(maximum) = state.descendant_limits.get(sponsor).copied() {
@@ -330,12 +357,20 @@ mod tests {
             .is_err());
     }
     fn checkpoint(registry: &ActorAdmissionRegistry, issuer: ActorRef) -> String {
+        checkpoint_with_limit(registry, issuer, Some(1))
+    }
+
+    fn checkpoint_with_limit(
+        registry: &ActorAdmissionRegistry,
+        issuer: ActorRef,
+        maximum_active_children: Option<u16>,
+    ) -> String {
         registry.capture_checkpoint(
             "exact cut".into(),
             issuer,
             crate::ActorCapabilities::default().with_descendant_budget(crate::DescendantBudget {
                 maximum_depth: 4,
-                maximum_active_children: Some(1),
+                maximum_active_children,
             }),
             None,
             None,
@@ -523,6 +558,256 @@ mod tests {
                     assert_eq!(detail, stage);
                 }
                 _ => panic!("partial workspace identity was discarded at {stage}"),
+            }
+        }
+    }
+
+    #[test]
+    fn delegated_children_keep_issuer_budget_for_fresh_descendants_and_new_captures() {
+        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(crate::ActorId(1));
+        let creator = ActorRef::first(crate::ActorId(2));
+        let child = ActorRef::first(crate::ActorId(3));
+        let grandchild = ActorRef::first(crate::ActorId(4));
+        let foreign_creator = ActorRef::first(crate::ActorId(5));
+        let token = checkpoint_with_limit(&registry, issuer, Some(2));
+        let delegated = registry
+            .claim_spawn(creator, SessionId(1), Some(&token), None)
+            .unwrap();
+        delegated.authority.bind(creator, child).unwrap();
+        delegated.authority.acknowledge(child).unwrap();
+        let grandchild_claim = registry
+            .claim_spawn(child, SessionId(1), None, None)
+            .unwrap();
+        grandchild_claim.authority.bind(child, grandchild).unwrap();
+        grandchild_claim.authority.acknowledge(grandchild).unwrap();
+        assert!(matches!(
+            registry.claim_spawn(child, SessionId(1), None, None),
+            Err(SpawnClaimError::DescendantLimit { sponsor, maximum: 2 }) if sponsor == issuer
+        ));
+        let next_token = checkpoint_with_limit(&registry, child, None);
+        registry.release_checkpoint(&token, SessionId(1)).unwrap();
+        registry.retire_actor(child);
+        let foreign_claim = registry
+            .claim_spawn(foreign_creator, SessionId(1), Some(&next_token), None)
+            .unwrap();
+        assert!(matches!(
+            registry.claim_spawn(foreign_creator, SessionId(1), Some(&next_token), None),
+            Err(SpawnClaimError::DescendantLimit { sponsor, maximum: 2 }) if sponsor == issuer
+        ));
+        // Failure releases this reservation, while the grandchild remains charged.
+        foreign_claim.authority.fail("workspace refused".into());
+        registry.retire_actor(grandchild);
+        registry.retire_actor(issuer);
+        registry
+            .claim_spawn(foreign_creator, SessionId(1), Some(&next_token), None)
+            .unwrap();
+    }
+
+    #[derive(Clone, Debug)]
+    enum AccountingOperation {
+        Claim { creator: usize, checkpoint: bool },
+        Reserve(usize),
+        Bind(usize),
+        Acknowledge(usize),
+        Fail(usize),
+        Retire(usize),
+    }
+
+    fn accounting_operation() -> impl proptest::strategy::Strategy<Value = AccountingOperation> {
+        use proptest::prelude::*;
+        prop_oneof![
+            4 => (0usize..32, any::<bool>()).prop_map(|(creator, checkpoint)|
+                AccountingOperation::Claim { creator, checkpoint }),
+            1 => (0usize..32).prop_map(AccountingOperation::Reserve),
+            2 => (0usize..32).prop_map(AccountingOperation::Bind),
+            1 => (0usize..32).prop_map(AccountingOperation::Acknowledge),
+            2 => (0usize..32).prop_map(AccountingOperation::Fail),
+            2 => (0usize..32).prop_map(AccountingOperation::Retire),
+        ]
+    }
+
+    struct ModelAdmission {
+        authority: SpawnAdmission,
+        creator: ActorRef,
+        context: Option<ActorRef>,
+        child: ActorRef,
+        sponsors: HashSet<ActorRef>,
+        pending: bool,
+        bound: bool,
+        active: bool,
+    }
+
+    // Recompute sponsor reachability from explicit creator/context edges. The
+    // oracle neither reads registry ancestry nor copies its flattened sponsors.
+    fn reachable_sponsors(
+        edges: &HashMap<ActorRef, Vec<ActorRef>>,
+        creator: ActorRef,
+        checkpoint_issuer: Option<ActorRef>,
+    ) -> HashSet<ActorRef> {
+        let mut reachable = HashSet::from([creator]);
+        reachable.extend(checkpoint_issuer);
+        loop {
+            let before = reachable.len();
+            for (actor, parents) in edges {
+                if reachable.contains(actor) {
+                    reachable.extend(parents.iter().copied());
+                }
+            }
+            if reachable.len() == before {
+                return reachable;
+            }
+        }
+    }
+
+    fn property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(property_config())]
+
+        #[test]
+        fn independent_admission_histories_match_sponsor_graph_model(
+            maximum in 1u16..7,
+            operations in proptest::collection::vec(accounting_operation(), 1..96),
+        ) {
+            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+            let issuer = ActorRef::first(crate::ActorId(1));
+            let root_creator = ActorRef::first(crate::ActorId(2));
+            let token = checkpoint_with_limit(&registry, issuer, Some(maximum));
+            let _creator_capture = checkpoint_with_limit(&registry, root_creator, Some(maximum));
+            let mut edges = HashMap::<ActorRef, Vec<ActorRef>>::new();
+            let mut admissions = Vec::<ModelAdmission>::new();
+            let mut next_actor = 3;
+            for (ordinal, operation) in operations.iter().enumerate() {
+                match *operation {
+                    AccountingOperation::Claim { creator, checkpoint } => {
+                        let creators = [issuer, root_creator].into_iter()
+                            .chain(admissions.iter().filter(|record| record.active).map(|record| record.child))
+                            .collect::<Vec<_>>();
+                        let creator = creators[creator % creators.len()];
+                        let context = checkpoint.then_some(issuer);
+                        let sponsors = reachable_sponsors(&edges, creator, context);
+                        let exhausted = sponsors.iter().any(|sponsor| {
+                            admissions.iter().filter(|record| {
+                                (record.pending || record.active) && record.sponsors.contains(sponsor)
+                            }).count() >= usize::from(maximum)
+                        });
+                        let claim = registry.claim_spawn(
+                            creator, SessionId(1), checkpoint.then_some(token.as_str()),
+                            Some(usize::from(maximum)),
+                        );
+                        proptest::prop_assert_eq!(claim.is_err(), exhausted,
+                            "step {}: {:?}; edges={:?}", ordinal, operation, edges);
+                        if let Ok(claim) = claim {
+                            admissions.push(ModelAdmission {
+                                authority: claim.authority,
+                                creator,
+                                context,
+                                child: ActorRef::first(crate::ActorId(next_actor)),
+                                sponsors,
+                                pending: true,
+                                bound: false,
+                                active: false,
+                            });
+                            next_actor += 1;
+                        }
+                    }
+                    _ if admissions.is_empty() => {}
+                    AccountingOperation::Reserve(selected) => {
+                        let len = admissions.len();
+                        let record = &mut admissions[selected % len];
+                        let result = record.authority.reserve_child(record.creator, record.child);
+                        proptest::prop_assert_eq!(result.is_ok(), record.pending);
+                    }
+                    AccountingOperation::Bind(selected) => {
+                        let len = admissions.len();
+                        let record = &mut admissions[selected % len];
+                        let result = record.authority.bind(record.creator, record.child);
+                        proptest::prop_assert_eq!(result.is_ok(), record.pending);
+                        if result.is_ok() {
+                            edges.insert(record.child,
+                                [Some(record.creator), record.context].into_iter().flatten().collect());
+                            record.bound = true;
+                            record.active = true;
+                        }
+                    }
+                    AccountingOperation::Acknowledge(selected) => {
+                        let len = admissions.len();
+                        let record = &mut admissions[selected % len];
+                        if record.pending && record.bound {
+                            record.authority.acknowledge(record.child).unwrap();
+                            record.pending = false;
+                        }
+                    }
+                    AccountingOperation::Fail(selected) => {
+                        let len = admissions.len();
+                        let record = &mut admissions[selected % len];
+                        record.authority.fail("generated startup refusal".into());
+                        record.pending = false;
+                    }
+                    AccountingOperation::Retire(selected) => {
+                        let len = admissions.len();
+                        let record = &mut admissions[selected % len];
+                        registry.retire_actor(record.child);
+                        record.active = false;
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn concurrent_checkpoint_admissions_share_one_sponsor_ceiling(
+            maximum in 1u16..5,
+            contenders in 2usize..9,
+        ) {
+            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+            let issuer = ActorRef::first(crate::ActorId(1));
+            let token = checkpoint_with_limit(&registry, issuer, Some(maximum));
+            let barrier = Arc::new(std::sync::Barrier::new(contenders + 1));
+            let tasks = (0..contenders).map(|index| {
+                let registry = registry.clone();
+                let token = token.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    registry.claim_spawn(
+                        ActorRef::first(crate::ActorId(index as u64 + 2)),
+                        SessionId(1), Some(&token), None,
+                    )
+                })
+            }).collect::<Vec<_>>();
+            barrier.wait();
+            let admitted = tasks.into_iter().map(|task| task.join().unwrap())
+                .filter_map(Result::ok).collect::<Vec<_>>();
+            proptest::prop_assert_eq!(admitted.len(), contenders.min(usize::from(maximum)));
+            for (index, claim) in admitted.iter().enumerate() {
+                let child = ActorRef::first(crate::ActorId(index as u64 + 100));
+                let owner = registry.state.lock().spawns[&claim.authority.id].owner;
+                claim.authority.reserve_child(owner, child).unwrap();
+                if index == 0 {
+                    claim.authority.fail("reserved startup failed".into());
+                } else {
+                    claim.authority.bind(owner, child).unwrap();
+                    claim.authority.acknowledge(child).unwrap();
+                }
+            }
+            let replacement = registry.claim_spawn(
+                ActorRef::first(crate::ActorId(999)), SessionId(1), Some(&token), None,
+            );
+            proptest::prop_assert!(replacement.is_ok(), "one failed reservation must free capacity");
+            if contenders >= usize::from(maximum) {
+                proptest::prop_assert!(matches!(
+                    registry.claim_spawn(ActorRef::first(crate::ActorId(1000)), SessionId(1), Some(&token), None),
+                    Err(SpawnClaimError::DescendantLimit { .. })
+                ));
             }
         }
     }
