@@ -12,7 +12,6 @@ struct WorkbenchExecutionRecord {
 
 #[derive(Clone, Default)]
 pub(super) struct BoundaryAbortCleanup {
-    pub children: Vec<ActorRef>,
     pub scopes: Vec<tidepool_codegen::scope::ScopeId>,
 }
 
@@ -564,7 +563,6 @@ mod tests {
                 "checkpoint extraction must run unlocked"
             );
             BoundaryAbortCleanup {
-                children: Vec::new(),
                 scopes: checkpoints
                     .settle_checkpoints(actor, &boundary, false)
                     .into_iter()
@@ -590,7 +588,6 @@ mod tests {
         cleanup.scopes.clear();
         retry.retain_cleanup(cleanup);
         let completed = retry.collect_cleanup(|| panic!("completed abort remains idempotent"));
-        assert!(completed.children.is_empty());
         assert!(completed.scopes.is_empty());
     }
 
