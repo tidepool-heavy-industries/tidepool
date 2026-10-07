@@ -10870,7 +10870,8 @@ pub(crate) mod tests {
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");
             std::fs::write(&input, source).unwrap();
-            let request = context
+            let request_context = Arc::new(context.clone());
+            let request = request_context
                 .prepare_compilation(&directory.join("inputs"), &producer)
                 .unwrap();
             assert!(request.compiler_original_products().unwrap().is_empty());
