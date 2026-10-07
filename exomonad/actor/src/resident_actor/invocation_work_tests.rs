@@ -17,6 +17,102 @@ fn reservation() -> RequestReservationOwner {
 }
 
 #[test]
+fn nested_scope_tokens_fence_exact_owner_and_closed_ancestry() {
+    let owner = ActorRef::first(crate::ActorId(1));
+    let root = InvocationWork::new(owner, reservation());
+    let sibling_root = InvocationWork::new(owner, reservation());
+    let child = root.new_scope().unwrap();
+    let nested = child.new_scope().unwrap();
+    let sibling = root.new_scope().unwrap();
+    let token = nested.scope_token().unwrap();
+    assert_ne!(token, child.scope_token().unwrap());
+    assert_ne!(token, sibling.scope_token().unwrap());
+    assert!(Arc::ptr_eq(
+        &root.find_scope(owner, token).unwrap(),
+        &nested
+    ));
+    assert!(sibling_root.find_scope(owner, token).is_err());
+    assert!(root
+        .find_scope(ActorRef::first(crate::ActorId(2)), token)
+        .is_err());
+    assert!(root
+        .find_scope(
+            ActorRef {
+                incarnation: crate::Incarnation(2),
+                ..owner
+            },
+            token
+        )
+        .is_err());
+    child.close();
+    assert!(root.find_scope(owner, token).is_err());
+    assert!(nested.with_admission(|| ()).is_err());
+    assert!(nested.new_scope().is_err());
+    assert!(sibling.with_admission(|| ()).is_ok());
+    assert_eq!(root.scopes().len(), 2, "closed scope remains inspectable");
+    root.close();
+    assert!(sibling.with_admission(|| ()).is_err());
+}
+
+#[test]
+fn scope_construction_provenance_is_independent_of_cleanup_transfer() {
+    let owner = ActorRef::first(crate::ActorId(1));
+    let root = InvocationWork::new(owner, reservation());
+    let scope = root.new_scope().unwrap();
+    let requests = RequestRegistry::default();
+    let reserve = |work: &InvocationWork| {
+        work.with_admission(|| {
+            requests.reserve_for_cleanup_owner(
+                owner,
+                ActorRef::first(crate::ActorId(2)),
+                "request".into(),
+                true,
+                Some(work.reservation_owner()),
+                work.resource_cleanup_owner(),
+            )
+        })
+        .unwrap()
+    };
+    let parent_request = reserve(&root);
+    let child_request = reserve(&scope);
+    scope
+        .with_admission(|| {
+            requests.transfer_request_cleanup_owner(
+                owner,
+                child_request,
+                &scope.resource_cleanup_owner(),
+                ResourceCleanupOwner::Actor,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        requests
+            .abort_unsubmitted(owner, &scope.reservation_owner())
+            .0,
+        vec![child_request]
+    );
+    assert_eq!(
+        requests
+            .abort_unsubmitted(owner, &root.reservation_owner())
+            .0,
+        vec![parent_request]
+    );
+}
+
+#[test]
+fn escaped_scope_cannot_admit_after_parent_is_dropped_or_publishing() {
+    let owner = ActorRef::first(crate::ActorId(1));
+    let root = InvocationWork::new(owner, reservation());
+    let scope = root.new_scope().unwrap();
+    assert!(root.begin_publication());
+    assert!(scope.with_admission(|| ()).is_err());
+    drop(root);
+    assert!(scope.with_admission(|| ()).is_err());
+    assert!(scope.new_scope().is_err());
+}
+
+#[test]
 fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     let owner = ActorRef::first(crate::ActorId(1));
     let reservation = reservation();

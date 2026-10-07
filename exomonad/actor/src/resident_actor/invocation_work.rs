@@ -2,11 +2,16 @@
 
 use super::*;
 use crate::command_jobs::{CommandControl, CommandJobs};
+use crate::request::ResourceCleanupOwner;
+use std::sync::Weak;
 use tidepool_bridge_effects::{CommandCleanup, CommandError, CommandResult, CommandStatus};
 
 pub(crate) struct InvocationWork {
     owner: ActorRef,
     reservation: RequestReservationOwner,
+    cleanup_owner: ResourceCleanupOwner,
+    scope_id: Option<i64>,
+    parent: Weak<InvocationWork>,
     state: Mutex<InvocationWorkState>,
     cleanup_lock: tokio::sync::Mutex<()>,
 }
@@ -24,6 +29,7 @@ enum InvocationWorkPhase {
 #[derive(Default)]
 struct InvocationWorkState {
     phase: InvocationWorkPhase,
+    scopes: Vec<Arc<InvocationWork>>,
     compilers: Vec<crate::termination::CompilerWorkReceipt>,
     commands: Vec<String>,
     detached_commands: std::collections::HashSet<String>,
@@ -45,6 +51,7 @@ pub(super) struct InvocationCleanup {
     requests: Vec<InvocationRequestCleanup>,
     failures: Vec<String>,
     settlement_notifications_pending: bool,
+    scopes: Vec<(i64, InvocationCleanup)>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +78,11 @@ struct InvocationRequestCleanup {
 impl InvocationCleanup {
     pub(super) fn uncertainty(&self) -> Option<String> {
         let mut details = self.failures.clone();
+        for (scope, cleanup) in &self.scopes {
+            if let Some(detail) = cleanup.uncertainty() {
+                details.push(format!("scope {scope}: {detail}"));
+            }
+        }
         for receipt in &self.compilers {
             let close = receipt.observation();
             if !close.is_confirmed() {
@@ -137,10 +149,115 @@ impl InvocationWork {
     pub(super) fn new(owner: ActorRef, reservation: RequestReservationOwner) -> Arc<Self> {
         Arc::new(Self {
             owner,
+            cleanup_owner: ResourceCleanupOwner::Invocation(reservation.clone()),
             reservation,
+            scope_id: None,
+            parent: Weak::new(),
             state: Mutex::new(Default::default()),
             cleanup_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    pub(super) fn new_scope(self: &Arc<Self>) -> Result<Arc<Self>, String> {
+        static NEXT_SCOPE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        self.with_admission_state(|state| {
+            let token = NEXT_SCOPE
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |next| next.checked_add(1),
+                )
+                .map_err(|_| "resource scope identity exhausted".to_string())?;
+            let scope = Arc::new(Self {
+                owner: self.owner,
+                reservation: RequestReservationOwner::Scope(token),
+                cleanup_owner: ResourceCleanupOwner::Scope(token),
+                scope_id: Some(token),
+                parent: Arc::downgrade(self),
+                state: Mutex::new(Default::default()),
+                cleanup_lock: tokio::sync::Mutex::new(()),
+            });
+            state.scopes.push(scope.clone());
+            Ok(scope)
+        })?
+    }
+
+    pub(super) fn scope_token(&self) -> Option<i64> {
+        self.scope_id
+    }
+
+    pub(super) fn reservation_owner(&self) -> RequestReservationOwner {
+        self.reservation.clone()
+    }
+
+    pub(super) fn resource_cleanup_owner(&self) -> ResourceCleanupOwner {
+        self.cleanup_owner.clone()
+    }
+
+    pub(super) fn scopes(&self) -> Vec<Arc<Self>> {
+        self.state.lock().scopes.clone()
+    }
+
+    pub(super) fn find_scope(
+        self: &Arc<Self>,
+        caller: ActorRef,
+        token: i64,
+    ) -> Result<Arc<Self>, String> {
+        if caller != self.owner {
+            return Err("resource scope belongs to another actor incarnation".into());
+        }
+        let found = self
+            .find_retained_scope(token)
+            .ok_or_else(|| "resource scope is not retained by this owner".to_string())?;
+        found.with_admission(|| ())?;
+        Ok(found)
+    }
+
+    fn find_retained_scope(self: &Arc<Self>, token: i64) -> Option<Arc<Self>> {
+        if self.scope_id == Some(token) {
+            return Some(self.clone());
+        }
+        self.scopes()
+            .into_iter()
+            .find_map(|scope| scope.find_retained_scope(token))
+    }
+
+    /// Lock ancestry in one order so closing any ancestor fences child
+    /// admission. The callback must neither await nor reenter this owner.
+    pub(super) fn with_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
+        self.with_admission_state(|_| operation())
+    }
+
+    fn with_admission_state<T>(
+        &self,
+        operation: impl FnOnce(&mut InvocationWorkState) -> T,
+    ) -> Result<T, String> {
+        let mut ancestors = Vec::new();
+        let mut parent = self.parent.upgrade();
+        if self.scope_id.is_some() && parent.is_none() {
+            return Err("resource scope parent is no longer retained".into());
+        }
+        while let Some(owner) = parent {
+            parent = owner.parent.upgrade();
+            if owner.scope_id.is_some() && parent.is_none() {
+                return Err("resource scope parent is no longer retained".into());
+            }
+            ancestors.push(owner);
+        }
+        ancestors.reverse();
+        let mut guards = Vec::new();
+        for ancestor in &ancestors {
+            let guard = ancestor.state.lock();
+            if guard.phase != InvocationWorkPhase::Active {
+                return Err("resource scope ownership is closed".into());
+            }
+            guards.push(guard);
+        }
+        let mut state = self.state.lock();
+        if state.phase != InvocationWorkPhase::Active {
+            return Err("resource scope ownership is closed".into());
+        }
+        Ok(operation(&mut state))
     }
 
     pub(super) fn matches(&self, owner: ActorRef, reservation: &RequestReservationOwner) -> bool {
@@ -313,7 +430,14 @@ impl InvocationWork {
     }
 
     pub(super) fn close(&self) {
-        self.state.lock().phase = InvocationWorkPhase::Closing;
+        let scopes = {
+            let mut state = self.state.lock();
+            state.phase = InvocationWorkPhase::Closing;
+            state.scopes.clone()
+        };
+        for scope in scopes {
+            scope.close();
+        }
     }
 
     pub(super) fn cleanup_observation(&self) -> Option<InvocationCleanup> {

@@ -89,6 +89,7 @@ pub(crate) enum RequestReservationOwner {
         attempt: WorkbenchReservationAttempt,
     },
     Route(WatchId),
+    Scope(i64),
 }
 
 /// Cleanup lifetime is independent of actor authority and request construction.
@@ -1464,6 +1465,7 @@ impl RequestRegistry {
             Some(reservation @ RequestReservationOwner::Workbench { .. }) => {
                 ResourceCleanupOwner::Invocation(reservation.clone())
             }
+            Some(RequestReservationOwner::Scope(scope)) => ResourceCleanupOwner::Scope(*scope),
             _ => ResourceCleanupOwner::Actor,
         };
         self.reserve_for_cleanup_owner(
