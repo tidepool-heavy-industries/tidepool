@@ -22,11 +22,13 @@ data Event = Opened | Awaited | Rejected | Committed | Closed deriving (Eq,Show)
 data Script = Script
   { attempts :: [Either FormCause FormAttempt]
   , commits :: [Either FormCause FormTransition]
+  , rejects :: [Either FormCause FormTransition]
+  , currentAttempt :: Maybe Text
   , closeResult :: Either FormCause ()
   , events :: [Event]
   }
 script :: [Either FormCause FormAttempt] -> [Either FormCause FormTransition] -> Script
-script as cs = Script as cs (Right ()) []
+script as cs = Script as cs [Right FormApplied] Nothing (Right ()) []
 
 handle :: AskUser a -> Eff '[State Script] a
 handle (FormOpenWith _) = mark Opened >> pure (Right (FormLeaseToken "same-mount"))
@@ -35,15 +37,23 @@ handle (FormAwaitWith (FormLeaseToken lease)) = do
   mark Awaited
   state <- get
   case attempts state of
-    next:rest -> modify (\s -> s {attempts=rest}) >> pure next
+    next:rest -> do
+      let current = case next of Right (FormSubmitted (FormAttemptToken token) _) -> Just token; _ -> Nothing
+      modify (\s -> s {attempts=rest,currentAttempt=current})
+      pure next
     [] -> error "form awaited after scripted settlement"
-handle (FormRejectWith (FormLeaseToken lease) (FormAttemptToken _) errors) = do
+handle (FormRejectWith (FormLeaseToken lease) (FormAttemptToken attempt) errors) = do
   requireLease lease
+  requireAttempt attempt
   case errors of Array (_:_) -> pure (); _ -> error "rejected form without validation errors"
   mark Rejected
-  pure (Right FormApplied)
-handle (FormCommitWith (FormLeaseToken lease) (FormAttemptToken _) _) = do
+  state <- get
+  case rejects state of
+    next:rest -> modify (\s -> s {rejects=rest}) >> pure next
+    [] -> error "form rejected after scripted settlement"
+handle (FormCommitWith (FormLeaseToken lease) (FormAttemptToken attempt) _) = do
   requireLease lease
+  requireAttempt attempt
   mark Committed
   state <- get
   case commits state of
@@ -58,6 +68,10 @@ mark event = modify (\s -> s {events=events s ++ [event]})
 requireLease :: Text -> Eff '[State Script] ()
 requireLease "same-mount" = pure ()
 requireLease _ = error "form retried on another mount"
+requireAttempt :: Text -> Eff '[State Script] ()
+requireAttempt attempt = do
+  current <- currentAttempt <$> get
+  if current == Just attempt then pure () else error "form settled another submission's attempt ID"
 runForm :: Script -> Form a -> (FormResult a,[Event])
 runForm initial form = let (answer,final) = run (runState initial (interpret handle (askUser form))) in (answer,events final)
 submitted :: Text -> Value -> Either FormCause FormAttempt
@@ -66,6 +80,7 @@ submitted key value = Right (FormSubmitted (FormAttemptToken key) (object ["f0" 
 formLifecycleTests :: TestTree
 formLifecycleTests = testGroup "human-form-lifecycle"
   [ testCase "invalid corrected submission reuses one mount" invalidCorrected
+  , testCase "stale rejection awaits a corrected attempt on the same mount" staleRejection
   , testCase "stale commit awaits again and returns the new original closure" staleCommit
   , testCase "dismissal survives a cleanup failure" dismissal
   , testCase "transport cause survives a cleanup failure" unavailable
@@ -101,3 +116,11 @@ committedValue = do
       (answer,seen) = runForm initial (choice "Action" (option (text "Original") (+1) :| []))
   case answer of Submitted action -> assertEqual "selected original survives native commit" (11::Int) (action 10); _ -> error "commit failed"
   assertEqual "native applied commit authoritatively settles the lease" [Opened,Awaited,Committed] seen
+
+staleRejection :: IO ()
+staleRejection = do
+  let form = validate (\n -> ["positive required" | n <= 0]) (intInput "Count" Nothing)
+      initial = (script [submitted "invalid-old" (String "0"),submitted "valid-new" (String "2")] [Right FormApplied]) {rejects=[Right FormStale]}
+      (answer,seen) = runForm initial form
+  case answer of Submitted 2 -> pure (); _ -> error "stale rejection prevented corrected value"
+  assertEqual "stale rejection retains lease and current attempt identity" [Opened,Awaited,Rejected,Awaited,Committed] seen
