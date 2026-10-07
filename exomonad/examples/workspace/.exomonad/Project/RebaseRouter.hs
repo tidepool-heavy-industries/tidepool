@@ -57,6 +57,7 @@ import Tidepool.Effects.Core
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Effects (RepoEvent, sleep)
 import Tidepool.Journal (record)
+import Tidepool.Worktree (WorkspaceHandle)
 
 data Child = Child
   { childAgent :: AgentRef
@@ -119,8 +120,8 @@ adviceFor facts likelihood
   | likelihood >= 0.35 = DeferJudgment
   | otherwise = RecordOnly
 
-rebaseRouter :: WorktreeId -> ActorSpec RebaseRouter RebaseRouterEffects
-rebaseRouter integration = R.withWorktree integration $
+rebaseRouter :: WorkspaceHandle -> ActorSpec RebaseRouter RebaseRouterEffects
+rebaseRouter integration = R.withWorkspace integration $
   R.definition "rebase-router" (Actor.Selected knownEffects) RebaseRouter
     { routerState = RouterState Map.empty Nothing Nothing False
     , register = registerChild

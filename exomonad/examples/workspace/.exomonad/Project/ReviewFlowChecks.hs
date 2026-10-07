@@ -15,7 +15,7 @@ oneComponent = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-first\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-first\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-first\" :: Text"
     <> "\nlet sourcePlan = RequiresSiblingCommits [sourceHead]")
   script owner "review-flow-loop"
@@ -80,7 +80,7 @@ failurePaths = do
   owner2 <- root
   base2 <- git owner2 ["rev-parse", "HEAD"]
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral base2
-    <> "\nlet limit = 0 :: Int\nlet campaignName = \"review-loop-budget\" :: CampaignLabel"
+    <> "\nlet limit = 0 :: Int\nlet campaignName = \"review-loop-budget\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-budget\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner2 "review-flow-loop"
@@ -95,13 +95,13 @@ failurePaths = do
     "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 0 && null (flowRepairRequests state) && case flowStage state of { ReviewStopped (RepairBudgetSpent 0 _ _) -> True; _ -> False }) }"
   void $ turn owner2 "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show receipt)"
   assertCell owner2 "stopped review retains its reviewer stop outcome"
-    "case receipt of { ReviewCleanupAttempted outcomes -> length outcomes == 1 && case snd (head outcomes) of { StoppedNow -> True; StoppedRetaining _ -> True; StoppedReleasing -> True; AlreadyStopped -> True; StopUnavailable -> True; StopUnauthorized -> True; StopFailed _ -> True }; _ -> False }"
+    "case receipt of { ReviewCleanupAttempted outcomes -> length outcomes == 1 && case reverse (snd (head outcomes)) of { StoppedNow : _ -> True; StoppedRetaining _ : _ -> True; StoppedReleasing : _ -> True; AlreadyStopped : _ -> True; StopUnavailable : _ -> True; StopUnauthorized : _ -> True; StopFailed _ : _ -> True; [] -> False }; _ -> False }"
   void $ turn owner2 "R.finish flow"
   void restart
   owner3 <- root
   base3 <- git owner3 ["rev-parse", "HEAD"]
   void $ turn owner3 ("let sourceHead = " <> gitOidLiteral base3
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-stale\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-stale\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-stale\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner3 "review-flow-loop"
@@ -123,7 +123,7 @@ sourcePreflight = do
   baseline <- git owner ["rev-parse", "HEAD"]
   sibling <- checkpoint owner "sibling-source.txt" "required sibling\n" "required sibling source"
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-missing\" :: CampaignLabel"
+    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-missing\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-missing\" :: Text"
     <> "\nlet sourcePlan = RequiresSiblingCommits [" <> gitOidLiteral sibling <> "]")
   script owner "review-flow-loop"
@@ -139,7 +139,7 @@ sourcePreflight = do
   base2 <- git owner2 ["rev-parse", "HEAD"]
   sibling2 <- checkpoint owner2 "sibling-source.txt" "separate sibling\n" "separate sibling source"
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral base2
-    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-partial\" :: CampaignLabel"
+    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-partial\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-partial\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner2 "review-flow-loop"
@@ -162,7 +162,7 @@ emptyFindings = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-empty\" :: CampaignLabel"
+    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-empty\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-empty\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner "review-flow-loop"
@@ -187,7 +187,7 @@ effectfulRouting = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet campaignName = \"review-flow-effectful\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-flow-effectful\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-effectful-coordinator\" :: Text")
   script owner "review-flow-effectful"
   worker <- activation
@@ -221,7 +221,7 @@ effectfulRouting = do
   baseline2 <- git owner2 ["rev-parse", "HEAD"]
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral baseline2
     <> "\nlet limit = 1 :: Int\nlet sourcePlan = ComponentReview"
-    <> "\nlet campaignName = \"review-flow-semantic\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-flow-semantic\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-semantic-coordinator\" :: Text")
   script owner2 "review-flow-semantic"
   worker2 <- activation
@@ -244,7 +244,7 @@ workflowExample = do
   owner <- root
   source <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral source
-    <> "\nlet campaignName = \"review-workflow-accepted\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-workflow-accepted\" :: Text"
     <> "\nlet coordinatorName = \"review-workflow-accepted-coordinator\" :: Text"
     <> "\nlet routeCriteria = [\"Escalate if acceptance or paths change.\"] :: [Text]")
   script owner "review-flow-workflow"
@@ -291,7 +291,7 @@ workflowExample = do
   owner2 <- root
   source2 <- git owner2 ["rev-parse", "HEAD"]
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral source2
-    <> "\nlet campaignName = \"review-workflow-escalated\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-workflow-escalated\" :: Text"
     <> "\nlet coordinatorName = \"review-workflow-escalated-coordinator\" :: Text"
     <> "\nlet routeCriteria = [] :: [Text]")
   script owner2 "review-flow-workflow"
@@ -326,7 +326,7 @@ lateCandidate = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-late-source\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-late-source\" :: Text"
     <> "\nlet coordinatorName = \"review-late-coordinator\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner "review-flow-late-setup"
@@ -352,7 +352,7 @@ replacement = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-replacement\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-replacement\" :: Text"
     <> "\nlet coordinatorName = \"review-replacement-coordinator\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner "review-flow-loop"

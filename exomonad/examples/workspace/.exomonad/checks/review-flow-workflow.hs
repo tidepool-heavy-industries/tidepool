@@ -1,5 +1,6 @@
 {-# LANGUAGE QuasiQuotes #-}
 import Tidepool.Effects.Core (GitRef (..))
+import Tidepool.Worktree (workspaceFor)
 -- Supply routeCriteria for this task. Exact-source Repair uses Jev only when
 -- criteria are present; Accepted and missing-criteria escalation are local.
 let work = (task "implement" "Implement one component" ["review-flow.txt"] "Read exact committed source" sourceHead)
@@ -12,10 +13,11 @@ Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
 Right (worker, _updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions
 Right coordinatorTree <- createWorktree
   (fromRef (GitRef (renderGitOid sourceHead)) coordinatorName)
+Right coordinatorWorkspace <- workspaceFor coordinatorTree
 let policy = defaultReviewFlowPolicy
       { flowRepairLimit = 1
       , flowEscalationCriteria = routeCriteria }
-flow <- R.start (R.withWorktree (worktreeId coordinatorTree)
+flow <- R.start (R.withWorkspace coordinatorWorkspace
   (reviewFlowWith me work policy worker semanticReviewChoice))
 initialSnapshot <- R.call (reviewSnapshot (R.client flow)) ()
 pendingCleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce

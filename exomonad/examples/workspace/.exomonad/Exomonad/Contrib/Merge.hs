@@ -40,7 +40,7 @@ import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (BranchName (..), Commands, WorktreeHandle (..), WorktreeReceipt (..))
-import Tidepool.Worktree (SubmissionObservation (..), HeadState (..), renderGitOid, renderWorktreeError)
+import Tidepool.Worktree (WorkspaceHandle, SubmissionObservation (..), HeadState (..), renderGitOid, renderWorktreeError)
 import Exomonad.Contrib.Types (cleanReviewCheckout)
 
 -- One serialized actor owns the integration checkout and optional publication
@@ -134,9 +134,9 @@ type MergeEffects = R.LocalEffects Merge
 
 -- | Bind the integration checkout and run the supplied argv after each merge.
 -- Only a clean exit 0 can advance the optional publication branch.
-mergeInto :: WorktreeId -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects
-mergeInto tree advance check =
-  R.withWorktree tree $ R.definition "integrator" (Actor.Selected knownEffects) Merge
+mergeInto :: WorkspaceHandle -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects
+mergeInto workspace advance check =
+  R.withWorkspace workspace $ R.definition "integrator" (Actor.Selected knownEffects) Merge
     { mergeState = MergeState advance check Nothing Nothing []
     , mergeView = \() -> R.get
     , publish = runPublish

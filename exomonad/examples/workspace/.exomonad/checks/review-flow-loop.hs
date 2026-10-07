@@ -1,5 +1,6 @@
 {-# LANGUAGE QuasiQuotes #-}
 import Tidepool.Effects.Core (GitRef (..))
+import Tidepool.Worktree (workspaceFor)
 let work = (task "implement" "Implement one component" ["review-flow.txt"] "Read exact committed source" sourceHead)
       { planPath = "plans/component.md", rationale = "Exercise fresh review and bounded repair" }
 Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
@@ -10,7 +11,8 @@ Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
 Right (worker, _updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions
 Right coordinatorTree <- createWorktree
   (fromRef (GitRef (renderGitOid sourceHead)) coordinatorName)
-let flowDefinition = R.withWorktree (worktreeId coordinatorTree)
+Right coordinatorWorkspace <- workspaceFor coordinatorTree
+let flowDefinition = R.withWorkspace coordinatorWorkspace
       (reviewFlow me work
         (defaultReviewFlowPolicy { flowRepairLimit = limit, flowSourcePlan = sourcePlan }) worker)
 flow <- R.start flowDefinition

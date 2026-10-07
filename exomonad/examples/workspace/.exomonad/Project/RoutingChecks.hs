@@ -377,7 +377,7 @@ forwardCandidate disposition = do
         Forward -> "route-forward"
         CancelDestination -> "route-cancel"
         LoseProducer -> "route-unavailable"
-  void $ turn owner ("let routeCampaign = " <> literal campaign <> " :: CampaignLabel")
+  void $ turn owner ("let routeCampaign = " <> literal campaign <> " :: Text")
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "route-reply-setup"

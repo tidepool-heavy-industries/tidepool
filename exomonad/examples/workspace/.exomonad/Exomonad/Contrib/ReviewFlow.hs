@@ -46,7 +46,7 @@ import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands)
 import Tidepool.Actors.Worktree (boundWorktree)
-import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError, renderWorktreeId)
+import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError, renderWorktreeId, workspaceFor)
 import qualified Exomonad.Contrib.Merge as Merge
 import Tidepool.Agent.Reply (requestIdNumber)
 import Exomonad.Contrib.CheckResults
@@ -235,6 +235,7 @@ data ReviewRun = ReviewRun
 -- reusable operation. It never waits for the implementer in the admission cell.
 startReviewFlow
   :: (Member Actor effects, Member WorktreeAllocation effects, Member BoundWorktree effects,
+      Member WorktreeRegistry effects,
       Member Replies effects)
   => AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate) -> [PlanCheck]
   -> Eff effects (Either Text ReviewRun)
@@ -245,6 +246,7 @@ startReviewFlow owner task policy = startReviewFlowWith
 
 startReviewFlowWith
   :: (Member Actor effects, Member WorktreeAllocation effects, Member BoundWorktree effects,
+      Member WorktreeRegistry effects,
       Member Replies effects)
   => (forall selected. Member Jev selected => ReviewContext -> Eff selected ReviewRouteResult)
   -> AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate) -> [PlanCheck]
@@ -263,9 +265,13 @@ startReviewFlowWith choose owner task policy worker checks
           case allocated of
             Left issue -> pure (Left (renderWorktreeError issue))
             Right tree -> do
-              flow <- R.start (R.withWorktree (worktreeId tree)
-                (checkedReviewFlow owner task policy worker checks choose))
-              pure (Right (ReviewRun flow tree))
+              workspace <- workspaceFor tree
+              case workspace of
+                Left issue -> pure (Left (renderWorktreeError issue))
+                Right grant -> do
+                  flow <- R.start (R.withWorkspace grant
+                    (checkedReviewFlow owner task policy worker checks choose))
+                  pure (Right (ReviewRun flow tree))
 
 -- The caller retains the dedicated managed worktree. The definition subscribes
 -- to the original implementer, including when its response already settled.
