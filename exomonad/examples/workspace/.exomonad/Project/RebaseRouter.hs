@@ -320,7 +320,7 @@ judgeAndRoute newHead rows = do
         (#children := J.each (\(label, _, _) -> label) judgeOne ambiguous)
       pure $ case result of
         Left failure -> Left failure
-        Right response -> Right (Map.fromList (map toJudgment response.children))
+        Right response -> Right (Map.fromList (map toJudgment (J.answers response).children))
   forM_ rows $ \(label, child, facts) -> do
     let (likelihood, costAnswer) = case judgments of
           Left _ | factsBehind facts && Set.null (factsOverlap facts) -> (0.5, Nothing)

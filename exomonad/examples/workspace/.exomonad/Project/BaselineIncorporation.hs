@@ -344,11 +344,11 @@ routeQuestion parent question affected = case exactOwners question affected of
     let routed =
           case answer of
             Left failure -> Left ("question ownership unresolved: " <> Text.pack (show failure))
-            Right response -> case J.settle J.careful response.route
+            Right response -> case J.settle J.careful (J.answers response).route
               (#unresolved (\() -> Left "question ownership unresolved; parent must choose")
                 J..| #owner (\_ row -> Right [affectedLabel row])) of
               Left doubt -> Left ("question ownership unresolved: " <> doubt.why)
-              Right (J.Settled route) -> route
+              Right settled -> let route = J.settledValue settled in route
     case routed of
       Left reason -> do
         notified <- sendMessage parent (reason <> ": " <> questionKey question)

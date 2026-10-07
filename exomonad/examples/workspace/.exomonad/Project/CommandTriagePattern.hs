@@ -68,16 +68,18 @@ transientQuestion criteria = J.noul
 chooseFollowup
   :: J.Policy p -> RepeatAllowance -> J.Chosen FaultOptions -> Maybe J.Yes
   -> Either J.Doubt (J.Settled p Followup)
-chooseFollowup policy allowance fault transient = fmap J.Settled $ do
-  J.Settled kind <- J.takenUnder policy fault
+chooseFollowup policy allowance fault transient = do
+  faultVerdict <- J.takenUnder policy fault
+  let kind = J.settledValue faultVerdict
+      fromFault result = fmap (const result) faultVerdict
   case kind of
-    AssertionFailure -> Right InspectAssertions
-    InputFailure -> Right InspectInputs
-    UnknownFailure -> Right AskForEvidence
+    AssertionFailure -> Right (fromFault InspectAssertions)
+    InputFailure -> Right (fromFault InspectInputs)
+    UnknownFailure -> Right (fromFault AskForEvidence)
     ToolFailure -> case allowance of
-      NoRepeat -> Right InspectTooling
+      NoRepeat -> Right (fromFault InspectTooling)
       OneRepeatAllowed -> case transient of
-        Nothing -> Right AskForEvidence
+        Nothing -> Right (fromFault AskForEvidence)
         Just answer -> do
-          J.Settled established <- J.judge policy answer
-          pure (if established then OfferOneRepeat else InspectTooling)
+          transientVerdict <- J.judge policy answer
+          pure (fmap (\established -> if established then OfferOneRepeat else InspectTooling) transientVerdict)

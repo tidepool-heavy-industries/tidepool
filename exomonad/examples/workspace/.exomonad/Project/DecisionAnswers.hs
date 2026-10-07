@@ -134,10 +134,10 @@ semanticDecisionAnswer task question = case prepareDecisionAnswer task question 
       Left failure -> AskOwner (Text.pack (show failure))
       Right response -> interpretDecisionAnswer response
 
-interpretDecisionAnswer :: J.Response DecisionAnswerPacket -> AnswerChoice
-interpretDecisionAnswer response = case J.takenUnder J.strict response.answer of
+interpretDecisionAnswer :: J.Response (DecisionAnswerPacket J.Answers) -> AnswerChoice
+interpretDecisionAnswer response = case J.takenUnder J.strict (J.answers response).answer of
   Left doubt -> AskOwner doubt.why
-  Right (J.Settled chosen) -> chosen
+  Right settled -> let chosen = J.settledValue settled in chosen
 
 data AnswerFailure = InvalidAnswerCount | InvalidAnswerNames | AnswerRoutingFailed RoutingError
   deriving (Show, Eq)

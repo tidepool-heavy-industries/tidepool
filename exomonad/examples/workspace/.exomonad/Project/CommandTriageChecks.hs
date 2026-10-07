@@ -18,7 +18,7 @@ construction = do
       evidence = J.state (#diagnostic := ("test failed" :: Text))
       questions = #fault := faultQuestion criteria
         :& #transient := J.optional (Nothing :: Maybe (J.Q Value J.Noul))
-      sent = J.request J.jevLatest evidence questions
-      single = J.request J.jevLatest evidence (#fault := faultQuestion criteria)
+      sent = J.request <$> J.prepare J.jevLatest evidence questions
+      single = J.request <$> J.prepare J.jevLatest evidence (#fault := faultQuestion criteria)
   check "disabled speculative question sends exactly the single-question request"
     (case (sent, single) of { (Right a, Right b) -> a == b; _ -> False })

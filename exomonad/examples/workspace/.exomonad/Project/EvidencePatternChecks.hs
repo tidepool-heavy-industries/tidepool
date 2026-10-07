@@ -39,8 +39,8 @@ construction = do
   check "two clients override criteria while retaining the same shape"
     (selectionQuestion commandCriteria /= selectionQuestion reviewCriteria
       && usefulWhen commandCriteria /= usefulWhen reviewCriteria)
-  let commandRequest = J.request J.jevLatest
-        commandState commandPacket
+  let commandPrepared = J.prepare J.jevLatest commandState commandPacket
+      commandRequest = J.request <$> commandPrepared
   check "text: shared useful criterion appears once in the packet, not once per candidate"
     (case commandRequest of
       Left _ -> False
@@ -51,10 +51,10 @@ construction = do
                (textFields request)) == 1)
   check "both authored packets prepare as a single request"
     (isRight commandRequest
-      && isRight (J.request J.jevLatest reviewState reviewPacket))
+      && isRight (J.prepare J.jevLatest reviewState reviewPacket))
   let duplicate = [head commandEvidence, head commandEvidence]
   check "the existing Jev request validator rejects duplicate candidate keys"
-    (isLeft (J.request J.jevLatest
+    (isLeft (J.prepare J.jevLatest
       (J.state (#intent := ("duplicate check" :: Text.Text)))
       (#best := evidenceQuestion commandCriteria (const "") duplicate)))
   let candidate = decodeSelection "E0061-site"
@@ -67,8 +67,9 @@ construction = do
 
 decodeSelection :: Text.Text -> Either Text.Text (EvidenceSelection Diagnostic)
 decodeSelection selected = do
-  response <- either (Left . Text.pack . show) Right $ J.decode
-    (#best := evidenceQuestion commandCriteria (const "") commandEvidence)
+  prepared <- either (Left . Text.pack . show) Right $ J.prepare J.jevLatest
+    commandState (#best := evidenceQuestion commandCriteria (const "") commandEvidence)
+  response <- either (Left . Text.pack . show) Right $ J.decode prepared
     (object
       [ "model" .= ("scripted" :: Text.Text)
       , "answers" .= object
@@ -83,9 +84,9 @@ decodeSelection selected = do
               ]
           ]
       ])
-  case settleEvidence J.lenient response.best of
+  case settleEvidence J.lenient (J.answers response).best of
     Left doubt -> Left doubt.why
-    Right (J.Settled selection) -> Right selection
+    Right settled -> let selection = J.settledValue settled in Right selection
 
 -- Inspect the actual protocol Text fields, preserving their boundaries.
 textFields :: Value -> [Text.Text]

@@ -85,7 +85,7 @@ commandState = J.state
 -- resolved model and usage. Policy is applied afterwards by the caller.
 runCommandCase
   :: Member Jev effects
-  => Eff effects (Either J.JevError (J.Response (J.Packet (EvidencePacket Diagnostic))))
+  => Eff effects (Either (J.JevError J.JevCallError) (J.Response (J.Packet (EvidencePacket Diagnostic) J.Answers)))
 runCommandCase = J.ask commandState commandPacket
 
 -- Exact spans already present at the shared package's baseline commit.
@@ -152,5 +152,5 @@ sourceRows rows =
 
 runReviewCase
   :: Member Jev effects
-  => Eff effects (Either J.JevError (J.Response (J.Packet (EvidencePacket ReviewSource))))
+  => Eff effects (Either (J.JevError J.JevCallError) (J.Response (J.Packet (EvidencePacket ReviewSource) J.Answers)))
 runReviewCase = J.ask reviewState reviewPacket

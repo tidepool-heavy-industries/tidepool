@@ -30,8 +30,8 @@ answer docs query = do
           (pure "This needs evidence beyond Git history and documentation.")))
   case decision of
     Left err -> pure ("Jev unavailable: " <> T.pack (show err))
-    Right chosen -> case J.takenUnder J.lenient chosen of
+    Right response -> case J.takenUnder J.lenient (J.answers response) of
       Left doubt -> pure ("Which investigation? " <> doubt.why)
-      Right (J.Settled action) -> do
+      Right settled -> let action = J.settledValue settled in do
         result <- action
         pure ("[" <> chosen.key <> "]\n" <> result)

@@ -30,7 +30,9 @@ Nothing from `.exomonad/workspace/Project` appears here.
 unqualified.
 
 `J.ask1 state question` asks one; `J.ask state packet` asks a whole packet in
-one round trip. Both return `Either J.JevError _`. Read the error and fall back
+one round trip. Both return a typed Jev call error or a response. Use
+`J.answers response` to project the answer payload; retain the response when
+you need its model, usage or diagnostics. Read the typed error and fall back
 to your own policy; never retry blindly.
 
 ## Compose the questions
@@ -132,8 +134,8 @@ A policy sets three floors: mass, margin and confidence. `J.lenient`,
 actual decisions and outcomes. `J.handle` follows the winner directly;
 `J.settle` adds a doubt branch when the program benefits from another read,
 another question or a handback. `J.settle policy answer
-handlers` returns `Either J.Doubt (J.Settled p r)`: `Right (J.Settled result)`
-through the handler for the alternative that won, or `Left` a
+handlers` returns `Either J.Doubt (J.Settled p r)`: `Right settled` carries
+the handler result, available through `J.settledValue settled`, or `Left` a
 `J.Doubt { cause, why }` whose `cause` is `NearTie`, `Underweight` or
 `Unconfident` and whose `why` is the line a log reads. `J.takenUnder` is the
 same with no handler list when every alternative carries the same type of
@@ -196,9 +198,9 @@ let gate = J.choice "Which of these describes the candidate?"
 answer <- J.ask1 (J.state (#owned_paths := (["src/Retry.hs", "tests/RetrySpec.hs"] :: [Text]) :& #diff_stat := diffStat :& #test_output := testOutput :& #review_scope := ("retry bounds only" :: Text))) gate
 display (case answer of
   Left err -> "jev unavailable: " <> T.pack (show err)
-  Right a -> case J.takenUnder J.careful a of
+    Right response -> let a = J.answers response in case J.takenUnder J.careful a of
     Left doubt -> "hold: " <> doubt.why
-    Right (J.Settled verdict) -> a.key <> " -> " <> verdict <> "; " <> J.explain J.careful a)
+    Right settled -> a.key <> " -> " <> J.settledValue settled <> "; " <> J.explain J.careful a)
 ```
 
 The example uses `J.careful` to demonstrate settlement. Choose thresholds from
@@ -241,7 +243,7 @@ answer <- J.ask1 (J.state (#test_output := ("FAIL [ 0.2s] tidepool-runtime sessi
   (J.choice "Which prepared continuation matches this test output?"
     (J.alt #inspect_by_hand "The output names neither a single test nor a target" (pure ("reading the failure by hand" :: Text))
       J..| J.many #rerun (\(k, _, _) -> k) (\(_, w, _) -> w) runners))
-next <- either (const (pure "jev unavailable; inspecting by hand")) (\a -> J.handle a (#inspect_by_hand id J..| #rerun (\_ (_, _, action) -> action))) answer
+next <- either (const (pure "jev unavailable; inspecting by hand")) (\response -> J.handle (J.answers response) (#inspect_by_hand id J..| #rerun (\_ (_, _, action) -> action))) answer
 display next
 ```
 
@@ -262,7 +264,7 @@ let packet =
         :& #per := J.each fst (\(k, d) -> #relevant := J.noul ("Is " <> k <> " (" <> d <> ") on the path the timeout takes?")) candidates
         :& #fixed := J.noul "Given that the retry loop changed yesterday, is the timeout already fixed?"
 answer <- J.ask (J.state (#failure := ("fetch times out after 3 retries" :: Text))) packet
-display (fmap (\r -> (either (.why) (\(J.Settled (k, _)) -> k) (J.takenUnder J.lenient r.best), [(k, s.relevant.yes) | ((k, _), s) <- r.per], r.fixed.yes)) answer)
+display (fmap (\r -> let a = J.answers r in (either (.why) (J.settledValue) (J.takenUnder J.lenient a.best), [(k, s.relevant.yes) | ((k, _), s) <- a.per], a.fixed.yes)) answer)
 ```
 
 When several items may each qualify, ask one `noul` per item with `J.each`, not
@@ -355,7 +357,7 @@ let classify :: Text -> Handler [(Text, Text)] MyEffects (); classify output = d
             J..| J.alt #insufficient_evidence "`check_output` is empty or does not name a tool, a rule or a test" "ask for the full check output"))
       case answer of
         Left err -> modify' (++ [("jev_unavailable", T.pack (show err))])
-        Right a -> modify' (++ [(either (const "doubt") (\(J.Settled act) -> act) (J.takenUnder J.lenient a), a.key <> " " <> T.pack (show a.confidence))])
+        Right response -> let a = J.answers response in modify' (++ [(either (const "doubt") J.settledValue (J.takenUnder J.lenient a), a.key <> " " <> T.pack (show a.confidence))])
 ```
 
 For a compiled command → choice → effectful continuation example, read

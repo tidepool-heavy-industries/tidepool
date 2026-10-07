@@ -49,7 +49,7 @@ select results candidates = do
   pure $ case answer of
     Left _ -> []
     Right response -> Lookup.rankCandidates
-      [(candidate, judged.relevance.expectation) | ((_, candidate), judged) <- response.candidates]
+      [(candidate, judged.relevance.expectation) | ((_, candidate), judged) <- (J.answers response).candidates]
 
 scalarPrefix :: Int -> Text -> Text
 scalarPrefix size = T.pack . take size . T.unpack

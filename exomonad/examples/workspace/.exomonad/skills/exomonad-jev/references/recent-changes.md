@@ -20,13 +20,13 @@ inspectRecentChanges task = do
             (J.choice "Which listed commit subject identifies a change worth inspecting for `task`?" offers)
           case answer of
             Left err -> pure ("Jev unavailable: " <> T.pack (show err))
-            Right a -> case J.settle J.lenient a
+            Right response -> let a = J.answers response in case J.settle J.lenient a
                  (#unresolved (\() -> pure "The listed subjects do not resolve what to read; inspect broader history or source.")
                    J..| #commit (\_ (oid, _) -> do
                      result <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "show", "--stat", "--oneline", oid]))
                      pure (either (\issue -> "Cannot read selected commit: " <> T.pack (show issue)) id (Cmd.stdout result)))) of
               Left _ -> pure ("Needs inspection: " <> J.explain J.lenient a)
-              Right (J.Settled act) -> act
+              Right settled -> J.settledValue settled
 ```
 
 Call `inspectRecentChanges "Which recent change could explain the command output regression?"`

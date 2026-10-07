@@ -57,7 +57,7 @@ skills = do
   void $ example owner "exomonad-jev" 1
   void $ example owner "exomonad-jev" 2
   assertCell owner "the review gate resolves to an accepted key or a stated doubt"
-    "case answer of { Left _ -> True; Right a -> case J.takenUnder J.careful a of { Left doubt -> not (T.null doubt.why); Right (J.Settled verdict) -> (a.key, verdict) `elem` [(\"all_present\", \"merge: every item of the checklist holds\"), (\"one_absent\", \"repair: an item of the checklist does not hold\"), (\"contradicts\", \"escalate: the artifacts contradict each other\"), (\"insufficient_evidence\", \"ask again: name the missing field and re-ask\")] } }"
+    "case answer of { Left _ -> True; Right a -> case J.takenUnder J.careful a of { Left doubt -> not (T.null doubt.why); Right settled -> let verdict = J.settledValue settled in (a.key, verdict) `elem` [(\"all_present\", \"merge: every item of the checklist holds\"), (\"one_absent\", \"repair: an item of the checklist does not hold\"), (\"contradicts\", \"escalate: the artifacts contradict each other\"), (\"insufficient_evidence\", \"ask again: name the missing field and re-ask\")] } }"
   void $ example owner "exomonad-jev" 3
   assertCell owner "text: the selected continuation runs and returns its command output"
     "case answer of { Left _ -> next == \"jev unavailable; inspecting by hand\"; Right _ -> next `elem` [\"would rerun session::retry_is_bounded\\n\", \"would rerun the suite\\n\", \"reading the failure by hand\", \"rerun unavailable\", \"suite unavailable\"] }"

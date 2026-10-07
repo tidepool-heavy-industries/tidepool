@@ -965,7 +965,7 @@ const CELL: &str = r#"answer <- J.ask1 (J.rawState (String "retry loop in fetch;
      (J.alt #not_here "The branch is not in this file" (0 :: Int)
         J..| J.many #line (\(k, _, _) -> k) (\(_, w, _) -> w)
                [("line-4", "if attempts > 3", 4), ("line-12", "if elapsed > timeout", 12)]))
-_ <- if either (const 0) (\a -> J.handle a (#not_here id J..| #line (\_ (_, _, n) -> n))) answer == 12 then pure () else error "choice did not select line 12""#;
+_ <- if either (const 0) (\response -> J.handle (J.answers response) (#not_here id J..| #line (\_ (_, _, n) -> n))) answer == 12 then pure () else error "choice did not select line 12""#;
 
 #[tokio::test]
 async fn jev_choice_round_trips_through_the_host_backend() {
@@ -1009,7 +1009,7 @@ async fn score_then_choice_packets_with_alternatives_install_on_one_machine() {
         campaign.root_installation.policy.as_ref(),
         r#"let rubric = J.level #low "low" (0 :: Int) J..| J.level #high "high" 1
 answer <- J.ask (J.rawState (String "one machine regression")) (#q := J.score "How important is this?" rubric)
-_ <- if either (const False) (\a -> a.q.expectation == 1) answer then pure () else error "score did not select the high criterion""#,
+_ <- if either (const False) (\response -> (J.answers response).q.expectation == 1) answer then pure () else error "score did not select the high criterion""#,
     )
     .await;
     assert_eq!(score["status"], "committed", "Score packet failed: {score}");
@@ -1018,7 +1018,7 @@ _ <- if either (const False) (\a -> a.q.expectation == 1) answer then pure () el
         campaign.root_installation.policy.as_ref(),
         r#"answer <- J.ask1 (J.rawState (String "one machine regression"))
   (J.choice "Which branch?" (J.alt #first "First branch" (1 :: Int) J..| J.alt #second "Second branch" 2))
-_ <- if either (const 0) (\selected -> J.handle selected (#first id J..| #second id)) answer == 2 then pure () else error "choice did not select the second branch""#,
+_ <- if either (const 0) (\response -> J.handle (J.answers response) (#first id J..| #second id)) answer == 2 then pure () else error "choice did not select the second branch""#,
     )
     .await;
     assert_eq!(
@@ -1170,7 +1170,7 @@ async fn live_jev_from_a_haskell_cell() {
      (J.alt #windowsill "On a windowsill" (1 :: Int)
         J..| J.alt #roof "On a roof" 2
         J..| J.alt #bed "In a bed" 3))
-_ <- if either (const 0) (\a -> J.handle a (#windowsill id J..| #roof id J..| #bed id)) answer == 1 then pure () else error "live Jev did not select the windowsill""#,
+_ <- if either (const 0) (\response -> J.handle (J.answers response) (#windowsill id J..| #roof id J..| #bed id)) answer == 1 then pure () else error "live Jev did not select the windowsill""#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
@@ -1232,7 +1232,7 @@ probeBody request = do
     Left _ -> "tool-body: jev unavailable for " <> topic request
     Right a ->
       J.handle
-        a
+        (J.answers a)
         ( #yes (\_ -> "tool-body branch: yes, investigate " <> topic request)
             J..| #no (\_ -> "tool-body branch: no, skip " <> topic request)
         )
@@ -1288,7 +1288,7 @@ noted call result
           Annotated
             ( T.pack "ordinal=" <> T.pack (show (toolResultOrdinal result))
                 <> T.pack " handle=" <> toolResultHandle result
-                <> T.pack " branch=" <> J.handle a
+                <> T.pack " branch=" <> J.handle (J.answers a)
                 ( #yes (\_ -> T.pack "after-tool branch: complete")
                     J..| #no (\_ -> T.pack "after-tool branch: incomplete")
                 )

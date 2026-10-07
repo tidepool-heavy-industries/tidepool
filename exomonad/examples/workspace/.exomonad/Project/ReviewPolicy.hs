@@ -15,7 +15,7 @@ module Project.ReviewPolicy (defaultReviewFlowPolicy, semanticReviewChoice) wher
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import qualified Jev.Operators as J
-import Jev.Operators (Packet ((:=)), Settled (Settled))
+import Jev.Operators (Packet ((:=)))
 import Tidepool.Actors.Exomonad
 import Tidepool.Agent.Contract (AgentSpec)
 import qualified AgentSpec as Installed
@@ -123,7 +123,7 @@ semanticReviewChoice context = case routeDecision context of
               (EscalateReview ("semantic review unavailable: " <> reason))
               (JevRouteUnavailable reason)
           Right observed ->
-            let selected = observed.route
+            let selected = (J.answers observed).route
                 model = J.resolvedModel observed
                 explanation = J.explain J.strict selected
             in case J.takenUnder J.strict selected of
@@ -131,7 +131,7 @@ semanticReviewChoice context = case routeDecision context of
                 (EscalateReview ("semantic review uncertain: " <> doubt.why))
                 (JevRouteDoubted model selected.key selected.mass
                   selected.confidence explanation)
-              Right (Settled choice) -> ReviewRouteResult choice
+              Right settled -> let choice = J.settledValue settled in ReviewRouteResult choice
                 (JevRouteSelected model selected.key selected.mass
                   selected.confidence explanation)
 

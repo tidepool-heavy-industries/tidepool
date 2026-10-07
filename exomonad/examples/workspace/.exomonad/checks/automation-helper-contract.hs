@@ -74,9 +74,9 @@ semanticSlowDiagnostic context observation = do
         J..| J.alt #unclear "The bounded output does not establish a cause" "Cause unresolved"))
   pure $ case answer of
     Left issue -> "Semantic diagnosis unavailable: " <> Text.pack (show issue)
-    Right choice -> case J.takenUnder J.careful choice of
+    Right response -> case J.takenUnder J.careful (J.answers response) of
       Left doubt -> "Semantic diagnosis uncertain: " <> doubt.why
-      Right (J.Settled recommendation) -> recommendation
+      Right settled -> let recommendation = J.settledValue settled in recommendation
 
 assert :: String -> Bool -> IO ()
 assert label passed = do

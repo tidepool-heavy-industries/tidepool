@@ -69,7 +69,7 @@ exportRequests = mapM_ emit decisionCases
   where
     emit (name, work, question) = case prepareDecisionAnswer work question of
       Left reason -> check ("GUARDED " <> name <> " " <> reason) False
-      Right (state, packet) -> case J.request J.jevLatest (J.rawState state) packet of
+      Right (state, packet) -> case J.request <$> J.prepare J.jevLatest (J.rawState state) packet of
         Left issue -> check ("REQUEST-ERROR " <> name <> " " <> Text.pack (show issue)) False
         Right request -> check ("REQUEST " <> name <> " " <> encodeValue request) True
 
@@ -83,11 +83,13 @@ replay = do
   where
     replayOne responses (name, work, question) =
       case (prepareDecisionAnswer work question, Map.lookup name responses) of
-        (Right (_, packet), Just raw) -> case J.decode packet raw of
-          Left issue -> check ("decoder failed: " <> Text.pack (show issue)) False
-          Right response -> do
-            let result = interpretDecisionAnswer response
-                expected = if name == "paraphrase" then result == UseDecision 0
-                  else case result of { AskOwner _ -> True; _ -> False }
-            check ("live replay " <> name <> ": " <> Text.pack (show result)) expected
+        (Right (state, packet), Just raw) -> case J.prepare J.jevLatest (J.rawState state) packet of
+          Left issue -> check ("preparation failed: " <> Text.pack (show issue)) False
+          Right prepared -> case J.decode prepared raw of
+            Left issue -> check ("decoder failed: " <> Text.pack (show issue)) False
+            Right response -> do
+              let result = interpretDecisionAnswer response
+                  expected = if name == "paraphrase" then result == UseDecision 0
+                    else case result of { AskOwner _ -> True; _ -> False }
+              check ("live replay " <> name <> ": " <> Text.pack (show result)) expected
         _ -> check ("missing prepared packet or response: " <> name) False

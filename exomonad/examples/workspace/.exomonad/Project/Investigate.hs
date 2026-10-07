@@ -830,7 +830,7 @@ askGroups policy owned intent command exit groups
               -- three named policies rather than a bare probability.
               chosen = case J.takenUnder (strategyPolicy policy) answers.strategy of
                 Left doubt -> StrategyUnclear (Text.pack (show doubt) <> "; " <> reasoning)
-                Right (J.Settled key) -> case key of
+                Right settled -> let key = J.settledValue settled in case key of
                   "callers_catch_up" -> CallersCatchUp
                   "restore_the_definition" ->
                     RestoreDefinition (definitionNamedBy groups)
