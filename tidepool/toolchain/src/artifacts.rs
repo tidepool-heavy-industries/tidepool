@@ -1476,7 +1476,13 @@ impl ModuleCandidateOffer {
         let specification = self.checked_cell.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("ordinary compile offer cannot admit a checked cell".into())
         })?;
-        let planned = self.admit_planned_declaration(root, exact, specification)?;
+        let planned = self.admit_planned_declaration(
+            root,
+            exact,
+            specification,
+            None,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )?;
         crate::checked_cell::admit_checked_cell(
             root,
             &self.producer,
@@ -1559,11 +1565,19 @@ impl ModuleCandidateOffer {
                         tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
                             .module_name(),
                     ];
+                let produced_types = values.capture_produced_types(
+                    initial.producer_sha256,
+                    planned,
+                    index..index,
+                    &mut validation,
+                )?;
                 let original = effective
                     .admit_planned_declaration(
                         &segment_root,
                         effective.exact.as_ref().expect("exact program offer"),
                         &source_spec,
+                        Some(&produced_types),
+                        &mut validation,
                     )?
                     .ok_or_else(|| {
                         CompileError::ExtractFailed(
@@ -1941,6 +1955,8 @@ impl ModuleCandidateOffer {
         root: &Path,
         exact: &crate::declaration_context::ExactCompilationRequest,
         specification: &crate::checked_cell::CheckedCellSpecification,
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Option<crate::checked_cell::PlannedCheckedDeclaration>, CompileError> {
         use sha2::{Digest, Sha256};
         let receipt_path = root.join("planned-declaration.cbor");
@@ -2001,7 +2017,7 @@ impl ModuleCandidateOffer {
         let authored = crate::declaration_join::NativeAuthoredDeclarationAdmission::from_planned(
             &module, &admission,
         )?;
-        let sealed = seal_turn_outputs_inner(
+        let sealed = seal_turn_outputs_with_validation(
             self,
             &directory,
             &source_path,
@@ -2011,6 +2027,8 @@ impl ModuleCandidateOffer {
             None,
             Some(&authored),
             OriginalOutputPublication::Transaction,
+            produced_types,
+            validation,
         )?
         .ok_or_else(fail)?;
         let products = sealed

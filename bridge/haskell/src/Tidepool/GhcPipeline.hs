@@ -600,10 +600,11 @@ data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
   , prTyCons :: [TyCon]
   , prHscEnv :: HscEnv
-  -- | Actual thin-interface bytes hydrated for selected session inputs and
-  -- typed segment outputs. Admission distinguishes submitted inputs from
-  -- reserved output custody; these snapshots supply only type evidence.
+  -- | Actual thin-interface bytes selected by session injection.
+  -- These authorize type-dependency seals, not source or native products.
   , prInjectedSessionInterfaces :: [CapturedSessionInterface]
+  -- | New typed capture outputs, kept distinct from injected inputs.
+  , prProducedSessionInterfaces :: [CapturedSessionInterface]
   -- | Verified canonical owners selected by this exact compiler request.
   -- Retained home interfaces have no source location in the GHC finder.
   , prCanonicalInterfaceAdmissions :: Map.Map (String,String) CanonicalInterfaceAdmission
@@ -3704,12 +3705,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
           injectedBaseline <- liftIO (cpInjectedSessionInterfaces plan)
           injectedTyped <- liftIO (readIORef typedSessionInterfacesRef)
-          let injectedInterfaces = injectedBaseline ++ injectedTyped
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
                 , prHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
-                , prInjectedSessionInterfaces = injectedInterfaces
+                , prInjectedSessionInterfaces = injectedBaseline
+                , prProducedSessionInterfaces = injectedTyped
                 , prCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
                     (pvExactScope variant)
                 , prCapturedType = capturedType

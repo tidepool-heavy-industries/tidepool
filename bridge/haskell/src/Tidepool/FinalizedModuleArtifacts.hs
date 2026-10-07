@@ -37,7 +37,7 @@ import System.Mem.StableName (StableName, makeStableName)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
 import Tidepool.BoundedRead (FileObservations, FileObservation(..), withFileObservations, observeFile)
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces )
 import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
 import Tidepool.FinalizedCore (captureFinalizedCore, isUnsupportedFinalizedCore)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, decodeCapturedPackageImports)
@@ -173,7 +173,7 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
     pure (CapturedModule (T.pack unit) (T.pack name) source interface package core requirements identity)
   let required = Set.fromList [(unit,name)
         | CapturedModule _ _ _ _ _ _ dependencies _ <- rows, (unit,name,_) <- dependencies]
-  values <- forM [snapshot | snapshot <- originalSessionInterfaces originals
+  values <- forM [snapshot | snapshot <- originalSessionInterfaces originals ++ originalProducedSessionInterfaces originals
       , let (owner,_) = capturedSessionInterface snapshot
       , (T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))) `Set.member` required
           || maybe False (const True) (capturedSessionInterfaceEvidence snapshot)] $ \snapshot -> do

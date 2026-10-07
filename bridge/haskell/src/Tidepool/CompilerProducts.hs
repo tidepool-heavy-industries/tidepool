@@ -48,7 +48,7 @@ import System.Mem.StableName (makeStableName)
 import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionCaptures )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionOutputs )
 import Tidepool.ExactScope
   ( ExactScope(..), scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
   , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
@@ -559,9 +559,9 @@ retainedOriginalInterfaces prepared =
 -- | Share the selected interfaces with finalization and type-witness sealing.
 newPreparedOriginalInterfaceArtifacts :: PreparedPipelineResult -> FilePath -> IO OriginalInterfaceArtifacts
 newPreparedOriginalInterfaceArtifacts prepared directory =
-  newOriginalInterfaceArtifactsWithSessionCaptures (prHscEnv result)
+  newOriginalInterfaceArtifactsWithSessionOutputs (prHscEnv result)
     (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared)
-    (prInjectedSessionInterfaces result) directory
+    (prInjectedSessionInterfaces result) (prProducedSessionInterfaces result) directory
   where result = pprPipelineResult prepared
 
 writeCertifiedProductsKeeping

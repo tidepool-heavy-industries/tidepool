@@ -853,6 +853,7 @@ def runtime_test_cases(binary):
         "generated_capture_histories_match_ghc_cold_warm_and_recovery",
         "authentic_native_entries_refuse_root_and_order_substitution_before_effects",
         "one_four_eight_actions_use_one_completed_inference_segment",
+        "produced_capture_types_cross_a_declaration_barrier_without_replaying_effects",
         "zero_capture_let_executes_without_publishing_a_dummy_binding",
         "zero_capture_bang_let_preserves_forcing_and_prior_effects",
         "zero_capture_action_runs_once_before_the_next_item",

@@ -734,6 +734,34 @@ fn one_four_eight_actions_use_one_completed_inference_segment() {
 }
 
 #[test]
+fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects() {
+    let mut session = SemanticSession::new();
+    let history = render_history(
+        23,
+        &[
+            HistoryOperation::Capture,
+            HistoryOperation::PureBindInt(1),
+            HistoryOperation::ObserveCapture,
+        ],
+        false,
+    );
+    assert_eq!(ghc_trace(&history.oracle), [23]);
+    session
+        .execute("produced_types_across_declaration", &history.cell, 1)
+        .unwrap();
+    assert_eq!(session.observed(), [23]);
+    session.assert_no_compiler_since_last_effect();
+    assert!(session
+        .resident
+        .current_binding_in(session.public, "historyCaptured")
+        .is_some());
+    session
+        .execute("produced_type_reuse", "segmentRecord historyCaptured", 0)
+        .unwrap();
+    assert_eq!(session.observed(), [23, 23]);
+}
+
+#[test]
 fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() {
     let mut session = SemanticSession::new();
     session
