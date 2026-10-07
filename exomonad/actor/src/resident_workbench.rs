@@ -16306,6 +16306,37 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
     }
 
+    async fn wait_for_explicit_installation_cleanup<H, O>(
+        workbench: &ResidentActorWorkbench<H, O>,
+        context: crate::ActorSessionContext,
+        expected_persistent_roots: usize,
+    ) where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let counts = workbench
+                    .access
+                    .with_machine(context.clone(), |session, _, _| {
+                        Ok((
+                            session.parked_count(),
+                            session.stowed_roots_count(),
+                            session.persistent_roots_count(),
+                        ))
+                    })
+                    .await
+                    .expect("inspect explicit installer cleanup");
+                if counts == (0, 0, expected_persistent_roots) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("explicit installer continuations and payload roots retire");
+    }
+
     #[tokio::test]
     async fn explicit_installer_keeps_capture_and_replacement_leases_without_recompiling() {
         with_test_compiler_owner(async {
@@ -16360,6 +16391,150 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             }
             state.clear();
         }).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_spawn_installer_requires_exactly_one_request_receiver() {
+        with_test_compiler_owner(async {
+            let (mut session, context, mut source, root) = host_mount_fixture();
+            let authored = tempfile::tempdir().unwrap();
+            std::fs::write(
+                authored.path().join("CapturedSpecInstaller.hs"),
+                include_str!("fixtures/captured-spec-installer.hs"),
+            )
+            .unwrap();
+            let mut include_roots = source.base_include.to_vec();
+            include_roots.push(authored.path().to_path_buf());
+            source.base_include = include_roots.into();
+            let preamble =
+                insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
+            let templates =
+                resident_workbench_templates(&preamble, &context.haskell_effects_alias, "");
+            let include = source
+                .base_include
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            let turn = run_turn(TurnRequest {
+                exact_context: None,
+                session_id: Some(context.placement.session),
+                turn_text: include_str!("fixtures/captured-spec-installer-bind.hs"),
+                templates: &templates,
+                include: &include,
+                session_root: root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            })
+            .unwrap();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = turn
+            else {
+                panic!("captured installer variants bind")
+            };
+            assert_eq!(bound.len(), 3, "capture each installer from one compile");
+            assert!(matches!(
+                session.run_projected_bind_with_sites(
+                    "captured_installer_variants",
+                    compiled.code(),
+                    &bound,
+                    tidepool_repr::Generation(1),
+                ),
+                Ok(ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. })
+            ));
+            let installer = Arc::new(
+                session
+                    .retain_binding_custody("installer")
+                    .unwrap()
+                    .unwrap(),
+            );
+            let application_installer = Arc::new(
+                session
+                    .retain_binding_custody("applicationInstaller")
+                    .unwrap()
+                    .unwrap(),
+            );
+            let duplicate_installer = Arc::new(
+                session
+                    .retain_binding_custody("duplicateReceiverInstaller")
+                    .unwrap()
+                    .unwrap(),
+            );
+            let baseline_roots = session.persistent_roots_count();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let before_preparations = tidepool_extract_cmd::extract_spawn_count();
+
+            // The same captured application value is accepted only by public
+            // spawn preparation and yields both the tool lease and receiver.
+            let (tools, receiver) = workbench
+                .prepare_explicit_application(
+                    context.clone(),
+                    1,
+                    vec![],
+                    application_installer.clone(),
+                )
+                .await
+                .expect("one registered receiver completes application preparation");
+            assert!(tools.origin.is_explicit());
+            drop(receiver);
+            drop(tools);
+            wait_for_explicit_installation_cleanup(&workbench, context.clone(), baseline_roots)
+                .await;
+
+            let missing = workbench
+                .prepare_explicit_application(context.clone(), 2, vec![], installer.clone())
+                .await;
+            let Some(missing) = missing.err() else {
+                panic!("a tools-only installer must be refused for public spawn")
+            };
+            assert!(
+                matches!(missing, ResidentActorWorkbenchError::ActorProtocol(_)),
+                "a tools-only installer must be refused for public spawn: {missing:?}"
+            );
+            wait_for_explicit_installation_cleanup(&workbench, context.clone(), baseline_roots)
+                .await;
+
+            let duplicate = workbench
+                .prepare_explicit_application(
+                    context.clone(),
+                    3,
+                    vec![],
+                    duplicate_installer.clone(),
+                )
+                .await;
+            let Some(duplicate) = duplicate.err() else {
+                panic!("a second receiver registration must be refused")
+            };
+            assert!(
+                matches!(duplicate, ResidentActorWorkbenchError::ActorProtocol(_)),
+                "a second receiver registration must be refused: {duplicate:?}"
+            );
+            wait_for_explicit_installation_cleanup(&workbench, context.clone(), baseline_roots)
+                .await;
+
+            let replacement = workbench
+                .prepare_explicit_tools(context.clone(), 4, vec![], application_installer.clone())
+                .await;
+            let Some(replacement) = replacement.err() else {
+                panic!("tools-only preparation must refuse a receiver-bearing installer")
+            };
+            assert!(
+                matches!(replacement, ResidentActorWorkbenchError::ActorProtocol(_)),
+                "tools-only preparation must refuse a receiver-bearing installer: {replacement:?}"
+            );
+            wait_for_explicit_installation_cleanup(&workbench, context, baseline_roots).await;
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                before_preparations,
+                "explicit preparation applies retained closures without another extractor turn"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
