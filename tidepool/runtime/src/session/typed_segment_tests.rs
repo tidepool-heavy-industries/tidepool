@@ -904,6 +904,21 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
 
 #[test]
 fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
+    let inline = include_str!("fixtures/typed-segment-zero-let-inline.hs");
+    let newline = include_str!("fixtures/typed-segment-zero-let-newline.hs");
+    assert_eq!(ghc_trace(inline), [1, 2]);
+    assert_eq!(ghc_trace(newline), [1, 2]);
+    let invalid = ghc_oracle_with_language(
+        "",
+        "",
+        include_str!("fixtures/typed-segment-zero-let-invalid-layout.hs"),
+    );
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("parse error"),
+        "the implicit inline let must fail GHC's grammar: {}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
     let mut session = SemanticSession::new();
     let before = session.resident.binding_names_in(session.public);
     session
@@ -912,11 +927,7 @@ fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
     assert_eq!(session.resident.binding_names_in(session.public), before);
     assert!(session.observed().is_empty());
     session
-        .execute(
-            "zero_let_order",
-            "segmentRecord 1; let _ = (undefined :: Int); segmentRecord 2",
-            0,
-        )
+        .execute("zero_let_order", inline, 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 2]);
 }
