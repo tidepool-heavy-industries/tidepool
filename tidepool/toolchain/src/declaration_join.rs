@@ -2033,6 +2033,39 @@ mod authored_tests {
 
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
+    fn authored_declaration_in_exact_context_keeps_its_native_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let module = SessionModule::lib(Generation(1));
+        let source = "module Tidepool.Session.Lib.G1 where\nanswer = (41 :: Int)\n";
+        let path = root.path().join(module.relative_hs_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
+        let result = certify_authored_declaration_in_context(
+            module,
+            &path,
+            source,
+            &[root.path().to_path_buf()],
+            root.path(),
+            context,
+        )
+        .expect("the authored probe must reach its native origin issuer in an exact context");
+        assert_eq!(result.product.owner().module, module.module_name());
+        assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
+        assert_eq!(
+            result.product.module_interface().unwrap().origin(),
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
+        );
+        assert!(result
+            .introduced_exports()
+            .iter()
+            .any(|export| export.head.occurrence == "answer"));
+        let context = ExactDeclarationContext::new(&[Arc::new(result)], &[], Vec::new()).unwrap();
+        assert!(context.authored_native_root(1).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
     fn authored_module_retains_owned_home_import_closure() {
         let root = tempfile::tempdir().unwrap();
         let first = SessionModule::lib(Generation(1));

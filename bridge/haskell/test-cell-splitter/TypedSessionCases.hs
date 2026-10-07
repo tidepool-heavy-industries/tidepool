@@ -1,10 +1,12 @@
 module TypedSessionCases (typedSessionHydrationPublicationChecks) where
 
 import Control.Exception
-  ( AsyncException(ThreadKilled), Exception, IOException, bracket, throwIO, try )
+  ( AsyncException(ThreadKilled), Exception, IOException, SomeException, bracket, throwIO, try )
 import Control.Monad (forM_, unless, void)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
 import GHC (getSessionDynFlags, runGhc)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Type (liftedTypeKind, mkInfForAllTy, mkInfForAllTys, mkTyVarTy, mkVisFunTyMany)
@@ -19,7 +21,7 @@ import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var (mkTyVar, varName)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
-import GHC.Unit.Module (moduleName)
+import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Module.ModIface (mi_fixities, mi_extra_decls)
 import System.Directory
@@ -35,6 +37,11 @@ import Tidepool.Binders
   , prepareTypedSegmentSource, preparedTypedSegmentPlan
   , preparedTypedSegmentSource, preparedTypedSegmentOperations )
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.DependencyEvidence (DependencyEvidence(..))
+import Tidepool.ExactHydration (newOriginalInterfaceArtifactsWithSessionOutputs)
+import Tidepool.FinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, selectFinalizedSessionOutputs
+  , finalizedValueInterfaceSeals, finalizedInterfaceSeals )
 import Tidepool.CheckedCell (captureCheckedSignature, resolveCheckedSignature)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), withResidentPipelineSelectedRequests
@@ -114,6 +121,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
           readIORef observed >>= maybe (fail "typed preparation callback did not execute") pure
 
     (initial, admitted, typed, prepared) <- acquire (root </> "positive-stage") (const (pure ()))
+    verifyOutputProjection root prepared
     verifySigmaTransport initial (root </> "sigma-transport")
     forM_ owners (assertNoStagingFinder initial (root </> "positive-stage"))
     forM_ owners (assertNoStagingFinder (typedSegmentSessionEnvironment prepared) (root </> "positive-stage"))
@@ -277,11 +285,54 @@ verifySigmaTransport initial root = do
     unless (eqType original resolved)
       (fail "checked signature collapsed scoped forall binders")
 
+-- Use the real hydrated batch and complete snapshot evidence. Prefix
+-- projection retains imported roles and refuses relabeling one as an output.
+verifyOutputProjection :: FilePath -> PreparedTypedSegmentBindings -> IO ()
+verifyOutputProjection root prepared = do
+  let environment = typedSegmentSessionEnvironment prepared
+      snapshots = typedSegmentSessionInterfaces prepared
+      evidence = DependencyEvidence False False [] [] [] []
+      capture originals directory = captureFinalizedModuleArtifacts originals environment
+        Map.empty Map.empty evidence directory
+      keys = map (T.pack . moduleNameString . moduleName . fst . capturedSessionInterface)
+      seals = map (snd . fst) . finalizedValueInterfaceSeals
+  unless (length snapshots == 2 && null (typedSegmentSessionInterfacesThrough (-1) prepared))
+    (fail "output projection requires two actual captures and an empty initial prefix")
+  originals <- newOriginalInterfaceArtifactsWithSessionOutputs environment Map.empty [] [] snapshots
+    (root </> "complete-output-evidence")
+  full <- capture originals (root </> "complete-output-evidence")
+  unless (seals full == keys snapshots) (fail "complete original output census differs from actual batch")
+  first <- selectFinalizedSessionOutputs originals (typedSegmentSessionInterfacesThrough 0 prepared) full
+  both <- selectFinalizedSessionOutputs originals (typedSegmentSessionInterfacesThrough 1 prepared) full
+  unless (seals first == keys (take 1 snapshots) && finalizedInterfaceSeals both == finalizedInterfaceSeals full)
+    (fail "current/prior output projection lost or included the wrong generation")
+  unless (seals full == keys snapshots) (fail "prefix projection mutated the complete original inventory")
+  duplicates <- try (selectFinalizedSessionOutputs originals [head snapshots,head snapshots] full)
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  case duplicates of Left _ -> pure (); Right _ -> fail "duplicated output snapshot was admitted"
+  imported <- newOriginalInterfaceArtifactsWithSessionOutputs environment Map.empty []
+    (take 1 snapshots) (drop 1 snapshots) (root </> "imported-output-evidence")
+  mixed <- capture imported (root </> "imported-output-evidence")
+  empty <- selectFinalizedSessionOutputs imported [] mixed
+  unless (seals empty == keys (take 1 snapshots))
+    (fail "empty current capture removed an imported baseline interface")
+  wrongRole <- try (selectFinalizedSessionOutputs imported (take 1 snapshots) mixed)
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  case wrongRole of Left _ -> pure (); Right _ -> fail "imported interface was relabeled as produced output"
+  valid <- selectFinalizedSessionOutputs imported (drop 1 snapshots) mixed
+  unless (finalizedInterfaceSeals valid == finalizedInterfaceSeals mixed)
+    (fail "unchanged imported/output roles did not re-admit after refusal")
+
 verifyBatch :: [SessionModule] -> TypedSegment -> PreparedTypedSegmentBindings -> IO ()
 verifyBatch owners typed prepared = do
   let captures = concatMap typedItemCaptures (typedSegmentItems typed)
       pairs = typedSegmentSessionGlobals prepared
       bindings = concatMap snd (typedSegmentSessionBinders prepared)
+      dependencies = typedSegmentSessionRetainedGlobals prepared
+      expectedDependencies = [(global,generation)
+        | (SessionModule _ (Generation generation),(_,global)) <- zip owners pairs]
+  unless (dependencies == expectedDependencies)
+    (fail "native capture dependency generation differs from its exact hydrated global")
   unless (length captures == 2 && length pairs == 2 && length bindings == 2
     && length (typedSegmentSessionInterfaces prepared) == 2)
     (fail "Session positive has an incomplete or empty capture inventory")

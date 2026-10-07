@@ -52,6 +52,10 @@ Refused or interrupted cycles do not emit applicability. Request reports retain
 completion and inapplicability cycle counts separately: mixed check/native stages
 count only native decisions, and wholly inapplicable stages have status
 `not_applicable` with null counts. Purpose names alone never infer applicability.
+`cycle_stages` retains the same validated observations for each cycle separately.
+A completed early cycle can be inspected even when a later incomplete cycle
+leaves the request's aggregate stage unknown. Cycle views do not qualify a
+failed request or merge separate physical invocations with the same digest.
 The schema-1 diagnostic shape is unchanged; this extends its closed decision and
 reason tags. Older strict reporters reject the new tags. Historical traces with
 no applicability evidence retain their original completion requirements.
@@ -79,7 +83,13 @@ The report retains each raw parsed event and source row, per-request stage count
 accounted bytes, reasons, purpose/cycle, service time, admission queue time and
 flat phase totals. Input trace path and SHA bind retained raw details. Legacy
 counts and compile summaries remain diagnostic data, never substitutes for a
-completed stage. Timers lacking interval boundaries (including legacy lowering)
+completed stage. Indexed `legacy_observations` retain count and flat-timer rows;
+`boundary_status` qualifies each against the request's start and sole terminal.
+`legacy_status` qualifies aggregates only for one successful request with no
+invalid legacy boundary observations. Missing, duplicate, pre-start or
+post-terminal boundaries leave aggregates empty/unknown, including when a
+valid earlier observation would otherwise supply a misleading partial subtotal.
+Timers lacking interval boundaries (including legacy lowering)
 are preserved as nonexclusive totals; do not sum overlapping phases. Queue time
 belongs to admission and is not additive across requests sharing a transaction.
 The current `lowering` owner times `hscDesugar` plus `hscSimplify`; it is not
@@ -89,6 +99,11 @@ stg2stg. Raw phase names remain intact and parent/child totals are not added.
 `resident-performance-report.py` also includes `compile_reuse`; repeat
 `--require-reuse-stage STAGE` to make missing stage evidence fail its gate. No
 reuse claim can be recovered from a historical elapsed-only sample.
+`profile-compiler.py` consumes this same validator in its capture summary and
+readable request report, pairing observations with separately scoped RTS spans
+and sampled RSS. Offline timing recovery retains the physical request start and
+terminal rows along with selected diagnostics; old captures lacking those rows
+remain incomplete until reanalysis from an explicitly retained complete log.
 
 The owning next-run fixture must execute distinct cells, repeated identical cells,
 binding growth, and A–B–A on one private worker/epoch, asserting actual semantic

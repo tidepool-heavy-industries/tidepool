@@ -293,5 +293,220 @@ elif args[0] == "report":
             self.assertEqual(coverage["unassigned_timestamped_hash_count_rows"], 0)
 
 
+class RequestAccountingTests(unittest.TestCase):
+    def span(self, ordinal=1, worker=7):
+        return {"daemon_epoch": "epoch", "worker_pid": worker, "admission_id": 4,
+                "request_ordinal": ordinal, "compile_request": "same-input", "transaction": True}
+
+    def event(self, decision="work", cycle=1, stage="source_frontend", **changes):
+        terminal = decision == "complete"
+        return {"schema": 1, "cycle": cycle, "purpose": "cell_program", "observed_ns": 1,
+                "stage": stage, "decision": decision, "reason": "stage_complete" if terminal else "absent",
+                "unit": None if terminal else "main", "module": None if terminal else "Support",
+                "version_kind": None if terminal else "source_fingerprint",
+                "version": None if terminal else "abc", "items": 0 if terminal else 1,
+                "bytes": None, **changes}
+
+    def history(self, packets, ordinal=1, terminal="compiler request finished"):
+        span = self.span(ordinal)
+        rows = [{"fields": {"message": "compiler request started"}, "span": span}]
+        rows += [{"fields": {"line": "tidepool-reuse " + json.dumps(packet)}, "span": span} for packet in packets]
+        if terminal:
+            rows.append({"fields": {"message": terminal, "exit_code": 0, "elapsed_ms": 5}, "span": span})
+        return rows
+
+    def analyze(self, rows, suffix="", rss=None, log_complete=True):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timing.log"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n" + suffix)
+            return profile.request_accounting(path, 7, rss or [], log_complete)
+
+    def test_missing_completion_and_cancelled_request_are_not_zero(self):
+        missing = self.analyze(self.history([self.event()]))
+        request = missing["requests"][0]
+        self.assertEqual(request["stages"]["source_frontend"]["status"], "UNKNOWN")
+        self.assertIsNone(request["source_frontend_work_items"])
+        cancelled = self.analyze(self.history([self.event(), self.event("complete")],
+                                             terminal="compiler request abandoned by client"))
+        self.assertEqual(cancelled["requests"][0]["status"], "UNKNOWN")
+        self.assertIsNone(cancelled["requests"][0]["source_frontend_work_items"])
+        self.assertIn("Actually linked bytecode: UNKNOWN", profile.render_request_accounting(cancelled))
+
+    def test_truncated_envelope_and_absent_terminal_are_incomplete(self):
+        report = self.analyze(self.history([self.event(), self.event("complete")], terminal=None),
+                              suffix='{"fields":')
+        self.assertEqual(report["status"], "incomplete")
+        self.assertEqual(report["requests"][0]["status"], "UNKNOWN")
+        self.assertTrue(any("invalid trace" in problem for problem in report["problems"]))
+
+    def test_duplicate_stage_and_request_completion_are_refused(self):
+        stage = self.analyze(self.history([self.event(), self.event("complete"), self.event("complete")]))
+        self.assertEqual(stage["requests"][0]["cycle_stages"][0]["stages"]["source_frontend"]["status"], "UNKNOWN")
+        rows = self.history([self.event(), self.event("complete")])
+        report = self.analyze(rows + [rows[-1]])
+        self.assertEqual(report["requests"][0]["status"], "UNKNOWN")
+
+    def test_interleaved_same_digest_requests_and_cycles_stay_separate(self):
+        first = self.history([self.event(cycle=1), self.event("complete", cycle=1)])
+        second = self.history([self.event(cycle=2), self.event("complete", cycle=2)], ordinal=2)
+        rows = [first[0], second[0], first[1], second[1], first[2], second[2], second[3], first[3]]
+        report = self.analyze(rows)
+        self.assertEqual(report["status"], "observed")
+        self.assertEqual([request["identity"]["request_ordinal"] for request in report["requests"]], [1, 2])
+        self.assertEqual([request["source_frontend_work_items"] for request in report["requests"]], [1, 1])
+        self.assertEqual([request["cycle_stages"][0]["cycle"] for request in report["requests"]], [1, 2])
+
+    def test_successful_output_without_decisions_does_not_prove_reuse(self):
+        report = self.analyze(self.history([]))
+        self.assertEqual(report["requests"][0]["status"], "UNKNOWN")
+        self.assertTrue(all(stage["status"] == "UNKNOWN" for stage in report["requests"][0]["stages"].values()))
+        self.assertIsNone(report["requests"][0]["bytecode"]["reconstructed"])
+
+    def test_resources_remain_nested_and_rss_is_scoped_to_observed_windows(self):
+        rows = self.history([self.event(), self.event("complete")])
+        lines = ["tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=30 wall_ns=20 allocated_bytes=100 gcs=2",
+                 "tidepool-timing-detail parent=ghc_load phase=decode start_ns=15 end_ns=20 wall_ns=5 allocated_bytes=70 gcs=1",
+                 "tidepool-count name=exact_execution_original_load_owners count=3",
+                 "tidepool-timing phase=retained_finalized_bytecode ms=2"]
+        rows[-1:-1] = [{"fields": {"line": line}, "span": self.span()} for line in lines]
+        report = self.analyze(rows, rss=[{"monotonic_ns": 9, "VmRSS": 999}, {"monotonic_ns": 16, "VmRSS": 25}])
+        request = report["requests"][0]
+        self.assertEqual([span["allocated_bytes"] for span in request["resource_spans"]], [100, 70])
+        self.assertEqual(request["sampled_rss"]["peak_bytes"], 25)
+        self.assertEqual(request["sampled_rss"]["sample_count"], 1)
+        self.assertEqual(request["bytecode"]["selected"], {"exact_execution_original_load_owners": 3})
+        self.assertEqual(request["bytecode"]["reconstructed"]["retained_finalized_bytecode"]["completed_operations"], 1)
+        self.assertIsNone(request["bytecode"]["actually_linked"])
+        self.assertNotIn("allocated_bytes_total", request)
+
+    def test_offline_recovery_retains_request_boundaries_and_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "source", Path(directory) / "target"
+            rows = self.history([self.event(), self.event("complete")])
+            rows.insert(1, {"fields": {"line": "tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=20"}, "span": self.span()})
+            source.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            profile.recover_timing_window(source, target, {"pid": 7,
+                "sampling_enabled": {"monotonic_ns": 9}, "sampling_end": {"monotonic_ns": 21}})
+            report = profile.request_accounting(target, 7, [])
+            self.assertEqual(report["status"], "observed")
+            self.assertEqual(report["requests"][0]["source_frontend_work_items"], 1)
+            self.assertEqual(len(target.read_text().splitlines()), len(rows))
+
+    def test_text_envelopes_and_nested_json_spans_retain_physical_identity(self):
+        rows = self.history([self.event(), self.event("complete")])
+        for row in rows:
+            row["spans"] = [row.pop("span")]
+        report = self.analyze(rows)
+        self.assertEqual(report["requests"][0]["source_frontend_work_items"], 1)
+        envelope = 'compile_request{daemon_epoch=epoch worker_pid=7 admission_id=4 request_ordinal=1 compile_request=same-input transaction=true}: '
+        lines = [envelope + "compiler request started",
+                 envelope + "compiler timing line=" + json.dumps("tidepool-reuse " + json.dumps(self.event())),
+                 envelope + "compiler timing line=" + json.dumps("tidepool-reuse " + json.dumps(self.event("complete"))),
+                 envelope + "compiler request finished elapsed_ms=5 exit_code=0"]
+        parsed = profile.REUSE_REPORT.analyze(list(profile.trace_rows_from_lines(lines, 7)))
+        self.assertEqual(parsed["status"], "observed")
+
+    def test_capture_overflow_is_separate_from_completed_request(self):
+        report = self.analyze(self.history([self.event(), self.event("complete")]), log_complete=False)
+        self.assertEqual(report["status"], "incomplete")
+        self.assertEqual(report["requests"][0]["status"], "observed")
+        self.assertTrue(any("capture/recovery incomplete" in problem for problem in report["problems"]))
+
+    def test_selected_activation_and_reconstruction_totals_require_enclosing_boundaries(self):
+        lines = ["tidepool-count name=activation_preview_frontends count=9",
+                 "tidepool-count name=exact_execution_original_load_owners count=9",
+                 "tidepool-timing phase=retained_finalized_bytecode ms=2"]
+        for placement in ("before", "after", "missing_terminal", "duplicate_terminal"):
+            with self.subTest(placement=placement):
+                rows = self.history([self.event(), self.event("complete")])
+                diagnostics = [{"fields": {"line": line}, "span": self.span()} for line in lines]
+                if placement == "before":
+                    rows[0:0] = diagnostics
+                elif placement == "after":
+                    rows.extend(diagnostics)
+                else:
+                    rows[1:1] = diagnostics
+                    if placement == "missing_terminal":
+                        rows.pop()
+                    else:
+                        rows.append(rows[-1])
+                report = self.analyze(rows)
+                request = report["requests"][0]
+                self.assertEqual(report["status"], "incomplete")
+                self.assertEqual(request["legacy_status"], "UNKNOWN")
+                self.assertIsNone(request["activation_preview_frontends"])
+                self.assertIsNone(request["bytecode"]["selected"])
+                self.assertIsNone(request["bytecode"]["reconstructed"])
+
+    def test_valid_interleaved_legacy_totals_remain_per_physical_request(self):
+        first = self.history([self.event(cycle=1), self.event("complete", cycle=1)])
+        second = self.history([self.event(cycle=2), self.event("complete", cycle=2)], ordinal=2)
+        one = {"fields": {"line": "tidepool-count name=activation_preview_frontends count=1"}, "span": self.span()}
+        two = {"fields": {"line": "tidepool-count name=activation_preview_frontends count=2"}, "span": self.span(2)}
+        report = self.analyze([first[0], second[0], first[1], second[1], one, two,
+                               first[2], second[2], first[3], second[3]])
+        self.assertEqual(report["status"], "observed")
+        self.assertEqual([request["activation_preview_frontends"] for request in report["requests"]], [1, 2])
+
+    def test_unavailable_rts_preserves_wall_cpu_and_nullable_counter_observations(self):
+        rows = self.history([self.event(), self.event("complete")])
+        detail = ("tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=20 "
+                  "wall_ns=10 cpu_ns=7 rts=unavailable rts_scope=process_delta "
+                  "allocated_bytes=unavailable gc_cpu_ns=unavailable gc_elapsed_ns=unavailable gcs=unavailable "
+                  "major_gcs=unavailable minor_gcs=unavailable last_gc_epoch_before=unavailable "
+                  "last_gc_live_bytes_after=unavailable process_highwater_major_gc_live_bytes=unavailable")
+        rows.insert(1, {"fields": {"line": detail}, "span": self.span()})
+        report = self.analyze(rows)
+        self.assertEqual(report["status"], "observed")
+        resource_span = report["requests"][0]["resource_spans"][0]
+        self.assertEqual(resource_span["wall_ns"], 10)
+        self.assertEqual(resource_span["cpu_ns"], 7)
+        self.assertEqual(resource_span["rts"], "unavailable")
+        for name in ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs", "major_gcs", "minor_gcs"):
+            self.assertIsNone(resource_span[name])
+        human = profile.render_request_accounting(report)
+        self.assertIn("wall_ns=10 cpu_ns=7 allocated_bytes=UNKNOWN gcs=UNKNOWN", human)
+        for required_field in ("start_ns", "end_ns", "wall_ns", "cpu_ns"):
+            with self.subTest(required_field=required_field):
+                invalid = detail.replace(f"{required_field}={resource_span[required_field]}", f"{required_field}=unavailable")
+                bad = self.history([self.event(), self.event("complete")])
+                bad.insert(1, {"fields": {"line": invalid}, "span": self.span()})
+                rejected = self.analyze(bad)
+                self.assertEqual(rejected["status"], "incomplete")
+                self.assertEqual(rejected["requests"][0]["resource_spans"], [])
+
+    def test_invalid_or_unenclosed_resource_span_does_not_become_request_measurement(self):
+        for line in (
+            "tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=20 wall_ns=99",
+            "tidepool-timing-detail parent=compile phase=ghc_load start_ns=10 end_ns=20 wall_ns=10"):
+            rows = self.history([self.event(), self.event("complete")])
+            rows.append({"fields": {"line": line}, "span": self.span()})
+            report = self.analyze(rows)
+            self.assertEqual(report["status"], "incomplete")
+            self.assertEqual(report["requests"][0]["resource_spans"], [])
+            self.assertIsNone(report["requests"][0]["sampled_rss"]["peak_bytes"])
+
+    def test_unknown_bytecode_and_resource_fields_remain_explicit_in_human_report(self):
+        report = self.analyze(self.history([self.event(), self.event("complete")]))
+        human = profile.render_request_accounting(report)
+        self.assertIn("Executable selection observations: UNKNOWN", human)
+        self.assertIn("Bytecode reconstruction observations: UNKNOWN", human)
+        self.assertIn("RTS allocation/GC and resource spans: UNKNOWN", human)
+        self.assertIn("peak_bytes=UNKNOWN", human)
+
+    def test_request_detail_overflow_preserves_an_incomplete_bounded_summary(self):
+        report = self.analyze(self.history([self.event(), self.event("complete")]))
+        report["requests"][0]["resource_spans"] = [{"large": "x" * 30000}]
+        summary = {"compile_reuse": report, "phase_samples": [], "phase_leaf_groups": [], "phase_analysis_complete": True}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary"
+            profile.write_summary(path, summary, limit=20000)
+            retained = json.loads(path.read_text())
+            self.assertEqual(retained["compile_reuse"]["status"], "incomplete")
+            self.assertEqual(retained["compile_reuse"]["requests"][0]["omitted_resource_spans"], 1)
+            self.assertFalse(retained["phase_analysis_complete"])
+            self.assertIn("request detail omitted", profile.render_request_accounting(retained["compile_reuse"]))
+
+
 if __name__ == "__main__":
     unittest.main()

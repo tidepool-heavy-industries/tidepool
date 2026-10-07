@@ -242,7 +242,7 @@ def analyze(events):
                          'transaction': row.get('transaction'), 'start_row': index,
                          'terminal_rows': [], 'service_ms': None, 'phases_ms': {},
                          'timing_details': [],
-                         'legacy_counts': {}, 'legacy_compile_summaries': [],
+                         'legacy_counts': {}, 'legacy_compile_summaries': [], 'legacy_observations': [],
                          'events': [], 'stages': {}, 'parse_problems': []}
     for index, row in enumerate(normalized):
         key = identity(row)
@@ -253,13 +253,16 @@ def analyze(events):
         is_reuse = line.startswith(PREFIX)
         detail = parse_timing_detail(line)
         is_task_detail = detail is not None
+        phase = re.fullmatch(r'tidepool-timing phase=([a-zA-Z0-9_]+) ms=([0-9]+)', line)
+        count = re.fullmatch(r'tidepool-count name=([a-zA-Z0-9_.]+) count=([0-9]+)(?: count_ns=[0-9]+)?', line)
+        is_legacy = phase is not None or count is not None or line.startswith('tidepool-compile-summary ')
         if not request:
-            if is_reuse or is_task_detail:
+            if is_reuse or is_task_detail or is_legacy:
                 unlinked.append({'row': index, 'line': line, 'envelope': row})
                 problems.append(f'row {index}: diagnostic event lacks exact request linkage')
             continue
         if row.get('compile_request') != request['compile_request']:
-            if is_reuse or is_task_detail or row.get('message', '').startswith('compiler request '):
+            if is_reuse or is_task_detail or is_legacy or row.get('message', '').startswith('compiler request '):
                 problems.append(f'row {index}: request digest conflicts with physical invocation')
                 request['parse_problems'].append(f'row {index}: request digest conflicts with physical invocation')
             continue
@@ -269,14 +272,14 @@ def analyze(events):
             request['service_ms'] = row.get('elapsed_ms')
             request['exit_code'] = row.get('exit_code')
             request['terminal_message'] = row['message']
-        phase = re.fullmatch(r'tidepool-timing phase=([a-zA-Z0-9_]+) ms=([0-9]+)', line)
         if phase:
-            request['phases_ms'].setdefault(phase[1], []).append(int(phase[2]))
+            request['legacy_observations'].append({'row': index, 'line': line,
+                                                  'kind': 'phase', 'name': phase[1], 'value': int(phase[2])})
         if detail is not None:
             request['timing_details'].append({'row': index, 'line': line, 'parsed': detail})
-        count = re.fullmatch(r'tidepool-count name=([a-zA-Z0-9_.]+) count=([0-9]+)(?: count_ns=[0-9]+)?', line)
         if count:
-            request['legacy_counts'][count[1]] = request['legacy_counts'].get(count[1], 0) + int(count[2])
+            request['legacy_observations'].append({'row': index, 'line': line,
+                                                  'kind': 'count', 'name': count[1], 'value': int(count[2])})
         if line.startswith('tidepool-compile-summary '):
             request['legacy_compile_summaries'].append({
                 'row': index, 'line': line,
@@ -304,6 +307,22 @@ def analyze(events):
         elif (request.get('terminal_message') != 'compiler request finished'
                 or type(request.get('exit_code')) is not int or request['exit_code'] != 0):
             request_problems.append('request did not finish successfully')
+        legacy_problems = []
+        for observation in request['legacy_observations'] + request['legacy_compile_summaries']:
+            bounded = (len(terminals) == 1 and request['start_row'] < observation['row'] < terminals[0])
+            observation['boundary_status'] = 'observed' if bounded else 'UNKNOWN'
+            if not bounded:
+                legacy_problems.append(f"row {observation['row']}: legacy diagnostic outside request boundaries")
+        request['legacy_status'] = 'UNKNOWN'
+        if request['legacy_observations'] and not legacy_problems and not request_problems:
+            request['legacy_status'] = 'observed'
+            for observation in request['legacy_observations']:
+                name, value = observation['name'], observation['value']
+                if observation['kind'] == 'phase':
+                    request['phases_ms'].setdefault(name, []).append(value)
+                else:
+                    request['legacy_counts'][name] = request['legacy_counts'].get(name, 0) + value
+        request_problems.extend(legacy_problems)
         for detail in request['timing_details']:
             if detail['row'] <= request['start_row']:
                 detail['_boundary_problem'] = 'task timing detail outside request boundaries'
@@ -319,42 +338,20 @@ def analyze(events):
         request['admission_queue_ms'] = admissions.get((key[0], key[2]), [])
         cycles = sorted({(event['cycle'], event['purpose']) for event in request['events']})
         request['cycles'] = [{'cycle': cycle, 'purpose': purpose} for cycle, purpose in cycles]
+        request['cycle_stages'] = []
+        for cycle in cycles:
+            cycle_events = [event for event in request['events']
+                            if (event['cycle'], event['purpose']) == cycle]
+            request['cycle_stages'].append({
+                'cycle': cycle[0], 'purpose': cycle[1],
+                'stages': {stage: stage_observation(
+                    [event for event in cycle_events if event['stage'] == stage], [cycle])[0]
+                    for stage in STAGES}})
         for stage in STAGES:
             selected = [event for event in request['events'] if event['stage'] == stage]
-            complete = {(event['cycle'], event['purpose']) for event in selected if event['decision'] == 'complete'}
-            not_applicable = {(event['cycle'], event['purpose']) for event in selected
-                              if event['decision'] == 'not_applicable'}
-            touched = {(event['cycle'], event['purpose']) for event in selected}
-            final = True
-            for cycle in touched:
-                ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
-                closures = [event for event in ordered if event['decision'] in ('complete', 'not_applicable')]
-                if (len(closures) != 1 or ordered[-1]['decision'] not in ('complete', 'not_applicable')
-                        or (closures[0]['decision'] == 'not_applicable' and len(ordered) != 1)):
-                    final = False
-                    request_problems.append(f'{stage} cycle {cycle[0]}: expected exactly one final stage completion '
-                                            'or applicability observation without decisions')
-            covered = complete | not_applicable
-            if selected and covered != set(cycles):
-                final = False
-                request_problems.append(f'{stage}: missing stage completion or applicability for request cycles')
-            status = 'UNKNOWN'
-            if final and covered and covered == touched and covered == set(cycles):
-                status = 'observed' if complete else 'not_applicable'
-            counts, byte_counts, reasons, accounted = Counter(), Counter(), Counter(), 0
-            for event in selected:
-                if event['decision'] in ('complete', 'not_applicable'):
-                    continue
-                counts[event['decision']] += event['items']
-                reasons[event['reason']] += event['items']
-                if event['bytes'] is not None:
-                    accounted += 1
-                    byte_counts[event['decision']] += event['bytes']
-            request['stages'][stage] = {'status': status, 'counts': dict(counts) if status == 'observed' else None,
-                                        'bytes': dict(byte_counts) if status == 'observed' and accounted else None,
-                                        'byte_accounted_events': accounted,
-                                        'reasons': dict(reasons), 'completion_cycles': len(complete),
-                                        'not_applicable_cycles': len(not_applicable)}
+            observation, stage_problems = stage_observation(selected, cycles)
+            request['stages'][stage] = observation
+            request_problems.extend(f'{stage}{problem}' for problem in stage_problems)
         request['problems'] = sorted(set(request_problems))
         request['task_overlap'] = task_overlap(request['timing_details'])
         problems.extend(f'{key}: {problem}' for problem in request['problems'])
@@ -366,6 +363,41 @@ def analyze(events):
             'phase_meanings': {'lowering': 'GHC hscDesugar and hscSimplify; excludes prepared STG',
                                'prepared_stg': 'GHC CorePrep, coreToStg and stg2stg'},
             'interpretation': 'Hits name one stage only. Each request cycle requires stage completion or explicit applicability evidence; missing evidence is UNKNOWN. A not_applicable cycle supplies no work count. Admission queue times are shared by the transaction, not additive per request. Phase totals without interval boundaries remain nonexclusive; do not sum overlapping timers. task_overlap uses only qualified postload task-service intervals; UNKNOWN is not zero.'}
+
+
+def stage_observation(selected, cycles):
+    """One validator for both request aggregates and separately retained cycles."""
+    complete = {(event['cycle'], event['purpose']) for event in selected if event['decision'] == 'complete'}
+    not_applicable = {(event['cycle'], event['purpose']) for event in selected
+                      if event['decision'] == 'not_applicable'}
+    touched = {(event['cycle'], event['purpose']) for event in selected}
+    problems = []
+    for cycle in touched:
+        ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
+        closures = [event for event in ordered if event['decision'] in ('complete', 'not_applicable')]
+        if (len(closures) != 1 or ordered[-1]['decision'] not in ('complete', 'not_applicable')
+                or (closures[0]['decision'] == 'not_applicable' and len(ordered) != 1)):
+            problems.append(f' cycle {cycle[0]}: expected exactly one final stage completion '
+                            'or applicability observation without decisions')
+    covered = complete | not_applicable
+    if selected and covered != set(cycles):
+        problems.append(': missing stage completion or applicability for request cycles')
+    status = 'UNKNOWN'
+    if not problems and covered and covered == touched and covered == set(cycles):
+        status = 'observed' if complete else 'not_applicable'
+    counts, byte_counts, reasons, accounted = Counter(), Counter(), Counter(), 0
+    for event in selected:
+        if event['decision'] in ('complete', 'not_applicable'):
+            continue
+        counts[event['decision']] += event['items']
+        reasons[event['reason']] += event['items']
+        if event['bytes'] is not None:
+            accounted += 1
+            byte_counts[event['decision']] += event['bytes']
+    return ({'status': status, 'counts': dict(counts) if status == 'observed' else None,
+             'bytes': dict(byte_counts) if status == 'observed' and accounted else None,
+             'byte_accounted_events': accounted, 'reasons': dict(reasons),
+             'completion_cycles': len(complete), 'not_applicable_cycles': len(not_applicable)}, problems)
 
 
 def compare_control(normal, disabled, stage):

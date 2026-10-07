@@ -6,6 +6,7 @@ import bisect
 import collections
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -34,8 +35,17 @@ CGROUP_FILES = ("cpu.stat", "memory.events", "memory.current", "memory.max", "me
 IDENTITY_FIELDS = ("compile_request", "worker_pid", "run_id", "daemon_epoch", "admission_id",
                    "request_ordinal", "served", "transaction", "transport", "daemon_pid", "worker")
 NUMERIC_IDENTITY_FIELDS = {"worker_pid", "admission_id", "request_ordinal", "served", "daemon_pid", "worker"}
-NUMERIC_DETAIL_FIELDS = {"ms", "start_ns", "end_ns", "wall_ns", "cpu_ns", "allocated_bytes",
-                         "gc_cpu_ns", "gc_elapsed_ns", "gcs"}
+RTS_DETAIL_FIELDS = {"allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs", "major_gcs", "minor_gcs",
+                     "process_highwater_major_gc_live_bytes", "process_highwater_rts_mem_in_use_bytes"} | {
+                         f"{field}_{point}" for field in ("last_gc_epoch", "last_gc_gen", "last_gc_live_bytes",
+                                                          "last_gc_mem_in_use_bytes") for point in ("before", "after")}
+NUMERIC_DETAIL_FIELDS = {"ms", "start_ns", "end_ns", "wall_ns", "cpu_ns"} | RTS_DETAIL_FIELDS
+REQUEST_MESSAGES = {"compiler request started", "compiler request finished",
+                    "compiler request failed", "compiler request abandoned by client"}
+REUSE_SPEC = importlib.util.spec_from_file_location(
+    "compiler_reuse_report", Path(__file__).resolve().with_name("compiler-reuse-report.py"))
+REUSE_REPORT = importlib.util.module_from_spec(REUSE_SPEC)
+REUSE_SPEC.loader.exec_module(REUSE_REPORT)
 
 
 def anchor():
@@ -267,31 +277,45 @@ def diagnostic_rows(path, worker_pid=None):
 
 
 def diagnostic_rows_from_lines(lines, worker_pid=None):
+    for row in trace_rows_from_lines(lines, worker_pid):
+        if row.get("diagnostic_error"):
+            yield "", {"diagnostic_error": row["diagnostic_error"]}
+            continue
+        line = row.get("line", "")
+        if line:
+            identity = {key: row[key] for key in IDENTITY_FIELDS if key in row}
+            identity["worker_identity"] = "trace_pid" if "worker_pid" in identity else "assumed_selected_worker; log has no PID"
+            yield line, identity
+
+
+def trace_rows_from_lines(lines, worker_pid=None):
+    """Decode existing envelopes, retaining physical request boundaries too."""
     for line in lines:
-        identity = {}
+        row = {}
         try:
             if line.lstrip().startswith("{"):
                 parsed = json.loads(line)
-                fields, span = parsed.get("fields", {}), parsed.get("span", {})
-                identity = {key: fields.get(key, span.get(key)) for key in IDENTITY_FIELDS
-                            if fields.get(key, span.get(key)) is not None}
-                line = fields.get("line", "")
+                row = REUSE_REPORT.fields(parsed)
             elif match := re.search(r"\bcompile_request\{([^}]*)\}", line):
                 # tracing's text formatter encloses the actual diagnostic in a
                 # quoted `line` field. Never parse its surrounding span as detail.
                 envelope = dict(token.split("=", 1) for token in shlex.split(match[1]) if "=" in token)
-                identity = {key: envelope[key] for key in IDENTITY_FIELDS if key in envelope}
+                row = {key: envelope[key] for key in IDENTITY_FIELDS if key in envelope}
                 payload = re.search(r'\bline=("(?:[^"\\]|\\.)*")\s*$', line)
                 if not payload:
                     if "compiler timing" in line:
                         raise ValueError("invalid quoted diagnostic")
-                    line = ""
+                    boundary = re.search(r": (compiler request (?:started|finished|failed|abandoned by client))\b(.*)$", line)
+                    if boundary:
+                        row["message"] = boundary[1]
+                        row.update(dict(token.split("=", 1) for token in shlex.split(boundary[2]) if "=" in token))
                 else:
-                    line = json.loads(payload[1])
-            if not line:
-                continue
-            if not isinstance(line, str):
+                    row["line"] = json.loads(payload[1])
+            else:
+                row["line"] = line
+            if not isinstance(row.get("line", ""), str):
                 raise ValueError("diagnostic payload is not text")
+            identity = {key: row[key] for key in IDENTITY_FIELDS if row.get(key) is not None}
             for key in NUMERIC_IDENTITY_FIELDS & identity.keys():
                 if not re.fullmatch(r"\d+", str(identity[key])):
                     raise ValueError("invalid numeric trace identity")
@@ -304,35 +328,173 @@ def diagnostic_rows_from_lines(lines, worker_pid=None):
                 raise ValueError("invalid transaction identity")
             if any(not isinstance(identity[key], str) for key in identity.keys() - NUMERIC_IDENTITY_FIELDS - {"transaction"}):
                 raise ValueError("invalid text trace identity")
+            row.update(identity)
+            for key in ("elapsed_ms", "exit_code"):
+                if key in row:
+                    if isinstance(row[key], bool) or not re.fullmatch(r"-?\d+", str(row[key])):
+                        raise ValueError("invalid request terminal number")
+                    row[key] = int(row[key])
+                    if key == "elapsed_ms" and row[key] < 0:
+                        raise ValueError("negative request service time")
             if worker_pid is not None and "worker_pid" in identity and identity["worker_pid"] != worker_pid:
                 continue
         except (ValueError, AttributeError, TypeError):
-            yield "", {"diagnostic_error": "invalid trace envelope or quoted diagnostic"}
+            yield {"diagnostic_error": "invalid trace envelope or quoted diagnostic"}
             continue
-        identity["worker_identity"] = "trace_pid" if "worker_pid" in identity else "assumed_selected_worker; log has no PID"
-        yield line, identity
+        yield row
 
 
 def detail_rows(path, worker_pid=None):
+    return parsed_detail_rows(trace_rows_from_lines(path.read_text(errors="replace").splitlines(), worker_pid))
+
+
+def parsed_detail_rows(events):
     rows, invalid = [], 0
-    for line, identity in diagnostic_rows(path, worker_pid):
-        if "diagnostic_error" in identity:
+    for index, row in enumerate(events):
+        if "diagnostic_error" in row:
             invalid += 1
+        line = row.get("line", "")
+        identity = {key: row[key] for key in IDENTITY_FIELDS if key in row}
+        identity["worker_identity"] = "trace_pid" if "worker_pid" in identity else "assumed_selected_worker; log has no PID"
+        identity["diagnostic_row"] = index
         if "tidepool-timing-detail " in line:
             fields = dict(re.findall(r"(\w+)=([^\s]+)", line))
-            if any(not re.fullmatch(r"\d+", fields[key]) for key in NUMERIC_DETAIL_FIELDS & fields.keys()):
+            if any(not re.fullmatch(r"\d+", fields[key]) and not (key in RTS_DETAIL_FIELDS and fields[key] == "unavailable")
+                   for key in NUMERIC_DETAIL_FIELDS & fields.keys()):
                 invalid += 1
                 continue
             if "start_ns" in fields and "end_ns" in fields:
                 if int(fields["end_ns"]) < int(fields["start_ns"]) or not fields.get("parent") or not fields.get("phase"):
                     invalid += 1
                     continue
+                if "wall_ns" in fields and int(fields["wall_ns"]) != int(fields["end_ns"]) - int(fields["start_ns"]):
+                    invalid += 1
+                    continue
+                for key in RTS_DETAIL_FIELDS & fields.keys():
+                    if fields[key] == "unavailable":
+                        fields[key] = None
                 rows.append({**fields, "trace": identity})
     return rows, invalid
 
 
 def timing_rows(path, worker_pid=None):
     return detail_rows(path, worker_pid)[0]
+
+
+def request_accounting(path, worker_pid, rss_rows, log_complete=True):
+    """Consume the existing strict reuse validator; never derive hits from latency."""
+    if path is None:
+        return {"schema": 1, "status": "incomplete", "requests": [],
+                "problems": ["no timing log supplied"], "unlinked_event_count": 0}
+    if path.stat().st_size > TIMING_LIMIT:
+        raise ValueError("timing log exceeds bounded capture limit")
+    with path.open("rb") as stream:
+        snapshot = stream.read(TIMING_LIMIT + 1)
+    if len(snapshot) > TIMING_LIMIT:
+        raise ValueError("timing log exceeds bounded capture limit")
+    rows = list(trace_rows_from_lines(snapshot.decode(errors="replace").splitlines(), worker_pid))
+    report = REUSE_REPORT.analyze(rows)
+    invalid = sum(bool(row.get("diagnostic_error")) for row in rows)
+    phases, invalid_details = parsed_detail_rows(rows)
+    problems = list(report["problems"])
+    if invalid:
+        problems.append(f"{invalid} invalid trace envelopes")
+    if invalid_details:
+        problems.append(f"{invalid_details} invalid diagnostic/resource rows")
+    if not log_complete:
+        problems.append("timing log capture/recovery incomplete")
+    requests = []
+    for request in report["requests"]:
+        key = tuple(request["identity"][field] for field in REUSE_REPORT.KEY_FIELDS)
+        spans = [phase for phase in phases
+                 if tuple(phase["trace"].get(field) for field in REUSE_REPORT.KEY_FIELDS) == key
+                 and phase["trace"].get("compile_request") == request["compile_request"]]
+        bounded_spans = [phase for phase in spans
+                         if type(phase["trace"].get("diagnostic_row")) is int
+                         and len(request["terminal_rows"]) == 1
+                         and request["start_row"] < phase["trace"]["diagnostic_row"] < request["terminal_rows"][0]]
+        resource_problems = []
+        if len(bounded_spans) != len(spans):
+            resource_problems.append("resource spans lack one enclosing request boundary")
+            problems.append(f"{key}: {resource_problems[0]}")
+        spans = bounded_spans
+        resources = [{**{field: int(value) if field in NUMERIC_DETAIL_FIELDS and value is not None else value
+                         for field, value in span.items() if field != "trace"},
+                      "scope": "process counter delta over completed span; nested spans are not additive"}
+                     for span in spans]
+        windows = [(int(span["start_ns"]), int(span["end_ns"])) for span in spans]
+        rss = [row["VmRSS"] for row in rss_rows if type(row.get("VmRSS")) is int
+               and type(row.get("monotonic_ns")) is int
+               and any(start <= row["monotonic_ns"] <= end for start, end in windows)]
+        frontend = request["stages"]["source_frontend"]
+        counts = request["legacy_counts"]
+        bytecode = {
+            "selected": {name: counts[name] for name in ("candidate_executable_required",
+                         "exact_execution_original_load_owners") if name in counts} or None,
+            "reconstructed": {phase: {"completed_operations": len(request["phases_ms"][phase]),
+                             "wall_ms_observations": request["phases_ms"][phase]}
+                              for phase in ("retained_source_bytecode", "retained_finalized_bytecode")
+                              if phase in request["phases_ms"]} or None,
+            "actually_linked": None,
+            "scope": "selected counts describe executable requirements/owners, reconstruction counts completed operations; actual linkage has no owning event"}
+        requests.append({key: request[key] for key in (
+            "identity", "compile_request", "transaction", "status", "service_ms", "admission_queue_ms",
+            "cycles", "cycle_stages", "stages", "phases_ms", "legacy_status", "problems")}
+            | {"terminal_message": request.get("terminal_message"), "exit_code": request.get("exit_code"),
+               "source_frontend_work_items": frontend["counts"].get("work", 0)
+                   if frontend["status"] == "observed" and request["status"] == "observed" else None,
+               "activation_preview_frontends": counts.get("activation_preview_frontends"),
+               "bytecode": bytecode, "resource_spans": resources,
+               "resource_problems": resource_problems,
+               "sampled_rss": {"sample_count": len(rss), "peak_bytes": max(rss, default=None),
+                               "scope": "selected worker samples inside union of completed resource spans; not full request peak"}})
+    return {"schema": 1, "status": "incomplete" if problems or report["status"] != "observed" else "observed",
+            "input": {"path": str(path.resolve()), "sha256": hashlib.sha256(snapshot).hexdigest()}, "requests": requests,
+            "problems": problems, "unlinked_event_count": len(report["unlinked_events"]),
+            "interpretation": report["interpretation"]}
+
+
+def render_request_accounting(report):
+    """A human view of the same observations, with no cross-stage work total."""
+    lines = [f"Compiler request accounting: {report['status']}",
+             "UNKNOWN means missing or unqualified evidence. Stages, cycles and executions stay separate; nested timers are not additive."]
+    for request in report["requests"]:
+        owner = request["identity"]
+        lines += ["", f"Request {request['compile_request']} epoch={owner['daemon_epoch']} worker={owner['worker_pid']} "
+                  f"admission={owner['admission_id']} ordinal={owner['request_ordinal']}: {request['status']}",
+                  f"  terminal={request['terminal_message'] or 'UNKNOWN'} exit={request['exit_code']} service_ms={request['service_ms']}",
+                  f"  source_frontend_work_items={request['source_frontend_work_items'] if request['source_frontend_work_items'] is not None else 'UNKNOWN'}; "
+                  f"activation_preview_frontends={request['activation_preview_frontends'] if request['activation_preview_frontends'] is not None else 'UNKNOWN'}"]
+        lines.append(f"  Admission queue observations (shared transaction): {json.dumps(request['admission_queue_ms']) if request['admission_queue_ms'] else 'UNKNOWN'}")
+        lines.append(f"  Flat phase observations (nonexclusive ms): {json.dumps(request['phases_ms'], sort_keys=True) if request['phases_ms'] else 'UNKNOWN'}")
+        for cycle in request["cycle_stages"]:
+            lines.append(f"  Cycle {cycle['cycle']} purpose={cycle['purpose']}")
+            for stage, observation in cycle["stages"].items():
+                suffix = ""
+                if observation["status"] == "observed":
+                    byte_counts = json.dumps(observation['bytes'], sort_keys=True) if observation['bytes'] is not None else 'UNKNOWN'
+                    suffix = f" decisions={json.dumps(observation['counts'], sort_keys=True)} reasons={json.dumps(observation['reasons'], sort_keys=True)} bytes={byte_counts}"
+                elif observation["reasons"]:
+                    suffix = f" unqualified_reasons={json.dumps(observation['reasons'], sort_keys=True)}"
+                lines.append(f"    {stage}: {observation['status']}{suffix}")
+        bytecode = request["bytecode"]
+        lines += [f"  Executable selection observations: {json.dumps(bytecode['selected']) if bytecode['selected'] is not None else 'UNKNOWN'}",
+                  f"  Bytecode reconstruction observations: {json.dumps(bytecode['reconstructed']) if bytecode['reconstructed'] is not None else 'UNKNOWN'}",
+                  "  Actually linked bytecode: UNKNOWN (no owning event)"]
+        for span in request["resource_spans"]:
+            metrics = " ".join(f"{field}={span[field] if span.get(field) is not None else 'UNKNOWN'}" for field in (
+                "wall_ns", "cpu_ns", "allocated_bytes", "gcs", "gc_cpu_ns", "gc_elapsed_ns"))
+            owner_scope = f" owner={span['owner_unit']}/{span['owner_module']}" if span.get("owner_unit") and span.get("owner_module") else ""
+            lines.append(f"  Resource span parent={span['parent']} phase={span['phase']}{owner_scope} "
+                         f"start_ns={span['start_ns']} end_ns={span['end_ns']} {metrics}")
+        if not request["resource_spans"]:
+            lines.append("  RTS allocation/GC and resource spans: UNKNOWN")
+        rss = request["sampled_rss"]
+        lines.append(f"  RSS samples={rss['sample_count']} peak_bytes={rss['peak_bytes'] if rss['peak_bytes'] is not None else 'UNKNOWN'}; {rss['scope']}")
+        lines.extend(f"  Problem: {problem}" for problem in request["problems"])
+        lines.extend(f"  Resource problem: {problem}" for problem in request["resource_problems"])
+    lines.extend(f"Problem: {problem}" for problem in report["problems"])
+    return "\n".join(lines) + "\n"
 
 
 def hash_byte_counts(path, worker_pid=None):
@@ -503,6 +665,15 @@ def write_summary(path, summary, limit=DERIVED_LIMIT):
         summary["omitted_summary_spans"] = len(summary.pop("phase_samples", []))
         summary["omitted_summary_phase_groups"] = len(summary.pop("phase_leaf_groups", []))
         summary["omitted_summary_hash_groups"] = len(summary.pop("phase_hash_groups", []))
+        accounting = summary.get("compile_reuse")
+        if accounting:
+            for request in accounting["requests"]:
+                request["omitted_resource_spans"] = len(request.get("resource_spans", []))
+                request["omitted_cycle_views"] = len(request.get("cycle_stages", []))
+                request["resource_spans"] = []
+                request["cycle_stages"] = []
+            accounting["status"] = "incomplete"
+            accounting["problems"].append("request detail omitted at summary byte limit; inspect retained timing log")
         summary["phase_analysis_complete"] = False
         encoded = (json.dumps(summary, indent=2) + "\n").encode()
     if len(encoded) > limit:
@@ -556,12 +727,16 @@ def analyze_capture(out, metadata, perf, timing_requested):
         hash_groups, hash_positions = phase_hash_counts(out / "timing.log", metadata["pid"], phases) if (out / "timing.log").exists() else ([], {})
         phase_complete = timing_requested and "timing_log_error" not in metadata and invalid_rows == 0 and not any(omissions.values()) and not hash_positions.get("invalid_hash_timestamp_rows") and not hash_positions.get("omitted_hash_phase_groups")
         rss_rows = [json.loads(row) for row in (out / "rss.jsonl").read_text().splitlines()]
+        accounting = request_accounting(out / "timing.log" if (out / "timing.log").exists() else None,
+                                        metadata["pid"], rss_rows,
+                                        timing_requested and "timing_log_error" not in metadata)
         summary = {"sample_count": len(sample_rows), "lost_samples": lost if script_exit == 0 else None,
                    "perf_script_exit": script_exit,
                    "unknown_symbol_samples": sum("[unknown]" in row["line"] for row in sample_rows),
                    "rss_sample_count": len(rss_rows),
-                   "sampled_peak_rss_bytes": max((row.get("VmRSS", 0) for row in rss_rows), default=None),
+                   "sampled_peak_rss_bytes": max((row["VmRSS"] for row in rss_rows if type(row.get("VmRSS")) is int), default=None),
                    "phase_samples": phase_samples,
+                   "compile_reuse": accounting,
                    "phase_leaf_groups": phase_groups, "phase_omissions": omissions,
                    "phase_hash_groups": hash_groups, "hash_position_coverage": hash_positions,
                    "invalid_diagnostic_rows": invalid_rows, "phase_analysis_complete": phase_complete,
@@ -577,6 +752,10 @@ def analyze_capture(out, metadata, perf, timing_requested):
                    "recovery_errors": metadata["reanalysis"]["recovery_errors"] if "reanalysis" in metadata else [],
                    "capture_complete": metadata.get("capture_error") is None and metadata["perf_recording_ok"] and script_exit == 0 and report_exit == 0 and len(sample_rows) > 0 and lost is not None}
         write_summary(out / "summary.json", summary)
+        human = render_request_accounting(accounting).encode()
+        if len(human) > DERIVED_LIMIT:
+            human = b"Compiler request accounting: incomplete\nHuman report exceeds byte limit; inspect retained summary and timing log.\n"
+        (out / "request-report.txt").write_bytes(human)
         print(json.dumps({"output": str(out), "sample_count": len(sample_rows), "lost_samples": summary["lost_samples"], "capture_complete": summary["capture_complete"],
                           "workload_success": summary["workload_success"], "timing_log_complete": summary["timing_log_complete"]}))
     else:
@@ -601,10 +780,11 @@ def recover_timing_window(source, destination, metadata):
     lines = data.decode(errors="replace").splitlines(keepends=True)
     selected, decoded, invalid = set(), [], 0
     for raw in lines:
-        line, trace = next(diagnostic_rows_from_lines([raw.rstrip("\n")], metadata["pid"]), ("", {}))
+        trace = next(trace_rows_from_lines([raw.rstrip("\n")], metadata["pid"]), {})
+        line = trace.get("line", "")
         if "diagnostic_error" in trace:
             invalid += 1
-        key = tuple(trace.get(field) for field in IDENTITY_FIELDS)
+        key = tuple(trace.get(field) for field in (*REUSE_REPORT.KEY_FIELDS, "compile_request"))
         decoded.append((raw, line, trace, key))
         if "tidepool-timing-detail " in line:
             fields = dict(re.findall(r"(\w+)=([^\s]+)", line))
@@ -613,7 +793,7 @@ def recover_timing_window(source, destination, metadata):
                     selected.add(key)
     retained, omitted, written, count = [], 0, 0, 0
     for raw, line, trace, key in decoded:
-        if key not in selected or not line.startswith("tidepool-"):
+        if key not in selected or not (line.startswith("tidepool-") or trace.get("message") in REQUEST_MESSAGES):
             continue
         # Unqualified stderr has no invocation envelope; only recover the
         # individually bounded spans, rather than assigning unrelated counts.
