@@ -150,7 +150,7 @@ impl ScopeFixture {
         ] {
             preamble = insert_preamble_imports(&preamble, import);
         }
-        let preamble = format!("{preamble}\ndata ScopePing = ScopePing deriving (Generic, FromJSON, JsonSchema)\ndata ScopeTools mode = ScopeTools {{ ping :: mode :- Call ScopePing Int }} deriving Generic\n");
+        let preamble = format!("{preamble}\ndata ScopePing = ScopePing {{ sentinel :: Int }} deriving (Generic, FromJSON, JsonSchema)\ndata ScopeTools mode = ScopeTools {{ ping :: mode :- Call ScopePing Int }} deriving Generic\n");
         let root = tempfile::tempdir().expect("session root");
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -420,7 +420,7 @@ async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_wit
         .dispatch_boxed(exomonad_tool::ToolInvocation {
             context: None,
             name: "ping".into(),
-            arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({})),
+            arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({"sentinel": 0})),
         })
         .await
         .expect("retained child tool remains callable")
