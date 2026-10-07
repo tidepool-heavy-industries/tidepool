@@ -12240,8 +12240,14 @@ pub(crate) mod request_tests {
         let public_imports = source.workbench_imports.template_text();
         assert_eq!(selected.workbench_imports.template_text(), public_imports);
         for template in resident_workbench_templates(&selected.preamble, "'[]", &public_imports) {
-            assert!(template.source.contains("import qualified PublicNotebook"));
-            assert!(!template.source.contains("PrivatePolicy"));
+            // Decl is a parser-only template with no authored preamble.
+            if template.kind == tidepool_runtime::session::TemplateSelector::Decl {
+                continue;
+            }
+            let notebook =
+                tidepool_runtime::session::render_template(&template.source, "pure ()", &[]);
+            assert!(notebook.contains("import qualified PublicNotebook"));
+            assert!(!notebook.contains("PrivatePolicy"));
         }
 
         let (recipe, resolved) = selected
