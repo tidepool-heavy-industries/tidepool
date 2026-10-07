@@ -316,7 +316,7 @@ fn source_manifest_generated_histories_reach_mutation_transitions() {
     let mut total = Coverage::default();
     for _ in 0..64 {
         let tree = strategy.new_tree(&mut runner).unwrap();
-        let history_coverage = replay(tree.current()).unwrap();
+        let history_coverage = replay(&tree.current()).unwrap();
         total.writes += history_coverage.writes;
         total.replacements += history_coverage.replacements;
         total.renames += history_coverage.renames;
