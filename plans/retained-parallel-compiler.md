@@ -27,6 +27,84 @@ finishes; an accessible trial does not complete the performance gates.
 
 ## Shared contracts and owners
 
+### Current delivery sequence
+
+The next release separates prepared-worker correctness from the one-pass
+frontend change. The accepted frozen source at `76135f71a9` passes seven M2
+cases, M1 and the catalog gate. A later real prepared-child trial exposed an
+additional preparation-coverage defect: configuration selected the research
+authority ceiling, while the public Haskell research profile omitted `Sleep`.
+The different installer recipe legitimately took the unlisted-profile compile
+path and re-executed its quoter. The original-selection loader was not the
+source of that divergence.
+
+1. Generate public Haskell effect aliases and Rust profile metadata from the
+   existing protocol schema. Prepare concrete public profiles, keeping authority
+   ceilings separate and always preparing the root's actual descriptor row.
+   Preserve effect order and the support projection. Existing configuration
+   role names remain supported; inherited preparation remains invalid.
+2. Make prepared coverage an authoritative inventory of configured profile,
+   requested and supported rows, installer recipe and original. Derive lookup
+   maps from it. Refuse missing promised coverage and old incomplete manifests;
+   require re-preparation rather than infer evidence. Preserve absence-only
+   fresh compilation for genuinely unlisted profiles. Typed acquisition records
+   distinguish deployment originals, new run originals, existing run originals
+   and unretained compilation independently of singleflight disposition.
+3. First run one actual prepared-child regression: prepare against input 41,
+   change the external input to 42, then require the public research child to
+   install and execute original 41 without installer compilation or quotation.
+   The observer must first detect known preparation requests. Then run twenty
+   sequential children through the same fixture with distinct installation
+   scopes, exact typed original selections and parent replies. This is one
+   additional mandatory frozen cohort; the one-child diagnostic does not add a
+   duplicate mandatory cold run. Report setup P95 separately from correctness.
+4. Refresh the retained catalog sources and freeze one matched bundle. Execute
+   the affected component checks, the prepared-child cohort, unchanged M2/M1
+   and catalog gates. Drive a new live Sol 6.1 root with Luna children and a
+   grandchild through a small TUI project, using ordinary Haskell, commands,
+   yield, typed replies and commits. Keep the qualified root available for
+   human testing. A live failure must produce a deterministic component or
+   component-history regression before its repair is accepted.
+5. Independently implement the one-pass frontend below, then join and qualify
+   it as a second coherent compiler change. Its source-only intermediates do
+   not change the released compiler contract.
+
+The one-pass compiler uses a complete ordered plan sealed to the existing
+request reservation and source identity. One ordinary GHC frontend issues
+opaque typed item descriptors containing actual Ids, their original types,
+Name-keyed fixities, capture origins and predecessor evidence. The Session
+owner batches thin value interfaces and hydrates their actual global Ids;
+Core substitution consumes those Ids rather than reconstructing identities
+from printed types or runtime variable IDs. Simplification and finalization
+run once for the segment, producing multiple native entries with canonical
+original group identities. Declaration segments must also lose their duplicate
+successful check/produce frontend.
+
+Normal GHC generalization is the language contract. Genuine generalized lets
+and rank-N values survive; unresolved action results require a concrete
+same-cell use or annotation. No pre-zonk hook or additional generalization
+carrier is planned. Independently retained items keep their existing boundary:
+cross-item existential type/dictionary/coercion evidence that cannot be
+materialized is refused before execution; nested scopes inside one item work.
+There is no hidden continuation or capture ABI extension.
+
+Bare expressions use their actual typed occurrence from that same frontend.
+Pure expressions retain a lazy unit thunk; actions with the exact expected
+effect row run once and retain a thunk over the result. Wrong effect rows are
+refused. Existing type-based publication strictness for ordinary bound values
+is unchanged; recording capture origin does not authorize making scalar
+publication lazy. Stage all fallible interface and projection work before
+public installation, preserving cancellation and retry cleanup.
+
+Native tests must cover ordered-root substitution, same-typed item swaps,
+future captures, genuine sigma values, defaulting/MR/NoMR, pattern failure,
+nested versus cross-item GADT evidence, observation laziness and effect-once
+behavior. Request-history tests cover failed staging, cancellation and retry.
+For uncached 1/4/8-item segments require one successful authored frontend,
+the expected entry count and zero frontend work during execution; count
+dependency frontends and legitimate failed instance attempts separately.
+Measure wall time after these work-count invariants pass.
+
 ### Retained compiler contexts
 
 The existing resident compiler owner retains completed HPT/module graph views,
