@@ -32,6 +32,9 @@ M2_TESTS = [
     M2_SELECTED_CODING_TEST,
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
+PREPARED_CHILD_TESTS = [
+    "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
+]
 DESCRIPTOR = "share/exomonad/qualification.json"
 UNSET_ENVIRONMENT = (
     "TIDEPOOL_CACHE_DIR", "TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR",
@@ -75,7 +78,10 @@ def cohorts() -> dict:
                    "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900,
                                      M2_CHECKPOINT_RELEASE_TEST: 900,
                                      M2_SELECTED_CODING_TEST: 900}},
-            "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900}}
+            "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900},
+            "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": 1,
+                               "ignored": True, "timeout": 1800,
+                               "compiler_mode": "owned-resident", "max_jobs": 1}}
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -981,11 +987,17 @@ def run_cohort(args) -> int:
     descriptor = verify(args.descriptor.absolute())
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     cohort = descriptor["cohorts"][args.cohort]
+    required_compiler_mode = cohort.get("compiler_mode")
+    compiler_mode = getattr(args, "compiler_mode", None) or required_compiler_mode or "direct"
+    if required_compiler_mode is not None and compiler_mode != required_compiler_mode:
+        raise ValueError(f"{args.cohort} requires compiler mode {required_compiler_mode}")
+    if args.jobs > cohort.get("max_jobs", args.jobs):
+        raise ValueError(f"{args.cohort} permits at most {cohort['max_jobs']} test process")
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
-               "--output-dir", str(output / "tests"), "--compiler-mode", getattr(args, "compiler_mode", "direct")]
+               "--output-dir", str(output / "tests"), "--compiler-mode", compiler_mode]
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
@@ -1009,7 +1021,7 @@ def run_cohort(args) -> int:
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
               "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
                              "delegated_service": args.delegated_service, "service_slice": service_slice,
-                             "compiler_mode": getattr(args, "compiler_mode", "direct"),
+                             "compiler_mode": compiler_mode,
                              "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
@@ -1129,12 +1141,12 @@ def main(argv=None) -> int:
     environment.add_argument("--shell", action="store_true")
     run = commands.add_parser("run")
     run.add_argument("descriptor", type=Path)
-    run.add_argument("--cohort", required=True, choices=("m2", "m1"))
+    run.add_argument("--cohort", required=True, choices=tuple(cohorts()))
     run.add_argument("--output", required=True, type=Path)
     run.add_argument("--jobs", type=int, default=1,
                      help="maximum concurrent test processes (default: 1)")
-    run.add_argument("--compiler-mode", choices=("direct", "owned-resident"), default="direct",
-                     help="isolated per-case compiler lifecycle (default: direct)")
+    run.add_argument("--compiler-mode", choices=("direct", "owned-resident"),
+                     help="isolated per-case compiler lifecycle (default: cohort selection)")
     run.add_argument("--delegated-service", action="store_true",
                      help="run each test in the isolated runner's delegated user service")
     run.add_argument("--service-slice",

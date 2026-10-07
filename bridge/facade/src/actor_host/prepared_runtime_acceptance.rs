@@ -37,7 +37,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
         let mut fields = Fields::default();
         event.record(&mut fields);
         let mut state = self.0.lock();
-        if fields.0.get("message").map(String::as_str) == Some("compiler request identified")
+        if fields.0.contains_key("compile_request")
+            && fields.0.contains_key("request_ordinal")
             && event.metadata().target() == "tidepool_extract_cmd::endpoint"
         {
             assert_eq!(
@@ -58,7 +59,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
                     "the measured launch labels must be unique"
                 );
             }
-            Some("prepared_toolset_installed") => {
+            Some("toolset_installed") => {
                 let actor = fields.0["actor"].clone();
                 let count = state.requests.len();
                 assert!(
@@ -71,9 +72,71 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
     }
 }
 
+#[derive(serde::Serialize)]
+struct Progress {
+    schema: u8,
+    expected_children: usize,
+    observed_children: usize,
+    observed_installations: usize,
+    deployment_originals_verified: usize,
+    observed_native_replies: usize,
+    distinct_installation_scopes: usize,
+    compiler_requests_during_setup: usize,
+    quotation_executions_before: Option<usize>,
+    quotation_executions_observed: Option<usize>,
+    parent_result_verified: bool,
+    quotation_execution_unchanged: bool,
+    completed: bool,
+}
+
+impl Progress {
+    fn new(expected_children: usize) -> Self {
+        Self {
+            schema: 1,
+            expected_children,
+            observed_children: 0,
+            observed_installations: 0,
+            deployment_originals_verified: 0,
+            observed_native_replies: 0,
+            distinct_installation_scopes: 0,
+            compiler_requests_during_setup: 0,
+            quotation_executions_before: None,
+            quotation_executions_observed: None,
+            parent_result_verified: false,
+            quotation_execution_unchanged: false,
+            completed: false,
+        }
+    }
+
+    fn report(&self) {
+        eprintln!(
+            "prepared-runtime-progress {}",
+            serde_json::to_string(self).unwrap()
+        );
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        self.report();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exclusive matched compiler daemon and prepared root entry"]
+async fn production_prepared_toolset_one_child_executes_original_native_probe() {
+    prepared_children_execute_original_native_probe(1).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires exclusive matched compiler daemon and prepared root entry"]
 async fn production_prepared_toolset_twenty_children_execute_original_native_probe() {
+    prepared_children_execute_original_native_probe(20).await;
+}
+
+async fn prepared_children_execute_original_native_probe(expected_children: usize) {
+    let mut progress = Progress::new(expected_children);
+    progress.report();
     assert!(
         std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some(),
         "the campaign must select its matched bundle-owned fixed driver"
@@ -88,7 +151,14 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
         .with(tracing_subscriber::fmt::layer().json().with_ansi(false))
         .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_codegen::prepared_compile=info"))
         .try_init().expect("one isolated measurement process owns its subscriber");
-    let files = tempfile::tempdir().unwrap();
+    let mut files = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+        Some(root) => tempfile::Builder::new()
+            .prefix("prepared-quotation-")
+            .tempdir_in(root)
+            .unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
+    files.disable_cleanup(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").is_some());
     let input = files.path().join("external-input");
     std::fs::write(&input, "41").unwrap();
     let settings = hosted_test_settings(&files, 2);
@@ -122,19 +192,33 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
     .expect("actual production preparation and selected deployment start the host");
     host.run_scenario(|host| Box::pin(async move {
         let scenario = async move {
+        let frozen = host.context.config.workspace_inputs.as_ref()
+            .expect("the actual host selected its completed workspace");
+        let completed_entries = frozen.completed_entry_selections().expect("completed installer inventory");
+        assert!(!completed_entries.is_empty());
+        let research_coverage = frozen.prepared_toolset_coverage()
+            .expect("completed toolset coverage")
+            .iter().find(|entry| entry.profile == crate::exomonad::PreparationProfile::Public(
+                exomonad_tool::PublicActorProfile::Research))
+            .expect("the configured public research profile was prepared");
+        assert_eq!(research_coverage.requested_effects,
+            exomonad_tool::PublicActorProfile::Research.effect_keys());
         let prepared_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         assert!(!prepared_executions.is_empty(), "the original producer executed the real quoter");
+        progress.quotation_executions_before = Some(prepared_executions.lines().count());
         std::fs::write(&input, "42").unwrap();
-        host.input("Execute twenty prepared child native probes.").await.unwrap();
+        host.input("Execute prepared child native probes.").await.unwrap();
         let root = harness::model::AgentPath("/root".into());
         let mut pending = VecDeque::new();
+        let children_source = include_str!("prepared_runtime_children.hs")
+            .replace("{prepared-child-count}", &expected_children.to_string());
         next_hosted_script_round(&mut requests, &mut pending, &root).await
-            .call("prepared-children", include_str!("prepared_runtime_children.hs"));
+            .call("prepared-children", &children_source);
         let mut children = HashSet::new();
         let mut scopes = HashSet::new();
         let mut shared = None;
         let mut rows = Vec::new();
-        for ordinal in 1..=20 {
+        for ordinal in 1..=expected_children {
             let label = format!("prepared-runtime/probe-{ordinal}/prepared-child-{ordinal}");
             let round = match pending.pop_front() {
                 Some(round) => round,
@@ -152,15 +236,13 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
             let child = matching[0];
             assert_eq!(child.creator, Some(host.context.actor.identity()));
             assert!(children.insert(child.actor));
+            progress.observed_children = children.len();
+            progress.report();
             let binding = host.context.binding(child.actor).expect("production child attachment");
             let conversation = binding.conversation().unwrap();
             assert_eq!(conversation.identity().actor, *origin.actor());
             let installed = host.context.observer.installation(child.actor).await;
-            assert!(!installed.checkpoint);
-            assert_eq!(installed.context_parent, None, "selected provider context");
-            assert_eq!(installed.role, exomonad_actor::ActorRole::Research);
-            assert!(installed.tools.iter().any(|tool| matches!(tool,
-                exomonad_tool::HostedTool::Function(tool) if tool.name == "probe" && tool.description == "41")));
+            progress.observed_installations += 1;
             let (elapsed, compiler_requests, details) = {
                 let state = observations.0.lock();
                 let (start, before) = state.starts.get(&label).expect("real pre-lookup launch request");
@@ -169,7 +251,32 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
                 (installed.installed_at.duration_since(*start).as_nanos(), state.requests[*before..*after].to_vec(), details.clone())
             };
             assert!(scopes.insert(details["installation_scope"].clone()), "fresh installation heap scope");
-            let identity = ["original", "prepared_owner", "image_registry", "source_revision", "granted_effects"]
+            progress.distinct_installation_scopes = scopes.len();
+            progress.compiler_requests_during_setup += compiler_requests.len();
+            progress.report();
+            let current_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
+            progress.quotation_executions_observed = Some(current_executions.lines().count());
+            progress.quotation_execution_unchanged = current_executions == prepared_executions;
+            progress.report();
+            assert!(compiler_requests.is_empty(), "completed child admission must not compile installer source: {compiler_requests:?}");
+            assert!(progress.quotation_execution_unchanged,
+                "child admission must not execute the external quoter again: {current_executions}");
+            assert!(!installed.checkpoint);
+            assert_eq!(installed.context_parent, None, "selected provider context");
+            assert_eq!(installed.role, exomonad_actor::ActorRole::Research);
+            let acquisition = installed.acquisition.as_ref().expect("installed source acquisition");
+            let exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } = acquisition else {
+                panic!("prepared child must load its deployment original: {acquisition:?}");
+            };
+            assert_eq!(completed_entries.get(recipe), Some(original),
+                "the actual installed original belongs to the frozen completed inventory");
+            assert_eq!((recipe, original), (&research_coverage.recipe, &research_coverage.original),
+                "the child selects the configured research specialization");
+            progress.deployment_originals_verified += 1;
+            progress.report();
+            assert!(installed.tools.iter().any(|tool| matches!(tool,
+                exomonad_tool::HostedTool::Function(tool) if tool.name == "probe" && tool.description == "41")));
+            let identity = ["prepared_owner", "image_registry", "source_revision"]
                 .map(|field| details[field].clone());
             if let Some(previous) = &shared { assert_eq!(&identity, previous); }
             shared = Some(identity);
@@ -179,31 +286,39 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
             assert_eq!(output["status"], "replied", "{output}");
             assert_eq!(output["items"].as_array().unwrap().last().unwrap()["terminalTransfer"], "replyAccepted", "{output}");
             replied.finish();
-            rows.push(serde_json::json!({"schema":1,"composition":"engine-store-prepared-child",
+            progress.observed_native_replies += 1;
+            progress.report();
+            let row = serde_json::json!({"schema":1,"composition":"engine-store-prepared-child",
                 "ordinal":ordinal,"actor":child.actor,"provider_origin":origin,"setup_elapsed_ns":elapsed,
                 "setup_end":"actual_policy_installed","setup_start":"child_launch_requested",
                 "compiler_requests_during_setup":compiler_requests,"installation":details,
-                "native_probe_reply":41,"native_reply_accepted":true,"producer":endpoint.producer_hex()}));
+                "acquisition":acquisition,"completed_inventory_match":true,
+                "native_reply_accepted":true,"producer":endpoint.producer_hex()});
+            eprintln!("prepared-runtime-child {row}");
+            rows.push(row);
         }
         let completed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         completed.assert_value("prepared-children", &format!("[{}]", vec!["41"; children.len()].join(",")));
+        progress.parent_result_verified = true;
         completed.finish();
-        assert_eq!(children.len(), 20);
+        assert_eq!(children.len(), expected_children);
+        assert_eq!(rows.len(), expected_children);
+        assert_eq!(progress.deployment_originals_verified, expected_children);
         assert_eq!(scopes.len(), children.len());
         assert_eq!(std::fs::read_to_string(input.with_extension("executions")).unwrap(), prepared_executions,
             "child installers select the completed original without replaying external input42");
-        for row in &rows { eprintln!("prepared-runtime-child {row}"); }
+        progress.quotation_execution_unchanged = true;
         let mut durations = rows.iter().map(|row| row["setup_elapsed_ns"].as_u64().unwrap()).collect::<Vec<_>>();
         durations.sort_unstable();
         let p95 = durations[(durations.len() * 95).div_ceil(100) - 1];
         eprintln!("prepared-runtime-summary {}", serde_json::json!({"observed_children":children.len(),
             "observed_native_replies":rows.len(),"distinct_installation_scopes":scopes.len(),
-            "setup_p95_ns":p95,"gate_ns":1_000_000_000u64,"gate_passed":p95<1_000_000_000,
+            "setup_p95_ns":p95,"target_ns":1_000_000_000u64,"target_met":p95<1_000_000_000,
             "first_preparation_reported_separately":true}));
-        assert!(rows.iter().all(|row| row["compiler_requests_during_setup"].as_array().unwrap().is_empty()),
-            "completed readiness must not compile installer source during child setup");
+        progress.completed = true;
+        progress.report();
         };
         host.while_host_running(scenario).await
-            .expect("the production host remains available through all twenty native replies");
+            .expect("the production host remains available through every native reply");
     })).await;
 }

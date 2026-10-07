@@ -200,7 +200,7 @@ python3 build/package/qualification.py freeze \
   --build-log "$SUCCESSFUL_BUILD_LOG" --build-commands "$BUILD_ARGV_JSON"
 ```
 
-Use the one resulting descriptor for both cohorts. The existing isolated libtest
+Use the one resulting descriptor for all cohorts. The existing isolated libtest
 runner executes each test in a fresh bounded process. Reports retain exact
 names, actual counts, exit status, elapsed time and bounded stdout/stderr. An
 unknown executed count or zero selection cannot qualify a passing cohort.
@@ -229,6 +229,41 @@ python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
 
 For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
 whose resource bounds have been checked for the chosen concurrency.
+
+Every new prepared release also requires the `prepared-child` cohort from its
+own frozen descriptor. The one-child control
+`actor_host::prepared_runtime_acceptance::production_prepared_toolset_one_child_executes_original_native_probe`
+is the preceding focused gate; schedule the twenty-child cohort only after that
+control passes on the coherent candidate. Both use the same production fixture
+and parameterized child program. This release gate is separate from the seven
+M2 cases and is not part of routine focused spot checks.
+
+```sh
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort prepared-child --output "$PREPARED_CHILD_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
+
+This cohort seals one exact ignored test and selects an isolated owned-resident
+compiler. It refuses a different compiler mode or parallel test execution. One
+executed passing test means that twenty sequentially admitted children completed
+their actual native replies and the parent verified twenty typed answers; it is
+not a claim of twenty concurrent children. The scenario requires twenty unique
+actors and installation scopes, typed `DeploymentOriginal` acquisition matching
+the frozen workspace's completed inventory, unchanged external-quoter execution
+bytes after its input changes from 41 to 42, and zero compiler requests during
+child setup. Partial progress and per-child rows retain observed counts on
+failure. The existing hosted outcome records scenario and cleanup separately;
+scenario completion alone does not establish confirmed host cleanup.
+
+First preparation is reported separately. Setup P95 below one second remains
+a measured target on the shared host, while the quotation, compiler, provenance,
+reply and completion checks are required correctness conditions. A fixture-only
+libtest from another revision may supply diagnostic evidence with its source and
+hash recorded; it cannot replace the frozen libtest for release qualification.
+Preserve older frozen descriptors and their reports unchanged when introducing
+this new cohort; build and freeze the new candidate rather than editing an old
+qualification contract.
 
 The catalog acceptance route requires the frozen descriptor. It verifies the
 exact native selection before entering the consumer namespace, exposes the

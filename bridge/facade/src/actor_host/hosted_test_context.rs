@@ -426,6 +426,7 @@ pub(super) struct ObservedInstallation {
     pub(super) context_parent: Option<ActorRef>,
     pub(super) role: exomonad_actor::ActorRole,
     pub(super) tools: Vec<exomonad_tool::HostedTool>,
+    pub(super) acquisition: Option<exomonad_actor::ToolsetAcquisition>,
     pub(super) installed_at: std::time::Instant,
 }
 
@@ -454,6 +455,7 @@ impl HostTestObserver {
                 context_parent: installation.context_parent,
                 role: installation.effective_role.role(),
                 tools: installation.policy.tools().to_vec(),
+                acquisition: installation.toolset_acquisition().cloned(),
                 installed_at: std::time::Instant::now(),
             },
         );

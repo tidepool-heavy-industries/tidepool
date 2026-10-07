@@ -1,6 +1,6 @@
 import Control.Monad (forM)
 import qualified Data.Text as Text
-preparedReplies <- forM [1..20 :: Int] $ \ordinal -> do
+preparedReplies <- forM [1..{prepared-child-count} :: Int] $ \ordinal -> do
   let name = "prepared-child-" <> Text.pack (show ordinal)
   Right childLabel <- pure (labelFromText name)
   Right groupLabel <- pure (forkGroupLabel ("probe-" <> Text.pack (show ordinal)))

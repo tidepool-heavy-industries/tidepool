@@ -47,6 +47,62 @@ def root_entry_source_fixture(root, modules):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_prepared_child_cohort_selects_frozen_native_case_and_refuses_incomplete_execution(self):
+        outcomes = [('complete', 1, True, 0), ('empty', 0, True, 1),
+                    ('unknown', None, True, 1), ('failed', 1, False, 1)]
+        for label, count, passed, expected in outcomes:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor_path = root / 'qualification.json'
+                descriptor_path.write_text('frozen descriptor')
+                descriptor = {
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                    'cohorts': qualification.cohorts(), 'environment': {},
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                    'profile': 'production', 'stdlib_mode': 'catalog-backed',
+                }
+                output = root / 'evidence'
+                commands = []
+                def execute(command, **kwargs):
+                    commands.append(command)
+                    qualification.write_json(output / 'tests/case.json', {
+                        'test': qualification.PREPARED_CHILD_TESTS[0], 'passed': passed,
+                        'execution': {'executed_test_count': count, 'exit_code': 0 if passed else 101}})
+                    return subprocess.CompletedProcess(command, 0)
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    code = qualification.main(['run', str(descriptor_path), '--cohort', 'prepared-child',
+                                               '--output', str(output)])
+                self.assertEqual(code, expected)
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(report['completed'], expected == 0)
+                self.assertEqual(report['expected_count'], 1)
+                command = commands[0]
+                self.assertEqual(command[2], '/frozen/libtest')
+                self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
+                self.assertEqual(command[command.index('--expected-count') + 1], '1')
+                self.assertEqual(command[command.index('--timeout') + 1], '1800')
+                self.assertIn('--ignored', command)
+                self.assertEqual([command[index + 1] for index, value in enumerate(command)
+                                  if value == '--exact'], qualification.PREPARED_CHILD_TESTS)
+                self.assertEqual(len(qualification.M2_TESTS), 7)
+
+    def test_prepared_child_cohort_refuses_other_compiler_mode_and_parallel_execution(self):
+        for options in (['--compiler-mode', 'direct'], ['--jobs', '2']):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = {'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                              'cohorts': qualification.cohorts()}
+                output = root / 'evidence'
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run') as execute, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(qualification.main(['run', str(root / 'qualification.json'),
+                        '--cohort', 'prepared-child', '--output', str(output), *options]), 1)
+                execute.assert_not_called()
+                self.assertFalse(output.exists())
+
     def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
         with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):
             with patch.object(qualification, 'verify') as verify:
