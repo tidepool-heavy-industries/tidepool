@@ -81,8 +81,8 @@ import GHC.Tc.Errors.Types
   , SolverReportWithCtxt(..) )
 import GHC.Tc.Errors.Types qualified as TcError
 import GHC.Utils.Logger (LogAction, makeThreadSafe)
-import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, TypedSegmentFailure(..),
-  typedSegmentItems, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
+import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
+  pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
@@ -291,7 +291,7 @@ data PipelineSelection result where
 -- The Session owner emits and hydrates all captures as one private batch. The
 -- returned actual globals replace earlier capture parameters before simplify.
 type TypedSegmentPreparation = HscEnv -> Map.Map (String,String) CanonicalInterfaceAdmission
-  -> TypedSegment -> IO (HscEnv, [(Id,Id)], [CapturedSessionInterface])
+  -> PendingTypedSegment -> IO (HscEnv, [(Id,Id)], [CapturedSessionInterface])
 
 data PreparedSegmentProductsResult = PreparedSegmentProductsResult
   { preparedSegmentProducts :: PreparedPipelineResult
@@ -2169,14 +2169,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 writeIORef typedPreparationFailureRef (Just failure)
                 throwIO failure
             closed <- closeTypedSegment hydrated globals segment
-            writeIORef targetTypedSegmentRef (Just closed)
             writeIORef typedSessionInterfacesRef interfaces
             writeIORef typedSessionEnvironmentRef (Just hydrated)
-            modifyIORef' (tcg_keep tcg) (`extendNameSetList` map (idName . typedItemRoot) (typedSegmentItems closed))
+            modifyIORef' (tcg_keep tcg) (`extendNameSetList`
+              (map (idName . typedItemRoot) (pendingSegmentItems closed)
+                ++ map idName (pendingSegmentSupportRoots closed)))
             pure (hydrated, Just closed)
           _ -> pure (env, Nothing)
-        installSegment Nothing guts = pure guts
-        installSegment (Just segment) guts = installTypedSegmentRoots segment guts
+        installSegment _ Nothing guts = pure guts
+        installSegment env (Just pending) guts = do
+          (segment, installed) <- installTypedSegmentRoots env pending guts
+          writeIORef targetTypedSegmentRef (Just segment)
+          pure installed
         includeTypedSession final = do
           hydrated <- readIORef typedSessionEnvironmentRef
           interfaces <- readIORef typedSessionInterfacesRef
@@ -2953,7 +2957,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               (desugared0, dsWarnings) <- timeDetailPhase timing "ghc_load_desugar"
                 (moduleNameString (ms_mod_name summaryC)) $
                 runHsc' typedEnv (hscDesugar' (ms_location summaryC) tcg)
-              desugared <- installSegment typedSegment desugared0
+              desugared <- installSegment typedEnv typedSegment desugared0
               printOrThrowDiagnostics (hsc_logger env) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
               plugins <- readIORef (tcg_th_coreplugins tcg)
@@ -3238,7 +3242,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 liftIO $ modifyIORef' (tcg_keep tcGblEnv) (`extendNameSetList` resultRoots)
                 (desugared0, dsMs) <- timeSection $
                   timeDetailPhase timing "deferred_desugar" (moduleNameString (ms_mod_name modSum)) $
-                    liftIO (hscDesugar hscEnv modSum tcGblEnv >>= installSegment typedSegment)
+                    liftIO (hscDesugar hscEnv modSum tcGblEnv >>= installSegment hscEnv typedSegment)
                 let retainResult identifier = if idName identifier `elem` resultRoots
                       then setIdExported identifier else identifier
                     retainBinding (NonRec identifier rhs) = NonRec (retainResult identifier) rhs

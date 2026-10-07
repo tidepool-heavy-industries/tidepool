@@ -80,7 +80,7 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
 import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
 import Tidepool.TypedSegment.Types
-  ( TypedSegment, typedSegmentItems, typedItemPlan, typedItemCaptures
+  ( PendingTypedSegment, pendingSegmentItems, typedItemPlan, typedItemCaptures
   , TypedItemPlan(..), typedCaptureIdentifier, typedCaptureType
   , typedCaptureFixity )
 
@@ -175,9 +175,9 @@ typedSegmentSessionBindingRepresentations (PreparedTypedSegmentBindings _ _ repr
 -- staging root belongs to this request; it must not be the public session root.
 prepareTypedSegmentSessionBindings
   :: HscEnv -> Map.Map (String, String) CanonicalInterfaceAdmission
-  -> TypedSegment -> FilePath -> IO PreparedTypedSegmentBindings
+  -> PendingTypedSegment -> FilePath -> IO PreparedTypedSegmentBindings
 prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
-  let items = typedSegmentItems segment
+  let items = pendingSegmentItems segment
       captures = concatMap typedItemCaptures items
       persisted capture = stabilizeEffectRows (typedCaptureType capture)
       itemModule item = SessionModule ValMod (Generation (plannedItemGeneration (typedItemPlan item)))

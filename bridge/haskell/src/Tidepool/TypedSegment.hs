@@ -7,6 +7,7 @@ module Tidepool.TypedSegment
   , typedSegmentPlanItems, typedSegmentReservationDigest, typedSegmentPlanDigest
   , TypedItemPlan(..), TypedItemBody(..)
   , TypedSegment, typedSegmentOriginalRoot, typedSegmentItems, typedSegmentRoots
+  , PendingTypedSegment, pendingSegmentItems, pendingSegmentSupportRoots
   , TypedItem, typedItemPlan, typedItemRoot, typedItemInputs
   , typedItemActionType, typedItemCaptures, typedItemPredecessor, typedItemObservation
   , TypedItemInput, typedInputParameter, typedInputCapture
@@ -19,7 +20,7 @@ module Tidepool.TypedSegment
 
 import Tidepool.TypedSegment.Types
 import Control.Exception (throwIO)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Data (Data, Typeable, cast, gmapQ)
 import Data.List (foldl', nub, partition)
@@ -39,8 +40,8 @@ import GHC.Driver.Ppr (showSDoc)
 import GHC.Core.Make (mkCoreLets, mkCoreTup, mkCoreConApps)
 import GHC.Core.FVs (bindFreeVars, exprFreeVars, varTypeTyCoVars)
 import GHC.Core.Subst (mkEmptySubst, extendSubst, substExpr)
-import GHC.Types.Var.Env (mkInScopeSet)
-import GHC.Types.Var.Set (unionVarSet)
+import GHC.Types.Var.Env (mkInScopeSet, emptyVarEnv, extendVarEnv, lookupVarEnv)
+import GHC.Types.Var.Set (unionVarSet, emptyVarSet, extendVarSet, elemVarSet)
 import GHC.Core.Utils (exprType)
 import GHC.Types.Name (mkExternalName, mkInternalName)
 import GHC.Types.Name.Occurrence (mkVarOcc)
@@ -64,14 +65,14 @@ import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Tc.Types (TcGblEnv, tcg_mod, tcg_type_env, tcg_binds, tcg_rn_decls, tcg_ev_binds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Avail (AvailInfo(..), availNames)
-import GHC.Types.Id (Id, idName, idType, isLocalId, mkExportedVanillaId, mkLocalId, setIdType, isClassOpId_maybe)
+import GHC.Types.Id (Id, idName, idType, isLocalId, mkExportedVanillaId, mkLocalId, setIdType, setIdNotExported, isClassOpId_maybe)
 import GHC.Core.Class (className)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Types.Var (TyVar, isId)
+import GHC.Types.Var (TyVar, isId, varUnique)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface, hm_details)
@@ -79,13 +80,16 @@ import GHC.Unit.Module (mkModuleName, moduleName)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModIface (mi_module, mi_exports)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
-import GHC.Core.InstEnv (is_cls)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString)
 import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.State (lookupPackageName)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
+import System.IO (hPutStrLn, stderr)
 import Tidepool.ExactScope (CanonicalInterfaceAdmission, resolveShippedHomeModule)
+import Tidepool.Timing (readTimingEnabled)
+import Tidepool.Json (jsonString)
+import GHC.Utils.Outputable (ppr)
 
 -- The source comparison and the actual exported Ids authenticate the operation
 -- owner once. Extraction never resolves an operator from authored scope.
@@ -223,7 +227,7 @@ settleCore operations row action = case splitTyConApp_maybe (exprType action) of
 -- GHC has checked the complete fixed-unit root once. All types below come
 -- from that successful environment; only genuine local lets carry sigma types.
 captureTypedSegment :: TypedSegmentPlan -> HscEnv
-  -> Map.Map (String,String) CanonicalInterfaceAdmission -> TcGblEnv -> IO TypedSegment
+  -> Map.Map (String,String) CanonicalInterfaceAdmission -> TcGblEnv -> IO PendingTypedSegment
 captureTypedSegment plan environment admitted checked = do
   operations <- resolveSegmentOperations environment admitted
   original <- unique MissingCaptureRoot AmbiguousCaptureRoot
@@ -255,10 +259,13 @@ captureTypedSegment plan environment admitted checked = do
   body <- rootBody abstraction
   retained <- retainChain operations checker Nothing (typedSegmentPlanItems plan) (unLoc body)
   renamed <- maybe (throwIO MissingRenamedCaptures) pure (tcg_rn_decls checked)
+  exports <- identityExports checked
+  timing <- readTimingEnabled
   let fixities = Map.fromList
         [(unLoc name, fixity) | FixitySig _ names fixity <- (collect renamed :: [FixitySig GhcRn])
           , name <- names]
-      known = typeEnvIds (tcg_type_env checked) ++ map eb_lhs (bagToList (tcg_ev_binds checked))
+      tops = collectHsBindBinders CollNoDictBinders (tcg_binds checked)
+      known = tops ++ typeEnvIds (tcg_type_env checked) ++ map eb_lhs (bagToList (tcg_ev_binds checked))
   items <- forM (zip retained (scanl (++) [] (map retainedCaptures retained))) $ \(item, previous) -> do
     let itemPlan = retainedPlan item
         ordinal = plannedItemOrdinal itemPlan
@@ -270,7 +277,18 @@ captureTypedSegment plan environment admitted checked = do
       dsEvBinds (tcg_ev_binds checked) $ \topEvidence ->
         dsTcEvBinds_s (abs_ev_binds abstraction) $ \evidence ->
           pure (keepRequiredEvidence (topEvidence ++ evidence) (mkLams inputs settled))
-    core <- maybe (throwIO (ItemDesugaringFailed ordinal)) pure lowered
+    rawCore <- maybe (throwIO (ItemDesugaringFailed ordinal)) pure lowered
+    let core = applyIdentityExports exports rawCore
+    when timing $ forM_ [identifier | identifier <- nonDetEltsUniqSet (exprFreeVars rawCore)
+        , isId identifier, isLocalId identifier] $ \identifier -> do
+      let actual = case lookup identifier exports of Just exported -> exported; Nothing -> identifier
+      hPutStrLn stderr $ "tidepool-typed-module-reference ordinal=" ++ show ordinal
+        ++ " name=" ++ jsonString (showSDoc (hsc_dflags environment) (ppr (idName identifier)))
+        ++ " unique=" ++ show (varUnique identifier)
+        ++ " identity_export=" ++ show (identifier /= actual)
+        ++ " exported_unique=" ++ show (varUnique actual)
+        ++ " module_top=" ++ show (actual `elem` tops)
+        ++ " type_env=" ++ show (identifier `elem` typeEnvIds (tcg_type_env checked))
     mapM_ (checkClosedType ordinal . idType) inputs
     checkClosedType ordinal (exprType core)
     let payloadType = exprType (mkCoreTup (map Var captures))
@@ -296,15 +314,45 @@ captureTypedSegment plan environment admitted checked = do
     pure (TypedItem itemPlan root [TypedItemInput identifier identifier | identifier <- inputs]
       (exprType action) descriptors (retainedPredecessor item) observation core)
   auxiliary <- auxiliaryRoots operations environment checked
-  pure (TypedSegment original items auxiliary)
+  pure (PendingTypedSegment (TypedSegment original items auxiliary) tops)
   where
     isObservation item = case plannedItemBody item of ObservationItem{} -> True; _ -> False
+
+-- GHC's complete-signature AbsBinds can contain a fresh monomorphic clone
+-- even when the export is an identity. Its actual export pair, not its Name,
+-- proves this substitution. General type/evidence wrappers are not inverted.
+identityExports :: TcGblEnv -> IO [(Id,Id)]
+identityExports checked = do
+  let pairs = [(abe_mono exported, abe_poly exported)
+        | binding <- tcg_binds checked
+        , XHsBindsLR abstraction <- [unLoc binding]
+        , null (abs_tvs abstraction), null (abs_ev_vars abstraction)
+        , exported <- abs_exports abstraction
+        , WpHole <- [abe_wrap exported]
+        , eqType (idType (abe_mono exported)) (idType (abe_poly exported))
+        , nameModule_maybe (idName (abe_poly exported)) == Just (tcg_mod checked)]
+  unless (length (nub (map fst pairs)) == length pairs) $
+    throwIO UnprovedRootAbstraction
+  pure pairs
+
+applyIdentityExports :: [(Id,Id)] -> CoreExpr -> CoreExpr
+applyIdentityExports exports core = substExpr substitution core
+  where
+    used = [(local, global) | (local, global) <- exports
+      , local `elementOfUniqSet` exprFreeVars core]
+    scope = mkInScopeSet (foldl' unionVarSet (exprFreeVars core)
+      [exprFreeVars (Var global) | (_,global) <- used])
+    substitution = foldl' (\current (local,global) -> extendSubst current local (Var global))
+      (mkEmptySubst scope) used
 
 -- Only GHC evidence groups enter this closure; authored local bindings remain
 -- in the item body. Keep every demanded dictionary/coercion dependency and
 -- complete recursive group, in its original lexical order.
 keepRequiredEvidence :: [CoreBind] -> CoreExpr -> CoreExpr
-keepRequiredEvidence bindings body = mkCoreLets (filter (demanded required) bindings) body
+keepRequiredEvidence bindings body = mkCoreLets (requiredBindings bindings body) body
+
+requiredBindings :: [CoreBind] -> CoreExpr -> [CoreBind]
+requiredBindings bindings body = filter (demanded required) bindings
   where
     groups = [(binding, foldl' unionVarSet (bindFreeVars binding)
       (map varTypeTyCoVars (bindersOf binding))) | binding <- bindings]
@@ -358,8 +406,9 @@ auxiliaryRoots operations environment checked = do
 
 -- The decoded HPT is the authority for each supplied global. Captures remain
 -- values; closing an item's prior-value parameters never replays its predecessor.
-closeTypedSegment :: HscEnv -> [(Id,Id)] -> TypedSegment -> IO TypedSegment
-closeTypedSegment environment globals segment = do
+closeTypedSegment :: HscEnv -> [(Id,Id)] -> PendingTypedSegment -> IO PendingTypedSegment
+closeTypedSegment environment globals pending = do
+  let segment = pendingSegmentValue pending
   let expected = [(typedCaptureIdentifier capture, plannedItemGeneration (typedItemPlan item))
         | item <- typedSegmentItems segment, capture <- typedItemCaptures item]
   unless (length globals == length expected && length (nub (map fst globals)) == length globals) $
@@ -379,9 +428,10 @@ closeTypedSegment environment globals segment = do
         [global | (source, global) <- globals, source == typedInputCapture input]
       pure (typedInputParameter input, Var target)
     core <- applyInputs (plannedItemOrdinal (typedItemPlan item)) (typedItemCore item) arguments
-    checkItemCore environment (plannedItemOrdinal (typedItemPlan item)) [] core
+    checkItemCore environment (plannedItemOrdinal (typedItemPlan item))
+      (pendingSegmentTopIdentifiers pending) core
     pure item { typedItemRoot = setIdType (typedItemRoot item) (exprType core), typedItemCore = core }
-  pure segment { typedSegmentItems = items }
+  pure pending { pendingSegmentValue = segment { typedSegmentItems = items } }
   where
     applyInputs _ expression [] = pure expression
     applyInputs ordinal (Let bindings body) arguments = Let bindings <$> applyInputs ordinal body arguments
@@ -395,8 +445,10 @@ closeTypedSegment environment globals segment = do
 
 -- Only the actual item roots survive into the executable target interface.
 -- The private checker classes served inference and confer no published type.
-installTypedSegmentRoots :: TypedSegment -> ModGuts -> IO ModGuts
-installTypedSegmentRoots segment guts = do
+installTypedSegmentRoots :: HscEnv -> PendingTypedSegment -> ModGuts -> IO (TypedSegment,ModGuts)
+installTypedSegmentRoots environment pending guts = do
+  let segment = pendingSegmentValue pending
+  timing <- readTimingEnabled
   unless (nameModule_maybe (idName (typedSegmentOriginalRoot segment)) == Just (mg_module guts)) $
     throwIO UnprovedRootAbstraction
   let synthetic constructor = nameModule_maybe (tyConName constructor) == Just (mg_module guts)
@@ -404,17 +456,82 @@ installTypedSegmentRoots segment guts = do
       privateTypes = filter synthetic (mg_tcs guts)
       mentionsPrivate ty = any (`elementOfUniqSet` tyConsOfType ty) privateTypes
       roots = typedSegmentRoots segment
-      original = typedSegmentOriginalRoot segment
-      keep (NonRec identifier _) = identifier /= original && not (mentionsPrivate (idType identifier))
-      keep (Rec bindings) = all (\(identifier,_) -> identifier /= original && not (mentionsPrivate (idType identifier))) bindings
+      unexport (NonRec identifier rhs) = NonRec (setIdNotExported identifier) rhs
+      unexport (Rec bindings) = Rec [(setIdNotExported identifier,rhs) | (identifier,rhs) <- bindings]
+      bindings = map unexport (mg_binds guts) ++ roots
+      identifiers = concatMap bindersOf bindings
   forM_ (typedSegmentItems segment) $ \item ->
     when (mentionsPrivate (idType (typedItemRoot item))
       || any (mentionsPrivate . typedCaptureType) (typedItemCaptures item)) $
         throwIO (UnprovedItemPayload (plannedItemOrdinal (typedItemPlan item)))
-  pure guts { mg_binds = filter keep (mg_binds guts) ++ roots
-            , mg_exports = [Avail (idName identifier) | NonRec identifier _ <- roots]
-            , mg_tcs = filter (not . synthetic) (mg_tcs guts)
-            , mg_insts = filter (not . (`elem` map tyConName privateTypes) . className . is_cls) (mg_insts guts) }
+  graph <- foldM addDefinition emptyVarEnv
+    [(identifier,index,binding) | (index,binding) <- zip [0 :: Int ..] bindings
+      , identifier <- bindersOf binding]
+  let reverseReferences = foldl' addReverse emptyVarEnv
+        [(identifier,rhs) | binding <- bindings, (identifier,rhs) <- bindingPairs binding]
+      originalDependents = findDependents reverseReferences emptyVarSet
+        [typedSegmentOriginalRoot segment]
+      moduleTops = foldl' extendVarSet emptyVarSet (pendingSegmentTopIdentifiers pending)
+      checkReferences ordinal core = forM_ (nonDetEltsUniqSet (exprFreeVars core)) $ \reference ->
+        case lookupVarEnv graph reference of
+          Nothing -> when (reference `elemVarSet` moduleTops) $
+            throwIO (OpenItemCore ordinal [occurrence reference])
+          Just (identifier,_,_) -> unless (eqType (idType identifier) (idType reference)) $
+            throwIO (OpenItemCore ordinal [occurrence reference])
+      demandedGroups selected [] = selected
+      demandedGroups selected (reference : rest) = case lookupVarEnv graph reference of
+        Nothing -> demandedGroups selected rest
+        Just (_,index,_) | Map.member index selected -> demandedGroups selected rest
+        Just (_,index,binding) -> demandedGroups (Map.insert index binding selected)
+          (nonDetEltsUniqSet (foldl' unionVarSet (bindFreeVars binding)
+            (map varTypeTyCoVars (bindersOf binding))) ++ rest)
+  -- Keep the whole compiler graph, including support SCCs. Only issued roots
+  -- remain exported; ordinary GHC DCE owns unused inference scaffolding.
+  support <- foldM (\selected binding -> do
+    let ordinal = case [plannedItemOrdinal (typedItemPlan item)
+          | item <- typedSegmentItems segment, typedItemRoot item `elem` bindersOf binding] of
+          [ordinal] -> ordinal
+          _ -> -1
+    checkBindingType ordinal binding
+    foldM (\current core -> do
+      checkReferences ordinal core
+      checkItemCore environment ordinal identifiers core
+      when (any (`elemVarSet` originalDependents) (nonDetEltsUniqSet (exprFreeVars core))) $
+        throwIO (OpenItemCore ordinal [occurrence (typedSegmentOriginalRoot segment)])
+      when timing $ forM_ [reference | reference <- nonDetEltsUniqSet (exprFreeVars core)
+          , reference `elemVarSet` moduleTops] $ \reference ->
+        hPutStrLn stderr $ "tidepool-typed-module-closure ordinal=" ++ show ordinal
+          ++ " name=" ++ jsonString (showSDoc (hsc_dflags environment) (ppr (idName reference)))
+          ++ " unique=" ++ show (varUnique reference) ++ " bound=True type_eq=True"
+      pure (demandedGroups current (nonDetEltsUniqSet (exprFreeVars core))))
+      selected (bindingExpressions binding)) Map.empty roots
+  -- Shared demanded groups are checked once, with their complete Rec scope.
+  forM_ (Map.elems support) $ \binding -> do
+    checkBindingType (-1) binding
+    forM_ (bindingExpressions binding) $ \rhs -> do
+      checkReferences (-1) rhs
+      checkItemCore environment (-1) identifiers rhs
+  pure (segment, guts { mg_binds = bindings
+            , mg_exports = [Avail (idName identifier) | NonRec identifier _ <- roots] })
+  where
+    addDefinition graph (identifier,index,binding) = case lookupVarEnv graph identifier of
+      Just _ -> throwIO (OpenItemCore (-1) [occurrence identifier])
+      Nothing -> pure (extendVarEnv graph identifier (identifier,index,binding))
+    addReverse graph (identifier,rhs) = foldl' (\current reference ->
+      extendVarEnv current reference (identifier : maybe [] id (lookupVarEnv current reference)))
+      graph (nonDetEltsUniqSet (exprFreeVars rhs))
+    findDependents _ found [] = found
+    findDependents reverseReferences found (identifier : rest)
+      | identifier `elemVarSet` found = findDependents reverseReferences found rest
+      | otherwise = findDependents reverseReferences (extendVarSet found identifier)
+          (maybe [] id (lookupVarEnv reverseReferences identifier) ++ rest)
+    checkBindingType ordinal binding = forM_ (bindingPairs binding) $ \(identifier,rhs) ->
+      unless (eqType (idType identifier) (exprType rhs)) $
+        throwIO (OpenItemCore ordinal [occurrence identifier])
+    bindingPairs (NonRec identifier rhs) = [(identifier,rhs)]
+    bindingPairs (Rec values) = values
+    bindingExpressions (NonRec _ rhs) = [rhs]
+    bindingExpressions (Rec values) = map snd values
 
 checkClosedType :: Int -> Type -> IO ()
 checkClosedType ordinal ty = do

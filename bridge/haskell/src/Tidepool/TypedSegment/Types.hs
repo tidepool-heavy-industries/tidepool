@@ -9,9 +9,11 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Word (Word64)
 import GHC.Core (CoreBind, CoreExpr, Bind(..))
+import GHC.Core.FVs (exprFreeVars)
 import GHC.Core.Type (Type)
 import GHC.Types.Fixity (Fixity)
 import GHC.Types.Id (Id, idType)
+import GHC.Types.Unique.Set (elementOfUniqSet)
 import GHC.Unit.Module (ModuleName)
 import Numeric (showHex)
 
@@ -86,6 +88,24 @@ data TypedSegment = TypedSegment
   , typedSegmentItems :: [TypedItem]
   , typedSegmentAuxiliaryRoots :: [CoreBind]
   }
+
+-- Capture types and input substitutions are proved before whole-module
+-- desugaring. Executable closure is issued only against that module's actual
+-- binding graph; pending roots cannot be returned as prepared products.
+data PendingTypedSegment = PendingTypedSegment
+  { pendingSegmentValue :: TypedSegment
+  , pendingSegmentTopIdentifiers :: [Id]
+  }
+
+pendingSegmentItems :: PendingTypedSegment -> [TypedItem]
+pendingSegmentItems = typedSegmentItems . pendingSegmentValue
+
+-- These genuine checked module tops must survive desugaring's early optimizer
+-- until the independently emitted item roots join that same module graph.
+pendingSegmentSupportRoots :: PendingTypedSegment -> [Id]
+pendingSegmentSupportRoots pending =
+  [identifier | identifier <- pendingSegmentTopIdentifiers pending
+    , any (elementOfUniqSet identifier . exprFreeVars . typedItemCore) (pendingSegmentItems pending)]
 
 data TypedItem = TypedItem
   { typedItemPlan :: TypedItemPlan
