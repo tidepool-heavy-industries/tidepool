@@ -43,7 +43,7 @@ compile n (Input label control) =
   let key = fieldId n
       result = case control of
         TextControl seed -> prepareInput "text" key label seed
-        IntControl seed -> prepareInput "int" key label seed
+        IntControl seed -> prepareInteger key label seed
         NumberControl seed -> prepareNumber key label seed
         BoolControl seed -> prepareInput "bool" key label seed
   in (result,n+1)
@@ -154,3 +154,26 @@ prepareNumber key label seed =
         if isNaN value || isInfinite value then Left [ValidationError (Just key) "Number must be finite"]
         else Right value
   in PreparedForm v finite render keys
+
+-- Decimal text avoids a browser floating-point round-trip. Parse as Integer
+-- first: Read Int may wrap before a caller could check the original bounds.
+prepareInteger :: Text -> Text -> Maybe Int -> PreparedForm Int
+prepareInteger key label seed = PreparedForm
+  (object ["kind" .= ("int" :: Text),"id" .= key,"label" .= label,"initial" .= fmap (T.pack . show) seed])
+  (\draft -> readField key draft >>= parse)
+  (\draft -> Caption (PlainText (either (const "") scalarText (readField key draft))) label)
+  (const [key])
+  where
+    bad message = Left [ValidationError (Just key) message]
+    parse (String lexeme)
+      | decimal (T.unpack lexeme) = case reads (T.unpack lexeme) :: [(Integer,String)] of
+          [(value,"")]
+            | value < toInteger (minBound :: Int) || value > toInteger (maxBound :: Int) -> bad "Integer is outside Int bounds"
+            | otherwise -> Right (fromInteger value)
+          _ -> bad "Expected a decimal integer"
+      | otherwise = bad "Expected a decimal integer"
+    parse _ = bad "Expected a decimal integer as text"
+    decimal ('-':digits) = unsigned digits
+    decimal digits = unsigned digits
+    unsigned [] = False
+    unsigned digits = all (\c -> c >= '0' && c <= '9') digits

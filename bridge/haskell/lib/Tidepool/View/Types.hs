@@ -23,4 +23,3 @@ viewTree (Caption v t) = Concat [viewTree v, LineBreak, TextLeaf t]
 viewTree (Image _ alt) = TextLeaf alt
 viewTree (Vector _) = TextLeaf "<svg>"
 viewTree (Inspection tree) = tree
-

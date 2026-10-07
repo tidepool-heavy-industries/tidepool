@@ -44,4 +44,3 @@ encodeView budget = fst . go (max 0 budget)
     mime PNG = "image/png" :: Text
     mime JPEG = "image/jpeg"
     mime WebP = "image/webp"
-
