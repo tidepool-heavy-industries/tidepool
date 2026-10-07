@@ -77,6 +77,7 @@ typedSegmentPlan reservation root items = do
 data TypedSegment = TypedSegment
   { typedSegmentOriginalRoot :: Id
   , typedSegmentItems :: [TypedItem]
+  , typedSegmentAuxiliaryRoots :: [CoreBind]
   }
 
 data TypedItem = TypedItem
@@ -121,6 +122,7 @@ data TypedObservation = TypedObservation
 typedSegmentRoots :: TypedSegment -> [CoreBind]
 typedSegmentRoots segment =
   [NonRec (typedItemRoot item) (typedItemCore item) | item <- typedSegmentItems segment]
+  ++ typedSegmentAuxiliaryRoots segment
 
 data TypedSegmentFailure
   = InvalidReservationDigest
@@ -153,6 +155,9 @@ data TypedSegmentFailure
   | UnprovedExpressionOccurrence Int
   | WrongObservationEffectRow Int
   | UnprovedCaptureBinding Int
+  | UnprovedSegmentGlobals
+  | MissingSegmentPreparation
+  | SegmentPlanPurposeMismatch
   deriving (Eq, Show)
 
 instance Exception TypedSegmentFailure

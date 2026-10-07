@@ -96,7 +96,7 @@ import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.TypedSegment.Types
-  ( TypedSegmentPlan, typedSegmentPlan, typedSegmentPlanRoot, typedSegmentPlanDigest
+  ( TypedSegmentPlan, typedSegmentPlan, typedSegmentPlanDigest
   , TypedItemPlan(..), TypedItemBody(..) )
 import Tidepool.CheckedCell
   ( renderCheckedTypeWitness, renderRequestTypeSignatures
@@ -106,8 +106,8 @@ import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 import Tidepool.TurnSource
-  ( spliceTemplate, CompilerDefaultRecipe, emptyCompilerDefaultRecipe
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, qualifyCompilerDefaultWithLineOffset
+  ( CompilerDefaultRecipe, emptyCompilerDefaultRecipe
+  , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset
   , importQualifierNamespaces
   , prepareDeclarationTemplate, renderPreparedDeclaration )
 
@@ -920,11 +920,11 @@ prepareTypedSegmentSource template sourcePlan reservation slots = do
   -- Its source/certificate owner is authenticated before Core extraction.
   protected <- replaceOnce "{{CELL_IMPORTS}}"
     "import qualified Tidepool.Internal.Resume as TidepoolResume\n{{CELL_IMPORTS}}" template
-  (rendered, lineOffset) <- renderCellSourceWithLineOffset False protected sourcePlan
+  (rendered, generatedLineOffset) <- renderCellSourceWithLineOffset False protected sourcePlan
   renamedRoot <- replaceOnce "__tidepool_cell_check ::" (root ++ " ::") rendered
     >>= replaceOnce "__tidepool_cell_check =" (root ++ " =")
   let sealed = renamedRoot ++ "\n-- tidepool-typed-segment-plan-v1 " ++ typedSegmentPlanDigest plan ++ "\n"
-  pure (PreparedTypedSegmentSource plan sealed protected lineOffset)
+  pure (PreparedTypedSegmentSource plan sealed protected generatedLineOffset)
 
 renderCellCheckSource :: String -> CellSourcePlan -> Either String String
 renderCellCheckSource template plan = fst <$> renderCellCheckSourceWithLineOffset template plan
@@ -996,22 +996,24 @@ renderCellSourceWithLineOffset checking template plan = do
     pinKey index binder = "__tidepool_cell_pin_" ++ show index ++ "_" ++ binder
     trailingNewline text = if null text || last text == '\n' then "" else "\n"
 
-    replaceOnce needle replacement haystack =
-      case breakOn needle haystack of
-        Nothing -> Left ("cell check template is missing " ++ needle)
-        Just (before, after)
-          | needle `isInfixOf` after ->
-              Left ("cell check template contains " ++ needle ++ " more than once")
-          | otherwise -> Right (before ++ replacement ++ after)
 
-    breakOn needle = go []
-      where
-        go _ [] = Nothing
-        go prefix rest
-          | needle `isPrefixOf` rest =
-              Just (reverse prefix, drop (length needle) rest)
-          | char : more <- rest = go (char : prefix) more
+replaceOnce :: String -> String -> String -> Either String String
+replaceOnce needle replacement haystack =
+  case breakOn needle haystack of
+    Nothing -> Left ("cell check template is missing " ++ needle)
+    Just (before, after)
+      | needle `isInfixOf` after ->
+          Left ("cell check template contains " ++ needle ++ " more than once")
+      | otherwise -> Right (before ++ replacement ++ after)
 
+breakOn :: Eq a => [a] -> [a] -> Maybe ([a],[a])
+breakOn needle = go []
+  where
+    go _ [] = Nothing
+    go prefix rest
+      | needle `isPrefixOf` rest =
+          Just (reverse prefix, drop (length needle) rest)
+      | char : more <- rest = go (char : prefix) more
 -- | Split a notebook cell at real tokens beginning in column one on a later
 -- line. GHC's lexer, not a second Haskell grammar, decides which newlines are
 -- inside strings, quasiquotes, comments, and pragmas.
@@ -1193,7 +1195,7 @@ classifyWithFlagsExactForm dflags src = (verdict, bindingForm)
         RecStmt{} -> Just RecursiveBinding
         _ -> Nothing
       _ -> Nothing
-    bindingForm | otherwise = Nothing
+                | otherwise = Nothing
     popts  = initParserOpts dflags
     loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
     buf    = stringToStringBuffer src
