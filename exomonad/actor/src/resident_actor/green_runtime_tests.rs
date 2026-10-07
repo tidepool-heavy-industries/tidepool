@@ -152,16 +152,21 @@ struct Fixture {
     _directory: tempfile::TempDir,
     forest: ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>,
     host: Arc<Host>,
+    effect_keys: Vec<crate::ActorEffectKey>,
 }
 
 impl Fixture {
     fn new(case: u64, scenario: Scenario) -> Self {
         eval_harness::require_extract();
-        let declarations = [
-            tidepool_mcp::console_decl(),
-            tidepool_mcp::green_decl(),
-            tidepool_mcp::askuser_decl(),
+        let mut declarations = vec![tidepool_mcp::console_decl(), tidepool_mcp::askuser_decl()];
+        let mut effect_keys = vec![
+            crate::ActorEffectKey::Console,
+            crate::ActorEffectKey::AskUser,
         ];
+        if scenario != Scenario::Single {
+            declarations.push(tidepool_mcp::green_decl());
+            effect_keys.push(crate::ActorEffectKey::Green);
+        }
         let effects =
             tidepool_mcp::ensure_effects_module(&declarations).expect("declared effect module");
         let include = crate::resident_workbench::request_tests::fixture_include_roots(&effects);
@@ -192,6 +197,7 @@ impl Fixture {
             _directory: directory,
             forest: forest.with_form_host(host.clone()),
             host,
+            effect_keys,
         }
     }
 
@@ -200,17 +206,18 @@ impl Fixture {
             .forest
             .new_workbench(
                 "green-native-fixture".into(),
-                crate::ActorCapabilities::default().with_effect_keys(vec![
-                    crate::ActorEffectKey::Console,
-                    crate::ActorEffectKey::Green,
-                    crate::ActorEffectKey::AskUser,
-                ]),
+                crate::ActorCapabilities::default().with_effect_keys(self.effect_keys.clone()),
             )
             .await
             .expect("native workbench actor");
-        let result = self
-            .execute(&actor, include_str!("green_runtime_setup.hs"), None)
-            .await;
+        let setup = include_str!("green_runtime_setup.hs");
+        let setup = if self.host.scenario == Scenario::Single {
+            setup.to_string()
+        } else {
+            let (pragma, declarations) = setup.split_once('\n').expect("fixture language pragma");
+            format!("{pragma}\nimport qualified Tidepool.Async as Async\n{declarations}")
+        };
+        let result = self.execute(&actor, &setup, None).await;
         assert_eq!(
             result.expect("checked fixture declarations").status,
             WorkbenchRunStatus::Committed

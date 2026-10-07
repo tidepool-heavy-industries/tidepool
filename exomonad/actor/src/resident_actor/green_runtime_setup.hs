@@ -2,8 +2,6 @@
 import Tidepool.Prelude
 import Control.Monad.Freer (Eff, Member, send)
 import qualified Tidepool.Effects.Core as Core
-import qualified Tidepool.Async as Async
-import Data.Aeson (toJSON)
 
 let awaitGreenForm :: Member Core.AskUser effects => Text -> a -> Eff effects a
     awaitGreenForm name original = do
