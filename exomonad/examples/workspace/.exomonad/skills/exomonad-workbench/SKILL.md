@@ -1,6 +1,6 @@
 ---
 name: exomonad-workbench
-description: Write Haskell notebook cells that typecheck the first time — Text vs String, Label vs Text, annotating polymorphic expressions, explicit value display, multi-line operator chains, and shell arguments. Load when a cell was rejected or a display needs expansion.
+description: Write Haskell notebook cells that typecheck the first time — Text vs String, Text labels, annotating polymorphic expressions, explicit value display, multi-line operator chains, and shell arguments. Load when a cell was rejected or a display needs expansion.
 ---
 
 Send one cell of ordinary Haskell: declarations, bindings and expressions. GHC

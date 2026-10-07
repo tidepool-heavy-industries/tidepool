@@ -21,7 +21,7 @@ modules = [
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
-  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.nestedRequests",
   "Project.RecursiveWorkChecks.revisedReview",
   "Project.DecisionAnswerChecks.routing",
   "Project.DecisionAnswerChecks.replay",

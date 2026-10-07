@@ -20,67 +20,61 @@ for an actor-owned start with completion notice. A returned or captured handle
 alone does not extend lifetime. Scope exit cancels unfinished owned work while
 retaining cleanup; borrowed observers cannot cancel another owner's resource.
 
-`waitFor awaiting` suspends directly on `Await a` and returns
-`Either WatchFailure a`. Applicative readiness preserves original typed handles.
-Use a named `Watch` for inspectable subscriptions or model notification, and an
-`EventSource` for ongoing delivery. `R.start` explicitly creates a persistent
-record service with actor lifetime; returning from its creator's invocation does
-not cancel that service. Handlers without a hosted invocation use actor ownership
-for their work and remain serialized while suspended. Never wait for an event that requires another handler on the same
-mailbox to run; start independent work and consume its event instead.
+Compose `result request` projections as `Await`; `await` observes one `Await a`
+and returns `Either AwaitError a`. Await values compose applicatively, and
+`traverse` handles a collection without a separate batch primitive. Use
+`eitherOf` when the first terminal branch should decide, including failure.
+`R.start` explicitly creates a persistent record service with actor lifetime;
+returning from its creator's invocation does not cancel that service. Handlers
+without a hosted invocation use actor ownership for their work and remain
+serialized while suspended. Never wait for an event that requires another
+handler on the same mailbox to run; start independent work and consume its event
+instead.
 
 ## Children and context
 
-`unfold` and `attemptUnfold` publish an applicative child group immediately.
-Every branch selects `fromCheckpoint captured` or `selected render`. Capture a
-focused scaffold with `checkpoint`; its exact Haskell environment and provider
-prefix are independent of the child's checkout and authority. Releasing a
-checkpoint prevents future admission; admitted children keep their own leases.
-Unresolved inherited context is refused before allocation.
+`spawnSubagent context workspace (defaultSpawnOptions actualSpec)` creates one
+idle agent and returns `Either SpawnError AgentRef`; spawning does not start
+inference. A partial failure retains its cleanup handles. Capture the intended
+declarations, values, and context with `checkpoint` before choosing
+`ForkCtx captured`; `FreshCtx prompt` supplies an independent explicit prompt.
+Choose `SameDir` to share the actual writable files, index, and HEAD; choose an
+opaque `ExistingWorkspace` or `ForkWorktree seed` when the granted directory or
+selected committed source should differ. Workspace choice does not install tools
+or select compiled source.
 
-Immediate invocation-owned children can be awaited in that same invocation.
-For independent work spanning model turns, decorate each branch with
-`withLifetime ActorOwned` and retain original response/progress handles. Use
-`unfoldDeferred` or `attemptUnfoldDeferred` only when children need the enclosing
-call's real completed result and final bindings. Deferred branches require an
-explicit persistent lifetime and the admission invocation must return before
-children start. Never await deferred children before that return.
-
-`request` submits a follow-up typed assignment to an existing actor;
-`requestWithProgress` also returns its typed progress stream. Direct requests
-are invocation-owned even on persistent actors: await them or inspect a successful
-`detachRequest` receipt before returning. Project helpers intentionally handing
-back unfinished work retain that transfer in `RequestHandoff`; refusal leaves
-normal scoped cleanup. A busy actor queues
-a new request. `updateRequest` targets an owned active request; admission and
-presentation do not prove incorporation. Questions remain progress while the
-original delivery is pending. Avoid circular waits on busy actors.
+Spawn and request ownership default to the parent actor's custody. A typed
+`request @Answer agent rawInput defaultRequestOptions` activates the agent and
+returns `Either RequestError (Request Answer)`; a refusal keeps the already
+spawned agent available for retry or retirement. `requestWithProgress` also
+returns an independent typed progress handle when updates matter. The request handle is its control identity.
+Use `result request` as an `Await` and `await` to observe it. `withScope` creates
+a runtime-owned delimiter; resources join only when their own options explicitly
+use `InScope scope`. Request, waiting, actor, and scope cleanup remain separate
+operations. Admission and presentation do not prove incorporation. Questions
+remain progress while the original delivery is pending; avoid circular waits on
+busy actors.
 
 ## Shared compositions and project policy
 
-The pinned package's `Exomonad.Contrib` modules supply Types, Actors, Routing,
-ReviewFlow, Merge, CheckResults, CheckPlan, PrepareContinue, RetainedEvidence and
-Check.Cargo. They compose existing command, readiness, actor and worktree owners.
-`Project.Work` owns task construction, instructions, model placement and direct
-review requests; `Project.ReviewPolicy` owns review thresholds and semantic choices.
-Configure their imports rather than adding another registry or universal plan DSL.
+The pinned `Project` and `Exomonad.Contrib` modules are optional authored
+compositions over the core agent, request, actor, command, readiness, and
+worktree APIs. Create agents explicitly with their actual spec and workspace,
+then submit typed requests. A project may add event-source routing when several
+already-created requests need ongoing progress observation; that collector does
+not create agents or define a universal plan language. Configure the package
+imports for the composition you use.
 
-`unfoldWorkBatch` retains heterogeneous products of original typed handles and
-maps results into an authored event sum. `unfoldWork` is the homogeneous-list
-convenience. Its collector keeps progress, questions, terminal results and delivery
-receipts. Optional observer failure cannot invalidate primary collection.
-`acknowledgeWork` records inspected publications; acknowledgment is distinct from
-incorporation and executed checks.
+Keep publication, acknowledgment, incorporation, and executed checks as distinct
+facts. A `Candidate`'s `reportedChecks` are authored claims. Counted check
+evidence retains original commands, source, and terminal receipts.
+`ReviewedCheckpoint` retains the original exact reviewed proof; a new integration
+head needs its own executed `IntegrationCheck`. Unknown output, zero test matches,
+and source mismatch stop for the owner. ReviewFlow preserves those distinctions
+through bounded repair.
 
-A `Candidate`'s `reportedChecks` are authored claims. Counted check evidence
-retains original commands, source and terminal receipts. `ReviewedCheckpoint`
-retains the original exact reviewed proof; a new integration head needs its own
-executed `IntegrationCheck`. Reported delivery, review, integration and resource
-release are separate facts. Unknown output, zero test matches and source mismatch
-stop for the owner. ReviewFlow preserves those distinctions through bounded repair.
-
-Load [exomonad-project-work](skills/exomonad-project-work/SKILL.md) for the Git
-workflow and [RECURSIVE-WORK.md](RECURSIVE-WORK.md) for its compiled compositions.
-Load the boundary skill for commands, forks, routing, review or
-cleanup; use targeted `lookup` for missing signatures. Registering an example
-proves neither that the current workspace compiled nor that live acceptance passed.
+Use [RECURSIVE-WORK.md](RECURSIVE-WORK.md) for optional project delivery,
+independent implementation, exact-candidate review, and checked integration.
+Load the boundary skill for commands, agent requests, routing, review, or cleanup;
+use targeted `lookup` for missing signatures. Registering an example proves
+neither that the current workspace compiled nor that live acceptance passed.

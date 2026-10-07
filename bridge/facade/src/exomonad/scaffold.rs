@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 // Keep this in step with this repository's .exomonad/workspace gitlink.
 // Both the qualified Git bundle and DEFAULT_WORKSPACE_URL must install the
 // commit this release compiled and checked, even if the remote advances.
-pub(super) const DEFAULT_WORKSPACE_REV: &str = "9dcdd1705effa4248aa816f43158317446f04c3c";
+pub(super) const DEFAULT_WORKSPACE_REV: &str = "33705bbbf570704c39e2b470004ae4717a16eaa1";
 
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
 /// and prompt files match the shipped workspace; only repository-specific
@@ -37,13 +37,13 @@ modules = [
   "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
   "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults",
   "Exomonad.Contrib.PrepareContinue", "Exomonad.Contrib.RetainedEvidence", "Project.AssumptionWatch",
-  "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
+  "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview", "Project.WorkflowExamples",
   "Exomonad.Contrib.CheckPlan", "Project.TestEvidence", "Exomonad.Contrib.ReviewFlow",
   "Project.BaselineIncorporation", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
-  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.nestedRequests",
   "Project.RecursiveWorkChecks.revisedReview",
   "Project.DecisionAnswerChecks.routing",
   "Project.DecisionAnswerChecks.replay",
