@@ -17,7 +17,7 @@ enum Scenario {
     EvaluationFailure,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct HostState {
     mounts: BTreeMap<String, (ActorRef, String)>,
     awaited: BTreeSet<String>,
@@ -256,7 +256,12 @@ impl Fixture {
     ) -> crate::KernelWorkbenchReply {
         tokio::time::timeout(Duration::from_secs(240), self.admit(actor, source, control))
             .await
-            .expect("bounded compiled native fixture")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "bounded compiled native fixture; observed host state: {:?}",
+                    self.host.state.lock()
+                )
+            })
             .expect("actual resident settlement")
     }
 
