@@ -3,7 +3,7 @@ do
       actualSpec :: AgentSpec CaptureTools '[]
       actualSpec = defaultSpec
         { specTools = CaptureTools
-            { ping = tool "Read a value captured by this supplied handler." $ \_ -> pure (handlerLocal + 1)
+            { ping = presentWith presentDisplay $ tool "Read a value captured by this supplied handler." $ \_ -> pure (handlerLocal + 1)
             , haskell = haskellTool @'Asynchronous @'[] @'[] "Read the retained checkpoint notebook."
             }
         }
