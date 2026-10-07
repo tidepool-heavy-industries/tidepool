@@ -160,6 +160,15 @@ pub struct LocalResidentInstallation {
     pub runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
+impl LocalResidentInstallation {
+    #[must_use]
+    pub fn toolset_acquisition(&self) -> Option<&crate::ToolsetAcquisition> {
+        self.prepared_tools
+            .as_ref()
+            .and_then(crate::InstalledToolLease::toolset_acquisition)
+    }
+}
+
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
     DisplayPublished(Arc<DisplayPublication>),

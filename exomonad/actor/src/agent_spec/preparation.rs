@@ -66,7 +66,7 @@ pub(crate) struct PreparedToolset {
     pub(crate) entry_name: String,
     pub(crate) resolved: ResolvedSpec,
     pub(crate) source_revision: String,
-    pub(crate) completed_selection: Option<(String, uuid::Uuid)>,
+    pub(crate) acquisition: ToolsetAcquisition,
     /// Retains the published source owner for the complete installer lifetime.
     _source: crate::CheckpointSourceLayer,
     /// Nominal owners include producer and original canonical interface identity.
@@ -161,6 +161,23 @@ struct PreparationState {
 
 const RETAINED_TOOLSETS: usize = 16;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparationLookupDisposition {
+    New,
+    JoinedPending,
+    ReadyHit,
+}
+
+impl PreparationLookupDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::JoinedPending => "joined_pending",
+            Self::ReadyHit => "ready_hit",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum OriginalAcquisition {
     CompileIfAbsent,
@@ -176,15 +193,21 @@ impl ToolsetPreparation {
         *slot = Some(observer);
     }
 
-    fn lookup(&self, recipe: &InstallerRecipe) -> (Arc<PreparationTask>, bool) {
+    fn lookup(
+        &self,
+        recipe: &InstallerRecipe,
+    ) -> (Arc<PreparationTask>, PreparationLookupDisposition) {
         let mut state = self.state.lock();
         match state.tasks.get(recipe).cloned() {
             Some(task) => {
-                if state.ready_order.contains(recipe) {
+                let disposition = if state.ready_order.contains(recipe) {
                     state.ready_order.retain(|key| key != recipe);
                     state.ready_order.push_back(recipe.clone());
-                }
-                (task, false)
+                    PreparationLookupDisposition::ReadyHit
+                } else {
+                    PreparationLookupDisposition::JoinedPending
+                };
+                (task, disposition)
             }
             None => {
                 let task = Arc::new(PreparationTask {
@@ -192,7 +215,7 @@ impl ToolsetPreparation {
                     completed: tokio::sync::Notify::new(),
                 });
                 state.tasks.insert(recipe.clone(), Arc::clone(&task));
-                (task, true)
+                (task, PreparationLookupDisposition::New)
             }
         }
     }
@@ -205,8 +228,16 @@ impl ToolsetPreparation {
         source: crate::CheckpointSourceLayer,
         registry: Arc<ImageRegistry>,
     ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
-        let (task, launch) = self.lookup(&recipe);
-        if launch {
+        let (task, disposition) = self.lookup(&recipe);
+        tracing::debug!(
+            target: "exomonad_actor::toolset_preparation",
+            phase = "lookup",
+            disposition = disposition.as_str(),
+            source_revision = %recipe.source_revision,
+            entry = %recipe.entry,
+            "toolset preparation lookup"
+        );
+        if disposition == PreparationLookupDisposition::New {
             let completed_original = match selected_original_present(&recipe, &source) {
                 Ok(present) => present,
                 Err(error) => {
@@ -330,15 +361,23 @@ pub(crate) mod tests {
     pub(crate) fn ready_bound_preserves_installed_lease(ready: Arc<PreparedToolset>) {
         let owner = ToolsetPreparation::default();
         let first_key = recipe("oldest");
-        let (first, launch) = owner.lookup(&first_key);
-        assert!(launch);
+        let (first, disposition) = owner.lookup(&first_key);
+        assert_eq!(disposition, PreparationLookupDisposition::New);
+        let (joined, disposition) = owner.lookup(&first_key);
+        assert_eq!(disposition, PreparationLookupDisposition::JoinedPending);
+        assert!(Arc::ptr_eq(&first, &joined));
+        drop(joined);
         let retired = Arc::downgrade(&first);
         owner.settle(first_key.clone(), &first, Ok(Arc::clone(&ready)));
+        let (hit, disposition) = owner.lookup(&first_key);
+        assert_eq!(disposition, PreparationLookupDisposition::ReadyHit);
+        assert!(Arc::ptr_eq(&first, &hit));
+        drop(hit);
         drop(first);
         for index in 0..RETAINED_TOOLSETS {
             let key = recipe(&format!("ready-{index}"));
-            let (task, launch) = owner.lookup(&key);
-            assert!(launch);
+            let (task, disposition) = owner.lookup(&key);
+            assert_eq!(disposition, PreparationLookupDisposition::New);
             owner.settle(key, &task, Ok(Arc::clone(&ready)));
         }
         assert_eq!(owner.state.lock().ready_order.len(), RETAINED_TOOLSETS);
@@ -360,16 +399,16 @@ pub(crate) mod tests {
     fn failed_preparation_retires_only_its_exact_lookup_task() {
         let owner = ToolsetPreparation::default();
         let key = recipe("failed");
-        let (failed, launched) = owner.lookup(&key);
-        assert!(launched);
+        let (failed, disposition) = owner.lookup(&key);
+        assert_eq!(disposition, PreparationLookupDisposition::New);
         owner.settle(
             key.clone(),
             &failed,
             Err(PreparationFailure::Source("transient".into())),
         );
         assert!(!owner.state.lock().tasks.contains_key(&key));
-        let (retry, launched) = owner.lookup(&key);
-        assert!(launched);
+        let (retry, disposition) = owner.lookup(&key);
+        assert_eq!(disposition, PreparationLookupDisposition::New);
         owner.settle(
             key.clone(),
             &failed,
@@ -411,15 +450,15 @@ pub(crate) mod tests {
     async fn observed_failure_has_already_retired_before_immediate_retry() {
         let owner = Arc::new(ToolsetPreparation::default());
         let key = recipe("retry");
-        let (failed, launch) = owner.lookup(&key);
-        assert!(launch);
+        let (failed, disposition) = owner.lookup(&key);
+        assert_eq!(disposition, PreparationLookupDisposition::New);
         let waiter_owner = Arc::clone(&owner);
         let waiter_key = key.clone();
         let waiter_task = Arc::clone(&failed);
         let waiter = tokio::spawn(async move {
             assert!(waiter_task.wait().await.is_err());
-            let (retry, launch) = waiter_owner.lookup(&waiter_key);
-            assert!(launch);
+            let (retry, disposition) = waiter_owner.lookup(&waiter_key);
+            assert_eq!(disposition, PreparationLookupDisposition::New);
             assert!(!Arc::ptr_eq(&retry, &waiter_task));
         });
         owner.settle(
@@ -488,7 +527,7 @@ fn compile_installer(
     let dispatcher_effects = installation.dispatcher_effect_row();
     let templates =
         resident_workbench_templates(&recipe.preamble, &dispatcher_effects, &recipe.imports);
-    let (compiled, selection) = if let Some(storage) = source.prepared_entries() {
+    let (compiled, acquisition) = if let Some(storage) = source.prepared_entries() {
         let template = templates
             .iter()
             .find(|template| {
@@ -506,7 +545,9 @@ fn compile_installer(
     } else {
         (
             compile_unprepared_installer(&recipe, &templates, &installation.expression)?,
-            None,
+            ToolsetAcquisition::UnretainedCompilation {
+                recipe: durable_recipe_key(&recipe)?,
+            },
         )
     };
     let compiled: Arc<CompiledTurn> = Arc::new(compiled);
@@ -518,7 +559,7 @@ fn compile_installer(
         entry_name: recipe.entry,
         resolved,
         source_revision: recipe.source_revision,
-        completed_selection: selection.map(|selection| (selection.recipe, selection.original)),
+        acquisition,
         _source: source,
         _nominal_artifacts: nominal_artifacts,
     }))
@@ -627,7 +668,7 @@ fn retained_installer(
     storage: &crate::SourceEntryStorage,
     wrapper: &str,
     acquisition: OriginalAcquisition,
-) -> Result<(CompiledTurn, Option<CompletedInstallerSelection>), PreparationFailure> {
+) -> Result<(CompiledTurn, ToolsetAcquisition), PreparationFailure> {
     use tidepool_toolchain::artifacts::{
         load_selected_production_entry, prepare_frozen_production_entry, FrozenEntrySources,
         ProductionEntrySources,
@@ -747,16 +788,25 @@ fn retained_installer(
     tidepool_atomic_write::sync_parent_directory(&output).map_err(|error| source_error(&error))?;
     let compiled =
         CompiledTurn::from_production_entry(&loaded).map_err(|error| source_error(&error))?;
-    Ok((
-        compiled,
-        Some(CompletedInstallerSelection {
-            recipe: key,
-            original: selected,
-        }),
-    ))
-}
-
-struct CompletedInstallerSelection {
-    recipe: String,
-    original: uuid::Uuid,
+    let acquisition = match storage {
+        crate::SourceEntryStorage::CompletedOriginal { .. } => {
+            ToolsetAcquisition::DeploymentOriginal {
+                recipe: key,
+                original: selected,
+            }
+        }
+        crate::SourceEntryStorage::FreshCompilation { .. } if completed => {
+            ToolsetAcquisition::ExistingRunOriginal {
+                recipe: key,
+                original: selected,
+            }
+        }
+        crate::SourceEntryStorage::FreshCompilation { .. } => {
+            ToolsetAcquisition::FreshRunOriginal {
+                recipe: key,
+                original: selected,
+            }
+        }
+    };
+    Ok((compiled, acquisition))
 }

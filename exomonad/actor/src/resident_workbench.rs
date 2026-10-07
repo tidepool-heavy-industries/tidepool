@@ -543,14 +543,17 @@ impl PreparedSourceToolset {
         &self.effects
     }
 
+    /// Provenance issued by the original preparation, retained across cache hits.
+    #[must_use]
+    pub fn acquisition(&self) -> &crate::ToolsetAcquisition {
+        &self.prepared.acquisition
+    }
+
     /// Exact completed output selected after full native readiness. This is
     /// retained-source metadata; loading still validates original custody.
     #[must_use]
     pub fn completed_entry_selection(&self) -> Option<(&str, uuid::Uuid)> {
-        self.prepared
-            .completed_selection
-            .as_ref()
-            .map(|(recipe, original)| (recipe.as_str(), *original))
+        self.prepared.acquisition.completed_entry_selection()
     }
 }
 
@@ -945,6 +948,13 @@ impl InstalledToolLease {
 
     pub(crate) fn tools(&self) -> Option<&ResidentWorkbenchTools> {
         self.tools.as_deref()
+    }
+
+    #[must_use]
+    pub fn toolset_acquisition(&self) -> Option<&crate::ToolsetAcquisition> {
+        self.tools
+            .as_ref()
+            .map(|tools| &tools._prepared.acquisition)
     }
 
     pub(crate) fn tools_arc(&self) -> Option<Arc<ResidentWorkbenchTools>> {
@@ -4806,7 +4816,9 @@ where
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     require_tool_installation_completion(session, &resumption_registration, &settled)?;
-                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "prepared_toolset_installed", source_revision = %prepared.source_revision, original = ?prepared.completed_selection, prepared_owner = Arc::as_ptr(&prepared) as usize, image_registry = Arc::as_ptr(prepared.entry.image_registry()) as usize, installation_scope = ?installation_scope.scope(), resource_scope = ?context.placement.resource_scope, granted_effects = ?admitted_base, "actor phase");
+                    let acquisition = serde_json::to_string(&prepared.acquisition)
+                        .expect("toolset acquisition fields serialize to JSON");
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", source_revision = %prepared.source_revision, acquisition = %acquisition, prepared_owner = Arc::as_ptr(&prepared) as usize, image_registry = Arc::as_ptr(prepared.entry.image_registry()) as usize, installation_scope = ?installation_scope.scope(), resource_scope = ?context.placement.resource_scope, requested_effects = ?granted_effects, effective_effects = ?admitted_base, "actor phase");
                     Ok(ResidentWorkbenchTools {
                         declarations,
                         dispatch: Arc::new(dispatch),
@@ -16095,6 +16107,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await;
         assert!(fresh.cleanup.observation().is_confirmed());
         let fresh = fresh.action.unwrap();
+        assert!(matches!(
+            fresh.acquisition(),
+            crate::ToolsetAcquisition::FreshRunOriginal { .. }
+        ));
         assert!(fresh
             .prepared
             .entry
@@ -16166,6 +16182,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .await
             .unwrap();
+        assert!(matches!(
+            loaded.acquisition(),
+            crate::ToolsetAcquisition::DeploymentOriginal { .. }
+        ));
         assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
         assert_eq!(
             fresh.prepared.entry.compiled().prepared,
@@ -16217,6 +16237,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .await
             .unwrap();
+        assert!(matches!(
+            retried.acquisition(),
+            crate::ToolsetAcquisition::ExistingRunOriginal { .. }
+        ));
         assert_eq!(
             retried.completed_entry_selection().unwrap(),
             (recipe, original)
