@@ -1448,6 +1448,76 @@ pub(crate) struct ExactSourceAdmission {
         BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
 }
 
+/// One physical segment's source receipt is classified only against its
+/// immutable input selection. Native item projections may grow output custody.
+pub(crate) struct ExactProgramSegmentAdmission {
+    request: ExactCompilationRequest,
+    admissions: Vec<ExactSourceAdmission>,
+}
+impl ExactProgramSegmentAdmission {
+    fn validate_request(&self, request: &ExactCompilationRequest) -> Result<(), CompileError> {
+        if self.request.request_sha256 != request.request_sha256
+            || self.request.semantic_sha256 != request.semantic_sha256
+            || self.request.producer_sha256 != request.producer_sha256
+        {
+            return Err(failure(
+                "segment source authority has another physical request",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn product_admission<'a>(
+        &'a self,
+        request: &ExactCompilationRequest,
+        path: &Path,
+        source: &str,
+        evidence: &[u8],
+    ) -> Result<ExactProductAdmission<'a>, CompileError> {
+        self.validate_request(request)?;
+        let matched = self
+            .admissions
+            .iter()
+            .filter(|admission| {
+                admission.witness.matches_source(path, source)
+                    && admission.validate_ineligible_evidence(evidence).is_ok()
+            })
+            .collect::<Vec<_>>();
+        let first = matched
+            .first()
+            .ok_or_else(|| failure("projected item lacks its physical segment source receipt"))?;
+        // Repeated projected receipt rows are equal authority, not new source
+        // compilation; retain every validated row for final conflict checks.
+        if matched.iter().any(|admission| {
+            admission.evidence_bytes != first.evidence_bytes
+                || admission.exact_imports != first.exact_imports
+                || admission.exact_source_imports != first.exact_source_imports
+                || admission.scaffold_roots != first.scaffold_roots
+                || admission.selected_originals.len() != first.selected_originals.len()
+                || admission
+                    .selected_originals
+                    .iter()
+                    .any(|(owner, original)| {
+                        first.selected_originals.get(owner).is_none_or(|expected| {
+                            original.interface() != expected.interface()
+                                || original.imports() != expected.imports()
+                        })
+                    })
+        }) {
+            return Err(failure("projected segment source receipts disagree"));
+        }
+        Ok(ExactProductAdmission {
+            request: &self.request,
+            source: first,
+        })
+    }
+    pub(crate) fn admissions(&self) -> &[ExactSourceAdmission] {
+        &self.admissions
+    }
+    pub(crate) fn into_admissions(self) -> Vec<ExactSourceAdmission> {
+        self.admissions
+    }
+}
+
 pub(crate) struct ExactProductAdmission<'a> {
     pub(crate) request: &'a ExactCompilationRequest,
     pub(crate) source: &'a ExactSourceAdmission,
@@ -2111,12 +2181,47 @@ impl ExactCompilationRequest {
         })
     }
 
+    pub(crate) fn admit_program_segment(
+        &self,
+        root: &Path,
+    ) -> Result<ExactProgramSegmentAdmission, CompileError> {
+        Ok(ExactProgramSegmentAdmission {
+            request: self.clone(),
+            admissions: self.validate_outputs(root)?,
+        })
+    }
+    pub(crate) fn admit_program_segment_support(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        segment: &ExactProgramSegmentAdmission,
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        segment.validate_request(self)?;
+        self.admit_program_support_inner(
+            context,
+            support,
+            &segment.admissions,
+            produced_types,
+            Some(&segment.request.context),
+        )
+    }
     pub(crate) fn admit_program_support(
         &mut self,
         context: Arc<ExactDeclarationContext>,
         support: &ArtifactView,
         admissions: &[ExactSourceAdmission],
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.admit_program_support_inner(context, support, admissions, produced_types, None)
+    }
+    fn admit_program_support_inner(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        admissions: &[ExactSourceAdmission],
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        segment_input: Option<&ExactDeclarationContext>,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
         let mut selected_originals = BTreeMap::new();
@@ -2151,6 +2256,10 @@ impl ExactCompilationRequest {
         let retained = context
             .artifact_view()
             .entries_for_owners(supplied.keys().cloned())?;
+        let source_input = segment_input.unwrap_or(&context);
+        let retained_source_input = source_input
+            .artifact_view()
+            .entries_for_owners(supplied.keys().cloned())?;
         let fresh = supplied
             .keys()
             .filter(|owner| {
@@ -2181,9 +2290,15 @@ impl ExactCompilationRequest {
                             "source-selected support has another original owner",
                         ));
                     }
-                } else if retained.contains_key(owner) {
+                } else if retained_source_input.contains_key(owner) {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
+                    ));
+                } else if retained.get(owner).is_some_and(|previous| {
+                    canonical_source_interface(previous) != canonical_source_interface(entry)
+                }) {
+                    return Err(failure(
+                        "projected segment source changed its admitted canonical owner",
                     ));
                 } else if canonical_source_interface(entry).is_none() {
                     return Err(failure(
@@ -2419,20 +2534,6 @@ impl ExactCompilationRequest {
             &planned.product().owner().module,
         );
         request.validate_outputs_selected(root, Some(&owner), &self.context)
-    }
-
-    pub(crate) fn validate_outputs_in_context(
-        &self,
-        root: &Path,
-        context: &ExactDeclarationContext,
-    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
-        if context.toolchain_identity_sha256() != self.producer_sha256
-            && !(context.toolchain_identity_sha256() == [0; 32]
-                && context.artifact_view().is_empty())
-        {
-            return Err(failure("same-transaction context has another producer"));
-        }
-        self.validate_outputs_selected(root, None, context)
     }
 
     fn validate_outputs_selected(
@@ -8765,6 +8866,106 @@ mod tests {
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
         Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
+    }
+
+    #[test]
+    fn program_segment_preserves_physical_source_authority_across_item_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), baseline.clone());
+        let source = "module Consumer where\n";
+        let source_path = directory.path().join("Consumer.hs");
+        let fixture = import_receipt(directory.path(), &request, "Unadmitted");
+        let mut receipt = read_receipt(&fixture);
+        receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        let output = directory.path().join("outputs");
+        for name in ["first", "second"] {
+            let root = output.join(".exact-compilations").join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let snapshot = root.join("source.hs");
+            std::fs::write(&snapshot, source).unwrap();
+            let mut projected = receipt.clone();
+            projected.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
+            write_receipt(&root.join("receipt.cbor"), &projected);
+        }
+        let segment = request.admit_program_segment(&output).unwrap();
+        assert_eq!(segment.admissions().len(), 2);
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(receipt.as_array().unwrap()[7].as_text().unwrap()).unwrap();
+        evidence.cache_safe = false;
+        evidence.selection_complete = false;
+        let evidence = serde_json::to_vec(&evidence).unwrap();
+        let support = support_view(&[support_product("Consumer")]);
+        let context = request
+            .admit_program_segment_support(baseline, &support, &segment, None)
+            .unwrap();
+        assert!(context
+            .interface_owners()
+            .iter()
+            .any(|interface| interface.owner == identity("fixture", "Consumer")));
+
+        // The subsequent item uses the evolved output view, while its source
+        // authority still comes from the same successful physical request.
+        let mut projected = request.clone();
+        projected.context = context.clone();
+        let admission = segment
+            .product_admission(&projected, &source_path, source, &evidence)
+            .unwrap();
+        assert!(admission.request.context.interface_owners().is_empty());
+        let repeated = projected
+            .admit_program_segment_support(context.clone(), &support, &segment, None)
+            .unwrap();
+        assert_eq!(repeated.semantic_sha256(), context.semantic_sha256());
+        let ordinary_refusal = projected
+            .admit_program_segment(&output)
+            .err()
+            .expect("a new source receipt cannot replace an admitted owner");
+        assert!(ordinary_refusal
+            .to_string()
+            .contains("fresh module replaced an admitted exact owner"));
+        assert!(projected
+            .admit_program_support(context.clone(), &support, segment.admissions(), None)
+            .unwrap_err()
+            .to_string()
+            .contains("program support cannot select a retained hidden owner"));
+
+        let before = projected.context.semantic_sha256();
+        let changed = support_view(&[support_product_with_interface(
+            "fixture",
+            "Consumer",
+            b"changed canonical interface".to_vec(),
+        )]);
+        assert!(projected
+            .admit_program_segment_support(context, &changed, &segment, None)
+            .unwrap_err()
+            .to_string()
+            .contains("projected segment source changed its admitted canonical owner"));
+        assert_eq!(projected.context.semantic_sha256(), before);
+        assert!(segment
+            .product_admission(
+                &projected,
+                &source_path,
+                "module Changed where\n",
+                &evidence
+            )
+            .is_err());
+        assert!(segment
+            .product_admission(&projected, &source_path, source, b"{}")
+            .is_err());
+        for changed in 0..3 {
+            let mut foreign = projected.clone();
+            match changed {
+                0 => foreign.request_sha256 = sha256(b"another request"),
+                1 => foreign.semantic_sha256 = [9; 32],
+                _ => foreign.producer_sha256 = [9; 32],
+            }
+            assert!(segment
+                .product_admission(&foreign, &source_path, source, &evidence)
+                .is_err());
+        }
+        assert_eq!(segment.into_admissions().len(), 2);
     }
 
     #[test]

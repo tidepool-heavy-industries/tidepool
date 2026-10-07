@@ -1673,8 +1673,9 @@ impl ModuleCandidateOffer {
                         )
                     })
                     .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
-                admissions
-                    .extend(program_request.validate_outputs_in_context(&segment_root, &context)?);
+                let segment_input = program_request
+                    .in_program_context(&root.join("program-inputs"), context.clone())?;
+                let source_segment = segment_input.admit_program_segment(&segment_root)?;
                 let produced_types = values.capture_produced_types(
                     initial.producer_sha256,
                     planned,
@@ -1694,21 +1695,16 @@ impl ModuleCandidateOffer {
                         &typed_segments,
                         index,
                         specification.admission_digest,
+                        &source_segment,
                         &mut validation,
                     )?;
-                    let source_admissions = effective
-                        .exact
-                        .as_ref()
-                        .expect("exact program offer")
-                        .validate_outputs(&segment_root)?;
                     context = self.admit_program_support(
                         &mut program_request,
                         context,
                         &output,
-                        &source_admissions,
+                        &source_segment,
                         Some(&item_produced_types),
                     )?;
-                    admissions.extend(source_admissions);
                     let generation = match &planned.slots[index] {
                         CheckedPlannedCellSlot::Bind { value } => *value,
                         CheckedPlannedCellSlot::Expression { capture, .. } => *capture,
@@ -1723,6 +1719,7 @@ impl ModuleCandidateOffer {
                     outputs.insert(index, output);
                     index += 1;
                 }
+                admissions.extend(source_segment.into_admissions());
             }
             segment += 1;
         }
@@ -1854,6 +1851,7 @@ impl ModuleCandidateOffer {
         typed_segments: &[crate::checked_cell::CheckedTypedSegmentPlan],
         item_index: usize,
         admission_digest: [u8; 32],
+        source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -1886,6 +1884,7 @@ impl ModuleCandidateOffer {
                 OriginalOutputPublication::Transaction,
                 Some(produced_types),
                 Some((typed_segments, item_index, admission_digest)),
+                Some(source_segment),
                 validation,
             )?
             .ok_or_else(|| {
@@ -1900,12 +1899,12 @@ impl ModuleCandidateOffer {
         request: &mut crate::declaration_context::ExactCompilationRequest,
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
         output: &ProgramNativeOutput,
-        admissions: &[crate::declaration_context::ExactSourceAdmission],
+        source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
         let generated =
             crate::declaration_context::ExactSourceAdmission::matching_generated_source_owner(
-                admissions,
+                source_segment.admissions(),
                 &output.source,
             )?;
         let support = program_support_artifacts(
@@ -1916,7 +1915,7 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             &generated,
         )?;
-        request.admit_program_support(context, &support, admissions, produced_types)
+        request.admit_program_segment_support(context, &support, source_segment, produced_types)
     }
 
     fn admit_program_value(
@@ -2029,6 +2028,7 @@ impl ModuleCandidateOffer {
             Some(&authored),
             OriginalOutputPublication::Transaction,
             produced_types,
+            None,
             None,
             validation,
         )?
@@ -2439,6 +2439,7 @@ fn seal_turn_outputs_inner(
         publication,
         None,
         None,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -2460,6 +2461,7 @@ fn seal_turn_outputs_with_validation(
         usize,
         [u8; 32],
     )>,
+    source_segment: Option<&crate::declaration_context::ExactProgramSegmentAdmission>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -2493,24 +2495,43 @@ fn seal_turn_outputs_with_validation(
             CompileError::ExtractFailed("source evidence accounting overflow".into())
         })?)
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let exact_source = offer
-        .exact
-        .as_ref()
-        .map(|request| {
-            request.admit_source_with_validation(source_path, source, &evidence_bytes, validation)
-        })
-        .transpose()?;
-    let exact = offer
-        .exact
-        .as_ref()
-        .zip(exact_source.as_ref())
-        .map(
-            |(request, source)| crate::declaration_context::ExactProductAdmission {
-                request,
-                source,
-            },
-        );
-    let evidence = match exact_source.as_ref() {
+    let exact_source_owned = match source_segment {
+        Some(_) => None,
+        None => offer
+            .exact
+            .as_ref()
+            .map(|request| {
+                request.admit_source_with_validation(
+                    source_path,
+                    source,
+                    &evidence_bytes,
+                    validation,
+                )
+            })
+            .transpose()?,
+    };
+    let exact = match source_segment {
+        Some(segment) => Some(segment.product_admission(
+            offer.exact.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("projected item lacks its physical request".into())
+            })?,
+            source_path,
+            source,
+            &evidence_bytes,
+        )?),
+        None => offer
+            .exact
+            .as_ref()
+            .zip(exact_source_owned.as_ref())
+            .map(
+                |(request, source)| crate::declaration_context::ExactProductAdmission {
+                    request,
+                    source,
+                },
+            ),
+    };
+    let exact_source = exact.as_ref().map(|admission| admission.source);
+    let evidence = match exact_source {
         Some(source) => Some(source.evidence.clone()),
         None => cache::CompletedSourceEvidence::from_worker(&evidence_bytes, source_path, source),
     };
@@ -2676,9 +2697,7 @@ fn seal_turn_outputs_with_validation(
             &certified.recovery_products,
             &certified.module_interfaces,
             &certified.value_interfaces,
-            exact
-                .as_ref()
-                .map(|admission| admission.request.context.as_ref()),
+            offer.exact.as_ref().map(|request| request.context.as_ref()),
             demand,
             validation,
         )?;
