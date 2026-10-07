@@ -7,8 +7,8 @@ import Tidepool.Agent.Reply.Internal (Replies, RequestScope, currentRequest)
 import qualified Tidepool.Effects.Core as Core
 
 {-# OPAQUE request #-}
-request :: Core.Forks (Either Text (Int, Text, [Text]))
-request = Core.ForksBeginWith False "group" ["branch"]
+request :: Core.AgentLaunch (Either Core.CheckpointRefusal Text)
+request = Core.AgentLaunchCheckpointWith "metadata"
 
 {-# OPAQUE siteRequest #-}
 siteRequest :: Eff '[Replies] (RequestScope Text Int)

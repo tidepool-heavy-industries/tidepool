@@ -31,7 +31,7 @@ tests = testGroup "source-boot"
   , testCase "candidate compact inventory" $ candidateCompactInventory
   , testCase "candidate GHC load" $ candidateGhcLoad
   , testCase "SOURCE boot reuse" $ withTiming (withScratch sourceBootReuseAt)
-  , testCase "candidate sited siblings" $ candidateSitedSiblings
+  , testCase "candidate request site siblings" $ candidateRequestSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
   , testCase "completed program source imports" $ completedProgramSourceImports
   , testCase "completed program import pairing" $ completedProgramSourceImportPairing

@@ -6,7 +6,7 @@ import qualified Tidepool.Effects.Core as Core
 import OriginalTextRequest (request, siteRequest)
 import Tidepool.Agent.Reply.Internal (Replies)
 
-result :: Eff '[Core.Forks] ()
+result :: Eff '[Core.AgentLaunch] ()
 result = send request >> pure ()
 
 sitedResult :: Eff '[Replies] ()
