@@ -4,6 +4,7 @@ module Expr where
 import Control.Monad.Freer (Eff)
 import qualified "tidepool-resume" Tidepool.Internal.Resume as TidepoolResume
 import Prelude
+-- tidepool-preamble-imports-v1
 __result :: Int
 __result = case TidepoolResume.settle (pure answer :: Eff '[] Int) of
   TidepoolResume.Done value -> value

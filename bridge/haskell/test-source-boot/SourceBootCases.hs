@@ -1286,9 +1286,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
       protected = do
         source <- T.unpack . TE.decodeUtf8 <$> BS.readFile target
-        pure (unlines (take 5 (lines source)
-          ++ ["import GeneratedScaffoldHomeSupport hiding (irrelevant)", init preambleImportMarker]
-          ++ drop 5 (lines source)))
+        either fail pure $ replaceTemplateMarker preambleImportMarker
+          ("import GeneratedScaffoldHomeSupport hiding (irrelevant)\n" ++ preambleImportMarker) source
   protectedSource <- protected
   writeFile target protectedSource
   recipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource protectedSource target "Expr"
