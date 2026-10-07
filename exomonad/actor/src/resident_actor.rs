@@ -30,6 +30,8 @@ mod green_runtime_tests;
 mod green_tool;
 mod inspection_wait;
 mod invocation_effects;
+#[cfg(test)]
+mod jev_form_runtime_tests;
 pub(crate) mod invocation_work;
 mod owned_workbench;
 #[cfg(test)]
