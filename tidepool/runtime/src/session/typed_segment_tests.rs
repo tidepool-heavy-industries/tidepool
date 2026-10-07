@@ -787,12 +787,15 @@ fn report_history_input(
 ) {
     // Emit before either oracle or native execution so shrinking failures retain
     // their complete input even when the runner's watchdog interrupts the case.
-    eprintln!("typed-segment-history-input {}", serde_json::json!({
-        "seed": seed, "prefix": prefix, "flag": flag, "no_mr": no_mr,
-        "operations": operations, "source": history.cell,
-        "oracle_source": history.oracle, "expected": history.expected,
-        "captured": history.captured, "declaration_line": history.declaration_line,
-    }));
+    eprintln!(
+        "typed-segment-history-input {}",
+        serde_json::json!({
+            "seed": seed, "prefix": prefix, "flag": flag, "no_mr": no_mr,
+            "operations": operations, "source": history.cell,
+            "oracle_source": history.oracle, "expected": history.expected,
+            "captured": history.captured, "declaration_line": history.declaration_line,
+        })
+    );
 }
 
 fn exercise_capture_history(history: &RenderedHistory) {
