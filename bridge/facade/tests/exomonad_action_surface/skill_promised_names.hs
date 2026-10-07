@@ -1,7 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- Exact-candidate project review guidance renders Git identities through the
--- public facade; authored cells can call the same exported formatter.
 module SkillPromisedNames where
 
 import Data.Text (Text)
