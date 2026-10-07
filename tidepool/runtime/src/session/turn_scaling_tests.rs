@@ -992,7 +992,8 @@ pub(super) fn assert_compiler_work(
             let native = item.native().unwrap();
             let target = native.target_owned();
             let (table, _) =
-                tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+                tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
+                    .unwrap();
             let turn: ciborium::value::Value =
                 ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
             let fields = turn.as_array().unwrap()[1].as_array().unwrap();
