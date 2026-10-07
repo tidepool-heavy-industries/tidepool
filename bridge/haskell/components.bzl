@@ -3452,6 +3452,7 @@ def declare_haskell_components():
         "test-source-boot/fixtures/GeneratedScaffoldCapture.hs": "test-source-boot/fixtures/GeneratedScaffoldCapture.hs",
         "test-source-boot/fixtures/GeneratedScaffoldExpr.hs": "test-source-boot/fixtures/GeneratedScaffoldExpr.hs",
         "test-source-boot/fixtures/GeneratedScaffoldHelper.hs": "test-source-boot/fixtures/GeneratedScaffoldHelper.hs",
+        "test-source-boot/fixtures/GeneratedScaffoldHomeSupport.hs": "test-source-boot/fixtures/GeneratedScaffoldHomeSupport.hs",
         "test-source-boot/fixtures/GeneratedScaffoldMetadata.hs": "test-source-boot/fixtures/GeneratedScaffoldMetadata.hs",
         "test-source-boot/fixtures/GeneratedScaffoldOrphanCapture.hs": "test-source-boot/fixtures/GeneratedScaffoldOrphanCapture.hs",
         "test-source-boot/fixtures/GeneratedScaffoldOrphanExpr.hs": "test-source-boot/fixtures/GeneratedScaffoldOrphanExpr.hs",
