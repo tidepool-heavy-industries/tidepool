@@ -7,12 +7,16 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.ByteString as BS
 import GHC (getSessionDynFlags, runGhc)
 import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.Type (liftedTypeKind, mkInfForAllTy, mkInfForAllTys, mkTyVarTy, mkVisFunTyMany)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Types.Fixity (Fixity(..), FixityDirection(..))
 import GHC.Types.Id (Id, idName, idType)
-import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name (mkInternalName, nameModule_maybe, nameOccName)
+import GHC.Types.Name.Occurrence (mkTyVarOcc, mkVarOcc, occNameString)
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
+import GHC.Types.SrcLoc (noSrcSpan)
+import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
+import GHC.Types.Var (mkTyVar, varName)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 import GHC.Unit.Module (moduleName)
@@ -31,6 +35,7 @@ import Tidepool.Binders
   , prepareTypedSegmentSource, preparedTypedSegmentPlan
   , preparedTypedSegmentSource, preparedTypedSegmentOperations )
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.CheckedCell (captureCheckedSignature, resolveCheckedSignature)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), withResidentPipelineSelectedRequests
   , preparedSegmentCaptures )
@@ -109,6 +114,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
           readIORef observed >>= maybe (fail "typed preparation callback did not execute") pure
 
     (initial, admitted, typed, prepared) <- acquire (root </> "positive-stage") (const (pure ()))
+    verifySigmaTransport initial (root </> "sigma-transport")
     forM_ owners (assertNoStagingFinder initial (root </> "positive-stage"))
     forM_ owners (assertNoStagingFinder (typedSegmentSessionEnvironment prepared) (root </> "positive-stage"))
 
@@ -236,6 +242,40 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
         _ -> fail "published retry lost its unique original capture"
       unless (eqType (idType original) (idType global))
         (fail "published retry changed its original capture type")
+
+-- Distinct native binders can have the same OccName before GHC tidies an
+-- interface. Exercise both one telescope and a nested scope through the real
+-- binary writer and decoder; presentation text cannot distinguish this fault.
+verifySigmaTransport :: HscEnv -> FilePath -> IO ()
+verifySigmaTransport initial root = do
+  supply <- mkSplitUniqSupply 't'
+  let (firstUnique, remaining) = takeUniqFromSupply supply
+      (secondUnique, _) = takeUniqFromSupply remaining
+      variable unique = mkTyVar (mkInternalName unique (mkTyVarOcc "a") noSrcSpan) liftedTypeKind
+      first = variable firstUnique
+      second = variable secondUnique
+      firstType = mkTyVarTy first
+      secondType = mkTyVarTy second
+      constantType = mkInfForAllTys [first, second]
+        (mkVisFunTyMany firstType (mkVisFunTyMany secondType firstType))
+      nestedType = mkInfForAllTy first (mkVisFunTyMany firstType
+        (mkInfForAllTy second (mkVisFunTyMany secondType firstType)))
+  unless (first /= second && nameOccName (varName first) == nameOccName (varName second))
+    (fail "sigma transport prerequisite did not retain distinct colliding binders")
+  forM_ (zip [681, 682] [constantType, nestedType]) $ \(generation, original) -> do
+    let owner = SessionModule ValMod (Generation generation)
+        binding = mkVarOcc "retainedSigma"
+    iface <- mkThinSessionIface initial owner [(binding, original)]
+    writeSessionIface initial root owner iface
+    (_, decoded, _) <- injectSessionIfaceWithBindings root owner initial
+    case decoded of
+      [global] -> unless (eqType original (idType global))
+        (fail "thin session interface collapsed scoped forall binders")
+      _ -> fail "sigma session interface lost its unique actual binder"
+    signature <- captureCheckedSignature initial "retained-sigma" original
+    (resolved, _) <- resolveCheckedSignature initial signature
+    unless (eqType original resolved)
+      (fail "checked signature collapsed scoped forall binders")
 
 verifyBatch :: [SessionModule] -> TypedSegment -> PreparedTypedSegmentBindings -> IO ()
 verifyBatch owners typed prepared = do
