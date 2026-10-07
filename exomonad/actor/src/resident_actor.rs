@@ -4990,7 +4990,7 @@ where
         kernel: &KernelContext,
         completed: child_launch::CompletedChildLaunch,
     ) -> child_launch::ChildLaunchResume {
-        child_launch::apply_launch(&self.environment, kernel, &self.descriptor, completed)
+        child_launch::apply_launch(kernel, &self.descriptor, completed)
     }
 
     async fn resolve_outbound(

@@ -305,7 +305,6 @@ where
                 "replacement must preserve the actor's worktree custody",
             ));
         }
-        let launch_worktrees = self.launch_worktrees.clone();
         // See `resident_actor.rs::try_start_child`'s matching resolution: a
         // replacement that names the predecessor's own session needs
         // nothing further. One that names a freshly minted session instead

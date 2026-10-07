@@ -970,7 +970,7 @@ where
                     admitted_source,
                     reservation_owner,
                     invocation_work,
-                    publication: ForkPublication::Workbench {
+                    publication: CheckpointPublication::Workbench {
                         boundary: request.checkpoint_boundary().cloned(),
                         capture,
                     },
@@ -2600,10 +2600,7 @@ where
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
-        OwnedWorkbenchWait::Launch(_)
-        | OwnedWorkbenchWait::Display { .. }
-        | OwnedWorkbenchWait::CapturedCommit(_)
-        | OwnedWorkbenchWait::DeferredCommit(_) => {
+        OwnedWorkbenchWait::Launch(_) | OwnedWorkbenchWait::Display { .. } => {
             unreachable!("child launch requires fenced actor application")
         }
         OwnedWorkbenchWait::Prepared(operation) => operation.await,

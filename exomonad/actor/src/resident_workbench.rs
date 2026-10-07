@@ -8229,7 +8229,7 @@ where
                     }
                     ResidentRequest::AgentLaunch(
                         crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
-                            _, spawn_context, workspace, effects, label, model, effort,
+                            spawn_context, _, workspace, effects, label, model, effort,
                             instructions, lifetime, limits,
                         ),
                     ) => crate::ResidentActorStart::capture_spawn(

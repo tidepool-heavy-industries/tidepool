@@ -515,16 +515,11 @@ pub(super) fn matches_parent(
         || current.source_layer() != original.source_layer())
 }
 
-pub(super) fn apply_launch<H, O>(
-    environment: &ResidentEnvironment<H, O>,
+pub(super) fn apply_launch(
     kernel: &KernelContext,
     descriptor: &ActorDescriptor,
     completed: CompletedChildLaunch,
-) -> ChildLaunchResume
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
+) -> ChildLaunchResume {
     let CompletedChildLaunch {
         continuation,
         result,
