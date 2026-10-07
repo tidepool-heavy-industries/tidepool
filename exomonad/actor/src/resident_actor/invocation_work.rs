@@ -184,6 +184,10 @@ impl InvocationWork {
         })?
     }
 
+    pub(super) fn is_owned_by(&self, actor: ActorRef) -> bool {
+        self.owner == actor
+    }
+
     pub(super) fn scope_token(&self) -> Option<i64> {
         self.scope_id
     }

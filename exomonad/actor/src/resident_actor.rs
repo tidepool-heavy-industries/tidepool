@@ -547,7 +547,6 @@ struct ResidentActorRecord {
     public_owner: ActorPublicOwnerPlane,
     recovery_claimed: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
-    actor_scopes: Arc<Mutex<Option<Arc<InvocationWork>>>>,
     forest_control: bool,
     interactive_policy_installed: bool,
     observation_roots: std::collections::HashSet<ActorRef>,
@@ -2782,7 +2781,6 @@ pub struct ResidentKernelBehavior<H, O> {
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
-    actor_scopes: Arc<Mutex<Option<Arc<InvocationWork>>>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     fork_publication: ForkPublication,
     active_route_reservation_owner: Option<RequestReservationOwner>,
@@ -3717,7 +3715,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             workbench_executions: Arc::default(),
-            actor_scopes: Arc::default(),
             active_route: None,
             fork_publication: ForkPublication::Resident,
             active_route_reservation_owner: None,
@@ -12593,7 +12590,6 @@ where
                     public_owner,
                     recovery_claimed: false,
                     workbench_executions: self.workbench_executions.clone(),
-                    actor_scopes: self.actor_scopes.clone(),
                     forest_control: self.forest_control,
                     interactive_policy_installed: false,
                     observation_roots: Default::default(),
@@ -14123,10 +14119,7 @@ where
     > {
         Box::pin(async move {
             use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
-            let mut invocations = self.workbench_executions.lock().invocation_work();
-            if let Some(scopes) = self.actor_scopes.lock().clone() {
-                invocations.push(scopes);
-            }
+            let invocations = self.workbench_executions.lock().invocation_work();
             for invocation in &invocations {
                 invocation.close();
             }

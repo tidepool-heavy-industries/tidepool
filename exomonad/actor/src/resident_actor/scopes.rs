@@ -43,11 +43,7 @@ where
     O: OutputSink + Sync + 'static,
 {
     pub(super) fn retained_scope_roots(&self) -> Vec<Arc<InvocationWork>> {
-        let mut roots = self.workbench_executions.lock().invocation_work();
-        if let Some(root) = self.actor_scopes.lock().clone() {
-            roots.push(root);
-        }
-        roots
+        self.workbench_executions.lock().invocation_work()
     }
 
     pub(super) fn resolve_resource_owner(
@@ -103,6 +99,7 @@ where
                 let scope = self
                     .retained_scope_roots()
                     .into_iter()
+                    .filter(|root| root.is_owned_by(context.actor))
                     .find_map(|root| retained(root, token))
                     .ok_or(crate::ReplyError::Unauthorized)?;
                 scope
@@ -179,12 +176,9 @@ where
         let parent = match effect_owner {
             CurrentEffectOwner::Scoped { scope, .. } => scope.clone(),
             _ => effect_owner.invocation_work().unwrap_or_else(|| {
-                let mut retained = self.actor_scopes.lock();
-                retained
-                    .get_or_insert_with(|| {
-                        InvocationWork::new(context.actor, RequestReservationOwner::Scope(0))
-                    })
-                    .clone()
+                self.workbench_executions
+                    .lock()
+                    .actor_scope_root(context.actor)
             }),
         };
         let work = parent.new_scope()?;

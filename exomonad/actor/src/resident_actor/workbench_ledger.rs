@@ -76,6 +76,9 @@ impl WorkbenchReplayKey {
 #[derive(Default)]
 pub(super) struct WorkbenchExecutions(
     std::collections::HashMap<WorkbenchReplayKey, WorkbenchExecutionRecord>,
+    // Actor callbacks have no notebook invocation, but use the same retained
+    // cleanup owner and journal retirement path as admitted notebook calls.
+    Vec<Arc<InvocationWork>>,
 );
 
 #[derive(Debug, PartialEq, Eq)]
@@ -175,7 +178,17 @@ impl WorkbenchExecutions {
         self.0
             .values()
             .filter_map(|record| record.invocation_work.clone())
+            .chain(self.1.iter().cloned())
             .collect()
+    }
+
+    pub(super) fn actor_scope_root(&mut self, actor: ActorRef) -> Arc<InvocationWork> {
+        if let Some(root) = self.1.iter().find(|root| root.is_owned_by(actor)) {
+            return root.clone();
+        }
+        let root = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        self.1.push(root.clone());
+        root
     }
 
     pub(super) fn lookup(
