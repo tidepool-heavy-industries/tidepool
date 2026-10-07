@@ -2,7 +2,7 @@
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
 };
 use super::*;
 use std::collections::{HashSet, VecDeque};
@@ -116,6 +116,7 @@ async fn production_prepared_toolset_twenty_children_execute_original_native_pro
             project.haskell.spec = Some("PreparedRuntimeSpec.agentSpec".into());
             project.preparation.roles = vec![exomonad_actor::ActorRole::Research];
         });
+        commit_workspace(&config.workspace);
     })
     .await
     .expect("actual production preparation and selected deployment start the host");
