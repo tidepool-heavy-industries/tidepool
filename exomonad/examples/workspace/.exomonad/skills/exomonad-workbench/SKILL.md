@@ -71,8 +71,9 @@ display ("annotated, and never forced" :: Text)
 ```
 
 Agent labels are optional ordinary `Text` used for description. They do not
-select an actor, workspace, permission, or group. Agent input and reply types
-come from the actual installed `AgentSpec`; use raw typed values for requests.
+select an actor, workspace, permission, or group. Typed request sites determine
+the input and reply types; the installed `AgentSpec` provides tools and effects.
+Use raw typed values for requests.
 
 ## A cell splits into units
 
