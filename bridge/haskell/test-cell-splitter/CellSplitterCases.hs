@@ -20,9 +20,12 @@ import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
 import GHC.Builtin.Types (intTy, intDataCon)
 import GHC.Core qualified as Core
-import GHC.Core.DataCon (dataConWorkId)
+import GHC.Core.DataCon (dataConWorkId, dataConRepArgTys, dataConTheta)
 import GHC.Core.Coercion (mkPrimEqPred)
-import GHC.Core.Type (mkInvisFunTys, isPredTy)
+import GHC.Core.Type (mkInvisFunTys, isPredTy, splitTyConApp_maybe)
+import GHC.Core.Predicate (isCoVarType)
+import GHC.Core.TyCon (tyConDataCons)
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Unit.Module.ModGuts (CgGuts, cg_binds)
 import GHC.Stg.Syntax (CgStgTopBinding)
@@ -240,6 +243,55 @@ sigmaValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \r
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-sigma-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- Constructor dictionaries are physical worker fields, even though they
+-- are absent from the source-level argument list. Only stored closures need
+-- opaque retention; boxed equality data and erased coercions remain distinct.
+constructorEvidenceClassification :: IO ()
+constructorEvidenceClassification = bracket temporary removeDirectoryRecursive $ \root -> do
+  let path = root </> "ConstructorEvidenceProducer.hs"
+  copyFile "test-cell-splitter/fixtures/sigma-retention/ConstructorEvidenceProducer.hs" path
+  prepared <- runPipelineSelected PreparedStg path [root]
+  let result = pprPipelineResult prepared
+      environment = prTargetTcGblEnv result
+      bindingType name = maybe (fail ("missing constructor evidence fixture binding: " ++ name)) pure
+        (capturedBindingType name environment)
+      constructorFields ty = case splitTyConApp_maybe ty of
+        Just (constructor, _) -> pure (concatMap dataConRepArgTys (tyConDataCons constructor))
+        _ -> fail "constructor evidence fixture has no nominal type"
+  forM_ [("some", True), ("number", True), ("equality", False)
+        , ("primitive", False), ("plain", False), ("function", True)
+        , ("numScalar", True), ("forallOnly", False), ("boxedScalar", True)] $ \(name, expected) -> do
+    ty <- bindingType name
+    assertEqual ("physical closure classification: " ++ name) expected (isClosureType ty)
+  forM_ ["some", "number"] $ \name -> do
+    fields <- bindingType name >>= constructorFields
+    unless (any (\(Scaled _ field) -> isPredTy field && not (isCoVarType field)
+                && isClosureType field) fields)
+      (fail ("constructor has no real stored dictionary closure: " ++ name))
+  equalityFields <- bindingType "equality" >>= constructorFields
+  unless (any (\(Scaled _ field) -> isPredTy field && not (isCoVarType field)) equalityFields)
+    (fail "boxed equality control has no stored dictionary")
+  primitive <- bindingType "primitive"
+  case splitTyConApp_maybe primitive of
+    Just (constructor, _) -> unless
+      (any (any isCoVarType . dataConTheta) (tyConDataCons constructor))
+      (fail "GADT control has no actual primitive equality evidence")
+    _ -> fail "primitive equality control has no nominal type"
+  assertEqual "primitive equality sigma stays erased" False
+    (isClosureType (mkInvisFunTys [mkPrimEqPred intTy intTy] intTy))
+  binders <- mkBoundBinders ["capturedSome"] 1 root result
+  case binders of
+    [binder] -> assertEqual "constructor dictionary closure retained opaque" RetainOpaque (bbTier binder)
+    _ -> fail "constructor producer did not issue exactly one actual capture"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-constructor-evidence"
       hClose handle
       removeFile path
       createDirectory path
