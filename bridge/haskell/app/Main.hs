@@ -103,15 +103,15 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
-  , originalInterfaceBytes, generatedActivationPreviewRecipe
+  , generatedActivationPreviewRecipe
   , RenderedProtectedTemplateImports
   , captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports
   , generatedTypedSegmentRecipeWithProtectedImports)
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
-  , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..), WorkerExecutionSource(..)
-  , executionIdentityKey, executionSourceProspectiveReferences )
+  , ExecutionSourceOwner(..), ExecutionSourceRef(..), WorkerExecutionSource(..)
+  , executionSourceProspectiveReferences )
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
   , HostBindingInterfaceInput(..), encodeHostBindingInterface, encodeBindingInterfacePurpose
@@ -160,12 +160,12 @@ import Tidepool.FatIface
 import Tidepool.SessionArtifacts
   ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
   , emitHostBindingInterface
-  , PreparedTypedSegmentBindings, prepareTypedSegmentSessionBindings
+  , prepareTypedSegmentSessionBindings
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals, typedSegmentSessionInterfaces
   , typedSegmentSessionBinders, typedSegmentSessionBindingRepresentations, withTypedSegmentSessionPublication )
 import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder)
-import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase, emitCount)
+import Tidepool.Timing (readTimingEnabled, timePhase, emitCount)
 import Tidepool.TurnSource
   ( extractModuleName, spliceTemplate, renderImportBinder
   , generatedScaffoldModuleName, renameScaffoldModuleHeader
@@ -1441,12 +1441,12 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                     purpose = GeneratedScaffoldCompile recipe
                       (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
                         (TypedSegmentCompile typedPlan (preparedTypedSegmentOperations authored) (CheckedItemCompile [] (programOriginal state) prefix)))
-                product <- scoped (WithTypedSegmentPreparation prepare
+                compiledSegment <- scoped (WithTypedSegmentPreparation prepare
                   (PreparedSegmentProducts typedPlan (requestModuleCandidates localArgs)))
                   (Map.keysSet (requestRetainedGenerations localArgs))
                   (withSourceImportIntents (cellPlanPrologue plan) purpose)
                   (Just (scopeFromWorkerRequest localArgs)) sourcePath (requestIncludes args) (requestBuildProductsDir args)
-                pure (authored,product)
+                pure (authored,compiledSegment)
           (finalized,(authored,compiled)) <- timePhase timing "cell_program_segment_frontend"
             (checkCellInstances compile withPrefix)
           (stagingRoot,batch) <- readIORef preparedBatch
@@ -1550,8 +1550,8 @@ encodeTypedSegmentPlan plan =
 
 typedEntryOriginalOrdinal :: CertifiedOriginalProducts -> SymbolIdentity -> IO Word32
 typedEntryOriginalOrdinal certified entry = case
-  [Execution.projectedOriginalOrdinal group | product <- certifiedOriginalProducts certified
-    , let (unit,owner,_,groups) = moduleProductInput product
+  [Execution.projectedOriginalOrdinal group | original <- certifiedOriginalProducts certified
+    , let (unit,owner,_,groups) = moduleProductInput original
     , unit == symbolUnit entry, owner == symbolModule entry
     , group <- groups, entry `elem` Execution.projectedBinders group] of
     [ordinal] -> pure ordinal
