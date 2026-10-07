@@ -160,6 +160,13 @@ impl EmbeddedService {
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
+        // Only this exclusive host startup can prove native continuations
+        // from the previous process no longer exist. Ordinary Store reads
+        // must preserve live mounted forms.
+        runtime
+            .store()
+            .interrupt_actor_forms_for_restart()
+            .map_err(|error| error.to_string())?;
         runtime
             .store()
             .recover_embedded_command_claims(&super::runtime_namespace(run_root))

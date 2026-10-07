@@ -208,3 +208,134 @@ impl FormHost for StoreFormHost {
             .map_err(cause)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn production_form_bridge_retains_drafts_and_commits_before_return() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(root.path().join("store.sqlite")).unwrap());
+        let host = StoreFormHost {
+            store: store.clone(),
+            run: "run".into(),
+            control: Arc::new(OnceLock::new()),
+        };
+        let actor = ActorRef::first(exomonad_actor::ActorId(1));
+        let publication = FormPublication {
+            actor,
+            operation: None,
+        };
+        let form =
+            json!({"version":1,"root":{"kind":"text","id":"f0","label":"Name","initial":null}});
+        host.open(&publication, "first", &form).unwrap();
+        host.open(&publication, "sibling", &form).unwrap();
+        let origin = host.origin(actor);
+        let draft = json!({"f0":""});
+        let first = store
+            .submit_actor_form(&origin, "first", "submission1", &draft)
+            .unwrap();
+        let duplicate = store
+            .submit_actor_form(&origin, "first", "submission1", &draft)
+            .unwrap();
+        assert_eq!(first.attempt_id, duplicate.attempt_id);
+        let Some(FormAttempt::FormSubmitted(FormAttemptId::FormAttemptToken(attempt), observed)) =
+            host.attempt(actor, "first").unwrap()
+        else {
+            panic!("submission must be available")
+        };
+        assert_eq!(observed, draft);
+        assert_eq!(
+            host.reject(
+                actor,
+                "first",
+                &attempt,
+                &json!([{"field":"f0","message":"Name is required"}])
+            )
+            .unwrap(),
+            FormTransition::FormApplied
+        );
+        let rejected = store.actor_form(&origin, "first").unwrap();
+        assert_eq!(rejected.sequence, first.sequence);
+        assert!(rejected.draft.is_some());
+        assert_eq!(rejected.errors[0].message, "Name is required");
+        assert!(host.attempt(actor, "first").unwrap().is_none());
+        assert!(host.attempt(actor, "sibling").unwrap().is_none());
+        let corrected = store
+            .submit_actor_form(&origin, "first", "submission2", &json!({"f0":"Ada"}))
+            .unwrap();
+        let corrected_attempt = corrected.attempt_id.unwrap();
+        let answer = json!({"kind":"text","text":"Ada"});
+        assert_eq!(
+            host.commit(actor, "first", &attempt, &answer).unwrap(),
+            FormTransition::FormStale
+        );
+        assert_eq!(
+            host.commit(actor, "first", &corrected_attempt, &answer)
+                .unwrap(),
+            FormTransition::FormApplied
+        );
+        let committed = store.actor_form(&origin, "first").unwrap();
+        assert_eq!(committed.state, ActorFormState::Answered);
+        assert_eq!(
+            serde_json::to_value(committed.answer.unwrap()).unwrap(),
+            answer
+        );
+        assert_eq!(
+            host.commit(actor, "first", &corrected_attempt, &answer)
+                .unwrap(),
+            FormTransition::FormApplied
+        );
+        host.close(actor, "first").unwrap();
+        assert_eq!(
+            store.actor_form(&origin, "first").unwrap().state,
+            ActorFormState::Answered
+        );
+        assert!(host.attempt(actor, "sibling").unwrap().is_none());
+    }
+
+    #[test]
+    fn production_form_bridge_fences_answer_after_owner_closure() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(root.path().join("store.sqlite")).unwrap());
+        let host = StoreFormHost {
+            store: store.clone(),
+            run: "run".into(),
+            control: Arc::new(OnceLock::new()),
+        };
+        let actor = ActorRef::first(exomonad_actor::ActorId(1));
+        host.open(
+            &FormPublication {
+                actor,
+                operation: None,
+            },
+            "form",
+            &json!({"version":1,"root":{"kind":"empty"}}),
+        )
+        .unwrap();
+        let submitted = store
+            .submit_actor_form(&host.origin(actor), "form", "submission", &json!({}))
+            .unwrap();
+        host.close(actor, "form").unwrap();
+        assert_eq!(
+            host.commit(
+                actor,
+                "form",
+                &submitted.attempt_id.unwrap(),
+                &json!({"kind":"text","text":"late"})
+            )
+            .unwrap(),
+            FormTransition::FormStale
+        );
+        assert!(matches!(
+            host.attempt(actor, "form"),
+            Err(FormCause::FormClosed)
+        ));
+        assert_eq!(
+            store.actor_form(&host.origin(actor), "form").unwrap().state,
+            ActorFormState::Cancelled
+        );
+    }
+}
