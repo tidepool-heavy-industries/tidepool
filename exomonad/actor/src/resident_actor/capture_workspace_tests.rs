@@ -6,6 +6,7 @@ use crate::fork_workspace::{
     WorkspaceAdmissionFuture, WorkspaceCustody, WorkspaceSelection,
 };
 use exomonad_tool::{ToolArguments, ToolInvocation};
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use tidepool_bridge_effects::{
     WtBranchName, WtGitOid, WtWorktreeHandle, WtWorktreeId, WtWorktreeReceipt,
 };
@@ -277,11 +278,19 @@ impl CaptureFixture {
     }
 
     async fn child(&mut self, label: &str) -> Box<LocalResidentInstallation> {
+        self.child_matching(&[label]).await
+    }
+
+    async fn child_matching(&mut self, labels: &[&str]) -> Box<LocalResidentInstallation> {
         tokio::time::timeout(std::time::Duration::from_secs(240), async {
             loop {
                 match self.deployments.recv().await.expect("deployment observer") {
                     LocalResidentDeployment::PolicyInstalled(child) => {
-                        assert_eq!(child.label, label, "unexpected child policy");
+                        assert!(
+                            labels.contains(&child.label.as_str()),
+                            "unexpected child policy: {}",
+                            child.label
+                        );
                         child
                             .spawn_admission
                             .as_ref()
@@ -298,7 +307,7 @@ impl CaptureFixture {
                                 .actors
                                 .lock()
                                 .get(&actor)
-                                .is_some_and(|record| record.descriptor.label() == label),
+                                .is_some_and(|record| labels.contains(&record.descriptor.label())),
                             "child retired before installation: {terminal:?}"
                         );
                     }
@@ -398,7 +407,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     let launcher = fixture.parent("shared-launcher").await;
     // This binding belongs to the launcher and must not replace the issuer snapshot.
     assert_committed(&run_cell(launcher.clone(), "let capturedValue = 900 :: Int".into()).await);
-    let mut calls = Vec::new();
+    let mut calls = FuturesUnordered::new();
     for label in ["first", "second"] {
         calls.push(tokio::spawn(run_cell_with_context(
             launcher.clone(),
@@ -431,29 +440,36 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     assert_eq!(issuer.terminal().wait().await.kind, ActorExitKind::Failed);
     fixture.workspaces.release.add_permits(2);
     let mut children = Vec::new();
-    // Both starts run independently; readiness can arrive in either order.
-    while children.len() < 2 {
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(240),
-            fixture.deployments.recv(),
-        )
-        .await
-        .expect("admitted child readiness")
-        .expect("deployment observer");
-        if let LocalResidentDeployment::PolicyInstalled(child) = event {
-            assert!(["first", "second"].contains(&child.label.as_str()));
-            child
-                .spawn_admission
-                .as_ref()
-                .unwrap()
-                .acknowledge(child.actor.identity())
-                .unwrap();
-            children.push(child);
+    let mut completed_calls = 0;
+    // Readiness can arrive in either order. A failed launch caller or matching
+    // child retirement must report its cause instead of consuming the wait bound.
+    tokio::time::timeout(std::time::Duration::from_secs(240), async {
+        while children.len() < 2 {
+            tokio::select! {
+                biased;
+                child = fixture.child_matching(&["first", "second"]) => {
+                    children.push(child);
+                }
+                outcome = calls.next(), if !calls.is_empty() => {
+                    let reply = outcome
+                        .expect("pending launch caller")
+                        .expect("launch caller failed before child readiness");
+                    assert_committed(&reply);
+                    completed_calls += 1;
+                }
+            }
         }
+    })
+    .await
+    .expect("both independently admitted children become ready");
+    while let Some(outcome) = calls.next().await {
+        assert_committed(&outcome.expect("launch caller"));
+        completed_calls += 1;
     }
-    for call in calls {
-        assert_committed(&call.await.expect("launch caller"));
-    }
+    assert_eq!(
+        completed_calls, 2,
+        "both launch callers settle successfully"
+    );
     assert_ne!(children[0].actor.identity(), children[1].actor.identity());
     for child in &children {
         assert_captured_reader(child).await;
