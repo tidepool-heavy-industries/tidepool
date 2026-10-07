@@ -860,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_owned_launch_completion_is_reclaimed_by_retained_journal() {
-        let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+        let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
         let (runner, machines, placement, captured, _root) = shared_fixture();
         fixture.environment.runner = runner;
         let actor = fixture.actor.identity();
@@ -913,7 +913,7 @@ mod tests {
 
     #[tokio::test]
     async fn construction_journal_leaves_transferred_actor_placement_live() {
-        let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+        let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
         let (runner, machines, placement, captured, _root) = shared_fixture();
         fixture.environment.runner = runner;
         let actor = fixture.actor.identity();
@@ -941,7 +941,7 @@ mod tests {
 
     #[tokio::test]
     async fn abandoned_launch_journal_retains_failed_cleanup_until_machine_returns() {
-        let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+        let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
         let actor = fixture.actor.identity();
         let id = SessionId(979);
         let root = tempfile::tempdir().unwrap();
@@ -987,7 +987,7 @@ mod tests {
     #[tokio::test]
     async fn late_launch_retention_fences_concurrent_root_and_nested_cleanup_proofs() {
         for nested in [false, true] {
-            let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+            let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
             let (runner, machines, placement, captured, _root) = shared_fixture();
             fixture.environment.runner = runner;
             let actor = fixture.actor.identity();
