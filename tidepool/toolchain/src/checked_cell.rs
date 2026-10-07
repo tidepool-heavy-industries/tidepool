@@ -2434,7 +2434,158 @@ pub struct CheckedTypedEntry {
     artifact: crate::artifact_inventory::ArtifactId,
 }
 
+fn validate_item_receipt(
+    fields: &[Value],
+    request: &str,
+    admission_digest: [u8; 32],
+    receipt_digest: [u8; 32],
+    index: usize,
+    source: &str,
+    is_program: bool,
+) -> Result<(), CompileError> {
+    if string(&fields[0])? != "TPEXACTITEM"
+        || string(&fields[1])? != if is_program { "2" } else { "1" }
+        || string(&fields[2])? != request
+        || string(&fields[3])? != hex(&admission_digest)
+        || string(&fields[4])?
+            != hex(&if is_program {
+                admission_digest
+            } else {
+                receipt_digest
+            })
+        || fields[5] != Value::Integer((index as u64).into())
+        || string(&fields[6])? != hash(source.as_bytes())
+        || string(&fields[7])? != "tidepool-checked-recipe-2"
+    {
+        return Err(failure(
+            "checked-item recipe receipt differs from its same compiler offer",
+        ));
+    }
+    Ok(())
+}
+fn typed_entry_failure() -> CompileError {
+    CompileError::CompilerEvidence(Box::new(
+        crate::certified_products::CertificationError::Mismatch("typed native entry"),
+    ))
+}
+fn typed_entry_identity(
+    value: &Value,
+) -> Result<tidepool_repr::execution_schema::SymbolIdentity, CompileError> {
+    let fields = row(value, 3)?;
+    let unit = string(&fields[0])?;
+    let module = string(&fields[1])?;
+    let occurrence = string(&fields[2])?;
+    if [unit, module, occurrence]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > 65536)
+    {
+        return Err(failure("typed native identity is incomplete"));
+    }
+    Ok(tidepool_repr::execution_schema::SymbolIdentity {
+        unit: unit.into(),
+        module: module.into(),
+        namespace: "value".into(),
+        occurrence: occurrence.into(),
+        record_parent: None,
+    })
+}
 impl CheckedTypedEntry {
+    fn matches_receipt(&self, proof: &[Value]) -> Result<bool, CompileError> {
+        Ok(string(&proof[0])? == self.plan_digest
+            && typed_entry_identity(&proof[1])? == self.origin
+            && typed_entry_identity(&proof[2])? == self.entry
+            && proof[3] == Value::Integer(self.original_ordinal.into()))
+    }
+    /// Issued once before inventory admission from the same request, normalized
+    /// plan, exact source admission and authenticated original product census.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_program_item(
+        directory: &Path,
+        request: &str,
+        admission_digest: [u8; 32],
+        plans: &[CheckedTypedSegmentPlan],
+        index: usize,
+        source: &str,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+        groups: &[crate::certified_products::PendingCertifiedGroup],
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        producer: [u8; 32],
+    ) -> Result<Self, CompileError> {
+        use tidepool_repr::execution_schema::Group;
+        let receipt = decode(&read(directory.join("checked-item.cbor"), 4 << 20)?)?;
+        let fields = row(&receipt, 9)?;
+        validate_item_receipt(
+            fields,
+            request,
+            admission_digest,
+            admission_digest,
+            index,
+            source,
+            true,
+        )?;
+        let (plan, item) = plans
+            .iter()
+            .find_map(|plan| {
+                plan.items
+                    .iter()
+                    .find(|item| item.ordinal == index)
+                    .map(|item| (plan, item))
+            })
+            .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
+        let proof = row(&fields[8], 4)?;
+        let origin = typed_entry_identity(&proof[1])?;
+        let entry = typed_entry_identity(&proof[2])?;
+        let original_ordinal = match proof[3] {
+            Value::Integer(value) => u32::try_from(value).map_err(failure)?,
+            _ => return Err(failure("typed native original ordinal is not integer")),
+        };
+        let target_entry = target
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(binding) => std::slice::from_ref(binding),
+                Group::Recursive(bindings) => bindings.as_slice(),
+            })
+            .find(|binding| binding.binding.id == target.entry());
+        let matches = groups
+            .iter()
+            .filter(|group| {
+                group.owner().unit == entry.unit
+                    && group.owner().module == entry.module
+                    && group.group().original_ordinal() == original_ordinal
+                    && group.group().binders().contains(&entry)
+            })
+            .collect::<Vec<_>>();
+        let originals = products
+            .iter()
+            .filter(|product| matches.len() == 1 && product.owner() == matches[0].owner())
+            .collect::<Vec<_>>();
+        if string(&proof[0])? != plan.digest
+            || origin.occurrence != plan.root
+            || entry.occurrence != item.entry
+            || origin.unit != owner.unit
+            || origin.module != owner.module
+            || entry.unit != origin.unit
+            || entry.module != origin.module
+            || target_entry.is_none_or(|binding| binding.identity != entry)
+            || matches.len() != 1
+            || originals.len() != 1
+        {
+            return Err(typed_entry_failure());
+        }
+        Ok(Self {
+            plan_digest: plan.digest.clone(),
+            origin,
+            entry,
+            original_ordinal,
+            artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                producer,
+                originals[0],
+            ),
+        })
+    }
+
     pub fn plan_digest(&self) -> &str {
         &self.plan_digest
     }
@@ -3342,30 +3493,22 @@ impl CheckedItemOffer {
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
-        program_groups: Option<&[crate::certified_products::PendingCertifiedGroup]>,
+        program_entry: Option<&CheckedTypedEntry>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, if self.is_program { 9 } else { 8 })?;
-        if string(&fields[0])? != "TPEXACTITEM"
-            || string(&fields[1])? != if self.is_program { "2" } else { "1" }
-            || string(&fields[2])? != request
-            || string(&fields[3])? != hex(&self.item.admission_digest())
-            || string(&fields[4])?
-                != hex(&if self.is_program {
-                    self.item.admission_digest()
-                } else {
-                    self.item.cell.receipt_digest
-                })
-            || fields[5] != Value::Integer((self.item.index as u64).into())
-            || string(&fields[6])? != hash(source.as_bytes())
-            || string(&fields[7])? != "tidepool-checked-recipe-2"
-        {
-            return Err(failure(
-                "checked-item recipe receipt differs from its same compiler offer",
-            ));
-        }
+        validate_item_receipt(
+            fields,
+            request,
+            self.item.admission_digest(),
+            self.item.cell.receipt_digest,
+            self.item.index,
+            source,
+            self.is_program,
+        )?;
         let typed_entry = if self.is_program {
-            use tidepool_repr::execution_schema::{Group, SymbolIdentity};
+            let issued =
+                program_entry.ok_or_else(|| failure("typed native entry was not admitted"))?;
             let (plan, item) = self
                 .item
                 .cell
@@ -3378,88 +3521,24 @@ impl CheckedItemOffer {
                         .map(|item| (plan, item))
                 })
                 .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
-            let proof = row(&fields[8], 4)?;
-            let identity = |value: &Value| -> Result<SymbolIdentity, CompileError> {
-                let fields = row(value, 3)?;
-                let unit = string(&fields[0])?;
-                let module = string(&fields[1])?;
-                let occurrence = string(&fields[2])?;
-                if [unit, module, occurrence]
-                    .iter()
-                    .any(|value| value.is_empty() || value.len() > 65536)
-                {
-                    return Err(failure("typed native identity is incomplete"));
-                }
-                // ITEM2 identities name compiler-generated ordinary value
-                // roots; record fields and other namespaces cannot issue them.
-                Ok(SymbolIdentity {
-                    unit: unit.into(),
-                    module: module.into(),
-                    namespace: "value".into(),
-                    occurrence: occurrence.into(),
-                    record_parent: None,
-                })
-            };
-            let origin = identity(&proof[1])?;
-            let entry = identity(&proof[2])?;
-            let original_ordinal = match &proof[3] {
-                Value::Integer(value) => u32::try_from(*value).map_err(failure)?,
-                _ => return Err(failure("typed native original ordinal is not integer")),
-            };
             let owner = original_execution.original_instance_target()?;
-            let target_entry = target
-                .bindings()
-                .iter()
-                .flat_map(|group| match group {
-                    Group::NonRecursive(binding) => std::slice::from_ref(binding),
-                    Group::Recursive(bindings) => bindings.as_slice(),
-                })
-                .find(|binding| binding.binding.id == target.entry());
-            let groups = program_groups
-                .ok_or_else(|| failure("typed native original inventory is absent"))?;
-            let matches = groups
-                .iter()
-                .filter(|group| {
-                    group.owner().unit == entry.unit
-                        && group.owner().module == entry.module
-                        && group.group().original_ordinal() == original_ordinal
-                        && group.group().binders().contains(&entry)
-                })
-                .collect::<Vec<_>>();
-            let artifacts = original_execution.artifact_view().entries();
-            let original_artifacts = artifacts
-                .iter()
-                .filter(|artifact| {
-                    matches.len() == 1
-                        && matches!(&artifact.payload,
-                    crate::artifact_inventory::ArtifactPayload::Original(original)
-                    if original.owner() == matches[0].owner())
-                })
-                .collect::<Vec<_>>();
-            if string(&proof[0])? != plan.digest
-                || origin.occurrence != plan.root
-                || entry.occurrence != item.entry
-                || origin.unit != owner.unit
-                || origin.module != owner.module
-                || entry.unit != origin.unit
-                || entry.module != origin.module
-                || target_entry.is_none_or(|binding| binding.identity != entry)
-                || matches.len() != 1
-                || original_artifacts.len() != 1
+            let proof = row(&fields[8], 4)?;
+            if issued.plan_digest != plan.digest
+                || issued.origin.occurrence != plan.root
+                || issued.entry.occurrence != item.entry
+                || issued.origin.unit != owner.unit
+                || issued.origin.module != owner.module
+                || !issued.matches_receipt(proof)?
+                || !original_execution
+                    .artifact_view()
+                    .selected_native_groups()
+                    .contains(&issued.native_group_key())
             {
-                return Err(CompileError::CompilerEvidence(Box::new(
-                    crate::certified_products::CertificationError::Mismatch("typed native entry"),
-                )));
+                return Err(typed_entry_failure());
             }
-            Some(CheckedTypedEntry {
-                plan_digest: plan.digest.clone(),
-                origin,
-                entry,
-                original_ordinal,
-                artifact: original_artifacts[0].descriptor.id,
-            })
+            Some(issued.clone())
         } else {
-            if program_groups.is_some() {
+            if program_entry.is_some() {
                 return Err(failure("ordinary item was given typed program authority"));
             }
             None
@@ -3645,6 +3724,61 @@ pub(crate) fn retain_projection_inputs(
     Ok(projections.to_vec())
 }
 
+fn validate_cell_receipt_header(
+    header: &[Value],
+    output: &[Value],
+    observations: &[u8],
+    request_digest: &str,
+    specification: &CheckedCellSpecification,
+    program: Option<&CheckedPlannedCellSpecification>,
+) -> Result<(), CompileError> {
+    let checked_source = string(&output[2])?;
+    if string(&header[0])?
+        != if program.is_some() {
+            "TPEXACTPROGRAM"
+        } else {
+            "TPEXACTCHECK"
+        }
+        || string(&header[1])? != if program.is_some() { "4" } else { "3" }
+        || string(&header[2])? != request_digest
+        || string(&header[3])? != hex(&specification.admission_digest)
+        || string(&header[4])? != hash(specification.cell_source.as_bytes())
+        || string(&header[5])? != hash(specification.template_source.as_bytes())
+        || string(&header[6])? != hash(observations)
+        || string(&header[7])? != hash(checked_source.as_bytes())
+    {
+        return Err(failure(
+            "whole-cell receipt differs from the same admitted compiler offer",
+        ));
+    }
+    if let Some(program) = program {
+        if string(&header[10])? != hex(&program.parsed_plan.digest()) {
+            return Err(failure("program has another parser plan"));
+        }
+    }
+    Ok(())
+}
+pub(crate) fn read_program_typed_segments(
+    root: &Path,
+    request: &str,
+    specification: &CheckedCellSpecification,
+    program: &CheckedPlannedCellSpecification,
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    let receipt = decode(&read(root.join("checked-cell.cbor"), 8 << 20)?)?;
+    let header = row(&receipt, 12)?;
+    let observations = read(root.join("cell.cbor"), 32 << 20)?;
+    let decoded = decode(&observations)?;
+    let output = cell_observations(&decoded)?;
+    validate_cell_receipt_header(
+        header,
+        output,
+        &observations,
+        request,
+        specification,
+        Some(program),
+    )?;
+    decode_typed_segment_plans(&header[11], program)
+}
 pub(crate) fn admit_checked_cell(
     root: &Path,
     producer: &[u8],
@@ -3667,24 +3801,14 @@ pub(crate) fn admit_checked_cell(
     let output = decode(&observations)?;
     let output = cell_observations(&output)?;
     let checked_source = string(&output[2])?.to_owned();
-    if string(&header[0])?
-        != if program.is_some() {
-            "TPEXACTPROGRAM"
-        } else {
-            "TPEXACTCHECK"
-        }
-        || string(&header[1])? != if program.is_some() { "4" } else { "3" }
-        || string(&header[2])? != request_digest
-        || string(&header[3])? != hex(&specification.admission_digest)
-        || string(&header[4])? != hash(specification.cell_source.as_bytes())
-        || string(&header[5])? != hash(specification.template_source.as_bytes())
-        || string(&header[6])? != hash(&observations)
-        || string(&header[7])? != hash(checked_source.as_bytes())
-    {
-        return Err(failure(
-            "whole-cell receipt differs from the same admitted compiler offer",
-        ));
-    }
+    validate_cell_receipt_header(
+        header,
+        output,
+        &observations,
+        request_digest,
+        specification,
+        program,
+    )?;
     if let Some(program) = program {
         if string(&header[10])? != hex(&program.parsed_plan.digest()) {
             return Err(failure("program has another parser plan"));

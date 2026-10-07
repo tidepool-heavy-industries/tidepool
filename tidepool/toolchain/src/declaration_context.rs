@@ -4697,6 +4697,7 @@ pub(crate) fn certified_product_artifact_view(
         interfaces,
         &[],
         baseline,
+        crate::artifact_inventory::NativeArtifactDemand::AllGroups,
         &mut PackageInterfaceValidation::default(),
     )
 }
@@ -4710,6 +4711,7 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
     values: &[CertifiedValueInterface],
     baseline: Option<&ExactDeclarationContext>,
+    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
     let view = baseline.map_or_else(
@@ -4738,7 +4740,11 @@ pub(crate) fn certified_product_artifact_view_with_validation(
             validation,
         )?);
     }
-    view.inventory().admit(&view, entries)
+    view.inventory().admit_shared_with_demand(
+        &view,
+        entries.into_iter().map(Arc::new).collect(),
+        demand,
+    )
 }
 
 pub(crate) fn certified_artifact_view(

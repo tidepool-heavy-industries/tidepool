@@ -423,7 +423,6 @@ impl ArtifactEntry {
         product: CertifiedRecoveryProduct,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
-        let owner = product.owner();
         let canonical = product
             .module_interface()
             .ok_or_else(|| failure("native product lacks its canonical finalized module"))?;
@@ -467,18 +466,7 @@ impl ArtifactEntry {
                     "artifact inventory native requirements: {error}"
                 ))
             })?;
-        let descriptor = descriptor(
-            ArtifactKind::OriginalModule,
-            ExactModuleIdentity {
-                unit: owner.unit.clone(),
-                module: owner.module.clone(),
-            },
-            producer,
-            owner.skinny_iface_sha256,
-            Some(owner.product_sha256),
-            digest(product.package_imports_bytes()),
-            Some(digest(product.certification_bytes())),
-        );
+        let descriptor = Self::original_descriptor(producer, &product);
         Ok(Self {
             descriptor,
             payload: ArtifactPayload::Original(product),
@@ -489,6 +477,30 @@ impl ArtifactEntry {
             native_group_ordinals: native_requirements.group_ordinals,
             retained_packages: native_requirements.retained_packages,
         })
+    }
+    fn original_descriptor(
+        producer: [u8; 32],
+        product: &CertifiedRecoveryProduct,
+    ) -> ArtifactDescriptor {
+        let owner = product.owner();
+        descriptor(
+            ArtifactKind::OriginalModule,
+            ExactModuleIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+            },
+            producer,
+            owner.skinny_iface_sha256,
+            Some(owner.product_sha256),
+            digest(product.package_imports_bytes()),
+            Some(digest(product.certification_bytes())),
+        )
+    }
+    pub(crate) fn original_artifact_id(
+        producer: [u8; 32],
+        product: &CertifiedRecoveryProduct,
+    ) -> ArtifactId {
+        Self::original_descriptor(producer, product).id
     }
     pub(crate) fn canonical(
         interface: crate::certified_products::CertifiedModuleInterface,
