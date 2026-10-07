@@ -398,6 +398,7 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         })
         .await
         .expect("the valid configured spec reaches production root readiness");
+    let valid_root = valid.context.actor.identity();
     valid
         .stop()
         .await
@@ -419,7 +420,11 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
             let (actor, terminal) = failure
                 .root_terminal()
                 .expect("original failed root retained");
-            assert_eq!(actor, ActorRef::first(exomonad_actor::ActorId(1)));
+            assert_ne!(
+                actor, valid_root,
+                "the refusal belongs to the new admitted root"
+            );
+            assert_eq!(actor.incarnation, exomonad_actor::Incarnation::FIRST);
             assert_eq!(terminal.kind, exomonad_actor::ActorExitKind::Failed);
             let diagnostic = terminal
                 .diagnostic
