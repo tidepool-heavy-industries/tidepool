@@ -29,6 +29,8 @@ mod source_checkpoint;
 mod storage_errors;
 #[path = "../submission_observation.rs"]
 mod submission_observation;
+#[path = "../workspace_membership_properties.rs"]
+mod workspace_membership_properties;
 #[path = "../worktree_core.rs"]
 mod worktree_core;
 #[path = "../worktree_head.rs"]

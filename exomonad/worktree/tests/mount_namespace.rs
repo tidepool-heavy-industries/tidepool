@@ -41,10 +41,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         repository.path(),
     );
     let prepared = manager
-        .prepare_inherited_source(
-            &exomonad_worktree::WorktreeSource::CurrentRepository,
-            &tidepool_repr::ActorPath::parse("root/child").unwrap(),
-        )
+        .prepare_inherited_source(&exomonad_worktree::WorktreeSource::CurrentRepository)
         .unwrap();
     let cwd = prepared.receipt().cwd.clone();
     std::fs::write(cwd.join("file"), "before\n").unwrap();
@@ -243,7 +240,7 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         .put(&WorktreeReceipt {
             worktree_id: id.clone(),
             cwd: view.clone(),
-            branch: BranchName::from_raw("child"),
+            branch: Some(BranchName::from_raw("child")),
             source_head: GitOid::from_raw(original_head.trimmed()),
             snapshot_ref: None,
             origin: WorktreeOrigin::CurrentRepository,

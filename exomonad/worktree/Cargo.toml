@@ -29,6 +29,9 @@ parking_lot.workspace = true
 rustix = { version = "1", features = ["fs", "process"] }
 walkdir = "2.5"
 
+[dev-dependencies]
+proptest.workspace = true
+
 [[test]]
 name = "worktree"
 path = "tests/suites/worktree.rs"

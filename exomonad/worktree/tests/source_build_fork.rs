@@ -13,7 +13,6 @@ use exomonad_worktree::{
     git::inspect, testing::TestRepo, WorktreeManager, WorktreeRecordStatus, WorktreeRegistry,
     WorktreeSource,
 };
-use tidepool_repr::ActorPath;
 
 struct Owner(Child);
 
@@ -264,16 +263,10 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         view.clone(),
     );
     let prepared = manager
-        .prepare_inherited_source(
-            &WorktreeSource::CurrentRepository,
-            &ActorPath::parse("root/child").unwrap(),
-        )
+        .prepare_inherited_source(&WorktreeSource::CurrentRepository)
         .unwrap();
     let wrong_view = manager
-        .prepare_inherited_source(
-            &WorktreeSource::CurrentRepository,
-            &ActorPath::parse("root/wrong-view").unwrap(),
-        )
+        .prepare_inherited_source(&WorktreeSource::CurrentRepository)
         .unwrap();
     let wrong_id = wrong_view.receipt().worktree_id.clone();
     assert!(matches!(
@@ -475,10 +468,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     let child_admin = inspect::git_dir(&child_git, &view).unwrap();
     let child_index = std::fs::read(child_admin.join("index")).unwrap();
     let grandchild = host_manager
-        .prepare_inherited_source(
-            &WorktreeSource::Worktree(handle.id().clone()),
-            &ActorPath::parse("root/child/grandchild").unwrap(),
-        )
+        .prepare_inherited_source(&WorktreeSource::Worktree(handle.id().clone()))
         .unwrap();
     assert_eq!(
         grandchild.receipt().source_head,

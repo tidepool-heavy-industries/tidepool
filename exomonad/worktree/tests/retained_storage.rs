@@ -29,7 +29,7 @@ fn mounted_descriptor_requires_exact_stable_rotation_before_recovery() {
     let receipt = WorktreeReceipt {
         worktree_id: id.clone(),
         cwd,
-        branch: BranchName::from_raw("exomonad/worktree/live"),
+        branch: Some(BranchName::from_raw("exomonad/worktree/live")),
         source_head: GitOid::from_raw("a".repeat(40)),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -114,7 +114,7 @@ fn interrupted_admission_keeps_provisional_descriptor_layers() {
     let receipt = WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-admission"),
         cwd: root.join("worktrees/wt-admission"),
-        branch: BranchName::from_raw("exomonad/worktree/admission"),
+        branch: Some(BranchName::from_raw("exomonad/worktree/admission")),
         source_head: GitOid::from_raw("a".repeat(40)),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -158,7 +158,7 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
         let receipt = WorktreeReceipt {
             worktree_id: id,
             cwd,
-            branch: BranchName::from_raw(format!("exomonad/worktree/tiny-{number}")),
+            branch: Some(BranchName::from_raw(format!("exomonad/worktree/tiny-{number}"))),
             source_head: GitOid::from_raw("a".repeat(40)),
             snapshot_ref: None,
             origin: WorktreeOrigin::CurrentRepository,
