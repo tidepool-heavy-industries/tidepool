@@ -2717,13 +2717,6 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
 }
 
 fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
-    recipe_workspace_with_modules(checks, None)
-}
-
-fn recipe_workspace_with_modules(
-    checks: Option<&[&str]>,
-    modules: Option<&[&str]>,
-) -> tempfile::TempDir {
     let repository = tempfile::tempdir().unwrap();
     // A candidate is a project, and a project is a Git tree: that is how `nix`
     // reads the `flake.nix` a package's pinned Haskell source is named in.
@@ -2745,16 +2738,11 @@ fn recipe_workspace_with_modules(
         repository.path(),
     )
     .unwrap();
-    if checks.is_some() || modules.is_some() {
+    if let Some(checks) = checks {
         crate::exomonad::edit_fixture_project_config(
             &repository.path().join(".exomonad"),
             |project| {
-                if let Some(checks) = checks {
-                    project.haskell.checks = checks.iter().map(|entry| (*entry).into()).collect();
-                }
-                if let Some(modules) = modules {
-                    project.haskell.modules = modules.iter().map(|entry| (*entry).into()).collect();
-                }
+                project.haskell.checks = checks.iter().map(|entry| (*entry).into()).collect();
             },
         );
     }
