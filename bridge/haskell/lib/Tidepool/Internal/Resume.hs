@@ -16,6 +16,8 @@ module Tidepool.Internal.Resume
   ( Settled (..)
   , settle
   , resumeLifted
+  , segmentPure
+  , segmentBind
   ) where
 
 import Control.Monad.Freer.Internal (Arrs, Eff (..), qApp)
@@ -44,3 +46,16 @@ settle (E u q) = Suspended u q
 resumeLifted :: Arrs effs b a -> b -> Eff effs a
 resumeLifted = qApp
 {-# NOINLINE resumeLifted #-}
+
+-- | Construct the pure node used by compiler-owned effect segments.
+-- Authored programs do not import this helper.
+segmentPure :: a -> Eff effs a
+segmentPure = Val
+{-# NOINLINE segmentPure #-}
+
+-- | Bind compiler-owned effect segments using freer-simple's representation.
+-- A completed value enters the next segment immediately; a suspended effect
+-- retains its request and appends the next segment to its continuation.
+segmentBind :: Eff effs a -> (a -> Eff effs b) -> Eff effs b
+segmentBind = (>>=)
+{-# NOINLINE segmentBind #-}
