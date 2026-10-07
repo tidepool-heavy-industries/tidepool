@@ -1,2 +1,1 @@
-packed <- pure (Some (41 :: Int))
-name <- pure (case packed of Some (_ :: a) -> show (typeRep (Proxy @a)))
+name <- pure (case Some (41 :: Int) of Some (_ :: a) -> show (typeRep (Proxy @a)))

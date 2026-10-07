@@ -1,2 +1,2 @@
-let applied = id (\x -> undefined `asTypeOf` x)
-answer <- pure (applied (2 :: Int))
+function <- pure (id (\value -> undefined `asTypeOf` value))
+answer <- pure (function (2 :: Int))
