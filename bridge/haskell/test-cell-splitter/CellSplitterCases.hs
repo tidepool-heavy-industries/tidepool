@@ -1933,7 +1933,7 @@ genericDerivationRecovery fixture explicit automatic =
   withGenericCompiler fixture $ \compile plan -> do
     -- The exact authored derives are valid without their generated duplicates.
     -- Retain the automatic-only companions while checking this prerequisite.
-    baseline <- compile (omitCellGenericDeclarations explicit plan)
+    (_, baseline) <- checkCellInstances compile (omitCellGenericDeclarations explicit plan)
     assertGenericInstances (explicit ++ automatic) baseline
     assertEqual "parser retains candidates until GHC resolves their class" True
       (all (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations plan)) (explicit ++ automatic))
@@ -1965,8 +1965,8 @@ authoredGenericConflictsRemainErrors =
     -- The same target and class compile with one real authored instance
     -- before either conflict refusal is allowed to satisfy this control.
     source <- readFile "test-cell-splitter/fixtures/explicit-generic/AuthoredConflictBaseline.cell.hs"
-    baselinePlan <- analyzeOrderedCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
-    baseline <- compile (omitCellGenericDeclarations ["Conflicting"] baselinePlan)
+    baselinePlan <- genericDeclarationPlan source
+    (_, baseline) <- checkCellInstances compile (omitCellGenericDeclarations ["Conflicting"] baselinePlan)
     assertGenericInstances ["Conflicting"] baseline
     -- Removing the generated candidate leaves the real authored conflict.
     -- Recovery must preserve that refusal rather than authorizing either one.
@@ -1985,7 +1985,7 @@ withGenericCompiler fixture use = bracket structuralDisplayDirectory removeDirec
   effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
   prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
   source <- readFile ("test-cell-splitter/fixtures/explicit-generic" </> fixture)
-  plan <- analyzeOrderedCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
+  plan <- genericDeclarationPlan source
   let includes = [root, "test-cell-splitter", effects, prelude]
       path = root </> "GenericDerivation.hs"
   withResidentPipelineSelectedRequests includes $ \runRequest ->
@@ -1997,6 +1997,17 @@ withGenericCompiler fixture use = bracket structuralDisplayDirectory removeDirec
               (GeneratedInstanceCheck (cellGeneratedInstanceRecipe current) OriginalDeclarationCompile)
               Nothing path includes Nothing
       use compile plan
+
+-- Match Main's declaration preparation boundary. The import prologue and
+-- executable runs have their own segments; companion refinement consumes
+-- one authored declaration run rather than a reconstructed whole-cell plan.
+genericDeclarationPlan :: String -> IO CellSourcePlan
+genericDeclarationPlan source = do
+  whole <- analyzeOrderedCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
+  case [segment | segment <- cellInferenceSegments whole
+    , not (null (cellPlanGenericDeclarations segment))] of
+    [segment] -> pure segment
+    _ -> fail "Generic fixture did not select one original declaration segment"
 
 assertGenericInstances :: [String] -> CheckedEnvironmentResult -> IO ()
 assertGenericInstances targets result = do
