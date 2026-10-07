@@ -1878,6 +1878,9 @@ impl PartialEq for ArtifactView {
 impl Eq for ArtifactView {}
 
 #[cfg(test)]
+mod native_history_properties;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
