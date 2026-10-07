@@ -94,6 +94,7 @@ tidepool_rust_isolated_test(
         "//exomonad/node:exomonad_node",
         "//third-party/rust:camino",
         "//third-party/rust:parking_lot",
+        "//third-party/rust:proptest",
         "//third-party/rust:rustix",
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
