@@ -15,7 +15,7 @@ import GHC.Parser.Annotation (noLocA, noAnn)
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (RdrName, mkRdrQual, mkRdrUnqual, rdrNameOcc)
-import GHC.Types.SrcLoc (noSrcSpan)
+import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan)
 import GHC.Unit.Module (mkModuleName)
 import GHC.Utils.Outputable (defaultSDocContext, ppr, showSDocOneLine)
 import Language.Haskell.Syntax.Extension (noExtField)
@@ -49,8 +49,8 @@ parsedNames = everything (++) (mkQ [] (\name -> [occNameString (rdrNameOcc name)
 
 rewriteRoot
   :: TypedSegmentPlan
-  -> LHsModule GhcPs
-  -> Either TypedSegmentFailure (LHsModule GhcPs, Int)
+  -> Located (HsModule GhcPs)
+  -> Either TypedSegmentFailure (Located (HsModule GhcPs), Int)
 rewriteRoot plan (L moduleLocation hsModule) = do
   (declarations, matches) <- foldl rewriteDeclaration (Right ([], 0)) (hsmodDecls hsModule)
   pure (L moduleLocation (hsModule { hsmodDecls = reverse declarations }), matches)
@@ -71,14 +71,14 @@ rewriteRoot plan (L moduleLocation hsModule) = do
         case (unLoc (m_pats match), grhssGRHSs (m_grhss match)) of
           ([], [locatedRhs]) -> do
             let rhs = unLoc locatedRhs
-            case (grhs_guard rhs, unLoc (grhs_body rhs)) of
-              ([], HsDo _ DoExpr statements) -> do
+            case (rhs, grhssLocalBinds (m_grhss match)) of
+              (GRHS rhsExtension [] (L _ (HsDo _ (DoExpr Nothing) statements)), EmptyLocalBinds _) -> do
                 body <- rewriteStatements plan (unLoc statements)
-                let rhs' = rhs { grhs_body = noLocA body }
-                    grhss' = (m_grhss match) { grhssGRHSs = [locatedRhs { unLoc = rhs' }] }
+                let rhs' = GRHS rhsExtension [] body
+                    grhss' = (m_grhss match) { grhssGRHSs = [L (getLoc locatedRhs) rhs'] }
                     match' = match { m_grhss = grhss' }
                     matches' = (fun_matches binding)
-                      { mg_alts = noLocA [locatedMatch { unLoc = match' }] }
+                      { mg_alts = noLocA [L (getLoc locatedMatch) match'] }
                 pure (binding { fun_matches = matches' })
               _ -> Left UnprovedRootAbstraction
           _ -> Left UnprovedRootAbstraction
@@ -96,7 +96,7 @@ rewriteStatements plan statements = case reverse statements of
         planned = typedSegmentPlanItems plan
     if length items /= length planned
       then Left (UnprovedItemSequence (min (length items) (length planned)))
-      else if map plannedItemOrdinal planned /= [0 .. length planned - 1]
+      else if not (consecutiveOrdinals (map plannedItemOrdinal planned))
         then Left InvalidItemOrdinals
         else lowerItems (zip planned items) final
   where
@@ -109,6 +109,12 @@ rewriteStatements plan statements = case reverse statements of
     lowerItems ((item, statement) : rest) final = do
       continuation <- lowerItems rest final
       lowerItem item statement continuation
+
+consecutiveOrdinals :: [Int] -> Bool
+consecutiveOrdinals [] = True
+consecutiveOrdinals (_ : []) = True
+consecutiveOrdinals (first : second : rest) =
+  second == first + 1 && consecutiveOrdinals (second : rest)
 
 lowerItem
   :: TypedItemPlan
@@ -156,12 +162,12 @@ lazyVariablePattern name = noLocA (LazyPat noAnn (nlVarPat (unqualifiedName name
 
 patternCase :: String -> LPat GhcPs -> LHsExpr GhcPs -> LHsExpr GhcPs
 patternCase valueName originalPattern continuation = noLocA
-  (HsCase noExtField (variable valueName) alternatives)
+  (HsCase noAnn (variable valueName) alternatives)
   where
     sourceLoc = getLocA originalPattern
-    failedPattern = L sourceLoc (WildPat noExtField)
+    failedPattern = L (getLoc originalPattern) (WildPat noExtField)
     message = "Pattern match failure in do expression at "
-      ++ showSDocOneLine defaultSDocContext (ppr (locA sourceLoc))
+      ++ showSDocOneLine defaultSDocContext (ppr sourceLoc)
     failure = mkHsApps (qualifiedVariable "segmentFail")
       [noLocA (HsLit noExtField (mkHsString message))]
     alternatives = mkMatchGroup (Generated OtherExpansion SkipPmc)
