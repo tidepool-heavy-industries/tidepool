@@ -1052,7 +1052,6 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     assert!(Arc::ptr_eq(
         session
             .resident
-            .state
             .retained_checked_value_artifact(baseline_binding.1)
             .unwrap(),
         &baseline_proof,
@@ -1253,7 +1252,6 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     assert!(Arc::ptr_eq(
         session
             .resident
-            .state
             .retained_checked_value_artifact(result_binding.1)
             .unwrap(),
         &result_proof,
