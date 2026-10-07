@@ -178,6 +178,8 @@ pub struct WorktreeReceipt {
     /// anyone else only after [`crate::WorktreeManager::restore_retained_view`]
     /// has materialized the sealed source layers on demand.
     pub cwd: PathBuf,
+    /// Branch observed when this backing was registered; detached adoption
+    /// has no branch. Live HEAD state is obtained through repository observation.
     pub branch: Option<BranchName>,
     /// The commit the managed branch was rooted at. For a snapshot creation
     /// this is the synthetic snapshot commit, not the pre-snapshot source

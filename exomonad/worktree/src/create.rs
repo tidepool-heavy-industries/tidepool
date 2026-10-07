@@ -748,11 +748,15 @@ impl WorktreeManager {
         // retirement failed left a `Mounted` receipt whose view this process
         // never installed, and deriving liveness for it turned the root's own
         // `boundWorktree` into `StorageFailure ... requires filesystem recovery`.
-        if let Some(receipt) = self.registry.receipts()?.into_iter().find(|receipt| {
-            receipt.origin == WorktreeOrigin::SourceCheckout
-                && receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source)
-        }) {
-            return Ok(WorktreeHandle::from_receipt(receipt));
+        if let Some(receipt) = self
+            .registry
+            .receipts()?
+            .into_iter()
+            .find(|receipt| receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source))
+        {
+            return self
+                .lookup(&receipt.worktree_id)?
+                .ok_or_else(|| WorktreeError::WorktreeNotRegistered(receipt.worktree_id));
         }
 
         let branch = crate::submission::HeadState::read(&self.git, &canonical_source)?;
