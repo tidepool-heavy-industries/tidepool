@@ -5855,14 +5855,10 @@ pub(crate) fn certify_products_with_validation(
         }
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
-    let mut source_selection = match exact {
-        Some(admission) => CertifiedSourceSelection::from_compiler_projection(
-            admission.request.context.compiler_input_projection(),
-            admission.request.context.artifact_view(),
-            &validation.inventory,
-        )?,
-        None => CertifiedSourceSelection::default(),
-    };
+    let mut source_selection = CertifiedSourceSelection::from_projected_originals(
+        &projected_originals,
+        &validation.inventory,
+    )?;
     for (owner, _, _, _, _, origin) in &module_bytes {
         source_selection.admit_current(owner, *origin, &validation.inventory)?;
     }
