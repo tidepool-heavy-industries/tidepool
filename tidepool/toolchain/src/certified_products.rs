@@ -6769,6 +6769,7 @@ mod home_self_issuer_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod issued_interface_selection_history;
     mod promotion_import_history;
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
