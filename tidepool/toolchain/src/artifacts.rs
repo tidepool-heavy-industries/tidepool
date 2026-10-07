@@ -2814,9 +2814,6 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
-    if publication == OriginalOutputPublication::Transaction {
-        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
-    }
     if publication == OriginalOutputPublication::Transaction
         && offer
             .exact
@@ -2847,6 +2844,9 @@ fn seal_turn_outputs_with_validation(
         module_candidates::publish_prepared(publication);
     } else if publication == OriginalOutputPublication::Transaction {
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
+    }
+    if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     }
     Ok(Some(SealedTurnProducts {
         artifact_view,
