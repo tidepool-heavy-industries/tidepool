@@ -6,9 +6,17 @@ import Control.Monad.IO.Class (liftIO)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import GHC
 import GHC.Core (bindersOfBinds)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
+import GHC.Driver.Env.Types (hsc_unit_env)
+import GHC.Data.FastString (fsLit)
+import GHC.Unit.Env (ue_units)
+import GHC.Unit.Info (PackageName(..))
+import GHC.Unit.State (lookupPackageName)
+import GHC.Unit.Module (moduleUnit)
+import GHC.Unit.Types (unitString)
 import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Name (getOccString, nameModule_maybe)
@@ -18,7 +26,7 @@ import GHC.Types.SourceError (SourceError)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import System.Directory
-  ( createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile )
+  ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive, removeFile )
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.Binders
@@ -26,6 +34,7 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.DiagJson (diagsFromSourceError)
 import Tidepool.GhcPipeline
 import Tidepool.PreparedStg (pmModule, pmBindings, pmOriginalTopNames)
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.SessionArtifacts
 import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TurnSource (preambleDefaultDeclaration)
@@ -42,6 +51,10 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
   prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
   libdir <- getLibdir
   flags <- runGhc (Just libdir) getSessionDynFlags
+  let shadowDirectory = root </> "Tidepool" </> "Internal"
+  createDirectoryIfMissing True shadowDirectory
+  -- A package-qualified compiler import must not inspect or compile this source.
+  writeFile (shadowDirectory </> "Resume.hs") "invalid authored home source shadow\n"
   let fixtures = "test-cell-splitter/fixtures/typed-segment-native"
       includes = [root, fixtures, effects, prelude]
   withResidentPipelineSelectedRequests includes $ \runRequest ->
@@ -73,6 +86,16 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
           :: IO (Either SomeException PreparedSegmentProductsResult)
       case (expected, result) of
         (PrepareAccepted, Right products) -> do
+          let prepared = preparedSegmentProducts products
+              environment = prHscEnv (pprPipelineResult prepared)
+          selected <- maybe (fail (name ++ ": pinned resume package is absent")) pure
+            (lookupPackageName (ue_units (hsc_unit_env environment)) (PackageName (fsLit "tidepool-resume")))
+          let roots = concatMap packageInterfaces (Map.elems (pprPackageImports prepared))
+          unless (any (\root -> packageModule root == "Tidepool.Internal.Resume"
+              && packageUnit root == unitString selected) roots
+              && all (\modul -> moduleName (pmModule modul) /= mkModuleName "Tidepool.Internal.Resume"
+                || moduleUnit (pmModule modul) == selected) (pprModules prepared))
+            (fail (name ++ ": compiler support escaped its exact external package unit"))
           let segment = preparedSegmentCaptures products
               issued = bindersOfBinds (TypedSegment.typedSegmentRoots segment)
           owner <- case Set.toList (Set.fromList [owner

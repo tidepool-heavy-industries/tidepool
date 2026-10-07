@@ -1007,10 +1007,11 @@ prepareTypedSegmentSource template sourcePlan reservation slots = do
         _ -> Left "typed segment reservation differs from its parser statement form"
     | (item, (ordinal, generation, observation)) <- zip items slots ]
   plan <- either (Left . show) Right (typedSegmentPlan reservation root planned)
-  -- This exact private import is the existing generated-scaffold support edge.
-  -- Its source/certificate owner is authenticated before Core extraction.
-  protected <- replaceOnce "{{CELL_IMPORTS}}"
-    ("import qualified Tidepool.Internal.Resume as " ++ moduleNameString qualifier ++ "\n{{CELL_IMPORTS}}") template
+  -- The compiler support import selects its pinned package rather than home source.
+  protected <- replaceOnce "{{CELL_PRAGMAS}}"
+    "{{CELL_PRAGMAS}}\n{-# LANGUAGE PackageImports #-}" template
+    >>= replaceOnce "{{CELL_IMPORTS}}"
+      ("import qualified \"tidepool-resume\" Tidepool.Internal.Resume as " ++ moduleNameString qualifier ++ "\n{{CELL_IMPORTS}}")
   (rendered, generatedLineOffset) <- renderCellSourceWithLineOffset False protected sourcePlan
   renamedRoot <- replaceOnce "__tidepool_cell_check ::" (root ++ " ::") rendered
     >>= replaceOnce "__tidepool_cell_check =" (root ++ " =")
