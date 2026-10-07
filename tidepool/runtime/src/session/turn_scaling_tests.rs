@@ -683,7 +683,10 @@ impl OutputSink for QuietOutput {
     }
 }
 
-pub(in crate::session) type ScaleSession = ResidentSession<frunk::HNil, QuietOutput>;
+pub(in crate::session) type ScaleSession<H = frunk::HNil> = ResidentSession<H, QuietOutput>;
+
+#[path = "typed_segment_tests.rs"]
+mod typed_segment_tests;
 
 /// Choose the existing publication owner; durable measurements never use the
 /// ephemeral publication shortcut.
@@ -743,7 +746,10 @@ fn scale_workspace(durable: bool) -> (PathBuf, Option<tempfile::TempDir>) {
     }
 }
 
-fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Value {
+fn counters<H>(resident: &ScaleSession<H>, images: &ImageRegistry) -> serde_json::Value
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let residency = resident.residency().unwrap_or_default();
     let (functions, code_bytes) = resident.codegen_totals().unwrap_or_default();
     serde_json::json!({
@@ -759,14 +765,17 @@ fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Valu
     })
 }
 
-fn measured_duration<T>(
-    resident: &mut ScaleSession,
+fn measured_duration<T, H>(
+    resident: &mut ScaleSession<H>,
     images: &ImageRegistry,
     scenario: (usize, usize),
     phase: &str,
     item: Option<usize>,
-    action: impl FnOnce(&mut ScaleSession) -> T,
-) -> (T, u128) {
+    action: impl FnOnce(&mut ScaleSession<H>) -> T,
+) -> (T, u128)
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let before = counters(resident, images);
     let started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(resident)));
@@ -786,19 +795,22 @@ fn measured_duration<T>(
     }
 }
 
-fn measured<T>(
-    resident: &mut ScaleSession,
+fn measured<T, H>(
+    resident: &mut ScaleSession<H>,
     images: &ImageRegistry,
     scenario: (usize, usize),
     phase: &str,
     item: Option<usize>,
-    action: impl FnOnce(&mut ScaleSession) -> T,
-) -> T {
+    action: impl FnOnce(&mut ScaleSession<H>) -> T,
+) -> T
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     measured_duration(resident, images, scenario, phase, item, action).0
 }
 
-pub(in crate::session) fn execute_cell(
-    resident: &mut ScaleSession,
+pub(in crate::session) fn execute_cell<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -807,7 +819,10 @@ pub(in crate::session) fn execute_cell(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-) -> Duration {
+) -> Duration
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     execute_cell_with_authority_checks(
         resident,
         public,
@@ -826,10 +841,11 @@ pub(in crate::session) fn execute_cell(
 enum AuthorityChecks {
     Configured,
     RefusalBranches,
+    TypedEntryRefusalBranches,
 }
 
-fn execute_cell_with_authority_checks(
-    resident: &mut ScaleSession,
+fn execute_cell_with_authority_checks<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -839,7 +855,10 @@ fn execute_cell_with_authority_checks(
     declarations: usize,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
-) -> Duration {
+) -> Duration
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     try_execute_cell_with_authority_checks(
         resident,
         public,
@@ -855,8 +874,8 @@ fn execute_cell_with_authority_checks(
     .unwrap()
 }
 
-fn try_execute_cell_with_authority_checks(
-    resident: &mut ScaleSession,
+fn try_execute_cell_with_authority_checks<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -866,7 +885,10 @@ fn try_execute_cell_with_authority_checks(
     declarations: usize,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
-) -> Result<Duration, ResidentError> {
+) -> Result<Duration, ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     try_execute_cell_with_template_imports(
         resident,
         public,
@@ -883,8 +905,8 @@ fn try_execute_cell_with_authority_checks(
     .map(|(elapsed, _)| elapsed)
 }
 
-fn try_execute_cell_with_template_imports(
-    resident: &mut ScaleSession,
+fn try_execute_cell_with_template_imports<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -895,7 +917,10 @@ fn try_execute_cell_with_template_imports(
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
-) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     try_execute_cell_with_template_imports_expectation(
         resident,
         public,
@@ -912,8 +937,8 @@ fn try_execute_cell_with_template_imports(
     )
 }
 
-fn try_execute_cell_with_template_imports_expectation(
-    resident: &mut ScaleSession,
+fn try_execute_cell_with_template_imports_expectation<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -925,7 +950,10 @@ fn try_execute_cell_with_template_imports_expectation(
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
     expected_observation: Option<i64>,
-) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -1065,10 +1093,57 @@ fn try_execute_cell_with_template_imports_expectation(
         .iter()
         .filter_map(|item| item.native().map(|native| native.target_owned()))
         .collect();
+    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+        let native_items = program
+            .items()
+            .iter()
+            .filter(|item| item.native().is_some())
+            .collect::<Vec<_>>();
+        assert!(
+            native_items.len() >= 2,
+            "the root substitution control needs two actually compiled roots"
+        );
+        let first = native_items[0];
+        let second = native_items[1];
+        let first_native = first.native().unwrap();
+        let second_target = second.native().unwrap().target_owned();
+        assert_ne!(
+            first_native.typed_entry().unwrap().entry(),
+            second.native().unwrap().typed_entry().unwrap().entry()
+        );
+        let (table, _) =
+            tidepool_repr::serial::read_metadata(first.native_metadata_bytes().unwrap()).unwrap();
+        let turn: ciborium::value::Value =
+            ciborium::de::from_reader(first.native_turn_bytes().unwrap()).unwrap();
+        let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+        let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+        first_native
+            .original_execution_context(&first_native.target_owned(), &table, &sites)
+            .unwrap();
+        assert!(
+            first_native
+                .original_execution_context(&second_target, &table, &sites)
+                .is_err(),
+            "a genuine other item root cannot substitute for the sealed native entry"
+        );
+    }
     let prefix = resident
         .begin_cell_program(admission, program)
         .unwrap()
         .expect("nonempty compiled cell has an ordered prefix");
+    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+        assert!(checked.items.len() >= 2);
+        let before = resident.public_visibility_snapshot_in(public).unwrap();
+        let wrong = checked.checked_item(1).unwrap();
+        assert!(matches!(
+            resident.admit_checked_item(prefix.clone(), wrong),
+            Err(crate::session::SessionError::StaleStagedDeclaration)
+        ));
+        assert_eq!(
+            resident.public_visibility_snapshot_in(public).unwrap(),
+            before
+        );
+    }
     let submissions_before_effects = tidepool_extract_cmd::extract_spawn_count();
     let mut expected_observation_seen = false;
     resident
@@ -1127,27 +1202,23 @@ fn try_execute_cell_with_template_imports_expectation(
                     Some(index),
                     |resident| {
                         if bound.len() == 1 {
-                            resident
-                                .run_bind_with_sites(
-                                    &bound[0].name,
-                                    compiled.code(),
-                                    &bound[0],
-                                    reservation.generation(),
-                                )
-                                .unwrap();
+                            resident.run_bind_with_sites(
+                                &bound[0].name,
+                                compiled.code(),
+                                &bound[0],
+                                reservation.generation(),
+                            )
                         } else {
                             assert!(!bound.is_empty());
-                            resident
-                                .run_projected_bind_with_sites(
-                                    label,
-                                    compiled.code(),
-                                    &bound,
-                                    reservation.generation(),
-                                )
-                                .unwrap();
+                            resident.run_projected_bind_with_sites(
+                                label,
+                                compiled.code(),
+                                &bound,
+                                reservation.generation(),
+                            )
                         }
                     },
-                );
+                )?;
             } else {
                 let observed = measured(
                     resident,

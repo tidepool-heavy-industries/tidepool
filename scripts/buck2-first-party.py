@@ -592,6 +592,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         resources.append("//bridge/haskell:native_json_test_sources")
     if package_name == "tidepool-runtime" and unit:
         env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
+        env["TIDEPOOL_GHC"] = "$(exe toolchains//:ghc)"
+        resources.append("toolchains//:ghc")
     if package_name == "tidepool-extract-cmd" and target_name == "daemon_integration":
         env["TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR"] = "$(location //bridge/haskell:retained_import_test_sources)"
         resources.append("//bridge/haskell:retained_import_test_sources")
@@ -840,6 +842,28 @@ def runtime_test_cases(binary):
         "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
         "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
     ])]
+    semantic_tests = ["session::turn::turn_scaling_tests::typed_segment_tests::" + name for name in (
+        "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
+        "scalar_publication_forces_after_effect_without_publishing_then_recovers",
+        "retained_action_closure_demand_does_not_repeat_completed_effect",
+        "bare_observation_retains_lazy_thunk_before_later_demand",
+        "effectful_observation_runs_once_and_retains_its_lazy_result",
+        "late_type_error_prevents_all_effects_and_publication_before_new_retry",
+        "cancellation_after_real_effect_preserves_receipt_and_allows_new_intent",
+        "generated_capture_histories_match_ghc_cold_warm_and_recovery",
+        "authentic_native_entries_refuse_root_and_order_substitution_before_effects",
+    )]
+    semantic_env, semantic_resources, semantic_worker = test_runtime_inputs("tidepool-runtime", "", unit=True)
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_typed_segment_semantic_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(semantic_tests, 8), "    ],",
+        f"    expected_count = {len(semantic_tests)},", "    jobs = 1,", "    timeout = 1200,",
+        f"    test_rule_timeout_ms = {(len(semantic_tests) * 1200 + 60) * 1000},",
+        runtime_arguments(semantic_env, semantic_resources, semantic_worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
     for name, test in (
         ("runtime_checked_cache_test", "empty_checked_context_reuses_immutable_support_and_invalidates_changed_source"),
         ("runtime_checked_original_test", "admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression"),
