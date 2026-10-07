@@ -12,5 +12,5 @@ do
     (Core.ForkDirectory Core.CurrentCheckout) [] (Just "CHILD_LABEL")
     Nothing Nothing Nothing CHILD_LIFETIME Nothing)
   case started of
-    Left failure -> error (tshow failure) >> pure False
+    Left failure -> Tidepool.Effects.error (tshow failure) >> pure False
     Right _ -> pure True
