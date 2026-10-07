@@ -1283,9 +1283,6 @@ struct InteractiveApplicationOwner {
     fork_gate: Option<exomonad_actor::ForkGroupGate>,
     custody: Option<Arc<dyn exomonad_actor::WorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
-
-    embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
-
     embedded: EmbeddedApplicationState,
     terminal: Option<ActorTerminal>,
 }
@@ -1423,9 +1420,6 @@ impl InteractiveApplicationOwner {
             fork_gate: None,
             custody: None,
             scoped_retention: None,
-
-            embedded_policy: None,
-
             embedded: EmbeddedApplicationState::new(),
             terminal: None,
         }
@@ -1454,7 +1448,6 @@ impl InteractiveApplicationOwner {
             custody.actor_stopped(&terminal);
         }
         self.terminal.get_or_insert(terminal);
-        drop(self.embedded_policy.take());
         self.cancel();
     }
 }
