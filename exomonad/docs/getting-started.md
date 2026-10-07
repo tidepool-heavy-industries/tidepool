@@ -129,15 +129,19 @@ memory limit. The compiler trace records daemon epoch, daemon/worker PIDs,
 queue wait, service time and worker RSS so rotation is visible in measurements.
 
 The root prepares its selected source toolset before becoming ready. Optional
-common role rows can then warm in the background:
+public child profiles can then warm in the background:
 
 ```toml
 [preparation]
 roles = ["research", "coding"]
 ```
 
-Only the listed roles are prepared, with the actual grants and installed handler
-support. Later actors execute fresh installations from the shared immutable code.
+Each listed role selects its standard public constructor: `researching`, `coding`,
+`scaffolding`, or `integrating`. Preparation uses that constructor's exact ordered
+available effects and actual installed handler support. `research` selects
+`ResearchEffects`; it does not cover the distinct `researchingLeaf` profile.
+The required root uses its actual host grants independently of `ActorEffects`.
+Later actors execute fresh installations from the shared immutable code.
 With one compiler worker, optional warming may be refused so foreground work can
 proceed; a later required installation still prepares its row in the foreground.
 
@@ -190,8 +194,12 @@ The destination's immediate parent must already exist and be accessible.
 Preparation creates the final directory and refuses missing parent directories.
 
 Preparation creates an immutable deployment that later runs can reuse. It
-covers the required root toolset and explicitly configured preparation roles.
-Those are the only role configurations covered by that deployment. Recipe
+covers the required root toolset and the standard public profiles selected by
+the explicitly configured preparation roles. The deployment records each exact
+requested and supported effect list with its installer recipe and retained original.
+Init refuses missing or changed promised coverage before installing actor tools.
+Other valid leaf, inherited-role, and narrowed effect lists prepare fresh when
+their exact recipe is uncovered. Recipe
 checks remain a separate, fresh, model-free operation through `exomonad check
 --recipes`. To start a run from the deployment, pass
 `--prepared /path/to/deployment` to `exomonad init`. Each init creates an

@@ -117,6 +117,7 @@ fn every_emitted_rust_file_is_a_rustfmt_fixed_point() {
     let files: Vec<_> = tidepool_protocol::gen::all_files(&effects)
         .into_iter()
         .chain(tidepool_protocol::model_control::generated_files())
+        .chain(tidepool_protocol::actor_profiles::generated_files())
         .filter(|f| f.path.ends_with(".rs"))
         .collect();
 

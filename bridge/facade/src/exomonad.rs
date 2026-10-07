@@ -346,33 +346,6 @@ impl PreparationConfig {
             })
             .collect()
     }
-
-    pub(crate) fn selected_roles(
-        &self,
-        policy: exomonad_actor::ResearchPolicy,
-    ) -> Result<Vec<exomonad_actor::EffectiveRole>, Box<dyn std::error::Error>> {
-        use exomonad_actor::{ActorRole, EffectiveRole};
-        let mut selected = vec![EffectiveRole::root().with_research_policy(policy)];
-        for role in &self.roles {
-            let selected_role = match role {
-                ActorRole::Root => continue,
-                ActorRole::Research => EffectiveRole::research(),
-                ActorRole::Coding => EffectiveRole::coding(),
-                ActorRole::Scaffolding => EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
-                    maximum_depth: 0,
-                    maximum_active_children: Some(0),
-                }),
-                ActorRole::Integration => EffectiveRole::integration(),
-                ActorRole::Inherited => return Err(runtime_error(
-                    "preparation.roles requires a concrete role; inherited has no standalone effect row",
-                )),
-            }.with_research_policy(policy);
-            if !selected.iter().any(|selected| selected.role() == *role) {
-                selected.push(selected_role);
-            }
-        }
-        Ok(selected)
-    }
 }
 
 #[cfg(test)]
@@ -818,7 +791,7 @@ fn parse_project_config(
         ))
     })?;
     config.launch.validate()?;
-    config.preparation.selected_roles(config.research)?;
+    config.preparation.selected_profiles(config.research)?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
         runtime_error(format!(
@@ -968,7 +941,7 @@ pub async fn check_recipe(
         return Err(runtime_error(missing_effects.join("\n")));
     }
     println!(
-        "Agent spec installability: every launchable child role compiles the selected spec installation."
+        "Agent spec installability: every public child profile compiles the selected spec installation."
     );
     if recipes || recipe.is_some() {
         crate::actor_host::recipe_checks::run(&workspace, &selected, recipe.as_deref()).await?;
@@ -3465,11 +3438,14 @@ mod tests {
         ] {
             std::fs::write(&path, format!("{base}{configured}")).unwrap();
             let config = read_project_config(workspace.path()).unwrap().0;
-            let selected = config.preparation.selected_roles(config.research).unwrap();
+            let selected = config
+                .preparation
+                .selected_profiles(config.research)
+                .unwrap();
             assert_eq!(
                 selected
                     .iter()
-                    .map(exomonad_actor::EffectiveRole::role)
+                    .map(|selected| selected.profile.effective_role(config.research).role())
                     .collect::<Vec<_>>(),
                 expected
             );
@@ -3482,6 +3458,50 @@ mod tests {
             .unwrap();
             assert!(read_project_config(workspace.path()).is_err());
         }
+    }
+
+    #[test]
+    fn preparation_roles_select_public_requests_and_preserve_logical_profiles() {
+        use exomonad_actor::{ActorEffectKey, ActorRole, EffectiveRole, ResearchPolicy};
+        use exomonad_tool::PublicActorProfile;
+        let config = PreparationConfig {
+            roles: vec![
+                ActorRole::Research,
+                ActorRole::Coding,
+                ActorRole::Scaffolding,
+                ActorRole::Research,
+            ],
+        };
+        let selected = config.selected_profiles(ResearchPolicy::default()).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|selected| selected.profile.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PreparationProfile::Root,
+                PreparationProfile::Public(PublicActorProfile::Research),
+                PreparationProfile::Public(PublicActorProfile::Coding),
+                PreparationProfile::Public(PublicActorProfile::Scaffolding),
+            ]
+        );
+        assert_eq!(
+            selected[0].requested_effects,
+            EffectiveRole::root().effect_keys()
+        );
+        assert_eq!(
+            selected[1].requested_effects,
+            PublicActorProfile::Research.effect_keys()
+        );
+        assert!(!selected[1]
+            .requested_effects
+            .contains(&ActorEffectKey::Sleep));
+        assert!(EffectiveRole::research()
+            .effect_keys()
+            .contains(&ActorEffectKey::Sleep));
+        assert_eq!(selected[2].requested_effects, selected[3].requested_effects);
+        assert!(selected.iter().all(|selected| selected.profile
+            != PreparationProfile::Public(PublicActorProfile::ResearchLeaf)));
     }
 
     #[test]

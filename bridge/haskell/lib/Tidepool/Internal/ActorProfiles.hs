@@ -51,4 +51,3 @@ type IntegrationEffects =
 
 type ActorEffects =
   '[Replies, Watches, Forks, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Notifications, Jev, ModelCall, Commands, Console, Actor, Reflect, Lookup, Source, Journal, RepoEvent]
-

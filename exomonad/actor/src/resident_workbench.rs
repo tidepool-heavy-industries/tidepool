@@ -763,18 +763,16 @@ impl ActorWorkbenchSource {
         self
     }
 
-    /// Exact common role grants to warm after the root's required installer.
+    /// Exact public child requests to warm after the root's required installer.
     #[must_use]
-    pub fn with_preparation_roles(
+    pub fn with_preparation_profiles(
         mut self,
-        roles: impl IntoIterator<Item = crate::EffectiveRole>,
+        profiles: impl IntoIterator<Item = exomonad_tool::PublicActorProfile>,
     ) -> Self {
         let mut rows = Vec::new();
-        for role in roles {
-            if role.role() != crate::ActorRole::Root
-                && !rows.iter().any(|row| row == role.effect_keys())
-            {
-                rows.push(role.effect_keys().to_vec());
+        for profile in profiles {
+            if !rows.iter().any(|row| row == profile.effect_keys()) {
+                rows.push(profile.effect_keys().to_vec());
             }
         }
         self.preparation_rows = rows.into();
@@ -865,6 +863,41 @@ impl ActorWorkbenchSource {
             Some(entry) => self.with_spec(entry),
             None => self,
         }
+    }
+}
+
+#[cfg(test)]
+mod preparation_profile_tests {
+    use super::ActorWorkbenchSource;
+    use exomonad_tool::{ActorEffectKey, PublicActorProfile};
+
+    #[test]
+    fn warming_keeps_distinct_rows_and_reuses_shared_coding_profile() {
+        let source = ActorWorkbenchSource::new("", Vec::new()).with_preparation_profiles([
+            PublicActorProfile::Research,
+            PublicActorProfile::ResearchLeaf,
+            PublicActorProfile::Coding,
+            PublicActorProfile::Scaffolding,
+        ]);
+        assert_eq!(source.preparation_rows.len(), 3);
+        assert_eq!(
+            source.preparation_rows[0],
+            PublicActorProfile::Research.effect_keys()
+        );
+        assert_eq!(
+            source.preparation_rows[1],
+            PublicActorProfile::ResearchLeaf.effect_keys()
+        );
+        assert_eq!(
+            source.preparation_rows[2],
+            PublicActorProfile::Coding.effect_keys()
+        );
+        assert!(source.preparation_rows[0].contains(&ActorEffectKey::Forks));
+        assert!(!source.preparation_rows[1].contains(&ActorEffectKey::Forks));
+        assert!(source
+            .preparation_rows
+            .iter()
+            .all(|row| !row.contains(&ActorEffectKey::Sleep)));
     }
 }
 

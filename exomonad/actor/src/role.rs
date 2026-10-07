@@ -593,54 +593,86 @@ mod tests {
         );
     }
 
-    /// `Tidepool.Actors.Role` spells what a child DECLARES; the roles here are
-    /// the ceilings those declarations must sit under. The two are different
-    /// things — a ceiling is a maximum, not a request — so this checks the
-    /// subset direction. Standard rows also declare Console for explicit
-    /// display; its interpreter is intrinsic to the resident actor, including
-    /// recipe-check environments. Custom narrowed rows retain their own policy.
     #[test]
-    fn haskell_declared_rows_sit_under_the_rust_ceilings() {
-        let source = include_str!("../../../bridge/haskell/actors/Tidepool/Actors/Role.hs");
-        fn declared(source: &str, name: &str) -> Vec<String> {
-            let start = source
-                .find(&format!("type {name} ="))
-                .unwrap_or_else(|| panic!("alias {name} missing from Role.hs"));
-            let body = &source[start + format!("type {name} =").len()..];
-            let end = body.find(']').expect("alias closes");
-            body[..end]
-                .replace(['\'', '[', '\n'], " ")
-                .split(',')
-                .map(|name| name.trim().to_owned())
-                .filter(|name| !name.is_empty())
-                .collect()
-        }
-        for (name, role) in [
-            ("CoreEffects", EffectiveRole::research()),
-            ("ResearchLeafEffects", EffectiveRole::research()),
-            ("ResearchEffects", EffectiveRole::research()),
-            ("CodingEffects", EffectiveRole::coding()),
-            ("IntegrationEffects", EffectiveRole::integration()),
-            ("ActorEffects", EffectiveRole::root()),
-        ] {
-            let ceiling: Vec<&str> = role
-                .effect_keys()
-                .iter()
-                .map(|effect| effect.haskell_name())
-                .collect();
-            let declared = declared(source, name);
+    fn public_declared_rows_sit_under_the_rust_ceilings() {
+        use exomonad_tool::PublicActorEffectRow;
+        for row in PublicActorEffectRow::ALL {
+            let ceiling = match row {
+                PublicActorEffectRow::Core
+                | PublicActorEffectRow::ResearchLeaf
+                | PublicActorEffectRow::Research => EffectiveRole::research(),
+                PublicActorEffectRow::Coding => EffectiveRole::coding(),
+                PublicActorEffectRow::Integration => EffectiveRole::integration(),
+                PublicActorEffectRow::Actor => EffectiveRole::root(),
+            };
             assert!(
-                declared.iter().any(|effect| effect == "Console"),
-                "{name} must support explicit value display"
+                row.effect_keys().contains(&ActorEffectKey::Console),
+                "{} must support explicit value display",
+                row.haskell_alias(),
             );
-            for effect in declared {
-                assert!(
-                    ceiling.contains(&effect.as_str()),
-                    "{name} declares {effect}, which is outside the {:?} ceiling",
-                    role.role()
-                );
-            }
+            assert!(
+                ceiling.accepts_effect_keys(row.effect_keys()),
+                "{} exceeds {:?}",
+                row.haskell_alias(),
+                ceiling.role()
+            );
+            assert!(ceiling.effect_keys().contains(&ActorEffectKey::Sleep));
+            assert!(!row.effect_keys().contains(&ActorEffectKey::Sleep));
         }
+    }
+
+    #[test]
+    fn research_leaf_and_exhausted_research_keep_distinct_public_rows() {
+        use exomonad_tool::PublicActorProfile;
+        let parent = EffectiveRole::root();
+        let leaf = parent
+            .preview_child(
+                EffectiveRole::public_profile(PublicActorProfile::ResearchLeaf),
+                None,
+            )
+            .unwrap();
+        let exhausted = parent
+            .preview_child(
+                EffectiveRole::public_profile(PublicActorProfile::Research),
+                Some((0, 0)),
+            )
+            .unwrap();
+        assert_eq!(leaf.descendants(), exhausted.descendants());
+        assert_eq!(leaf.role(), ActorRole::Research);
+        assert_eq!(exhausted.role(), ActorRole::Research);
+        assert!(!leaf.effect_keys().contains(&ActorEffectKey::Forks));
+        assert!(exhausted.effect_keys().contains(&ActorEffectKey::Forks));
+        assert_ne!(leaf.effect_keys(), exhausted.effect_keys());
+        for profile in PublicActorProfile::ALL {
+            let role = EffectiveRole::public_profile(profile);
+            assert!(role.respects_role_ceiling(), "{}", profile.label());
+            assert!(parent.permits_child(&role), "{}", profile.label());
+        }
+    }
+
+    #[test]
+    fn public_actor_alias_does_not_replace_actual_root_grants() {
+        let public = exomonad_tool::PublicActorEffectRow::Actor.effect_keys();
+        let actual = EffectiveRole::root();
+        assert_ne!(public, actual.effect_keys());
+        assert_eq!(
+            &public[public.len() - 3..],
+            &[
+                ActorEffectKey::Source,
+                ActorEffectKey::Journal,
+                ActorEffectKey::RepoEvent
+            ]
+        );
+        let grants = actual.effect_keys();
+        assert_eq!(
+            &grants[grants.len() - 3..],
+            &[
+                ActorEffectKey::RepoEvent,
+                ActorEffectKey::Journal,
+                ActorEffectKey::Source
+            ]
+        );
+        assert!(actual.accepts_effect_keys(public));
     }
 
     #[test]

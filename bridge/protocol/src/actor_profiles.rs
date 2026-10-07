@@ -342,6 +342,7 @@ pub fn generated_files() -> Vec<GeneratedFile> {
             row.effects.join(", ")
         ));
     }
+    hs.pop();
     vec![
         GeneratedFile {
             path: "exomonad/tool/src/generated/public_profiles.rs".into(),

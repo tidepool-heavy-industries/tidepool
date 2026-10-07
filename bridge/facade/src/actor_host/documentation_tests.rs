@@ -3430,8 +3430,8 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     repository
 }
 
-/// `exomonad check --workspace` asks GHC whether every launchable child role
-/// can install the selected spec and retains the role, entry, and compiler
+/// `exomonad check --workspace` asks GHC whether every public child profile
+/// can install the selected spec and retains the profile, entry, and compiler
 /// evidence when one cannot.
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
@@ -3470,15 +3470,46 @@ async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
         .unwrap_err();
     let message = error.to_string();
     assert!(
-        message.contains("role research cannot install spec AgentSpec.agentSpec"),
+        message.contains("profile research cannot install spec AgentSpec.agentSpec"),
         "{message}"
     );
     assert!(
-        message.contains("role coding cannot install spec AgentSpec.agentSpec"),
+        message.contains("profile coding cannot install spec AgentSpec.agentSpec"),
         "{message}"
     );
     assert!(
         message.contains("Journal") && message.contains("<agent-spec-installation>"),
+        "{message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_check_refuses_sleep_required_by_a_spec_under_wider_role_ceilings() {
+    let repository = recipe_workspace(None);
+    crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+        .await
+        .expect("the original spec installs under every concrete public profile");
+    std::fs::write(
+        repository.path().join(".exomonad/AgentSpec.hs"),
+        include_str!("fixtures/sleep_required_spec.hs"),
+    )
+    .unwrap();
+    super::test_campaign::commit_workspace(repository.path());
+    let error = crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    for profile in exomonad_tool::PublicActorProfile::ALL {
+        assert!(
+            message.contains(&format!(
+                "profile {} cannot install spec AgentSpec.agentSpec",
+                profile.label()
+            )),
+            "{message}"
+        );
+    }
+    assert!(
+        message.contains("Sleep") && message.contains("<agent-spec-installation>"),
         "{message}"
     );
 }

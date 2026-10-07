@@ -1962,6 +1962,17 @@ async fn run_owned(
     let prior_actor_records = actor_recovery.records();
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, entry) = root.into_parts();
+    let prepared_validation = config
+        .workspace_inputs
+        .as_ref()
+        .filter(|inputs| inputs.prepared_toolset_coverage().is_some())
+        .map(|inputs| {
+            let mut supported = host_context_support();
+            supported.extend(
+                tidepool_mcp::InstalledEffectSupport::installed_effect_support(machine.handlers()),
+            );
+            (inputs, source.clone(), supported)
+        });
     let exomonad_actor::ResidentRootEntry::Startup(entry) = entry else {
         return Err(runtime_error(
             "root startup requires its installed executable entry",
@@ -2010,6 +2021,22 @@ async fn run_owned(
         actor_recovery.clone(),
         cell_model::admitted_factory(&embedded_service, settings, &config),
     )?;
+    if let Some((inputs, workbench, mut supported)) = prepared_validation {
+        for key in forest.installed_intrinsic_effect_support() {
+            if !supported.contains(&key) {
+                supported.push(key);
+            }
+        }
+        let layers = source_layers.as_ref().ok_or_else(|| {
+            runtime_error("prepared toolset validation requires its admitted source owner")
+        })?;
+        let frozen = exomonad_actor::ActorSourceLayers::freeze_toolset_layer(
+            layers.as_ref(),
+            tidepool_repr::PrincipalId::SYSTEM,
+        )
+        .map_err(std::io::Error::other)?;
+        inputs.validate_prepared_toolset_recipes(&workbench, &frozen, &supported)?;
+    }
     forest.track_resource_release();
     let forest = Arc::new(forest);
     let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())?;
@@ -2811,31 +2838,8 @@ pub(crate) fn validate_workspace_program(
     typecheck_candidate_revision(inputs, run_root, &inputs.runtime_actors(), &[], false, &[])
 }
 
-/// One configured launchable role: the label diagnostics name it by, and the
-/// constructor for its effect row.
-type LaunchableRole = (&'static str, fn() -> exomonad_actor::EffectiveRole);
-
-/// Every role `exomonad check --workspace` can launch a child into, paired
-/// with the label its diagnostics name it by. Root is not among them: it is
-/// never admitted as a child, so no role row can omit anything from it.
-const LAUNCHABLE_ROLES: &[LaunchableRole] = &[
-    ("research", exomonad_actor::EffectiveRole::research),
-    ("coding", exomonad_actor::EffectiveRole::coding),
-    ("scaffolding", scaffolding_default),
-    ("integration", exomonad_actor::EffectiveRole::integration),
-];
-
-fn scaffolding_default() -> exomonad_actor::EffectiveRole {
-    // A scaffolding role's effect row does not depend on the descendant
-    // budget passed here; any budget answers the same row.
-    exomonad_actor::EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
-        maximum_depth: 0,
-        maximum_active_children: Some(0),
-    })
-}
-
 /// Typecheck the exact selected spec installation for each static launchable
-/// child role row. GHC expands aliases and checks the selected entry's actual
+/// public child profile. GHC expands aliases and checks the selected entry's actual
 /// type, so this also covers requirements that are not spelled in its
 /// signature. This is an authored-row check; runtime handler availability is
 /// resolved later when an actor's workbench is installed.
@@ -2868,9 +2872,10 @@ pub(crate) fn spec_effect_preflight(
     preamble = insert_preamble_imports(&preamble, "Tidepool.Actors.Exomonad");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
-    for (label, role) in LAUNCHABLE_ROLES {
+    for profile in exomonad_tool::PublicActorProfile::ALL {
+        let label = profile.label();
         let installation =
-            exomonad_actor::agent_spec::installation_expression(entry, role().effect_keys());
+            exomonad_actor::agent_spec::installation_expression(entry, profile.effect_keys());
         let dispatcher_effects = installation.dispatcher_effect_row();
         let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
         let template = templates
@@ -2906,12 +2911,12 @@ pub(crate) fn spec_effect_preflight(
                     },
                 );
                 failures.push(format!(
-                    "role {label} cannot install spec {entry}:\n{detail}"
+                    "profile {label} cannot install spec {entry}:\n{detail}"
                 ));
             }
             Err(error) => {
                 return Err(runtime_error(format!(
-                    "could not establish whether role {label} can install spec {entry}: {error}"
+                    "could not establish whether profile {label} can install spec {entry}: {error}"
                 )));
             }
         }
@@ -3469,11 +3474,17 @@ fn host_workbench_source(
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_toolset_support_roots(toolset_support)
-        .with_preparation_roles(match &config.workspace_inputs {
+        .with_preparation_profiles(match &config.workspace_inputs {
             Some(inputs) => inputs
                 .config()?
                 .preparation
-                .selected_roles(config.research_policy)?,
+                .selected_profiles(config.research_policy)?
+                .into_iter()
+                .filter_map(|selected| match selected.profile {
+                    crate::exomonad::PreparationProfile::Root => None,
+                    crate::exomonad::PreparationProfile::Public(profile) => Some(profile),
+                })
+                .collect(),
             None => Vec::new(),
         })
         .with_installed_effect_support(host_context_support())
@@ -3519,9 +3530,9 @@ pub(crate) async fn prepare_workspace_toolsets(
     directory: &tidepool_atomic_write::DirectoryAnchor,
     inputs: crate::exomonad::workspace::FrozenWorkspace,
     source: Arc<crate::exomonad::source::ExomonadSourceReload>,
-) -> Result<BTreeMap<String, uuid::Uuid>, Box<dyn std::error::Error>> {
+) -> Result<Vec<crate::exomonad::workspace::PreparedToolsetCoverage>, Box<dyn std::error::Error>> {
     let authored = inputs.config()?;
-    let rows = authored.preparation.selected_roles(authored.research)?;
+    let profiles = authored.preparation.selected_profiles(authored.research)?;
     let settings = authored
         .launch
         .embedded
@@ -3624,13 +3635,13 @@ pub(crate) async fn prepare_workspace_toolsets(
     let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
     let outcome = compiler_owner
         .scope(async {
-            let mut selected = BTreeMap::new();
-            for role in rows {
+            let mut selected = Vec::new();
+            for profile in profiles {
                 let ready = workbench
                     .prepare_source_toolset(
                         tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                         frozen.clone(),
-                        role.effect_keys(),
+                        &profile.requested_effects,
                         &supported,
                         Arc::clone(&registry),
                     )
@@ -3640,7 +3651,13 @@ pub(crate) async fn prepare_workspace_toolsets(
                         "source preparation produced no retained original selection".into(),
                     )
                 })?;
-                selected.insert(recipe.to_owned(), original);
+                selected.push(crate::exomonad::workspace::PreparedToolsetCoverage {
+                    profile: profile.profile,
+                    requested_effects: profile.requested_effects,
+                    effective_effects: ready.effects().to_vec(),
+                    recipe: recipe.to_owned(),
+                    original,
+                });
             }
             Ok::<_, exomonad_actor::ResidentActorWorkbenchError>(selected)
         })
@@ -3655,7 +3672,10 @@ pub(crate) async fn prepare_workspace_toolsets(
 }
 
 struct SourcePreparationCleanupUnconfirmed {
-    action: Result<BTreeMap<String, uuid::Uuid>, exomonad_actor::ResidentActorWorkbenchError>,
+    action: Result<
+        Vec<crate::exomonad::workspace::PreparedToolsetCoverage>,
+        exomonad_actor::ResidentActorWorkbenchError,
+    >,
     cleanup: exomonad_actor::CompilerPreparationCleanup,
 }
 
