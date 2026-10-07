@@ -8,23 +8,19 @@ import Control.Exception (throwIO)
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
-import GHC (ParsedModule (..), GhcPs)
+import GHC (ParsedModule (..))
 import GHC.Hs
-import GHC.Hs.Utils
-import GHC.Parser.Annotation (noLocA, noAnn)
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc)
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan)
-import GHC.Unit.Module (mkModuleName)
 import GHC.Utils.Outputable (defaultSDocContext, ppr, showSDocOneLine)
-import Language.Haskell.Syntax.Extension (noExtField)
 import Tidepool.TypedSegment.Types
 
 rewriteParsedSegmentRoot :: TypedSegmentPlan -> ParsedModule -> IO ParsedModule
 rewriteParsedSegmentRoot plan parsed = case rewriteModule of
   Left failure -> throwIO failure
-  Right source -> pure (parsed { pm_parsed_source = source })
+  Right rewrittenSource -> pure (parsed { pm_parsed_source = rewrittenSource })
   where
     source = pm_parsed_source parsed
     authoredNames = parsedNames source
@@ -65,7 +61,7 @@ rewriteRoot plan (L moduleLocation hsModule) = do
               pure (L (getLoc declaration) (ValD extension binding') : rewritten, count + 1)
         _ -> pure (declaration : rewritten, count)
 
-    rewriteBinding binding = case unLoc (mg_alts (fun_matches binding)) of
+    rewriteBinding binding@FunBind{} = case unLoc (mg_alts (fun_matches binding)) of
       [locatedMatch] -> do
         let match = unLoc locatedMatch
         case (unLoc (m_pats match), grhssGRHSs (m_grhss match)) of
@@ -83,6 +79,8 @@ rewriteRoot plan (L moduleLocation hsModule) = do
               _ -> Left UnprovedRootAbstraction
           _ -> Left UnprovedRootAbstraction
       _ -> Left UnprovedRootAbstraction
+
+    rewriteBinding _ = Left UnprovedRootAbstraction
 
 rewriteStatements
   :: TypedSegmentPlan

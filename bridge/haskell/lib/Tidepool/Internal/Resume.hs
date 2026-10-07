@@ -1,4 +1,5 @@
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 -- | Engine-private freer plumbing for the prepared-STG route.
 --
@@ -18,6 +19,7 @@ module Tidepool.Internal.Resume
   , resumeLifted
   , segmentPure
   , segmentBind
+  , segmentFail
   ) where
 
 import Control.Monad.Freer.Internal (Arrs, Eff (..), qApp)
@@ -59,3 +61,9 @@ segmentPure = Val
 segmentBind :: Eff effs a -> (a -> Eff effs b) -> Eff effs b
 segmentBind = (>>=)
 {-# NOINLINE segmentBind #-}
+
+-- The generated effects home owns this instance. Pattern failure in a segment
+-- uses that same operation and dictionary as an authored do binding.
+segmentFail :: MonadFail (Eff effs) => String -> Eff effs a
+segmentFail = fail
+{-# NOINLINE segmentFail #-}

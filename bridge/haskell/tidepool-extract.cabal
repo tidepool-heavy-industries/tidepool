@@ -118,6 +118,7 @@ library tidepool-extract-internal
     Tidepool.Timing
     Tidepool.TypePolicy
     Tidepool.TypedSegment
+    Tidepool.TypedSegment.Source
     Tidepool.TurnSource
   other-modules:   Tidepool.LocalNativeDeclaration
                    Tidepool.TypedSegment.Types

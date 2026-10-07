@@ -26,6 +26,7 @@ module Tidepool.ExactHydration
   , captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, generatedCheckingTemplateRecipe
   , generatedScaffoldRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports
+  , generatedTypedSegmentRecipeWithProtectedImports
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
@@ -267,7 +268,7 @@ instance Show TemplateImportShape where
 data GeneratedScaffoldInstanceScope = ImportedTemplateInstances | OriginalPreviewInstances CheckedTemplateInterface
   deriving (Eq)
 
-data GeneratedScaffoldPurpose = NativeTurnTemplate | CheckingCellTemplate
+data GeneratedScaffoldPurpose = NativeTurnTemplate | CheckingCellTemplate | TypedSegmentTemplate
   deriving (Eq, Show)
 
 instance Show GeneratedScaffoldRecipe where
@@ -334,6 +335,12 @@ generatedCheckingTemplateRecipeWithProtectedImports :: DynFlags -> CheckedTempla
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedCheckingTemplateRecipeWithProtectedImports = generatedScaffoldRecipeWithProtectedImportsFor CheckingCellTemplate
 
+generatedTypedSegmentRecipeWithProtectedImports :: DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> String -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedTypedSegmentRecipeWithProtectedImports = generatedScaffoldRecipeWithProtectedImportsFor TypedSegmentTemplate
+
+
 generatedScaffoldRecipeFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedScaffoldRecipeFor purpose flags imports protectedTemplate rendered path name =
@@ -394,6 +401,7 @@ generatedScaffoldRecipeWithProtectedImportsFor purpose flags
     unless (Map.size graph == length interfaces) (Left "duplicate checked template interface")
     closure <- reachable Map.empty [key interface | (interface,_,_) <- selected]
     case (purpose,compilerImportLines) of
+      (TypedSegmentTemplate,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
       (NativeTurnTemplate,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
       (CheckingCellTemplate,[]) -> Right (GeneratedScaffoldRecipe canonical name bytes 0 selected closure ImportedTemplateInstances purpose)
       _ -> Left "generated scaffold support import differs from its template role"
@@ -507,7 +515,8 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           (Left "generated scaffold support imports home orphan or family witnesses")
         let exports = concatMap availNames (mi_exports iface)
         unless (all (\occurrence -> any (\name -> nameModule_maybe name == Just support
-            && occNameString (nameOccName name) == occurrence) exports) ["settle","resumeLifted"])
+            && occNameString (nameOccName name) == occurrence) exports) (if purpose == TypedSegmentTemplate
+            then ["segmentPure", "segmentBind", "segmentFail"] else ["settle","resumeLifted"]))
           (Left "generated scaffold support has another export owner")
         imported <- case [name | (NoPkgQual,name) <- ms_textual_imps summary
             , unLoc name == moduleName support
