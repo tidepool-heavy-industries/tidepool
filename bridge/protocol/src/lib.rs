@@ -35,6 +35,7 @@
 //! hand-written copy is deleted. [`effects::all`] is the migrated set;
 //! everything else still lives in `bridge/mcp/src/effect_defs.rs`.
 
+pub mod actor_profiles;
 pub mod effects;
 pub mod gen;
 pub mod hs;
@@ -63,6 +64,7 @@ pub fn generated_files() -> Vec<GeneratedFile> {
     }
     let mut files = all_files(&effects);
     files.extend(model_control::generated_files());
+    files.extend(actor_profiles::generated_files());
     files
 }
 

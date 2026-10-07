@@ -85,6 +85,22 @@ pub struct EffectiveRole {
 }
 
 impl EffectiveRole {
+    /// Concrete built-in Haskell requests, beneath their independent ceilings.
+    #[must_use]
+    pub fn public_profile(profile: exomonad_tool::PublicActorProfile) -> Self {
+        use exomonad_tool::PublicActorProfile;
+        let ceiling = match profile {
+            PublicActorProfile::Research | PublicActorProfile::ResearchLeaf => Self::research(),
+            PublicActorProfile::Coding => Self::coding(),
+            PublicActorProfile::Scaffolding => Self::scaffolding(DescendantBudget {
+                maximum_depth: 0,
+                maximum_active_children: Some(0),
+            }),
+            PublicActorProfile::Integration => Self::integration(),
+        };
+        ceiling.with_effect_keys(profile.effect_keys().to_vec())
+    }
+
     #[must_use]
     pub fn root() -> Self {
         Self::new(

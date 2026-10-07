@@ -279,7 +279,74 @@ pub(crate) struct PreparationConfig {
     pub(crate) roles: Vec<exomonad_actor::ActorRole>,
 }
 
+/// A configured concrete public request, or the root's actual host grants.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "profile", rename_all = "snake_case")]
+pub(crate) enum PreparationProfile {
+    Root,
+    Public(exomonad_tool::PublicActorProfile),
+}
+
+impl PreparationProfile {
+    pub(crate) fn effective_role(
+        &self,
+        policy: exomonad_actor::ResearchPolicy,
+    ) -> exomonad_actor::EffectiveRole {
+        match self {
+            Self::Root => exomonad_actor::EffectiveRole::root(),
+            Self::Public(profile) => exomonad_actor::EffectiveRole::public_profile(*profile),
+        }
+        .with_research_policy(policy)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelectedPreparationProfile {
+    pub(crate) profile: PreparationProfile,
+    pub(crate) requested_effects: Vec<exomonad_tool::ActorEffectKey>,
+}
+
 impl PreparationConfig {
+    pub(crate) fn selected_profiles(
+        &self,
+        policy: exomonad_actor::ResearchPolicy,
+    ) -> Result<Vec<SelectedPreparationProfile>, Box<dyn std::error::Error>> {
+        use exomonad_actor::ActorRole;
+        use exomonad_tool::PublicActorProfile;
+        let mut profiles = vec![PreparationProfile::Root];
+        for role in &self.roles {
+            let profile = PreparationProfile::Public(match role {
+                ActorRole::Root => continue,
+                ActorRole::Research => PublicActorProfile::Research,
+                ActorRole::Coding => PublicActorProfile::Coding,
+                ActorRole::Scaffolding => PublicActorProfile::Scaffolding,
+                ActorRole::Integration => PublicActorProfile::Integration,
+                ActorRole::Inherited => return Err(runtime_error(
+                    "preparation.roles requires a concrete role; inherited has no standalone effect row",
+                )),
+            });
+            if !profiles.contains(&profile) {
+                profiles.push(profile);
+            }
+        }
+        profiles
+            .into_iter()
+            .map(|profile| {
+                let role = profile.effective_role(policy);
+                if !role.respects_role_ceiling() {
+                    return Err(runtime_error(
+                        "public preparation profile exceeds its role ceiling",
+                    ));
+                }
+                Ok(SelectedPreparationProfile {
+                    profile,
+                    requested_effects: role.effect_keys().to_vec(),
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn selected_roles(
         &self,
         policy: exomonad_actor::ResearchPolicy,

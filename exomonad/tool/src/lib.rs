@@ -2,8 +2,11 @@
 //! concrete host projections.
 
 mod effects;
+#[path = "generated/public_profiles.rs"]
+mod public_profiles;
 pub mod surface;
 pub use effects::{ActorEffectKey, ToolEffectKey};
+pub use public_profiles::{PublicActorEffectRow, PublicActorProfile};
 
 /// When this invocation must settle relative to the caller's next inference.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
