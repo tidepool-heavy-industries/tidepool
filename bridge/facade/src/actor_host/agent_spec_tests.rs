@@ -1320,6 +1320,7 @@ async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
 
 const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
      import Tidepool.Actors.Exomonad\n\
+     import Tidepool.Effects.Core (Commands, Lookup)\n\
      import qualified AgentSpec as Spec\n\
      import qualified Project.Tools as Tools\n\
      Right seed <- checkpoint \"agent-spec child context\"\n\

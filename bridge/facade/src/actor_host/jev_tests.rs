@@ -1623,7 +1623,7 @@ fn watchdog_child_script(label: &str) -> String {
     format!(
         "import qualified Tidepool.Agent.Contract as A\n\
          import Tidepool.Actors.Exomonad\n\
-         import Tidepool.Effects.Core (ActorContext, Jev, Notifications, Reflect)\n\
+         import Tidepool.Effects.Core (Commands, Lookup, ActorContext, Jev, Notifications, Reflect)\n\
          import qualified AgentSpec as Spec\n\
          import qualified Project.Tools as Tools\n\
          Right seed <- checkpoint \"watchdog child context\"\n\

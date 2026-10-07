@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
 capturedValue <- pure (x :: Int)

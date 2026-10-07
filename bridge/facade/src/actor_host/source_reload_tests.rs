@@ -230,6 +230,7 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
 
 const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
      import Tidepool.Actors.Exomonad\n\
+     import Tidepool.Effects.Core (Commands, Lookup)\n\
      import Tidepool.Effects.Core (Source)\n\
      Right seed <- checkpoint \"source-reload child context\"\n\
      Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\

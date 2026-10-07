@@ -1,4 +1,5 @@
 import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
 
 let domainLabel = "domain" :: Text
 let consumerLabel = "consumer-tests" :: Text

@@ -3,6 +3,7 @@
 
 import Data.Text (Text)
 import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
 let x = 41 :: Int

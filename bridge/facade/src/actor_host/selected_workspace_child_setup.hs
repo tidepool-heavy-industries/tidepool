@@ -4,6 +4,7 @@
 import qualified Exomonad.Contrib.Types as Types
 import qualified Project.Work as Work
 import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
 Right selectedTree <- boundWorktree

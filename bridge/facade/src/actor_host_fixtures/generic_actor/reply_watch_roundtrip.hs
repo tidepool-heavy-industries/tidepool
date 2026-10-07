@@ -1,4 +1,5 @@
 import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
 
 data ReplyReport = ReplyReport Int deriving (Show, Eq)
 -- TIDEPOOL-ITEM --
