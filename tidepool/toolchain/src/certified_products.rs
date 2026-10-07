@@ -334,7 +334,36 @@ impl PendingCertifiedGroup {
     }
 }
 
-/// Native facts admitted from these exact immutable original bytes. Construction
+/// Complete local product facts authenticated from original bytes and headers.
+/// External group dependencies remain declarative until contextual admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AuthenticatedOriginalGroup {
+    owner: CachedHomeOwner,
+    group: Arc<ProjectedGroup>,
+    imports: Arc<[PendingImportOwner]>,
+}
+
+impl AuthenticatedOriginalGroup {
+    fn group(&self) -> &ProjectedGroup {
+        &self.group
+    }
+
+    fn imports(&self) -> &[PendingImportOwner] {
+        &self.imports
+    }
+
+    /// The caller has checked this group's selected dependency closure.
+    fn admitted(&self) -> PendingCertifiedGroup {
+        PendingCertifiedGroup {
+            origin: ProductOrigin::Cached,
+            owner: self.owner.clone(),
+            group: Arc::clone(&self.group),
+            imports: Arc::clone(&self.imports),
+        }
+    }
+}
+
+/// Native facts authenticated from these exact immutable original bytes. Construction
 /// stays in the issuer and original recovery authentication; selected contexts
 /// check exact group closure and current package evidence before reuse.
 #[derive(Debug)]
@@ -342,7 +371,7 @@ pub(crate) struct OriginalNativeWitness {
     owner: CachedHomeOwner,
     execution_source_sha256: Option<[u8; 32]>,
     anchors: [Arc<[u8]>; 4],
-    groups: Arc<[PendingCertifiedGroup]>,
+    groups: Arc<[AuthenticatedOriginalGroup]>,
     sources: Vec<CachedHomeOwner>,
     interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
@@ -365,18 +394,34 @@ impl OriginalNativeWitness {
 
 fn retain_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
-    mut groups: Vec<PendingCertifiedGroup>,
+    groups: Vec<PendingCertifiedGroup>,
+    witness: HomeCertification,
+) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
+    retain_authenticated_original_native(
+        product,
+        groups
+            .into_iter()
+            .map(|group| AuthenticatedOriginalGroup {
+                owner: group.owner,
+                group: group.group,
+                imports: group.imports,
+            })
+            .collect(),
+        witness,
+    )
+}
+
+fn retain_authenticated_original_native(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    groups: Vec<AuthenticatedOriginalGroup>,
     witness: HomeCertification,
 ) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
     if product.owner() != &witness.owner
-        || groups.iter().any(|group| group.owner() != product.owner())
+        || groups.iter().any(|group| &group.owner != product.owner())
     {
         return Err(CertificationError::Mismatch(
             "original native witness owner",
         ));
-    }
-    for group in &mut groups {
-        group.origin = ProductOrigin::Cached;
     }
     let native_requirements = native_requirements_from_witness(&witness);
     let facts = Arc::new(OriginalNativeWitness {
@@ -1598,7 +1643,9 @@ fn resolve_cold_recovery_source(
         binder,
     } = import
     else {
-        return Err(CertificationError::Mismatch("expected recovery source owner"));
+        return Err(CertificationError::Mismatch(
+            "expected recovery source owner",
+        ));
     };
     let key = (unit.clone(), module.clone());
     let owner = if key == (witness.owner.unit.clone(), witness.owner.module.clone()) {
@@ -3516,7 +3563,12 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
             }
         }
         if !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone())) {
-            result.extend(witness.groups.iter().cloned());
+            result.extend(
+                witness
+                    .groups
+                    .iter()
+                    .map(AuthenticatedOriginalGroup::admitted),
+            );
         }
     }
     Ok(result)
@@ -3582,11 +3634,25 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
             ));
         }
     }
-    let selected_groups = originals
-        .values()
-        .map(|(group, _)| (*group).clone())
-        .collect::<Vec<_>>();
-    let sources = certified_source_map(&selected_groups)?;
+    let mut sources = SourceGroupMap::new();
+    for (group, _) in originals.values() {
+        for binder in group.group.binders() {
+            if sources
+                .insert(
+                    (
+                        group.owner.unit.clone(),
+                        group.owner.module.clone(),
+                        group.group.original_ordinal(),
+                        binder.clone(),
+                    ),
+                    (group.owner.clone(), ProductOrigin::Cached),
+                )
+                .is_some()
+            {
+                return Err(CertificationError::Mismatch("duplicate source binder"));
+            }
+        }
+    }
     let mut inherited = BTreeSet::new();
     for group in current_groups {
         let key = (
@@ -3666,7 +3732,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
             }
         }
         if !inherited.contains(&key) {
-            additional.push(group.clone());
+            additional.push(group.admitted());
         }
     }
     Ok(additional)
@@ -3849,8 +3915,7 @@ pub(crate) fn certify_recovery_products_with_validation(
                 .groups
                 .into_iter()
                 .zip(imports)
-                .map(|(group, imports)| PendingCertifiedGroup {
-                    origin: ProductOrigin::Cached,
+                .map(|(group, imports)| AuthenticatedOriginalGroup {
                     owner: witness.owner.clone(),
                     group: Arc::new(group),
                     imports: imports.into(),
@@ -3873,7 +3938,7 @@ pub(crate) fn certify_recovery_products_with_validation(
                     .with_execution_source_with_validation(graph, validation)
                     .map_err(|_| CertificationError::Mismatch("execution source owner"))?;
             }
-            let product = retain_original_native(product, groups, witness)?;
+            let product = retain_authenticated_original_native(product, groups, witness)?;
             Ok(CertifiedRecoveredOriginal {
                 producer_sha256,
                 product,
@@ -5962,8 +6027,8 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         // The admission owns authenticated bytes; scoped views need no file reread.
         std::fs::remove_file(root.path().join(&original.product_path)).unwrap();
-        let first = inventory.context(&ids, vec![]).unwrap();
-        let second = inventory.context(&ids, vec![]).unwrap();
+        let first = inventory.context_all_groups(&ids, vec![]).unwrap();
+        let second = inventory.context_all_groups(&ids, vec![]).unwrap();
         let first_entries = first.artifact_view().entries();
         let second_entries = second.artifact_view().entries();
         assert!(first_entries
@@ -5989,7 +6054,7 @@ pub(crate) mod tests {
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].generation, 1);
         assert_eq!(required[0].artifact_id, value.artifact_id);
-        assert!(inventory.context(&ids[..1], vec![]).is_err());
+        assert!(inventory.context_all_groups(&ids[..1], vec![]).is_err());
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
@@ -6077,19 +6142,19 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(inventory
-            .context(
+            .context_all_groups(
                 &[descriptors[0].id, descriptors[1].id, descriptors[2].id],
                 vec![]
             )
             .is_ok());
         assert!(inventory
-            .context(
+            .context_all_groups(
                 &[descriptors[0].id, descriptors[3].id, descriptors[2].id],
                 vec![]
             )
             .is_ok());
         assert!(inventory
-            .context(
+            .context_all_groups(
                 &descriptors.iter().map(|entry| entry.id).collect::<Vec<_>>(),
                 vec![]
             )

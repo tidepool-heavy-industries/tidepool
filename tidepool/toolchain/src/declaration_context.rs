@@ -5217,7 +5217,7 @@ mod tests {
         )
     }
 
-    // Retain the pre-snapshot wire-v2 encoder as an independent compatibility oracle.
+    // Retain the old identity encoder to prove selection-aware keys invalidate it.
     fn legacy_semantic_sha256(context: &ExactDeclarationContext) -> [u8; 32] {
         use sha2::Digest;
         let mut lexical = context.lexical.iter().collect::<Vec<_>>();
@@ -5286,12 +5286,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata_identity_preserves_existing_v2_canonical_encoding() {
+    fn metadata_identity_invalidates_preselection_encoding_and_normalizes_lexical_order() {
         let (context, _) = metadata_fixture();
-        assert_eq!(context.semantic_sha256(), legacy_semantic_sha256(&context));
+        assert_ne!(context.semantic_sha256(), legacy_semantic_sha256(&context));
         let mut reordered = context.as_ref().clone();
         reordered.lexical.reverse();
-        assert_eq!(
+        assert_eq!(reordered.semantic_sha256(), context.semantic_sha256());
+        assert_ne!(
             reordered.semantic_sha256(),
             legacy_semantic_sha256(&reordered)
         );
@@ -5306,7 +5307,8 @@ mod tests {
                 )],
             )
             .unwrap();
-        assert_eq!(
+        assert_ne!(extended.semantic_sha256(), context.semantic_sha256());
+        assert_ne!(
             extended.semantic_sha256(),
             legacy_semantic_sha256(&extended)
         );
