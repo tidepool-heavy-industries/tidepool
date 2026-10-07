@@ -1265,294 +1265,183 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       capturePath = work </> "GeneratedScaffoldCapture.hs"
       target = work </> "Expr.hs"
       includes = [work]
+      supportOwner = ("main","GeneratedScaffoldHomeSupport")
+      requireHiddenSource label = requireOriginalSourceRejection label (ExecutionSourceUnavailable supportOwner)
       originalOwners = filter (/= "GeneratedScaffoldCapture") . preparedNames
   copyFile "test-source-boot/fixtures/GeneratedScaffoldHomeSupport.hs" supportPath
   copyFile "test-source-boot/fixtures/GeneratedScaffoldCapture.hs" capturePath
-  copyFile "test-source-boot/fixtures/GeneratedScaffoldHomeExpr.hs" target
+  copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing capturePath includes Nothing
   originalFixture <- capturePreparedFixture work original
   hiddenPath <- writeGenuineCandidateNativeScope [] (originalOwners original) work originalFixture
-  let hidden = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
-  protected <- readFile target
-  recipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected protected target "Expr" >>= either fail pure
+  hidden <- readExactScope hiddenPath >>= either fail pure
+  supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces hidden
+      , exactUnit artifact == fst supportOwner, exactModule artifact == snd supportOwner] of
+    [artifact] -> pure artifact
+    _ -> fail "generated scaffold capture lacks the home template interface"
+  let templateInterface = CheckedTemplateInterface (exactUnit supportInterface)
+        (exactModule supportInterface) (exactSha256 supportInterface) []
+      templateImports = CheckedTemplateImports [supportOwner] [templateInterface]
+      templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
+      protected = do
+        source <- readFile target
+        pure (unlines (take 5 (lines source)
+          ++ ["import GeneratedScaffoldHomeSupport hiding (irrelevant)", init preambleImportMarker]
+          ++ drop 5 (lines source)))
+  protectedSource <- protected
+  writeFile target protectedSource
+  recipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource protectedSource target "Expr"
+    >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
-      supportOwner = ("main","GeneratedScaffoldHomeSupport")
-      requireHiddenSource label = requireOriginalSourceRejection label (ExecutionSourceUnavailable supportOwner)
-      neighborDiagnostic scopePath = do
-        retained <- readExactScope scopePath >>= either fail pure
-        artifact <- case [iface | (iface,_,_) <- scopeInterfaces retained
-            , (exactUnit iface,exactModule iface) == supportOwner] of
-          [iface] -> pure iface
-          _ -> fail "scaffold neighbor fixture lost its support interface"
-        pure $ if any (/= supportOwner) (exactRequirements artifact)
-          then "generated scaffold support requires another home implementation owner"
-          else "generated scaffold support imports home orphan or family witnesses"
+      hiddenSession = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
+      protectedImport = "import GeneratedScaffoldHomeSupport hiding (irrelevant)"
+      shadowDirectory = work </> "Tidepool" </> "Internal"
+      shadowPath = shadowDirectory </> "Resume.hs"
+  createDirectoryIfMissing True shadowDirectory
+  writeFile shadowPath "module Tidepool.Internal.Resume where\nshadow = error \"home source shadow selected\"\n"
   withResidentPipelineSelected includes $ \compile -> do
-    admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hidden) target [] Nothing
+    admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $
-      fail "generated scaffold lost its actual settled result"
-    -- Native custody alone does not admit this authored import. Only the
-    -- protected scaffold occurrence above may use the hidden home owner.
-    general <- try (void (compile (PreparedProducts Nothing) Set.empty GeneralCompile
-      (Just hidden) target [] Nothing)) :: IO (Either InputRejection ())
-    case general of
-      Left (OriginalSourceSelectionRejected
-          (ExecutionSourceUnavailable ("main", "GeneratedScaffoldHomeSupport"))) ->
-        putStrLn "scaffold general-purpose import refused missing current-source authority"
-      Left reason -> fail ("scaffold general-purpose import had another input refusal: " ++ show reason)
-      Right () -> fail "scaffold general-purpose import acquired hidden source authority"
-    let extra = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHomeSupport"] ++ drop 5 (lines protected))
-    writeFile target extra
-    duplicate <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected extra target "Expr" >>= either fail pure
-    requireHiddenSource "additional authored hidden import" $
-      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile duplicate GeneralCompile)
-        (Just hidden) target [] Nothing
-    writeFile target (protected ++ "\ntampered = 0 :: Int\n")
+      fail "pinned Resume package did not settle the generated result"
+    supportText <- readFile supportPath
+    writeFile supportPath (T.unpack (T.replace "answer = 42" "answer = 43" (T.pack supportText)))
+    drifted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult drifted))) $
+      fail "generated scaffold followed changed current HomeSupport source instead of its sealed interface"
+    writeFile supportPath supportText
+    let packageRoots = concatMap packageInterfaces (Map.elems (pprPackageImports admitted))
+    selectedResumeUnit <- maybe (fail "pinned tidepool-resume package unit is unavailable") pure
+      (lookupPackageName (ue_units (hsc_unit_env (prHscEnv (pprPipelineResult admitted))))
+        (PackageName (fsLit "tidepool-resume")))
+    packageOwner <- findImportedModule (prHscEnv (pprPipelineResult admitted))
+      (mkModuleName "Tidepool.Internal.Resume") (OtherPkg selectedResumeUnit) >>= \case
+        Found _ owner | moduleUnit owner == selectedResumeUnit -> pure owner
+        _ -> fail "pinned resume package selected another owner"
+    unless (any (\root -> packageModule root == "Tidepool.Internal.Resume"
+        && packageUnit root == unitString selectedResumeUnit) packageRoots
+        && moduleUnit packageOwner == selectedResumeUnit
+        && Map.notMember (mkModuleName "Tidepool.Internal.Resume") (pprFinalizedModules admitted)) $
+      fail "generated scaffold used a Resume home owner instead of the pinned package"
+    let compiledModules = pprModules admitted
+    resumeModule <- case [prepared | prepared <- compiledModules
+        , moduleNameString (moduleName (pmModule prepared)) == "Expr"] of
+      [prepared] -> pure prepared
+      _ -> fail "generated scaffold did not prepare its Resume expression module"
+    resumeTops <- either (fail . show) pure (preparedTopIdentities [resumeModule])
+    unless (any ((== "__resume") . symbolOccurrence) resumeTops) $
+      fail "generated scaffold did not retain its resume recovery entry"
+    requireHiddenSource "ordinary source import has no generated-template authority" $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just hiddenSession) target [] Nothing
+    duplicateSource <- either fail pure $ replaceTemplateMarker preambleImportMarker
+      (protectedImport ++ "\n" ++ preambleImportMarker) protectedSource
+    writeFile target duplicateSource
+    duplicateRecipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource duplicateSource target "Expr"
+      >>= either fail pure
+    requireHiddenSource "additional authored home import has no protected occurrence slot" $
+      compile (PreparedProducts Nothing) Set.empty
+        (GeneratedScaffoldCompile duplicateRecipe (CheckedItemCompile [] Nothing []))
+        (Just hiddenSession) target [] Nothing
+    writeFile target (protectedSource ++ "\ntampered = 0 :: Int\n")
     requireUserError "changed rendered target"
       "generated scaffold target differs from its protected recipe" $
-      compile (PreparedProducts Nothing) Set.empty purpose (Just hidden) target [] Nothing
-    writeFile target protected
+      compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
+    writeFile target protectedSource
     copyFile "test-source-boot/fixtures/GeneratedScaffoldHelper.hs" (work </> "GeneratedScaffoldHelper.hs")
-    let helperTarget = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHelper"] ++ drop 5 (lines protected))
+    helperTarget <- either fail pure $ replaceTemplateMarker preambleImportMarker
+      ("import GeneratedScaffoldHelper\n" ++ preambleImportMarker) protectedSource
     writeFile target helperTarget
-    helperRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected helperTarget target "Expr" >>= either fail pure
-    requireHiddenSource "fresh helper importing hidden support" $
-      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile helperRecipe GeneralCompile)
-        (Just hidden) target [] Nothing
-    writeFile target ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected)
-    lineRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
-    requireSourceSelectionInput "logical LINE import location differs from protected occurrence"
-      "generated scaffold import occurrence differs from its protected recipe" $
-      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile lineRecipe GeneralCompile)
-        (Just hidden) target [] Nothing
-    writeFile target protected
-    admittedScope <- readExactScope hiddenPath >>= either fail pure
-    unless (null (scopeLexical admittedScope)
-        && Set.fromList (map originalModule (scopeProducts admittedScope))
-          == Set.fromList (originalOwners original)) $
-      fail "scaffold capture changed lexical authority or original native inventory"
-    supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces admittedScope
-        , exactUnit artifact == "main", exactModule artifact == "GeneratedScaffoldHomeSupport"] of
-      [artifact] -> pure artifact
-      _ -> fail "template interface fixture lacks its exact captured owner"
-    let templateInterface = CheckedTemplateInterface (exactUnit supportInterface)
-          (exactModule supportInterface) (exactSha256 supportInterface) []
-        withTemplate = unlines (take 5 (lines protected)
-          ++ ["import GeneratedScaffoldHomeSupport hiding (irrelevant)", init preambleImportMarker] ++ drop 5 (lines protected))
-    writeFile target withTemplate
-    let templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
-        templateImports = CheckedTemplateImports templateRoot [templateInterface]
-    capturedTemplate <- generatedScaffoldRecipe parserFlags templateImports withTemplate withTemplate target "Expr"
+    helperRecipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource helperTarget target "Expr"
       >>= either fail pure
-    let capturedPurpose = GeneratedScaffoldCompile capturedTemplate (CheckedItemCompile [] Nothing [])
-        protectedImport = "import GeneratedScaffoldHomeSupport hiding (irrelevant)"
-    duplicateProtected <- either fail pure
-      (replaceTemplateMarker preambleImportMarker (protectedImport ++ "\n" ++ preambleImportMarker) withTemplate)
-    writeFile target duplicateProtected
+    requireHiddenSource "fresh helper importing hidden home support" $
+      compile (PreparedProducts Nothing) Set.empty
+        (GeneratedScaffoldCompile helperRecipe GeneralCompile) (Just hiddenSession) target [] Nothing
+    let lineSource = "{-# LINE 100 \"authored.hs\" #-}\n" ++ protectedSource
+    writeFile target lineSource
+    lineRecipe <- generatedScaffoldRecipe parserFlags templateImports lineSource lineSource target "Expr"
+      >>= either fail pure
+    requireSourceSelectionInput "logical LINE import location differs from protected occurrence"
+      "generated scaffold package import occurrence differs from its protected recipe" $
+      compile (PreparedProducts Nothing) Set.empty
+        (GeneratedScaffoldCompile lineRecipe GeneralCompile) (Just hiddenSession) target [] Nothing
+    duplicateProtected <- either fail pure $ replaceTemplateMarker preambleImportMarker
+      (protectedImport ++ "\n" ++ preambleImportMarker) protectedSource
     protectedOccurrences <- either fail pure (captureProtectedTemplateImports parserFlags duplicateProtected)
     renderedOccurrences <- either fail pure (renderProtectedTemplateImports 1 protectedOccurrences)
     let renderedDuplicate = "{-# LANGUAGE PackageImports #-}\n" ++ duplicateProtected
     writeFile target renderedDuplicate
-    duplicateRecipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
+    duplicateRecipeWithProtected <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
       renderedOccurrences duplicateProtected renderedDuplicate target "Expr" >>= either fail pure
-    let duplicatePurpose = GeneratedScaffoldCompile duplicateRecipe (CheckedItemCompile [] Nothing [])
-    interfaceOnly <- compile (PreparedProducts Nothing) Set.empty duplicatePurpose (Just hidden) target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult interfaceOnly))) $
-      fail "duplicate protected template imports changed the native result"
-    missingProtectedDuplicate <- either fail pure
-      (replaceTemplateMarker (protectedImport ++ "\n" ++ preambleImportMarker) preambleImportMarker duplicateProtected)
-    missingDuplicateRecipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
-      renderedOccurrences duplicateProtected ("{-# LANGUAGE PackageImports #-}\n" ++ missingProtectedDuplicate) target "Expr"
-    unless (case missingDuplicateRecipe of Left _ -> True; Right _ -> False) $
+    duplicateResult <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile duplicateRecipeWithProtected (CheckedItemCompile [] Nothing []))
+      (Just hiddenSession) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult duplicateResult))) $
+      fail "duplicate protected template imports changed the settled result"
+    missingProtected <- either fail pure
+      (replaceTemplateMarker (protectedImport ++ "\n" ++ preambleImportMarker)
+        preambleImportMarker duplicateProtected)
+    missingRecipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
+      renderedOccurrences duplicateProtected ("{-# LANGUAGE PackageImports #-}\n" ++ missingProtected)
+      target "Expr"
+    unless (case missingRecipe of Left _ -> True; Right _ -> False) $
       fail "a missing protected duplicate retained its occurrence authority"
     let changedRestriction = T.unpack
-          (T.replace "hiding (irrelevant)" "hiding (answer)" (T.pack withTemplate))
+          (T.replace "hiding (irrelevant)" "hiding (answer)" (T.pack protectedSource))
     changedRestrictionRecipe <- generatedScaffoldRecipe parserFlags templateImports
-      withTemplate changedRestriction target "Expr"
+      protectedSource changedRestriction target "Expr"
     unless (case changedRestrictionRecipe of Left _ -> True; Right _ -> False) $
       fail "changed protected import list retained template authority"
-    let supportOwner = ("main","TemplateSupport")
-        rootOwner = ("main","TemplateRoot")
-        supportInterface = CheckedTemplateInterface (fst supportOwner) (snd supportOwner) (replicate 64 '1') []
-        rootInterface = CheckedTemplateInterface (fst rootOwner) (snd rootOwner) (replicate 64 '2') [supportOwner]
-        rootGraph = [rootInterface,supportInterface]
-        rootTemplate = unlines (take 5 (lines protected) ++ ["import TemplateRoot"] ++ drop 5 (lines protected))
-        leakedSupport = unlines (take 5 (lines protected)
-          ++ ["import TemplateRoot","import TemplateSupport"] ++ drop 5 (lines protected))
-    writeFile target rootTemplate
-    _ <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
-      rootTemplate rootTemplate target "Expr" >>= either fail pure
-    let prefixCollision = T.unpack (T.replace "import TemplateRoot" "import TemplateRootExtra hiding (x)"
-          (T.pack rootTemplate))
-    prefixRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
-      rootTemplate prefixCollision target "Expr"
-    unless (case prefixRecipe of Left _ -> True; Right _ -> False) $
-      fail "a prefixed module name borrowed the protected template root"
-    let instanceOnlyTemplate = unlines (take 5 (lines protected)
-          ++ ["import TemplateRoot ()"] ++ drop 5 (lines protected))
-    _ <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
-      instanceOnlyTemplate instanceOnlyTemplate target "Expr" >>= either fail pure
-    writeFile target leakedSupport
-    supportAsRoot <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [rootOwner] rootGraph)
-      leakedSupport leakedSupport target "Expr"
-    case supportAsRoot of
-      Right _ -> pure ()
-      Left message -> fail ("support-only current import was rejected before current-source selection: " ++ message)
-    let checkPath = work </> "CellCheck.hs"
-        checkingTemplate = "module CellCheck where\ncell = 1\n"
-    writeFile checkPath checkingTemplate
-    _ <- generatedCheckingTemplateRecipe parserFlags (CheckedTemplateImports [] [])
-      checkingTemplate checkingTemplate checkPath "CellCheck" >>= either fail pure
-    writeFile target withTemplate
-    requireSourceSelectionInput "template interface cannot replace paired native owner"
-      "generated scaffold lacks one paired original native owner" $
-      compile (PreparedProducts Nothing) Set.empty
-        (ExactScopeCompile capturedPurpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
-    wrongSeal <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports templateRoot [templateInterface {templateInterfaceSha256=replicate 64 'f'}])
-      withTemplate withTemplate target "Expr" >>= either fail pure
-    requireSourceSelectionInput "changed initial template interface seal"
-      "checked template graph interface seal changed" $
-      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile wrongSeal GeneralCompile)
-        (Just hidden) target [] Nothing
-    let secondImport = "import qualified GeneratedScaffoldHomeSupport as AuthoredSecond"
-    authoredExtra <- either fail pure
-      (replaceTemplateMarker preambleImportMarker (secondImport ++ "\n" ++ preambleImportMarker) duplicateProtected)
-    writeFile target authoredExtra
-    secondRecipe <- generatedScaffoldRecipe parserFlags templateImports duplicateProtected authoredExtra target "Expr"
-      >>= either fail pure
-    requireHiddenSource "authored same-owner import has no protected occurrence slot" $
-      compile (PreparedProducts Nothing) Set.empty
-        (GeneratedScaffoldCompile secondRecipe (CheckedItemCompile [] Nothing []))
-        (Just hidden) target [] Nothing
-    let qualifiedTemplate = unlines (take 5 (lines protected)
-          ++ ["import qualified GeneratedScaffoldHomeSupport as CapturedTemplate"] ++ drop 5 (lines protected))
-    writeFile target qualifiedTemplate
-    qualifiedRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedTemplate qualifiedTemplate target "Expr"
+    let qualifiedImport = "import qualified GeneratedScaffoldHomeSupport as CapturedTemplate"
+    qualifiedSource <- either fail pure $ replaceTemplateMarker preambleImportMarker
+      (qualifiedImport ++ "\n" ++ preambleImportMarker) protectedSource
+    writeFile target qualifiedSource
+    qualifiedRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedSource qualifiedSource target "Expr"
       >>= either fail pure
     qualifiedResult <- compile (PreparedProducts Nothing) Set.empty
-      (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing [])) (Just hidden) target [] Nothing
+      (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing []))
+      (Just hiddenSession) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult qualifiedResult))) $
-      fail "qualified protected template changed original execution"
-    let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedTemplate))
-    aliasRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedTemplate changedAlias target "Expr"
+      fail "qualified protected template import changed the settled result"
+    let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedSource))
+    aliasRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedSource changedAlias target "Expr"
     unless (case aliasRecipe of Left _ -> True; Right _ -> False) $
       fail "changed qualified import alias retained protected template authority"
-    writeFile target (withTemplate ++ "\ntamperedTemplateTarget = 0 :: Int\n")
-    requireUserError "same owner with changed template target bytes"
-      "generated scaffold target differs from its protected recipe" $
-      compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
-    writeFile target protected
+    wrongSeal <- generatedScaffoldRecipe parserFlags
+      (CheckedTemplateImports templateRoot [templateInterface {templateInterfaceSha256=replicate 64 'f'}])
+      protectedSource protectedSource target "Expr" >>= either fail pure
+    requireSourceSelectionInput "changed template interface seal"
+      "checked template graph interface seal changed" $
+      compile (PreparedProducts Nothing) Set.empty
+        (GeneratedScaffoldCompile wrongSeal GeneralCompile) (Just hiddenSession) target [] Nothing
+    writeFile target protectedSource
     forM_ ["Bind","Capture"] $ \name -> do
-      let rendered = T.unpack (T.replace "module Expr where" (T.pack ("module " ++ name ++ " where")) (T.pack protected))
+      let rendered = T.unpack (T.replace "module Expr where" (T.pack ("module " ++ name ++ " where")) (T.pack protectedSource))
           generatedPath = work </> (name ++ ".hs")
       writeFile generatedPath rendered
-      generated <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected rendered generatedPath name >>= either fail pure
-      let wrapped = ExactScopeCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) admittedScope
-      checked <- compile (PreparedProducts Nothing) Set.empty wrapped (Just hidden) generatedPath [] Nothing
+      generated <- generatedScaffoldRecipe parserFlags templateImports protectedSource rendered generatedPath name
+        >>= either fail pure
+      checked <- compile (PreparedProducts Nothing) Set.empty
+        (ExactScopeCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) hidden)
+        (Just hiddenSession) generatedPath [] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $
-        fail ("generated " ++ name ++ " lost its settled result or ExactScope wrapper")
-    requireSourceSelectionInput "scope omits its required native product"
-      "generated scaffold lacks one paired original native owner" $
-      compile (PreparedProducts Nothing) Set.empty
-        (ExactScopeCompile purpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
-    let alteredOwner product' = product' {originalIfaceSha256=replicate 64 'f'}
-        malformedScope = admittedScope {scopeProducts=map alteredOwner (scopeProducts admittedScope)}
-    requireUserError "mismatched native product/interface seal"
-      "user error (exact interface evidence is incomplete or lacks native module proof)" $
-      compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose malformedScope)
-        (Just hidden) target [] Nothing
-    supportText <- BSC.unpack <$> BS.readFile supportPath
-    let incompleteExports = unlines
-          [ if line == "module GeneratedScaffoldHomeSupport (answer) where"
-              then "module GeneratedScaffoldHomeSupport () where"
-              else line
-          | line <- lines supportText
-          ]
-    writeFile supportPath incompleteExports
-    missingExport <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing capturePath [] Nothing
-    missingExportFixture <- capturePreparedFixture work missingExport
-    missingExportPath <- writeGenuineCandidateNativeScope [] (originalOwners missingExport) work missingExportFixture
-    requireSourceSelectionInput "missing actual home-support export"
-      "generated scaffold support has another export owner" $
-      compile (PreparedProducts Nothing) Set.empty purpose
-        (Just hidden {ssExactScope=Just missingExportPath}) target [] Nothing
-    forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs"] $ \name ->
-      copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-    let withOrphan = unlines [if line == "import Prelude" then
-          "import Prelude\nimport ExecutionHiddenOrphan ()" else line | line <- lines supportText]
-    writeFile supportPath withOrphan
-    hiddenNeighbor <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing capturePath [] Nothing
-    neighborFixture <- capturePreparedFixture work hiddenNeighbor
-    neighborPath <- writeGenuineCandidateNativeScope [] (originalOwners hiddenNeighbor) work neighborFixture
-    orphanDiagnostic <- neighborDiagnostic neighborPath
-    requireSourceSelectionInput "hidden orphan neighbor through scaffold support" orphanDiagnostic $
-      compile (PreparedProducts Nothing) Set.empty purpose
-        (Just hidden {ssExactScope=Just neighborPath}) target [] Nothing
-    copyFile "test-source-boot/fixtures/MetadataHiddenFamily.hs" (work </> "MetadataHiddenFamily.hs")
-    let withFamily = unlines [if line == "import Prelude" then
-          "import Prelude\nimport MetadataHiddenFamily ()" else line | line <- lines supportText]
-    writeFile supportPath withFamily
-    hiddenFamily <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing capturePath [] Nothing
-    familyFixture <- capturePreparedFixture work hiddenFamily
-    familyPath <- writeGenuineCandidateNativeScope [] (originalOwners hiddenFamily) work familyFixture
-    familyDiagnostic <- neighborDiagnostic familyPath
-    requireSourceSelectionInput "hidden family neighbor through scaffold support" familyDiagnostic $
-      compile (PreparedProducts Nothing) Set.empty purpose
-        (Just hidden {ssExactScope=Just familyPath}) target [] Nothing
-    writeFile supportPath supportText
+        fail ("generated " ++ name ++ " lost the settled result or exact template authority")
     let metadataPath = work </> "CellCheck.hs"
     copyFile "test-source-boot/fixtures/GeneratedScaffoldMetadata.hs" metadataPath
     metadata <- sourceFailureDiagnostics $
-      compile CheckedEnvironment Set.empty GeneralCompile (Just hidden) metadataPath [] Nothing
+      compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenSession) metadataPath [] Nothing
     case metadata of
       Left diagnostics | any (\diagnostic -> sourceDiagnosticAt metadataPath "Not in scope" diagnostic
-          && "GeneratedScaffoldHomeSupport.answer" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
-      Left diagnostics -> fail ("authored metadata alias had another source failure: " ++ show diagnostics)
-      Right _ -> fail "authored metadata acquired the generated scaffold alias"
-    -- A current source implementation uses ordinary source admission, not the
-    -- generated edge exception. It must not require a retained exact product.
-    cold <- compile (PreparedProducts Nothing) Set.empty purpose Nothing target [] Nothing
+          && "TidepoolResume.settle" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+      Left diagnostics -> fail ("authored metadata had another source failure: " ++ show diagnostics)
+      Right _ -> fail "authored metadata acquired generated scaffold package authority"
+    writeFile target protectedSource
+    coldRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] [])
+      protectedSource protectedSource target "Expr" >>= either fail pure
+    cold <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile coldRecipe GeneralCompile) Nothing target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult cold))) $
-      fail "generated cold source scaffold failed ordinary support admission"
-    selectedResumeUnit <- maybe (fail "pinned tidepool-resume package unit is unavailable") pure
-      (lookupPackageName (ue_units (hsc_unit_env (prHscEnv (pprPipelineResult cold))))
-        (PackageName (fsLit "tidepool-resume")))
-    packageOwner <- findImportedModule (prHscEnv (pprPipelineResult cold))
-      (mkModuleName "Tidepool.Internal.Resume") (OtherPkg selectedResumeUnit) >>= \case
-        Found _ owner | moduleUnit owner == selectedResumeUnit -> pure owner
-        _ -> fail "pinned resume package selected another owner"
-    let packageTarget = work </> "ResumePackageExpr.hs"
-        packageImport = "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume"
-        packageSource = unlines
-          [ "{-# LANGUAGE DataKinds, PackageImports #-}"
-          , "module ResumePackageExpr where"
-          , "import Control.Monad.Freer (Eff)"
-          , packageImport
-          , "__result :: Int"
-          , "__result = case TidepoolResume.settle (pure 42 :: Eff '[] Int) of"
-          , "  TidepoolResume.Done value -> value"
-          , "  TidepoolResume.Suspended _ _ -> error \"unexpected effect\""
-          , "__prepared = TidepoolResume.settle (pure __result :: Eff '[] Int)"
-          , "__resume q value = TidepoolResume.settle (TidepoolResume.resumeLifted q value)"
-          ]
-        shadowDirectory = work </> "Tidepool" </> "Internal"
-        shadowPath = shadowDirectory </> "Resume.hs"
-    createDirectoryIfMissing True shadowDirectory
-    writeFile shadowPath "module Tidepool.Internal.Resume where\nshadow = error \"home source shadow selected\"\n"
-    writeFile packageTarget packageSource
-    packageResult <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing packageTarget [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult packageResult))) $
-      fail "pinned resume package failed settle recovery with a current source shadow present"
-    let packageRoots = concatMap packageInterfaces (Map.elems (pprPackageImports packageResult))
-    unless (any (\root -> packageModule root == "Tidepool.Internal.Resume"
-        && packageUnit root == unitIdString selectedResumeUnit) packageRoots
-        && moduleUnit packageOwner == selectedResumeUnit) $
-      fail "resume compilation did not retain evidence for the selected exact package unit"
-  putStrLn "generated scaffold home protection and pinned resume package: settled result, exact package owner, source-shadow isolation, and protected import refusal checks passed"
+      fail "cold generated scaffold failed with current package and template sources"
+  putStrLn "generated scaffold package import: exact tidepool-resume owner and settled/resume entries; generic hidden template, duplicate, alias, helper, source-drift, and interface-seal controls passed"
 
 -- Native and lexical roots share one immutable compiler capture. The witness
 -- is retained only as canonical interface/Core custody in the emitted scope.
