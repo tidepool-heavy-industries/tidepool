@@ -141,7 +141,13 @@ async fn custody_is_exact_and_released_only_after_last_owner() {
         .unwrap();
     let host = custody.clone();
     drop(host);
-    assert!(bindings.lock().current(&bound_tree).is_some());
+    assert!(bindings
+        .lock()
+        .membership(
+            &bound_tree,
+            &WorktreePrincipal::exact_actor("custody-test", actor.id.0, actor.incarnation.0),
+        )
+        .is_some());
     drop(custody);
     assert!(admission.authority.bound_worktree(actor.into()).is_none());
     assert_eq!(
@@ -184,7 +190,13 @@ async fn custody_retains_binding_when_process_cleanup_is_uncertain() {
     let backing = admission.manager.lookup(&bound_tree).unwrap().unwrap();
     custody.process_may_exist();
     drop(custody);
-    assert!(bindings.lock().current(&bound_tree).is_some());
+    assert!(bindings
+        .lock()
+        .membership(
+            &bound_tree,
+            &WorktreePrincipal::exact_actor("custody-test", actor.id.0, actor.incarnation.0),
+        )
+        .is_some());
     assert!(backing.cwd().join("README.md").exists());
 }
 
@@ -200,10 +212,14 @@ async fn custody_rejects_missing_workspaces_without_binding() {
         assert!(admission.prepare(actor, invalid, None).await.is_err());
     }
     for raw in ["../outside", "wt-absent"] {
-        assert!(bindings
-            .lock()
-            .current(&WorktreeId::from_raw(raw))
-            .is_none());
+        assert_eq!(
+            bindings
+                .lock()
+                .participants(&WorktreeId::from_raw(raw))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }
 
@@ -384,9 +400,10 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     // The observer's inherited source tip includes `worker`, whose typed
     // ExitCell is still pending at this fork boundary.
     let root = campaign.root_installation.policy.clone();
+    let observer_policy = root.clone();
     let observer_dispatch = tokio::spawn(async move {
         tests::dispatch_haskell_script(
-            root.as_ref(),
+            observer_policy.as_ref(),
             include_str!("inherited_response_observer.hs"),
         )
         .await
@@ -905,7 +922,10 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     }
     drop(installed);
     for id in ids {
-        assert!(campaign.bindings.lock().current(&id).is_none());
+        assert_eq!(
+            campaign.bindings.lock().participants(&id).unwrap().count(),
+            0
+        );
         assert!(
             campaign
                 .worktrees
