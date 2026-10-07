@@ -346,7 +346,9 @@ encodeIdentity identityValue = encodeListLen 5
   <> maybe encodeNull encodeString (symbolRecordParent identityValue)
 
 encodeRep :: RuntimeRep -> Encoding
-encodeRep rep = let (tag, bits) = case rep of
+encodeRep rep = encodeListLen 2 <> encodeString tag <> encodeWord bits
+  where
+    (tag, bits) = case rep of
       VoidRep -> ("void", 0)
       LiftedRefRep -> ("lifted", 0)
       UnliftedRefRep -> ("unlifted", 0)
@@ -354,15 +356,16 @@ encodeRep rep = let (tag, bits) = case rep of
       IntRep width -> ("int", fromIntegral width)
       WordRep width -> ("word", fromIntegral width)
       FloatRep width -> ("float", fromIntegral width)
-    in encodeListLen 2 <> encodeString tag <> encodeWord bits
 
 encodeSignature :: Signature -> Encoding
-encodeSignature signature = let (tag, results) = case signatureResults signature of
+encodeSignature signature = encodeListLen 2
+  <> encodeList (map encodeRep (signatureArguments signature))
+  <> encodeListLen 2 <> encodeString tag <> encodeList (map encodeRep results)
+  where
+    (tag, results) = case signatureResults signature of
       Returns reps -> ("returns", reps)
       NoSuccess -> ("no_success", [])
       CallerResult -> ("caller_result", [])
-    in encodeListLen 2 <> encodeList (map encodeRep (signatureArguments signature))
-      <> encodeListLen 2 <> encodeString tag <> encodeList (map encodeRep results)
 
 encodeList :: [Encoding] -> Encoding
 encodeList values = encodeListLen (fromIntegral (length values)) <> mconcat values
