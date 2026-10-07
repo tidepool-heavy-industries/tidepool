@@ -418,7 +418,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
     let accepted = ordinary_receipts(&initial_bytes, &parsed, &initial_worker);
     let packet = CertifiedReceipt {
         source_recipe: WorkerExecutionSource::Ordinary,
-        finalization: fixture_finalization(Some(root.path()), &accepted),
+        finalization: fixture_finalization_from_products(Some(root.path()), &accepted, &parsed),
         modules: accepted,
         targets: BTreeMap::new(),
         packages: BTreeMap::new(),
@@ -571,7 +571,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         source_recipe: WorkerExecutionSource::ExactUnavailable(
             SourceRecipeUnavailable::NoFreshOriginals,
         ),
-        finalization: fixture_finalization(None, &promoted_receipts),
+        finalization: fixture_finalization_from_products(None, &promoted_receipts, &promoted),
         modules: promoted_receipts,
         targets: BTreeMap::new(),
         packages: BTreeMap::new(),

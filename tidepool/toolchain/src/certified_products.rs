@@ -9981,6 +9981,37 @@ pub(crate) mod tests {
         root: Option<&Path>,
         modules: &[CertifiedModuleReceipt],
     ) -> FinalizationEnvelope {
+        const INTERFACE: &[u8] = &[0x42];
+        let interfaces = modules
+            .iter()
+            .map(|module| ((module.unit.clone(), module.module.clone()), INTERFACE))
+            .collect();
+        fixture_finalization_from_interfaces(root, modules, interfaces)
+    }
+
+    fn fixture_finalization_from_products(
+        root: Option<&Path>,
+        modules: &[CertifiedModuleReceipt],
+        products: &ParsedModuleProducts,
+    ) -> FinalizationEnvelope {
+        let interfaces = products
+            .products()
+            .iter()
+            .map(|product| {
+                (
+                    (product.unit.clone(), product.module.clone()),
+                    product.interface.as_slice(),
+                )
+            })
+            .collect();
+        fixture_finalization_from_interfaces(root, modules, interfaces)
+    }
+
+    fn fixture_finalization_from_interfaces(
+        root: Option<&Path>,
+        modules: &[CertifiedModuleReceipt],
+        interfaces: BTreeMap<(String, String), &[u8]>,
+    ) -> FinalizationEnvelope {
         let mut finalized = BTreeMap::new();
         let mut home_units = BTreeSet::from(["main".to_owned()]);
         for module in modules {
@@ -9994,13 +10025,17 @@ pub(crate) mod tests {
             if module.origin != ProductOrigin::Fresh {
                 continue;
             }
+            let interface_bytes = *interfaces
+                .get(&(module.unit.clone(), module.module.clone()))
+                .expect("fresh finalization fixture requires actual interface bytes");
+            let interface_sha256 = sha(interface_bytes);
             let package_value = value_array([
                 value_text("TPPKGROOTS"),
                 value_text("2"),
                 value_array([
                     value_text(&module.unit),
                     value_text(&module.module),
-                    value_text(hex(&module.skinny_iface_sha256)),
+                    value_text(hex(&interface_sha256)),
                 ]),
                 value_array([]),
                 value_array([]),
@@ -10015,14 +10050,14 @@ pub(crate) mod tests {
                 sha256: digest,
                 bytes: bytes.len() as u64,
             };
-            let interface = descriptor("hi", &[0x42], module.skinny_iface_sha256);
+            let interface = descriptor("hi", interface_bytes, interface_sha256);
             let package_imports = descriptor("packages", &packages, sha(&packages));
             let core_bytes = b"fixture-finalized-core";
             let core = descriptor("core", core_bytes, sha(core_bytes));
             if let Some(root) = root {
                 std::fs::create_dir_all(root.join("finalized-fixture")).unwrap();
                 for (artifact, bytes) in [
-                    (&interface, &[0x42][..]),
+                    (&interface, interface_bytes),
                     (&package_imports, packages.as_slice()),
                     (&core, core_bytes.as_slice()),
                 ] {
