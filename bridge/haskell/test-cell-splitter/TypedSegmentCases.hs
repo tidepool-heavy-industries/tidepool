@@ -6,8 +6,9 @@ import Control.Monad.IO.Class (liftIO)
 import Data.List (isPrefixOf)
 import GHC
 import GHC.Driver.Backend (interpreterBackend)
+import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
 import GHC.Builtin.Types (intTy)
-import GHC.Core.Type (eqType)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Name (getOccString)
 import GHC.Types.SourceError (SourceError)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
@@ -60,7 +61,7 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
       writeFile path (preparedTypedSegmentSource source)
       result <- try (runRequest (pure ()) $ \compiler -> compiler
         (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))
-        mempty GeneralCompile Nothing path includes Nothing)
+        mempty (TypedSegmentCompile plan GeneralCompile) Nothing path includes Nothing)
           :: IO (Either SomeException PreparedSegmentProductsResult)
       case (expected, result) of
         (PrepareAccepted, Right products) -> do
@@ -88,7 +89,7 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
           | Just failure <- fromException exception, captureRefusal failure -> pure ()
         (PrepareSourceRefusal, Left exception)
           | Just sourceError <- fromException exception ->
-              unless (not (null (diagsFromSourceError sourceError)))
+              unless (not (null (diagsFromSourceError (sourceError :: SourceError))))
                 (fail (name ++ ": GHC source refusal has no diagnostics"))
         (_, Left exception) -> fail (name ++ ": unexpected compiler failure " ++ show exception)
         (_, Right _) -> fail (name ++ ": expected compiler refusal was accepted")
@@ -114,13 +115,13 @@ preparationCases =
     , "constrained-open-let", "zero-let-lazy", "zero-let-bang", "zero-let-strict"
     , "strict-closure-let", "wildcard-action", "bang-wildcard-action" ]]
   ++ [(name, PrepareTypedRefusal) | name <-
-    [ "unresolved-action", "unresolved-dependent", "unresolved-read"
+    [ "unresolved-action", "unresolved-dependent"
     , "unresolved-phantom-action", "open-let", "cross-item-existential" ]]
-  ++ [(name, PrepareSourceRefusal) | name <- ["wrong-row", "wrong-observation-row"]]
+  ++ [(name, PrepareSourceRefusal) | name <- ["wrong-row", "wrong-observation-row", "unresolved-read"]]
 
 preparationTemplate :: String -> String
 preparationTemplate owner = unlines
-  [ "{-# LANGUAGE GHC2024, NamedDefaults, ScopedTypeVariables, TypeApplications, BangPatterns, UndecidableInstances #-}"
+  [ "{-# LANGUAGE GHC2024, NamedDefaults, ScopedTypeVariables, TypeApplications, BangPatterns, UndecidableInstances, ExtendedDefaultRules #-}"
   , "{{CELL_PRAGMAS}}"
   , "module " ++ owner ++ " where"
   , "import Control.Monad.Freer (Eff)"
@@ -161,7 +162,8 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
     void (setSessionDynFlags flags
-      { backend = interpreterBackend, ghcLink = LinkInMemory, importPaths = includes })
+      { backend = interpreterBackend, ghcLink = LinkInMemory, importPaths = includes
+      , packageDBFlags = [PackageDB GlobalPkgDb, ClearPackageDBs] })
     sources <- liftIO $ forM (zip [0 :: Int ..] differentialCases) $ \(index, control) -> do
       body <- readFile (fixtures </> differentialFixture control ++ ".hs")
       let ordinary = "TypedOrdinary" ++ show index
@@ -241,13 +243,17 @@ differentialCases =
   , success "substitution-shadow" "_ <- record first\n_ <- record second\n" [4, 13]
   , success "lazy-nested-bottom" "_ <- record answer\n" [7]
   , success "nested-existential" "_ <- record (if name == \"Int\" then 41 else 0)\n" [41]
+  , success "cross-item-existential" "_ <- record (if name == \"Int\" then 41 else 0)\n" [41]
+  , success "rank-n-value" "_ <- record intValue\n_ <- record doubleValue\n" [9, 11]
+  , success "nondefaultable-let" "_ <- record intValue\n_ <- record doubleValue\n" [17, 20]
+  , success "scoped-equality" "_ <- record answer\n" [12]
   , success "zero-let-lazy" "_ <- record 2\n" [1, 2]
   , failure "zero-let-bang"
   , failure "zero-let-strict"
   , failure "strict-closure-let"
   , success "wildcard-action" "_ <- record 2\n" [1, 2]
   , failure "bang-wildcard-action"
-  , failure "applied-original"
+  , DifferentialCase "applied-original" "_ <- record 1\n" "_ <- record answer\n" [1] True
   ]
   where
     success name after values = DifferentialCase name (before name) after values False
@@ -257,7 +263,7 @@ differentialCases =
 
 oracleTemplate :: String -> String
 oracleTemplate owner = unlines
-  [ "{-# LANGUAGE GHC2024, NamedDefaults, ScopedTypeVariables, TypeApplications, BangPatterns #-}"
+  [ "{-# LANGUAGE GHC2024, NamedDefaults, ScopedTypeVariables, TypeApplications, BangPatterns, ExtendedDefaultRules #-}"
   , "{{CELL_PRAGMAS}}"
   , "module " ++ owner ++ " where"
   , "import Control.Monad.Freer (Eff)"

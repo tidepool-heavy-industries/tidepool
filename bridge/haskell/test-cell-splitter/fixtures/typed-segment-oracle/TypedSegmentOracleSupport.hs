@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 module TypedSegmentOracleSupport (record, check) where
 
-import Control.Exception (ErrorCall, PatternMatchFail, SomeException, fromException, throwIO, try)
+import Control.Exception (ErrorCall, PatternMatchFail, SomeException, evaluate, fromException, throwIO, try)
 import Control.Monad.Freer (Eff, runM, send)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef, writeIORef)
 import System.IO.Unsafe (unsafePerformIO)
@@ -13,7 +13,7 @@ trace = unsafePerformIO (newIORef [])
 {-# NOINLINE trace #-}
 
 record :: Int -> Eff '[IO] ()
-record value = send (modifyIORef' trace (++ [value]))
+record value = send (evaluate value >>= \actual -> modifyIORef' trace (++ [actual]))
 
 check :: Eff '[IO] () -> IO ([Int], Bool)
 check action = do
