@@ -842,6 +842,151 @@ enum AuthorityChecks {
     Configured,
     RefusalBranches,
     TypedEntryRefusalBranches,
+    FreshTargetWork,
+    SegmentWorkCounts(usize),
+}
+
+// The caller supplies the response of the same physical request whose products
+// have just passed admission. Module identity comes from those products, rather
+// than a diagnostic filename or a generated-name convention.
+pub(super) fn assert_compiler_work(
+    program: &tidepool_toolchain::checked_cell::CellProgram,
+    stderr: &[u8],
+    expected_items: Option<usize>,
+) {
+    use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
+
+    if let Some(count) = expected_items {
+        assert_eq!(program.typed_segments().len(), 1);
+        let segment = &program.typed_segments()[0];
+        assert_eq!(segment.items().len(), count);
+        assert_eq!(program.items().len(), count);
+        assert!(segment
+            .items()
+            .iter()
+            .all(|item| matches!(item.body(), CheckedTypedSegmentBody::Action { .. })));
+        let entries = program
+            .items()
+            .iter()
+            .map(|item| item.native().unwrap().typed_entry().unwrap().entry())
+            .map(|entry| (&entry.unit, &entry.module, &entry.occurrence))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            entries.len(),
+            count,
+            "each item must have its own actual entry"
+        );
+    }
+
+    let mut owners = std::collections::BTreeMap::new();
+    for item in program.items() {
+        let owner = if let Some(native) = item.native() {
+            let entry = native.typed_entry().unwrap().entry();
+            (entry.unit.clone(), entry.module.clone(), "typed_segment")
+        } else {
+            let declaration = item.checked_item().planned_declaration().unwrap();
+            let owner = declaration.product().owner();
+            (owner.unit.clone(), owner.module.clone(), "program_item")
+        };
+        if let Some(previous) = owners.insert((owner.0, owner.1), owner.2) {
+            assert_eq!(previous, owner.2);
+        }
+    }
+    assert!(!owners.is_empty());
+    if expected_items.is_some() {
+        assert_eq!(
+            owners.len(),
+            1,
+            "one segment must retain one original source owner"
+        );
+    }
+    let stderr = std::str::from_utf8(stderr).unwrap();
+    let rows = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("tidepool-reuse "))
+        .map(|row| serde_json::from_str::<serde_json::Value>(row).unwrap())
+        .collect::<Vec<_>>();
+    for ((unit, module), purpose) in &owners {
+        let mut cycle = None;
+        for stage in ["source_frontend", "finalized_core"] {
+            let work = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    row["unit"] == *unit
+                        && row["module"] == *module
+                        && row["purpose"] == *purpose
+                        && row["stage"] == stage
+                        && row["decision"] == "work"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(work.len(), 1, "fresh {module} {stage} work: {stderr}");
+            let (work_index, row) = work[0];
+            assert_eq!(row["schema"], 1);
+            assert_eq!(row["items"], 1);
+            assert_eq!(row["version_kind"], "source_fingerprint");
+            assert!(!row["version"].as_str().unwrap().is_empty());
+            let actual_cycle = row["cycle"].as_u64().unwrap();
+            if let Some(previous) = cycle.replace(actual_cycle) {
+                assert_eq!(actual_cycle, previous, "stages must belong to one attempt");
+            }
+            let complete = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    row["cycle"] == actual_cycle
+                        && row["purpose"] == *purpose
+                        && row["stage"] == stage
+                        && row["decision"] == "complete"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(complete.len(), 1, "missing or repeated stage completion");
+            assert!(complete[0].0 > work_index);
+            assert_eq!(complete[0].1["reason"], "stage_complete");
+            assert!(complete[0].1["unit"].is_null() && complete[0].1["module"].is_null());
+        }
+        let cycle = cycle.unwrap();
+        let dependency_counts = ["source_frontend", "finalized_core"].map(|stage| {
+            rows.iter()
+                .filter(|row| {
+                    row["cycle"] == cycle
+                        && row["purpose"] == *purpose
+                        && row["stage"] == stage
+                        && row["decision"] == "work"
+                        && !(row["unit"] == *unit && row["module"] == *module)
+                })
+                .count()
+        });
+        eprintln!(
+            "typed-segment-work {}",
+            serde_json::json!({
+                "admission": program.admission_digest(), "unit": unit, "module": module,
+                "cycle": cycle, "purpose": purpose, "target_frontends": 1,
+                "target_finalizations": 1, "dependency_frontends": dependency_counts[0],
+                "dependency_finalizations": dependency_counts[1], "items": expected_items,
+            })
+        );
+    }
+    if let Some(count) = expected_items {
+        for (name, expected) in [
+            ("typed_segment_kept_entries", count),
+            ("typed_segment_generated_instance_retries", 0),
+        ] {
+            let prefix = format!("tidepool-count name={name} count=");
+            let counts = stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .map(|rest| {
+                    rest.split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(counts, [expected], "successful segment counter: {stderr}");
+        }
+    }
 }
 
 fn execute_cell_with_authority_checks<H>(
@@ -1030,10 +1175,29 @@ where
             compile_generation: admission.initial_value_generation().0,
             compile_view_evidence: "",
         };
-        if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
-            compile_cell_program_admitted_receipt_controls(request, admission.clone(), &templates)
-        } else {
-            compile_cell_program_admitted(request, admission.clone(), &templates)
+        match authority_checks {
+            AuthorityChecks::TypedEntryRefusalBranches => {
+                compile_cell_program_admitted_receipt_controls(
+                    request,
+                    admission.clone(),
+                    &templates,
+                )
+            }
+            AuthorityChecks::FreshTargetWork => compile_cell_program_admitted_work_controls(
+                request,
+                admission.clone(),
+                &templates,
+                None,
+            ),
+            AuthorityChecks::SegmentWorkCounts(count) => {
+                compile_cell_program_admitted_work_controls(
+                    request,
+                    admission.clone(),
+                    &templates,
+                    Some(count),
+                )
+            }
+            _ => compile_cell_program_admitted(request, admission.clone(), &templates),
         }
     };
     if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
@@ -3044,7 +3208,7 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
             source,
             usize::from(declaration),
             &ScalePublication::Ephemeral,
-            AuthorityChecks::Configured,
+            AuthorityChecks::FreshTargetWork,
             &imports,
         )
         .expect("the admitted checked/native pair must preserve its retained value");
@@ -3096,12 +3260,6 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
                     .is_some_and(|count| count > 0)
             }),
             "native compilation must consume validated canonical products: {stderr}"
-        );
-        assert!(
-            stderr.lines().any(|line| {
-                line.starts_with("tidepool-checked module=") && line.ends_with(" target=True")
-            }),
-            "checking still owns its fresh generated target: {stderr}"
         );
         if declaration {
             execute_cell(

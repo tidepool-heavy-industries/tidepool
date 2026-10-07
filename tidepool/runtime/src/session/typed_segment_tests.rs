@@ -687,6 +687,52 @@ proptest::proptest! {
 }
 
 #[test]
+fn one_four_eight_actions_use_one_completed_inference_segment() {
+    use super::super::tests::TestEnvGuard;
+
+    let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+    let _timing = TestEnvGuard::set("TIDEPOOL_TIMING", "1");
+    for count in [1, 4, 8] {
+        let cache = tempfile::tempdir().unwrap();
+        let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        let mut session = SemanticSession::new();
+        let source = (1..=count)
+            .map(|ordinal| {
+                let value = if ordinal == 1 {
+                    "(1 :: Int)".to_owned()
+                } else {
+                    format!("(count{count}Value{} + 1)", ordinal - 1)
+                };
+                format!("count{count}Value{ordinal} <- record {value} >> pure {value}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        try_execute_cell_with_authority_checks(
+            &mut session.resident,
+            session.public,
+            &session.effects,
+            &session.images,
+            (0, 0),
+            &format!("one_segment_{count}"),
+            &source,
+            0,
+            &ScalePublication::Ephemeral,
+            AuthorityChecks::SegmentWorkCounts(count),
+        )
+        .unwrap();
+        assert_eq!(session.observed(), (1..=count as i64).collect::<Vec<_>>());
+        assert_eq!(session.compiler_counts.lock().len(), count);
+        session.assert_no_compiler_since_last_effect();
+        for ordinal in 1..=count {
+            assert!(session
+                .resident
+                .current_binding_in(session.public, &format!("count{count}Value{ordinal}"))
+                .is_some());
+        }
+    }
+}
+
+#[test]
 fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() {
     let mut session = SemanticSession::new();
     session

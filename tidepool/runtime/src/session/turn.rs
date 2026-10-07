@@ -2630,7 +2630,7 @@ pub fn compile_cell_program_admitted(
         admission,
         templates,
         #[cfg(test)]
-        false,
+        CellProgramAudit::None,
     )
 }
 
@@ -2646,14 +2646,43 @@ fn compile_cell_program_admitted_receipt_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(req, admission, templates, true)
+    compile_cell_program_admitted_inner(req, admission, templates, CellProgramAudit::Receipts)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum CellProgramAudit {
+    None,
+    Receipts,
+    WorkCounts(Option<usize>),
+}
+
+#[cfg(test)]
+fn compile_cell_program_admitted_work_controls(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+    expected_items: Option<usize>,
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    compile_cell_program_admitted_inner(
+        req,
+        admission,
+        templates,
+        CellProgramAudit::WorkCounts(expected_items),
+    )
 }
 
 fn compile_cell_program_admitted_inner(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
     templates: &[TurnTemplate],
-    #[cfg(test)] audit_receipts: bool,
+    #[cfg(test)] audit: CellProgramAudit,
 ) -> Result<
     (
         CellCheck,
@@ -2756,12 +2785,16 @@ fn compile_cell_program_admitted_inner(
             offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
         })?;
     #[cfg(test)]
-    if audit_receipts {
+    if matches!(audit, CellProgramAudit::Receipts) {
         audit_compiler_issued_item_receipts(&offer, scratch.path());
     }
     let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
         offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
     })?;
+    #[cfg(test)]
+    if let CellProgramAudit::WorkCounts(expected_items) = audit {
+        scaling_tests::assert_compiler_work(&program, &run.output.stderr, expected_items);
+    }
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
         req.cell_text,
