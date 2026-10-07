@@ -25,18 +25,16 @@ import Tidepool.Effects.Core (Jev (..), JevCallError (..))
 
 -- | Encode a Jev request 'Value' to JSON text, send it through the @Jev@
 -- effect, and decode the response body back to 'Value' — matching the
--- @Value -> m (Either Text Value)@ shape @Jev.Core.session@ binds into the
+-- @Value -> m (Either JevCallError Value)@ shape @Jev.Core.session@ binds into the
 -- session that @Jev.Core.roundTrip@ and @Jev.Core.jev1@ take.
-jevTransport :: Member Jev effs => Value -> Eff effs (Either Text Value)
+jevTransport :: Member Jev effs => Value -> Eff effs (Either JevCallError Value)
 jevTransport body = do
   reply <- send (JevAskWith (encodeValue body))
   pure $ case reply of
-    Left failure -> Left (renderJevCallError failure)
-    Right text -> eitherDecodeValue text
+    Left failure -> Left failure
+    Right text -> either (Left . JevMalformed) Right (eitherDecodeValue text)
 
--- | Render a 'JevCallError' for the caller of 'jevTransport' — 'roundTrip'
--- and 'jev1' transports report failure as 'Left' 'Text', so this is where
--- the host's structured error collapses to the DSL's error channel.
+-- | Human-readable interpretation; control flow retains the typed cause.
 renderJevCallError :: JevCallError -> Text
 renderJevCallError = \case
   JevUnconfigured -> "jev: no Jev endpoint is configured for this run"
@@ -46,3 +44,5 @@ renderJevCallError = \case
   JevHttp code msg -> "jev: http " <> T.pack (show code) <> ": " <> msg
   JevBodyLimit -> "jev: response body exceeded the size limit"
   JevMalformed msg -> "jev: malformed response: " <> msg
+  JevCircuitOpen code delay -> "jev: circuit open after http " <> T.pack (show code) <> "; retry after " <> T.pack (show delay) <> "ms"
+  JevClientSetup msg -> "jev: client setup failed: " <> msg

@@ -60,8 +60,8 @@
 --
 -- Actor code does not build a transport. 'ask', 'ask1' and 'askWith' speak to
 -- the Exomonad host's own @Jev@ effect, so a packet or a question is the only
--- thing the model-visible surface ever passes. 'request' and 'decode' are the
--- same operation split, for recording and replay.
+-- thing the model-visible surface ever passes. 'prepare' retains the wire
+-- contract and decoder together for recording and replay.
 module Jev.Operators
   ( -- * Packets
     Packet ((:=), (:&))
@@ -80,15 +80,15 @@ module Jev.Operators
   , Yes (yes), Chosen (key, mass, margin, confidence, masses), Scored (expectation, confidence, masses)
     -- * Acting on answers
   , settle, takenUnder, judge, holds, grade, graded, explain, handle, contenders, taken
-  , Policy (..), lenient, careful, strict, Lenient, Careful, Strict
-  , Settled (..), Doubt (..), Cause (..), Weighed
+  , Policy, lenient, careful, strict, Lenient, Careful, Strict, Custom, customPolicy, PolicyError (..)
+  , Settled, settledValue, Doubt (..), Cause (..), Weighed
     -- * Uniform payloads: the continuation is the payload
   , Carries (mapCarried), Retarget, Uniform, uniform, mapUniform, withUniform, branches
     -- * Asking the Exomonad host
-  , ask, ask1, askWith, jevLatest, answers, usage, Usage (..), resolvedModel, diagnostics
-  , JevError (..), PrepError (..), DecodeError (..), Rejection (..), ValidationIssue (..)
+  , ask, ask1, askWith, jevLatest, answers, usage, Usage (..), resolvedModel, diagnostics, Diagnostic (..)
+  , JevCallError (..), JevError (..), PrepError (..), DecodeError (..), Rejection (..), ValidationIssue (..)
     -- * Recording and replay: the same operation split
-  , request, decode
+  , Prepared, prepare, request, decode, mapResponse, responsePreview, rawUsage
     -- * Types, for signatures only
   , type (::=), type (:&), type (::>), type (::*), type (:|:), Offers, Handlers, Handles, Rubric
   , Noul, Choice, Score, Each, Optional, Group
@@ -107,18 +107,21 @@ import Jev.Core
   ( Yes (yes), Chosen (key, mass, margin, confidence, masses), Scored (expectation, confidence, masses)
   , Alternatives, AltsOk, RubricOk, Carries (mapCarried), Cause (..), Choice, DecodeError (..), Doubt (..), Each, Optional, Field, Group
   , FieldPath ((:/)), StatePath
-  , Handles, JevError (..), Label, Lenient, Careful, Strict, Model, Noul, Packet (..), Retarget, Schema, Settled (..)
-  , PrepError (..), Q, Score, Unique, Weighed, type (:-), type (::=), type (:&), type (::>), type (::*), type (:|:), Policy (..)
+  , Handles, JevError (..), Label, Lenient, Careful, Strict, Model, Noul, Packet (..), Retarget, Schema, Settled, settledValue
+  , PrepError (..), Q, Score, Unique, Weighed, type (:-), type (::=), type (:&), type (::>), type (::*), type (:|:), Policy, Custom, customPolicy, PolicyError (..), Usage (..), Diagnostic (..)
   , Rejection (..), ValidationIssue (..)
   )
 import Tidepool.Aeson.Value (ToJSON (..), Value (String))
-import Tidepool.Effects.Core (Jev)
+import Tidepool.Effects.Core (Jev, JevCallError (..))
+import Tidepool.Inspection.Display (Display (..))
+import Tidepool.Inspection.Tree (DisplayTree (..), literalText)
 
 type Questions = Core.Questions Value
 type Answers = Core.Answers Value
 type Fields = Core.Fields Value
 type State t = Core.State Value t
-type Response s = Core.Response Value s
+type Response a = Core.Response Value a
+type Prepared a = Core.Prepared Value a
 
 -- | A disjunction whose alternatives all carry the same kind of thing,
 -- with the chain itself kept out of sight. 'withUniform' opens one.
@@ -284,17 +287,15 @@ contenders = Core.contenders
 -- A handler list as written: found by label, so its own order is its type.
 type Handlers' hs = Core.Alts Core.HandlerT hs
 
--- | Read-only choices: which file, which skill.
+-- | Package-owned preset policies.
 lenient :: Policy Lenient
-lenient = Policy 0.40 0.08 0.50
+lenient = Core.lenient
 
--- | Starting a worker, or choosing an approach.
 careful :: Policy Careful
-careful = Policy 0.55 0.20 0.70
+careful = Core.careful
 
--- | Merging, stopping, anything with a receipt.
 strict :: Policy Strict
-strict = Policy 0.70 0.40 0.85
+strict = Core.strict
 
 massAtOrAbove :: KnownNat (Core.Index l levels) => Label l -> Scored p levels -> Double
 massAtOrAbove = Core.massAtOrAbove
@@ -311,6 +312,47 @@ preview = Core.previewA
 instance (Unique t, Schema Value (Packet t)) => ToJSON (Packet t Answers) where
   toJSON = Core.previewSchema
 
+-- | Jev presentation uses preview facts only. Original action payloads are
+-- retained for interpretation and never traversed by these instances.
+instance Display Yes where
+  displayTree = previewTree . Core.previewA . Core.NoulA
+
+instance Alternatives alts => Display (Chosen alts) where
+  displayTree = previewTree . Core.previewA . Core.ChoiceA
+
+instance Core.Levels levels => Display (Scored p levels) where
+  displayTree = previewTree . Core.previewA . Core.ScoreA
+
+instance (Unique t, Schema Value (Packet t)) => Display (Packet t Answers) where
+  displayTree = previewTree . Core.previewSchema
+
+instance Display (Core.Response Value a) where
+  displayTree response = Constructor "Jev.Response"
+    [ ("answers", previewTree (Core.responsePreview response))
+    , ("model", displayTree (Core.responseModel response))
+    , ("usage", displayTree (Core.usage response))
+    , ("diagnostics", displayTree (Core.diagnostics response))
+    ]
+
+instance Display (Settled p a) where
+  displayTree _ = TextLeaf "<Jev settled value; use settledValue to project>"
+
+instance Display Usage where displayTree = StringLeaf . show
+instance Display Diagnostic where displayTree = StringLeaf . show
+instance Display Doubt where displayTree = StringLeaf . show
+instance Display Cause where displayTree = StringLeaf . show
+instance Display (Policy p) where displayTree = StringLeaf . show
+instance Show err => Display (JevError err) where displayTree = StringLeaf . show
+
+previewTree :: Value -> DisplayTree
+previewTree value = case Core.jView value of
+  Core.VNull -> TextLeaf "null"
+  Core.VBool b -> displayTree b
+  Core.VNumber n -> displayTree n
+  Core.VString text -> literalText text
+  Core.VArray values -> Sequence "[" "]" (map previewTree values)
+  Core.VObject fields -> Constructor "Jev.Answer" [(name, previewTree item) | (name, item) <- fields]
+
 -- The operation
 jevLatest :: Model
 jevLatest = Core.jevLatest
@@ -318,48 +360,51 @@ jevLatest = Core.jevLatest
 -- | The Exomonad host's own Jev endpoint. Actor code never builds a transport:
 -- the request crosses the @Jev@ effect as JSON text and comes back the same
 -- way, which is what @Jev.Host@ does at the boundary.
-hostSession :: Member Jev effs => Model -> Core.Session (Eff effs) Value
+hostSession :: Member Jev effs => Model -> Core.Session (Eff effs) Value JevCallError
 hostSession = Core.session jevTransport
 
 -- | Send a packet to the host with the default model and read back its
 -- typed 'Response'.
-ask :: (Member Jev effs, Schema Value s) => State t -> s Questions -> Eff effs (Either JevError (Response s))
+ask :: (Member Jev effs, Schema Value s) => State t -> s Questions -> Eff effs (Either (JevError JevCallError) (Response (s Answers)))
 ask = Core.roundTrip (hostSession jevLatest)
 
 -- | 'ask', naming the model explicitly.
-askWith :: (Member Jev effs, Schema Value s) => Model -> State t -> s Questions -> Eff effs (Either JevError (Response s))
+askWith :: (Member Jev effs, Schema Value s) => Model -> State t -> s Questions -> Eff effs (Either (JevError JevCallError) (Response (s Answers)))
 askWith = Core.roundTrip . hostSession
 
 -- | One question, one answer, under the label @value@.
-ask1 :: (Member Jev effs, Core.Endpoint Value e) => State t -> Q Value e -> Eff effs (Either JevError (Answers :- e))
+ask1 :: (Member Jev effs, Core.Endpoint Value e) => State t -> Q Value e -> Eff effs (Either (JevError JevCallError) (Response (Answers :- e)))
 ask1 = Core.jev1 (hostSession jevLatest)
 
--- | The request body, without sending it.
-request :: Schema Value s => Model -> State t -> s Questions -> Either JevError Value
+-- | Check one call and retain its original typed decoder.
+prepare :: Schema Value s => Model -> State t -> s Questions -> Either PrepError (Prepared (s Answers))
+prepare = Core.prepare
+
+-- | The checked request body for recording or transport.
+request :: Prepared a -> Value
 request = Core.request
 
--- | A response body against the packet that produced the request.
-decode :: Schema Value s => s Questions -> Value -> Either JevError (Response s)
+-- | Decode a recording with the exact prepared call that produced it.
+decode :: Prepared a -> Value -> Either DecodeError (Response a)
 decode = Core.decode
 
--- | The packet, under 'Answers'. A response already reads by its packet's
--- labels, so this is for handing the whole packet to a function.
-answers :: Response s -> s Answers
+answers :: Response a -> a
 answers = Core.answers
 
--- | Token counts for one call. Missing or non-numeric fields read as 0.
-data Usage = Usage { inputTokens :: Int, outputTokens :: Int } deriving (Show, Eq)
+mapResponse :: (a -> b) -> Response a -> Response b
+mapResponse = Core.mapResponse
 
-usage :: Response s -> Usage
-usage r = Usage (tokens "input_tokens") (tokens "output_tokens")
-  where
-    tokens :: Text -> Int
-    tokens k = maybe 0 round (Core.lookupKey k (Core.usage r) >>= Core.viewNumber)
+responsePreview :: Response a -> Value
+responsePreview = Core.responsePreview
 
--- | The model the request resolved to, as reported by the response envelope.
-resolvedModel :: Response s -> Text
+rawUsage :: Response a -> Value
+rawUsage = Core.rawUsage
+
+usage :: Response a -> Usage
+usage = Core.usage
+
+resolvedModel :: Response a -> Text
 resolvedModel = Core.responseModel
 
--- | Distributions that did not sum to one, and the like. Worth a log line.
-diagnostics :: Response s -> [Text]
+diagnostics :: Response a -> [Diagnostic]
 diagnostics = Core.diagnostics
