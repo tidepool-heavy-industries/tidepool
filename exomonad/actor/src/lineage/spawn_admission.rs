@@ -99,7 +99,13 @@ impl ForkGroupRegistry {
                     .filter(|record| {
                         record.sponsors.contains(sponsor)
                             && match record.child {
-                                Some(child) => state.active.contains(&child),
+                                Some(child) => {
+                                    state.active.contains(&child)
+                                        || matches!(
+                                            *record.outcome.borrow(),
+                                            SpawnAdmissionOutcome::Pending
+                                        )
+                                }
                                 None => matches!(
                                     *record.outcome.borrow(),
                                     SpawnAdmissionOutcome::Pending
@@ -142,6 +148,22 @@ impl ForkGroupRegistry {
 }
 
 impl SpawnAdmission {
+    pub(crate) fn reserve_child(&self, owner: ActorRef, child: ActorRef) -> Result<(), String> {
+        let mut state = self.registry.state.lock();
+        let record = state
+            .spawns
+            .get_mut(&self.id)
+            .ok_or("spawn admission unavailable")?;
+        if record.owner != owner || record.child.is_some_and(|bound| bound != child) {
+            return Err("spawn admission incarnation mismatch".into());
+        }
+        if !matches!(*record.outcome.borrow(), SpawnAdmissionOutcome::Pending) {
+            return Err("spawn admission already settled".into());
+        }
+        record.child = Some(child);
+        Ok(())
+    }
+
     pub(crate) fn bind(&self, owner: ActorRef, child: ActorRef) -> Result<(), String> {
         let mut state = self.registry.state.lock();
         let record = state

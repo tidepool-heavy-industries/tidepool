@@ -5038,9 +5038,11 @@ where
         let spawn_reply = child.spawn.is_some();
         let fork_group = child.descriptor.fork_group();
         let original_placement = child.descriptor.placement();
-        let invocation_work = effect_owner.invocation_work();
+        let resolved_owner = self.resolve_resource_owner(context, &effect_owner, child.lifetime);
+        let invocation_work = resolved_owner.as_ref().ok().cloned().flatten();
         let mut retained_spawn_admission = None;
         let admission = (|| {
+            let invocation_work = resolved_owner?;
             let crate::start::CapturedChildLaunch {
                 lifetime,
                 mut descriptor,

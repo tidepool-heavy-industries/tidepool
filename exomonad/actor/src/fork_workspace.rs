@@ -14,10 +14,16 @@ use tidepool_bridge_effects::{WtDirtyPolicy, WtWorktreeHandle, WtWorktreeSpec};
 use crate::ActorRef;
 
 #[derive(Debug, Clone, tidepool_bridge_derive::FromHaskell)]
+pub enum WorkspaceSeedWire {
+    CurrentCheckout,
+    CommittedSource(tidepool_bridge_effects::WtWorktreeSource),
+}
+
+#[derive(Debug, Clone, tidepool_bridge_derive::FromHaskell)]
 pub enum SpawnWorkspaceWire {
     SameDirectory,
     ExistingDirectory(tidepool_bridge_effects::WtWorkspaceHandle),
-    ForkDirectory(tidepool_bridge_effects::WtWorktreeSource),
+    ForkDirectory(WorkspaceSeedWire),
 }
 
 pub type WorkspaceSelection = SpawnWorkspaceWire;

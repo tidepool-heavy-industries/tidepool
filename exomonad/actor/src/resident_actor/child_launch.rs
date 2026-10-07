@@ -68,6 +68,28 @@ pub(super) struct ChildLaunchResume {
     >,
 }
 
+struct ChildStartupAdmission {
+    creator: ActorRef,
+    authority: crate::SpawnAdmission,
+    work: Option<Arc<InvocationWork>>,
+}
+
+impl crate::local_actor::WorkerStartupAdmission for ChildStartupAdmission {
+    fn reserve(&self, child: ActorRef) -> Result<(), String> {
+        if let Some(work) = &self.work {
+            crate::local_actor::WorkerStartupAdmission::reserve(work.as_ref(), child)?;
+        }
+        self.authority.reserve_child(self.creator, child)
+    }
+
+    fn admit(&self, child: LocalActorRef) -> Result<(), String> {
+        if let Some(work) = &self.work {
+            crate::local_actor::WorkerStartupAdmission::admit(work.as_ref(), child.clone())?;
+        }
+        self.authority.bind(self.creator, child.identity())
+    }
+}
+
 pub(super) async fn await_launch<H, O>(
     environment: ResidentEnvironment<H, O>,
     kernel: KernelContext,
@@ -289,13 +311,15 @@ where
                 ),
                 crate::WorkerLifetime::ActorOwned | crate::WorkerLifetime::RunOwned => None,
             };
+            let startup_admission: Option<Arc<dyn crate::local_actor::WorkerStartupAdmission>> =
+                match &spawn_admission {
+                    Some(authority) => Some(Arc::new(ChildStartupAdmission {
+                        creator: context.actor, authority: authority.clone(), work: startup_admission,
+                    })),
+                    None => startup_admission.map(|owner| owner as Arc<dyn crate::local_actor::WorkerStartupAdmission>),
+                };
             let child_result = match startup_admission {
-                Some(admission) => {
-                    let admission: Arc<dyn crate::local_actor::WorkerStartupAdmission> = admission;
-                    kernel
-                        .spawn_worker_scoped(None, behavior, lifetime, admission)
-                        .await
-                }
+                Some(admission) => kernel.spawn_worker_scoped(None, behavior, lifetime, admission).await,
                 None => kernel.spawn_worker(None, behavior, lifetime).await,
             };
             let child = match child_result {
