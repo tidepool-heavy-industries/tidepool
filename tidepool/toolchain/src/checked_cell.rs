@@ -1104,14 +1104,19 @@ impl ExactHostBindingPrototype {
             return Err(failure("host prototype requires one original binder"));
         };
         let fields = row(binder, 7)?;
+        let expected_key = match execution.typed_entry() {
+            Some(entry) => {
+                typed_capture_signature_key(&entry.entry().occurrence, string(&fields[0])?)
+            }
+            None => format!(
+                "__tidepool_cell_pin_{}_{}",
+                execution.item().index(),
+                string(&fields[0])?
+            ),
+        };
         if execution.item().kind() != CheckedItemKind::Bind
             || !matches!(string(&fields[6])?, "JsonValue" | "Text" | "CommandJob")
-            || signature.key()
-                != format!(
-                    "__tidepool_cell_pin_{}_{}",
-                    execution.item().index(),
-                    string(&fields[0])?
-                )
+            || signature.key() != expected_key
         {
             return Err(failure("host prototype lacks original host type authority"));
         }
@@ -3488,10 +3493,17 @@ pub(crate) fn admit_checked_cell(
         .iter()
         .any(|signature| !signature_keys.insert(&signature.key))
     {
-        return Err(failure("duplicate signature authority"));
+        return Err(if program.is_some() {
+            typed_metadata_failure()
+        } else {
+            failure("duplicate signature authority")
+        });
     }
     let pins = list(&output[1], 65536)?;
     let expressions = list(&output[4], 65536)?;
+    if program.is_some() && !pins.is_empty() {
+        return Err(typed_metadata_failure());
+    }
     let items = list(&output[0], 65536)?
         .iter()
         .enumerate()
@@ -3508,7 +3520,18 @@ pub(crate) fn admit_checked_cell(
                 .iter()
                 .map(|value| string(value).map(str::to_owned))
                 .collect::<Result<Vec<_>, _>>()?;
-            let item_pins = if kind == CheckedItemKind::Bind {
+            let typed_item = if program.is_some() && kind != CheckedItemKind::Declaration {
+                Some(
+                    typed_segments
+                        .iter()
+                        .flat_map(|plan| &plan.items)
+                        .find(|item| item.ordinal == index)
+                        .ok_or_else(typed_metadata_failure)?,
+                )
+            } else {
+                None
+            };
+            let item_pins = if program.is_none() && kind == CheckedItemKind::Bind {
                 binders
                     .iter()
                     .map(|binder| {
@@ -3519,21 +3542,51 @@ pub(crate) fn admit_checked_cell(
                 Vec::new()
             };
             let expression = if kind == CheckedItemKind::Expression {
-                Some(unique_key(
-                    expressions,
-                    &format!("__tidepool_cell_expr_{index}"),
-                    4,
-                )?)
+                let key = typed_item.map_or_else(
+                    || format!("__tidepool_cell_expr_{index}"),
+                    |item| item.entry.clone(),
+                );
+                Some(unique_key(expressions, &key, 4).map_err(|error| {
+                    if program.is_some() {
+                        typed_metadata_failure()
+                    } else {
+                        error
+                    }
+                })?)
             } else {
                 None
             };
-            let mut keys = item_pins
-                .iter()
-                .map(|value| row(value, 3).and_then(|row| string(&row[0])))
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Some(expression) = &expression {
-                keys.push(string(&row(expression, 4)?[0])?);
-            }
+            let keys = match typed_item {
+                Some(item) => {
+                    if let Some(expression) = &expression {
+                        decode_expression_lift(expression).map_err(|_| typed_metadata_failure())?;
+                    }
+                    match &item.body {
+                        CheckedTypedSegmentBody::Action { captures, .. }
+                        | CheckedTypedSegmentBody::Let { captures, .. } => captures
+                            .iter()
+                            .map(|capture| typed_capture_signature_key(&item.entry, capture))
+                            .collect(),
+                        CheckedTypedSegmentBody::Observation { capture, .. } => {
+                            vec![typed_capture_signature_key(&item.entry, capture)]
+                        }
+                    }
+                }
+                None => {
+                    let mut keys = item_pins
+                        .iter()
+                        .map(|value| {
+                            row(value, 3)
+                                .and_then(|row| string(&row[0]))
+                                .map(str::to_owned)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(expression) = &expression {
+                        keys.push(string(&row(expression, 4)?[0])?.to_owned());
+                    }
+                    keys
+                }
+            };
             let item_signatures = keys
                 .iter()
                 .map(|key| {
@@ -3542,7 +3595,11 @@ pub(crate) fn admit_checked_cell(
                         .find(|signature| &signature.key == key)
                         .cloned()
                         .ok_or_else(|| {
-                            failure("checked item lacks complete signature Name authority")
+                            if program.is_some() {
+                                typed_metadata_failure()
+                            } else {
+                                failure("checked item lacks complete signature Name authority")
+                            }
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -3604,9 +3661,11 @@ pub(crate) fn admit_checked_cell(
                 .filter(|item| item.expression.is_some())
                 .count()
     {
-        return Err(failure(
-            "whole-cell authority contains an unowned pin, plan or signature",
-        ));
+        return Err(if program.is_some() {
+            typed_metadata_failure()
+        } else {
+            failure("whole-cell authority contains an unowned pin, plan or signature")
+        });
     }
     Ok(Arc::new(ExactCheckedCell {
         specification: specification.clone(),
@@ -3628,6 +3687,18 @@ pub(crate) fn admit_checked_cell(
         typed_segments,
         value_inputs,
     }))
+}
+
+/// Opaque exact key joining a planned entry with its compiler-issued capture.
+/// Identity comes from the normalized plan and native proof, never key parsing.
+fn typed_capture_signature_key(entry: &str, capture: &str) -> String {
+    format!("{entry}:{capture}")
+}
+
+fn typed_metadata_failure() -> CompileError {
+    CompileError::CompilerEvidence(Box::new(
+        crate::certified_products::CertificationError::Mismatch("typed segment metadata"),
+    ))
 }
 
 fn decode_signature(value: &Value) -> Result<ExactCheckedSignature, CompileError> {

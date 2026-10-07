@@ -855,6 +855,7 @@ def runtime_test_cases(binary):
         "zero_capture_let_executes_without_publishing_a_dummy_binding",
         "zero_capture_bang_let_preserves_forcing_and_prior_effects",
         "zero_capture_action_runs_once_before_the_next_item",
+        "strict_let_group_forces_before_retaining_its_closure_capture",
     )]
     semantic_env, semantic_resources, semantic_worker = test_runtime_inputs("tidepool-runtime", "", unit=True)
     rules.append("\n".join([

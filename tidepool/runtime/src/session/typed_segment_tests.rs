@@ -759,3 +759,36 @@ fn zero_capture_action_runs_once_before_the_next_item() {
     assert_eq!(session.observed(), [1, 2]);
     session.assert_no_compiler_since_last_effect();
 }
+
+#[test]
+fn strict_let_group_forces_before_retaining_its_closure_capture() {
+    let mut session = SemanticSession::new();
+    let before = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let error = session
+        .execute(
+            "strict_closure_let",
+            include_str!("fixtures/typed-segment-strict-closure-let.hs"),
+            1,
+        )
+        .unwrap_err();
+    assert!(
+        is_raised_exception(&error),
+        "strict let group must force before returning its closure: {error:?}"
+    );
+    assert_eq!(session.observed(), [1]);
+    session.assert_no_compiler_since_last_effect();
+    assert_eq!(
+        session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap(),
+        before
+    );
+    session
+        .execute("strict_closure_retry", "record (3 :: Int)", 0)
+        .unwrap();
+    assert_eq!(session.observed(), [1, 3]);
+}
