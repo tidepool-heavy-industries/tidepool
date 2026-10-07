@@ -1530,6 +1530,29 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    /// Resolve already issued compiler roles against their authenticated custody.
+    /// Merely retaining a native artifact does not grant an original offer.
+    pub(crate) fn from_compiler_projection(
+        projection: &crate::artifact_inventory::CompilerInputProjection,
+        view: &crate::artifact_inventory::ArtifactView,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        let metadata = projection
+            .project_metadata(view.metadata_snapshot())
+            .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
+        let products = metadata
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                    Some(product.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        Self::from_projected_originals(&products, operation)
+    }
+
     /// Exact originals selected by this request's issuer, including validated
     /// newly finalized rows. The caller still authenticates their artifact IDs.
     pub(crate) fn selected_original_owners(&self) -> impl Iterator<Item = &CachedHomeOwner> {
@@ -5832,10 +5855,14 @@ pub(crate) fn certify_products_with_validation(
         }
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
-    let mut source_selection = CertifiedSourceSelection::from_projected_originals(
-        &projected_originals,
-        &validation.inventory,
-    )?;
+    let mut source_selection = match exact {
+        Some(admission) => CertifiedSourceSelection::from_compiler_projection(
+            admission.request.context.compiler_input_projection(),
+            admission.request.context.artifact_view(),
+            &validation.inventory,
+        )?,
+        None => CertifiedSourceSelection::default(),
+    };
     for (owner, _, _, _, _, origin) in &module_bytes {
         source_selection.admit_current(owner, *origin, &validation.inventory)?;
     }
