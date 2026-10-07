@@ -3165,6 +3165,10 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
     let products_path = root.join(format!("item-{index}/certified-products.cbor"));
     let products_original = std::fs::read(&products_path).unwrap();
     let products: CborValue = ciborium::de::from_reader(products_original.as_slice()).unwrap();
+    fn captured_owner(row: &CborValue) -> (&str, &str) {
+        let fields = row.as_array().unwrap();
+        (fields[0].as_text().unwrap(), fields[1].as_text().unwrap())
+    }
     let value_rows = products.as_array().unwrap()[6].as_array().unwrap()[3]
         .as_array()
         .unwrap();
@@ -3306,6 +3310,12 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             }
             _ => unreachable!(),
         }
+        // Keep the producer's strict owner order so each mutation reaches its
+        // type-evidence guard rather than the envelope ordering check.
+        rows.sort_by(|left, right| captured_owner(left).cmp(&captured_owner(right)));
+        assert!(rows
+            .windows(2)
+            .all(|pair| captured_owner(&pair[0]) < captured_owner(&pair[1])));
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
         std::fs::write(&products_path, bytes).unwrap();
@@ -3319,7 +3329,8 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         );
         if let Some(expected) = match mutation {
             0 => Some("produced value type output is missing"),
-            4 => Some("captured value was not selected by the request"),
+            1 | 3 | 4 => Some("captured value was not selected by the request"),
+            2 => Some("produced value type output differs from its reserved capture"),
             _ => None,
         } {
             assert!(
