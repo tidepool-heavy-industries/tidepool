@@ -11308,7 +11308,7 @@ where
                         .settle_actor_invocation_custody(context.clone(), registration.clone())
                         .await
                 } else {
-                    runner
+                    workbench
                         .abort_owned_continuations(
                             context.clone(),
                             registration.clone(),
