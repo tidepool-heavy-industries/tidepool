@@ -144,8 +144,8 @@ sitedVerbs =
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"
       "serveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
-  , (verb "runScope" "Tidepool.Scope"
-      "runScopeSited" "Tidepool.Scope" False [] DeliverHostAnswer SelectedAnswer)
+  , (verb "runScope" "Tidepool.Scope.Internal"
+      "runScopeSited" "Tidepool.Scope.Internal" False [] DeliverHostAnswer SelectedAnswer)
       { vsAnswerSource = EffectResult }
   ]
   where
