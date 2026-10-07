@@ -4,13 +4,13 @@ This file guides contributors; it is not part of the shipped model prompt.
 
 - `../../bridge/facade/src/actor_host/prompt_catalog.rs` owns prompt composition and
   catalog identity. `base.md` plus `api-guide.md` form one frozen shared superset
-  across roles. Workspace core overrides are selected once at swarm startup;
-  never vary the selected prefix by role or live bindings.
+  for every actor; `agent.md` is one task-neutral developer instruction. Workspace
+  core overrides are selected once at run startup, never by actor role or live bindings.
 - Optimize instructions for model decisions: use established technical vocabulary
   with its actual semantics; explain Exomonad-specific departures. Give each contract
   one canonical home, and move rare recovery detail behind targeted discovery.
   Use semantic compression: preserve relevant concepts and the conditions that
-  change their application. Inspect the assembled role and tool layers too.
+  change their application. Inspect the assembled base, agent, and tool layers too.
   Record prompt size as an observation, not an arbitrary acceptance ceiling;
   provider-enforced tool limits still apply.
 - Shape recognition and method selection: describe dependencies, transformations,
@@ -39,18 +39,18 @@ This file guides contributors; it is not part of the shipped model prompt.
 - Keep core callable signatures and representative examples in `api-guide.md`.
   Avoid ritual startup inventories; recommend targeted discovery only for missing
   information. Check against live/public types rather than inventing API shapes.
-- Keep role-specific instructions and runtime authority observations separate.
-  Inherited bindings and descriptions do not transfer permissions or reply ownership.
-- Keep Git project workflow policy in `exomonad-project-work`: recursive
-  scaffold, ready batches, independent review, repair and checked integration.
-  Base and relevant roles carry a clear load cue; general notebook and actor
-  programming stays compositional. API skills own their mechanics. Delivery of
+- Keep shared instructions, task requests, and runtime authority observations
+  separate. Inherited bindings and descriptions do not transfer permissions or
+  reply ownership.
+- Keep optional Git project delivery policy in `exomonad-project-work`. The
+  shared instructions carry its load cue; general notebook and actor programming
+  stays compositional. API skills own their mechanics. Delivery of
   a baseline is not acknowledgment or verified incorporation.
 - Recheck cautionary guidance against current source and behavior. Remove obsolete
   workarounds and incident-derived prohibitions; state live constraints through
   the composition they affect and a working way to proceed. Do not preserve an
   old restriction merely because it once prevented a failure.
-- Describe omitted fork effort through the native launch selector's inherited
+- Describe omitted model effort through the native launch selector's inherited
   default; native Codex goals remain disabled on all Exomonad nodes. Verify policy
   against the production selector, not the fallback launch helper.
 - Preserve active-update admission/presentation/incorporation distinctions and

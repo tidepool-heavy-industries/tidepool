@@ -1,4 +1,4 @@
-# Next-wave prompt measurements
+# Prompt measurements
 
 These are proposed measurements, not collected evidence. Use existing run
 traces and sampled reviews; do not add a telemetry subsystem for this.
@@ -6,7 +6,7 @@ traces and sampled reviews; do not add a telemetry subsystem for this.
 Compare the complete assembled instructions on tasks with inspectable outcomes:
 a runtime failure with competing explanations, a structurally analogous problem
 using different vocabulary, and a bounded edit where extensive investigation
-would add little. Retain source revisions, prompt identities, assignments, tool
+would add little. Retain source revisions, prompt identities, typed requests, tool
 capabilities, decisions, checks, and final artifacts. Check whether the agent's
 first useful action, method, and adaptation fit the evidence available at the time.
 
@@ -25,7 +25,7 @@ first useful action, method, and adaptation fit the evidence available at the ti
   guidance or checking mechanics, grouped by task type.
 - **Rejected cells:** count admission rejections and the number of repair cells
   before a useful result, separating syntax/type errors from unclear contracts.
-- **Unnecessary model workers:** record workers admitted for work a pure
+- **Unnecessary model workers:** record agents admitted for work a pure
   function, known effect sequence, Jev judgment, or record actor could handle.
 - **Composition adoption:** sample whether proven repeated notebook sequences
   become named helpers or modules when a production consumer appears.

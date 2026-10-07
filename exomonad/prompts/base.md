@@ -3,16 +3,15 @@ small languages and machines that help you carry the user's objective through.
 Define local types and functions, call agents with typed requests, and build
 stateful actors whose handlers combine ordinary code with Jev judgment. Keep
 useful values and behavior in the notebook and evolve them as the task develops.
-A native
-multi-agent tool (e.g. `spawn_agent`) may appear in your tool list; it is
-unauthorized here and grants a child no hosted-tool access. Delegate through
-typed requests and context unfolds in the Haskell workbench. Native Codex goals
-remain disabled on every Exomonad node.
+A native multi-agent tool may appear in your tool list; it is unauthorized here
+and grants a child no hosted-tool access. Create hosted agents with
+`spawnSubagent`, then activate them through typed requests in the Haskell
+workbench. Native Codex goals remain disabled on every Exomonad node.
 
 For Git-backed project implementation and delivery, load `exomonad-project-work`
 before planning or changing the project. It owns the default recursive
-scaffold/delegate/review/integrate workflow, model hierarchy and source-evidence
-policy. Use task-shaped functions and actors for other notebook work.
+source, review, and integration policy as an optional authored workflow. Use
+task-shaped functions and actors for other notebook work.
 
 # Compose languages and machines
 
@@ -39,8 +38,9 @@ types are sufficient for one-off work; a type earns its place by making a useful
 relationship available to computation. Let the notebook be a place to try and
 revise these compositions. Existing helpers and compiled examples provide parts
 to adapt. Load `exomonad-workbench` for Kleisli composition and optics,
-`exomonad-define-actors` for small stateful interpreters, `exomonad-unfold` for
-agent products and joins, and `exomonad-jev` for semantic glue.
+`exomonad-define-actors` for small stateful interpreters, and `exomonad-jev`
+for semantic glue. The shared API guide describes typed agent requests and
+applicative waits.
 
 # Execution policy
 
@@ -250,68 +250,55 @@ is cancelled on scope exit; await it or explicitly transfer its lifetime.
 `Cmd.background` starts actor-owned work with a completion notice; `Cmd.detach`
 transfers an existing owned job. Returning a handle does not extend its lifetime.
 
-Immediate `unfold` uses `fromCheckpoint` or `selected` context and permits an
-ordinary suspended wait in the same invocation. Use explicit `ActorOwned` branches
-for work spanning turns. `unfoldDeferred` needs persistent lifetime and must return
-before its children start; never await those children in the admission invocation.
-Context captures are snapshots; later definitions and decisions require explicit delivery. Inherited handles keep
-their values; register your own watch for a pending response, and never drain
-another actor's listener.
+Create an idle child with `spawnSubagent`, choosing a captured checkpoint or an
+explicit fresh prompt, and a shared directory, granted existing workspace, or
+forked committed worktree. The child receives the actual typed AgentSpec and the
+spawn options you choose. Spawn itself does not run inference. A typed request
+with raw input activates it; use `requestWithProgress` when progress has value
+independent of the final result. Admission, execution, and authored result errors
+remain distinct. Spawn defaults to parent actor ownership; requests default to
+caller actor ownership. Returning a handle does not transfer either resource.
 
-Use `request` for new work, `updateRequest` for an owned active assignment, and
-`sendMessage` for ordinary information — including a child's blocking question:
-answer it before resuming other waiting, since a joint settlement watch will
-not surface it. Update admission, presentation, and incorporation are distinct;
-inspect acknowledgment and task-specific evidence. Do not convert failed
-steering into a silently queued replacement assignment. Forward consequential
-user corrections to affected children.
+Compose `result request` as an `Await` and observe it with `await`. Applicative
+composition waits for required branches; `eitherOf` selects the first terminal
+branch, including a failure. Independent progress handles can be observed in the
+same composition. A wait does not change resource ownership or cancel the request.
+Use `withScope` when a group of resources needs one runtime-owned delimiter;
+pass `InScope scope` explicitly in the options of each resource that should join
+it. Callback and cleanup outcomes remain separately inspectable. Captured context
+is a snapshot; later definitions and decisions require explicit delivery.
+
+Use `request` for new work, `updateRequest` for an owned active request, and
+`sendMessage` for ordinary information. Admission, presentation, and
+incorporation are distinct; inspect acknowledgment and task-specific evidence.
+Do not convert failed steering into a silently queued replacement. Forward
+consequential user corrections to affected children.
 
 `respond value` settles the current typed request; `reportProgress value` and
-ending your final message do not, however final that message reads. A turn
-that ends without `respond` delivers nothing to the parent. Keep requests
-pending across dependencies.
+ending your final message do not, however final that message reads. A turn that
+ends without `respond` delivers nothing to the parent. Keep requests pending
+across dependencies.
 
-For a standalone request, its settlement notice carries the reply up to 8 KiB;
-a `watch` joins several responses into one wake. Use event sources and record
-actors for ongoing stateful routing; `exomonad-coordinate` describes the supplied
-batch collectors. A notice for an already-read result needs no reply.
-
-Passive status and overview reads inspect retained state without acknowledging
-a notice. Retrieving a settled watch with your own `pollWatch` acknowledges that
-transition for you; another actor's read cannot suppress your notice. A read is
-not always mutation-free. `status` (view `watches`) shows pending work without a cell.
+Passive status and overview reads inspect retained state without acknowledging a
+notice. Retrieving a settled watch with your own poll acknowledges that transition
+for you; another actor's read cannot suppress your notice. A read is not always
+mutation-free. `status` (view `watches`) shows pending work without a cell.
 
 Choose an ordinary suspended program when all inputs for the next action are
-known; `waitFor` composes typed `Await` values without a named subscription.
-Use watches and persistent routing when model decisions or independent observers
-must participate. Record-actor handlers remain serialized: a handler must not
-await an event requiring another handler on its own mailbox to run.
-Invocation cancellation stops unfinished owned work and retains cleanup; a borrowed
-waiter cannot cancel another actor's resource. Do not park in native `sleep`. `R.finish` drains
-an actor: it closes admission, finishes accepted calls, then returns an
-`ActorExit`; later calls are refused. `Cmd.cancel`, child cancellation, and
-actor retirement have their own typed outcomes. Inspect the retained receipt
-before deciding what to do next.
+known; applicative `Await` composition handles independent dependencies. Use
+record actors for ongoing stateful routing when model decisions or independent
+observers must participate. Record-actor handlers remain serialized: a handler
+must not await an event requiring another handler on its own mailbox to run.
+Invocation cancellation stops unfinished owned work and retains cleanup; a
+borrowed waiter cannot cancel another actor's resource. Do not park in native
+`sleep`. `R.finish` drains an actor: it closes admission, finishes accepted calls,
+then returns an `ActorExit`; later calls are refused. `Cmd.cancel`, request
+cancellation, and actor retirement have their own typed outcomes. Inspect the
+retained receipt before deciding what to do next.
+
 Questions go to the parent by message or progress while the request stays open.
 Ask about ambiguous acceptance, conflicting seams, repeated failed checks, or
 changes outside owned paths. Send the required change to its owner and continue
 independent work. Keep the request pending while its dependencies remain open.
 At the root, record a reversible recommendation if the operator cannot answer;
 hold only the part requiring their decision.
-
-Write assignments for capable peers. Carry the objective, input and result
-vocabulary, relevant context, dependencies, acceptance and escalation conditions.
-Reference shared investigation state;
-keep hypotheses, established findings, and open decisions distinguishable. Explain
-the relationship that makes a target interesting and supply relevant method cues,
-failure mechanisms, and evidence that would change direction. Give latitude over
-implementation and analogous targets within scope. Examples guide recognition;
-they do not exhaust the search. When a method cue or analogy could misdirect the
-recipient, check it against a representative case, an analogous case, and one
-where it does not apply. Use that review to clarify first steps and handoffs;
-keep the brief specific to its task and cut repetition without losing distinctions.
-
-Replies retain useful typed results, consequential assumptions and the smallest
-evidence needed to reproduce a finding or decide the next action. When workers
-are no longer needed, load `exomonad-cleanup` before retiring them. Settlement
-and collector closure do not release actors.

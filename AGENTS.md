@@ -179,32 +179,26 @@ Keep detailed design references out of always-loaded instructions.
 
 ## Shared-context development
 
-- Scaffold the shared types, semantics, source baseline, and integration owner
-  before forking independent obligations. Use resident Haskell `unfold` for
-  Exomonad work; native tools operate on the assigned checkout.
-- Fork around meaningful shared decisions, not a headcount target. Execution
-  owners scaffold and recursively delegate
-  to Luna component owners, subcomponent owners and microtask leaves. The Sol
-  Medium root owns cross-component choices and integration. Explain genuine
-  terminal leaves before substantial direct implementation; review leaf changes
-  and component joins at their owning boundaries. Use fresh Astra consultations
-  for consequential uncertainty.
-- Reuse the exact parent prefix rather than reconstructing it through long task
-  briefs. Keep one shared superset API guide and stable tool definitions across
-  roles; put changing assignments and authority observations after the shared
-  prefix. Start from the guide, not a ritual `:bindings` inventory.
-- Fork inheritance is a snapshot, not shared ongoing knowledge. A delivered
-  baseline, its acknowledgment, incorporation, and checks are distinct evidence.
-  Review concrete commits and failure paths; integrate and verify the resulting
-  revision. Retain specialists for repairs without importing all their history.
-- Assign independently inspectable results with source identity, owned paths,
-  shared contracts, dependencies, local acceptance and escalation conditions.
-  Give the recipient the relevant failure mechanism and method cues, then leave
-  routine implementation choices to them. Keep shared hypotheses, findings and
-  accepted decisions distinguishable; reallocate work when new evidence changes
-  the critical path. Local acceptance does not replace combined acceptance.
+- Delegate only when an independent result justifies another agent. A spawned
+  Exomonad agent is idle until it receives a typed request. Choose its captured
+  or fresh context, actual `AgentSpec`, and workspace explicitly; `SameDir`
+  shares the writable files, index, and HEAD. Labels are optional descriptive
+  text, not identities or grouping controls.
+- Give each assignment its source revision, owned paths, dependencies,
+  acceptance evidence, and escalation condition. Keep shared contracts and
+  accepted decisions visible in the parent workspace; a child's captured
+  context does not receive later changes automatically. Review the concrete
+  result and failure paths, then verify the integrated revision.
+- Use an authored project workflow when Git delivery benefits from recursive
+  implementation, exact-candidate review, repair, and integration. It is an
+  optional composition, not a required agent role or hierarchy. General
+  exploration and investigation need no project workflow.
+- Preserve the evidence trail that changes decisions: distinguish hypotheses,
+  findings, accepted decisions, and unresolved questions. Reassign work when
+  evidence changes the critical path; local acceptance does not replace
+  combined acceptance.
 - Exomonad owns continuation: native Codex goals are disabled on every node,
-  including root. Do not restore role-dependent goal-tool exposure.
+  including root.
 - Judge cache preservation using actual normalized provider requests and usage,
   not rollout metadata alone. Reuse existing opt-in tracing; keep full-context
   captures private and bounded, and report incomplete evidence explicitly.

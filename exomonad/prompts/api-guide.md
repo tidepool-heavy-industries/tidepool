@@ -43,123 +43,54 @@ or `presentWith presentDisplay` for a `Display` value. For example,
 `toolResultValue` as semantic JSON and `toolResultOutput` as the selected text;
 it does not render or replace the tool's text.
 
-## Delegate and inspect
+## Agent work
 
-Typed requests and context unfolds compose agent work. For Git project
-implementation, load `exomonad-project-work` for the default recursive delivery
-workflow; `exomonad-fork` and `exomonad-coordinate` explain its Project helpers.
+Create one idle child with `spawnSubagent context workspace
+(defaultSpawnOptions actualSpec)`. The context is a captured `ForkCtx checkpoint`
+or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
+`ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
+The options carry the actual typed `AgentSpec`, model and effort choices,
+instructions, an optional ordinary text label, lifetime, and limits. Labels are
+descriptive only; they do not identify actors, workspaces, or groups.
 
-```haskell
-let task = "Remove the stale path and report the focused check." :: Text
-(worker, ready) <- spawnWatched "implementation-ready" (batch "cleanup" "implementation") $
-  child @Text $ withLifetime ActorOwned $ withContext (selected id) $
-    coding projectHead $
-      assignment [label|remove-stale-path|] task
-display ready
-```
-
-`spawnWatched` combines immediate `unfold` and a named settlement watch.
-Explicit `ActorOwned` branches survive the cell. Default `InvocationOwned` branches
-must settle within its creating invocation; returning handles does not extend it.
-A wave composes independent children with `<$>` and `<*>`. Capture an exact
-checkpoint to reuse your current reasoning:
+A successful spawn returns an idle `AgentRef`. It has not run inference. Its
+first typed request or a human message activates it. A typed request supplies raw
+input and request options. `request @Text agent rawInput defaultRequestOptions`
+returns an `Either RequestError (Request Text)`; `requestWithProgress` also
+returns an independent typed progress handle.
 
 ```haskell
-let parserTask = "Implement the parser." :: Text
-let consumerTask = "Update its consumer." :: Text
-let reviewTask = "Review the interface." :: Text
-Right captured <- checkpoint "feature-scaffold"
-(parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
-  <$> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|parser|] parserTask))))
-  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|consumer|] consumerTask))))
-  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (researching currentCheckout (assignment [label|contract-review|] reviewTask))))
-```
-For another wave, `subgroup "wave-2"` nests under your path; pass only the
-new segment.
-
-Await immediate children with `waitFor`; use explicit `ActorOwned` branches for
-work spanning model turns. `unfoldDeferred` starts children after the enclosing
-call returns with its real result; never await them inside that invocation. See
-`doc unfold` for settlement watches and child status.
-
-```haskell
-settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
+Right worker <- spawnSubagent (FreshCtx prompt) SameDir (defaultSpawnOptions spec)
+Right pending <- request @Text worker input defaultRequestOptions
+Right answer <- await (result pending)
+display answer
 ```
 
-Record actors (`R.*`) collect and route events without model inference;
-`R.start` creates persistent services.
+Here `spec` is the actual typed `AgentSpec` for a `Text` input and reply;
+`prompt` and `input` are `Text` values. Spawn and request default to actor ownership. Returning a handle
+does not transfer ownership. A runtime scope is an explicit delimiter; a
+resource joins it only when its options use `InScope scope`.
 
-`currentCheckout` seeds the executing actor's checkout; `projectHead` selects
-the project source and `atRef` an explicit commit. Live-source admission checkpoints
-eligible edits without checks; inspect omission receipts before using that source.
+`result request` projects a typed `Await` value. Use the single `await` operation
+to observe it. `Await` supports ordinary functor, applicative, and traversal
+composition; `eitherOf` chooses the first terminal branch, including failure,
+while an all-branches wait requires each branch to succeed. Settlement projections
+let collectors retain failures as values. Progress is an independent typed
+observation. Scope results keep callback and cleanup outcomes separate.
 
-`withModel "luna"` selects a workspace alias; `withModel (Literal "provider-model")`
-selects an explicit model (`luna`: cheap tier; `executor`: `gpt-6.1-sol`). `withEffort Medium` sets effort. `previewBranch` shows resolved policy.
-`withContext (selected render)` selects fresh context; `fromCheckpoint` uses an
-exact retained capture. Immediate admission refuses unresolved `inherited`
-context before allocation; use `unfoldDeferred` with explicit `ActorOwned` for
-the enclosing call's completed context. Use `[label|orbit-motif|]`
-for compile-checked static assignment labels; use `labelFromText` for dynamic
-labels and handle its `Either`.
+`spawnSubagent context workspace (defaultSpawnOptions actualSpec)` returns
+`Either SpawnError AgentRef`. `request @Answer agent rawInput defaultRequestOptions`
+returns `Either RequestError (Request Answer)`. `requestWithProgress @Progress
+@Answer agent rawInput defaultRequestOptions` returns an `Either RequestError`
+containing the request and an independent `Progress Progress` handle.
+`result :: Request a -> Await a`; `await` observes an `Await` as either
+`AwaitError` or its typed result.
 
-Default `haskell` and `haskell_sync` share effects. Only an explicit synchronous
-profile declares `ContextReadWrite` (`import qualified Tidepool.Agent.Context as C`).
-`editableTexts` traverses authored text and eligible visible message/result
-bodies, not display previews; tool source/input and function
-arguments stay pinned. `C.trimText reason retained` prefixes exact retained
-text with an ordinary `[Trimmed: reason]` marker. Context, model and effort
-commit together on whole-cell success. Same-model continuation forwards opaque
-reasoning unchanged; incompatible cross-model history fails explicitly.
-Restoring a saved context cannot remove current required native groups. For
-curation then delegation, `unfoldDeferred` starts actor-owned children after
-commit; they inherit context and Haskell bindings and cannot be awaited inside
-their creating cell. See `doc workbench` and the compiled
-`bridge/haskell/examples/model-turns/ContextWorkflow.hs`.
-
-The activation supplies typed `sessionInput`, its reply declaration, and the
-roster of siblings admitted with you; use `display sessionInput` to inspect it.
-`respond`, `sessionReply` and `sessionInput` exist only while
-a request is pending; discovery shows them then. A root has none of them.
-`request @Report (responseActor worker) (assignment [label|revision|] input)`
-assigns invocation-owned follow-up work. Await it before returning or explicitly
-`detachRequest` for a request spanning turns. `pollRequestUpdate` inspects updates.
-Requests notify their owner unless a watch/route takes over; record actor
-settlement sources require `report = Silent`.
-
-You may inspect another actor's response, command output, progress, or
-worktree state, but reads never transfer control: ask the owner to cancel,
-publish, release, write stdin, or mutate its worktree.
-
-## Review and integrate
-
-For Git project delivery, `exomonad-project-work` owns review and integration
-policy. `responseWorktree` and Git expose the exact submission; `tryMerge`
-integrates managed worktrees. Load `exomonad-review` for review/repair operations
-and `exomonad-unfold` for submission observations. Reviewers running checks need
-coding authority.
-
-## Core signatures
-
-```haskell signatures
-assignment :: Label -> input -> Assignment input
-currentCheckout :: WorktreeSeed
-coding :: WorktreeSeed -> Assignment input -> Branch CodingEffects input result
-researching :: WorktreeSeed -> Assignment input -> Branch ResearchEffects input result
-child :: (KnownEffects child, Subset child parent)
-      => Branch child input result -> Unfold parent (Response result)
-unfold :: (Member Forks effects, Member Replies effects, Member AgentInspection effects)
-       => ForkGroupPath -> Unfold effects result -> Eff effects result
-request :: Member Replies effects
-        => AgentRef -> Assignment input -> Eff effects (Response result)
-spawnWatched :: WatchLabel -> ForkGroupPath -> Unfold effects (Response result)
-             -> Eff effects (Response result, Watch (Settlement result))
-awaitSettled :: Response result -> Await (Settlement result)
-awaitAnySettled :: [Response result] -> Await [Maybe (Settlement result)]
-waitFor :: Member Watches effects => Await result -> Eff effects (Either WatchFailure result)
-watch :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
-pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
-pollResponse :: Member Replies effects => Response result -> Eff effects (ResponseState result)
-```
+For Git project implementation and delivery, `exomonad-project-work` describes
+an optional authored workflow for scaffolding, assigning ready work, reviewing
+exact candidates, repairing, and integrating with checks. General exploration
+and actor programming do not require project roles or group names. Check any declaration details not shown here with targeted lookup before using
+them in a workspace.
 
 ## Compose commands and judgment
 

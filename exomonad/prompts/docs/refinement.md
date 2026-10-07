@@ -1,68 +1,17 @@
-Actors are retained handles, not one-shot tasks. Use a retained actor when its
-learned context and worktree are useful for a focused revision. Its context does
-not automatically acquire the parent's later reasoning: put accepted findings,
-changed constraints, and the evidence you need into the new typed input. Fork
-again when the updated parent context is the better starting point.
+A follow-up request is a new activation on the retained agent. Its typed input
+should carry the accepted candidate, corrections, and evidence needed for the
+revision. Settlement of one request does not settle another request or retire
+the target actor. A captured context is a snapshot; later findings and accepted
+decisions reach the next request only when explicitly supplied.
 
-With `interfaceWorker`, `revisionLabel`, and a task-specific `revisionPlan`
-already bound, and `RevisionReport` defined as your desired result type:
+For a reviewer and implementer, keep the implementer's request open while it
+needs a decision, and have the reviewer retain its own request while independent
+checks or repairs proceed. Avoid a circular wait: a request queued to an actor
+that is waiting on that very request cannot unblock it. Use progress for
+nonterminal findings and the final typed reply for the authored conclusion.
 
-```haskell
-revision <- do
-  response <- request @RevisionReport (responseActor interfaceWorker) $
-    (assignment revisionLabel revisionPlan)
-      { guidance = Just "Address only the accepted review findings." }
-  Right () <- detachRequest response
-  pure response
-let revisionActor = responseActor revision
-display revisionActor
-```
-
-The new response has its own identity and worktree evidence. Settling either
-request does not terminate the actor; teardown remains an explicit supervisor
-decision.
-
-A reviewer can drive this same follow-up directly. The parent first receives
-the implementer's candidate and lets that request settle, then forks a reviewer
-from its current context. Give the reviewer the candidate, contract, and
-`interfaceWorker` (or just its `AgentRef`). The reviewer authors `revisionPlan`
-and owns the new `revision` response. It may inspect an inherited parent response
-or register its own watch for it; the parent's update, cancellation, and release
-authority do not transfer.
-
-After submitting the repair above, the reviewer registers its own watch:
-
-```haskell
-let repairReadyLabel = "repair-ready" :: WatchLabel
-repairReady <- watch repairReadyLabel (awaitResponse revision)
-```
-
-End the model turn without settling the review request. On wake, poll
-`repairReady`, inspect the returned candidate and execution/worktree evidence,
-and review the revised commit. Repeat for within-contract repairs; settle the
-original review request with acceptance or a precise decision for the parent.
-Use a settled dependency instead when you want to fold failure with other
-independent evidence; unavailable watches also remain inspectable typed state.
-
-The implementer returns a revised candidate or a typed clarification/decision
-need in its repair reply. The reviewer can answer in the next request. Do not
-make a circular wait: the reviewer already has an active request while it waits
-for repair, so a new request back to it would queue behind that work. Progress
-publication does not settle that request or change its reply ownership.
-
-Keep code ownership with the implementer and review in the reviewer's own
-permitted checkout. A reviewer who runs checks needs coding authority, not an
-inspection-only role. Sharing an actor reference permits typed worktree state
-inspection while the checkout is available, but does not grant live-file access
-or transfer response, watch, or settlement control. Cancelling the
-review alone does not establish that a peer repair stopped; observe and settle
-or cancel that work through its owner before declaring the loop quiescent.
-
-A baseline-incorporation follow-up should carry the accepted commit and the
-consequential delta, for example: “Input adapter now owns paste delivery; merge
-this baseline and update routing.” Keep the rationale in the committed design.
-Ask for the resulting head, conflicts or unresolved choices, and checks performed
-on that head. Receipt of the assignment is not evidence of incorporation.
-Prefer merging an accepted baseline into already published work so earlier
-candidate identities remain traceable; rebasing unpublished work can be appropriate.
-The next review names the new candidate explicitly.
+The reviewer checks an exact candidate and reports its source identity, owned
+scope, acceptance evidence, and remaining uncertainty. The integration owner
+checks the resulting revision after incorporation. A report being delivered does
+not prove it was read or integrated. For Git delivery, load
+`exomonad-project-work` and `exomonad-review`.

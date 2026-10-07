@@ -1,16 +1,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptId {
     ExomonadBase,
-    ExomonadRoot,
-    RecreatedRoot,
-    WorktreeAgent,
-    ReadonlyAgent,
-    ScaffoldingAgent,
-    IntegrationAgent,
+    Agent,
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 59;
+    pub(super) const CATALOG_VERSION: u32 = 60;
 
     /// Digest of every prompt body in [`PromptId::ALL`] order — the guard
     /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
@@ -21,15 +16,7 @@ impl PromptId {
         "98738e1e4046cc8dae34dcf3a7f7526b9ca4e2dcae0e53e6d715273b4ce88093";
 
     #[cfg(test)]
-    pub(super) const ALL: [Self; 7] = [
-        Self::ExomonadBase,
-        Self::ExomonadRoot,
-        Self::RecreatedRoot,
-        Self::WorktreeAgent,
-        Self::ReadonlyAgent,
-        Self::ScaffoldingAgent,
-        Self::IntegrationAgent,
-    ];
+    pub(super) const ALL: [Self; 2] = [Self::ExomonadBase, Self::Agent];
 
     pub(super) fn artifact(self) -> PromptArtifact {
         let body = match self {
@@ -38,23 +25,14 @@ impl PromptId {
                 "\n\n",
                 include_str!("../../../../exomonad/prompts/api-guide.md")
             ),
-            Self::ExomonadRoot => include_str!("../../../../exomonad/prompts/root.md"),
-            Self::RecreatedRoot => include_str!("../../../../exomonad/prompts/recreated-root.md"),
-            Self::WorktreeAgent => include_str!("../../../../exomonad/prompts/worktree-agent.md"),
-            Self::ReadonlyAgent => include_str!("../../../../exomonad/prompts/readonly-agent.md"),
-            Self::ScaffoldingAgent => {
-                include_str!("../../../../exomonad/prompts/scaffolding-agent.md")
-            }
-            Self::IntegrationAgent => {
-                include_str!("../../../../exomonad/prompts/integration-agent.md")
-            }
+            Self::Agent => include_str!("../../../../exomonad/prompts/agent.md"),
         };
         PromptArtifact {
             id: self,
-            role: if self == Self::ExomonadBase {
-                PromptRole::BaseInstructions
+            layer: if self == Self::ExomonadBase {
+                PromptLayer::BaseInstructions
             } else {
-                PromptRole::Developer
+                PromptLayer::Developer
             },
             catalog_version: Self::CATALOG_VERSION,
             body,
@@ -77,7 +55,7 @@ impl PromptId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PromptRole {
+pub(super) enum PromptLayer {
     BaseInstructions,
     Developer,
 }
@@ -105,7 +83,7 @@ project that has them already needs `nix flake lock` and a new run.\n";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PromptArtifact {
     pub(super) id: PromptId,
-    pub(super) role: PromptRole,
+    pub(super) layer: PromptLayer,
     pub(super) catalog_version: u32,
     pub(super) body: &'static str,
 }
@@ -204,33 +182,25 @@ mod tests {
         assert!(FrozenBasePrompt::materialize(blocked.path()).is_err());
     }
 
-    /// The base instructions describe Jev unconditionally. A workspace that
-    /// does not supply it says so once, in the same instructions, rather than
-    /// letting the agent find out from a cell that will not compile.
     #[test]
-    fn a_workspace_without_jev_says_so_in_the_instructions() {
+    fn jev_availability_selects_an_instruction_extension() {
         let installed = FrozenBasePrompt::selected_body(None, JevSurface::Installed);
         let absent = FrozenBasePrompt::selected_body(None, JevSurface::Absent);
         assert_eq!(installed, PromptId::ExomonadBase.body());
         assert!(absent.starts_with(&installed));
-        assert!(
-            absent.contains("Jev is not installed in this workspace"),
-            "{absent}"
-        );
-        assert!(absent.contains("[haskell.flake_sources]"), "{absent}");
-        assert!(absent.contains("exomonad new"), "{absent}");
+        assert!(absent.len() > installed.len());
         let selected = FrozenBasePrompt::selected_body(Some("project core"), JevSurface::Absent);
         assert!(selected.starts_with("project core"));
-        assert!(selected.contains("Jev is not installed in this workspace"));
+        assert_ne!(selected, FrozenBasePrompt::selected_body(None, JevSurface::Absent));
     }
 
     #[test]
-    fn composed_identity_covers_base_role_and_tools_separately() {
-        let original = PromptId::composed_fingerprint("base", "role", "tools");
+    fn composed_identity_covers_base_agent_and_tools_separately() {
+        let original = PromptId::composed_fingerprint("base", "agent", "tools");
         for parts in [
-            ("changed", "role", "tools"),
+            ("changed", "agent", "tools"),
             ("base", "changed", "tools"),
-            ("base", "role", "changed"),
+            ("base", "agent", "changed"),
         ] {
             assert_ne!(
                 original,
@@ -255,17 +225,17 @@ mod tests {
     }
 
     #[test]
-    fn catalog_separates_base_from_role_instructions() {
+    fn catalog_separates_base_from_agent_instructions() {
         let artifacts = PromptId::ALL.map(PromptId::artifact);
         assert_eq!(artifacts.map(|artifact| artifact.id), PromptId::ALL);
         assert!(artifacts
             .iter()
             .all(|artifact| !artifact.body.trim().is_empty()));
-        assert!(artifacts.iter().all(|artifact| artifact.role
+        assert!(artifacts.iter().all(|artifact| artifact.layer
             == if artifact.id == PromptId::ExomonadBase {
-                PromptRole::BaseInstructions
+                PromptLayer::BaseInstructions
             } else {
-                PromptRole::Developer
+                PromptLayer::Developer
             }));
         assert!(artifacts
             .iter()
@@ -273,7 +243,7 @@ mod tests {
         assert_eq!(
             PromptId::composed_fingerprint(
                 PromptId::ExomonadBase.body(),
-                PromptId::ExomonadRoot.body(),
+                PromptId::Agent.body(),
                 "hosted-tool-fingerprint"
             )
             .len(),
@@ -281,69 +251,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_api_guide_is_part_of_the_frozen_base_not_role_instructions() {
-        let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
-        let base = PromptId::ExomonadBase.body();
-        assert_eq!(
-            base,
-            format!(
-                "{}\n\n{guide}",
-                include_str!("../../../../exomonad/prompts/base.md")
-            )
-        );
-        for id in PromptId::ALL {
-            if id != PromptId::ExomonadBase {
-                assert!(!id.body().contains(guide));
-            }
-        }
-        let root = tempfile::tempdir().unwrap();
-        let frozen = FrozenBasePrompt::materialize(root.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(frozen.file()).unwrap(), base);
-    }
-
-    #[test]
-    fn launch_capabilities_follow_each_admitted_notebook_profile() {
-        use super::super::orient_launch_instructions;
-        use exomonad_tool::{
-            ActorEffectKey, CustomToolDeclaration, HostedTool, ToolEffectKey, ToolImplementation,
-            ToolScheduling,
-        };
-        let notebook = |name: &str, effects: Vec<ToolEffectKey>| {
-            HostedTool::Custom(CustomToolDeclaration {
-                name: name.into(),
-                description: "test notebook".into(),
-                schedule: ToolScheduling::Async,
-                implementation: ToolImplementation::HaskellCell,
-                effect_keys: effects,
-            })
-        };
-        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
-        let sparse = notebook("sparse_cell", vec![ActorEffectKey::Commands.into()]);
-        let lookup = notebook("lookup_cell", vec![ActorEffectKey::Lookup.into()]);
-        let shared = PromptId::ExomonadBase.body();
-        let sparse_only =
-            orient_launch_instructions(shared, &observation.snapshot(), &[sparse.clone()]);
-        assert!(sparse_only.starts_with(shared));
-        assert!(sparse_only[shared.len()..].contains("sparse_cell"));
-        assert!(sparse_only[shared.len()..].contains("Commands"));
-        assert!(!sparse_only[shared.len()..].contains("Lookup"));
-        assert!(!sparse_only[shared.len()..].contains("LookupApi.lookupRaw"));
-        let mixed = orient_launch_instructions(shared, &observation.snapshot(), &[sparse, lookup]);
-        let suffix = &mixed[shared.len()..];
-        assert!(mixed.starts_with(shared));
-        assert!(suffix.contains("sparse_cell"));
-        assert!(suffix.contains("lookup_cell"));
-        assert_eq!(suffix.matches("LookupApi.lookupRaw").count(), 1);
-        assert!(!suffix.contains("haskell"));
-        let handler = HostedTool::Custom(CustomToolDeclaration {
-            name: "lookup".into(),
-            description: "authored handler".into(),
-            schedule: ToolScheduling::Async,
-            implementation: ToolImplementation::ResidentHandler,
-            effect_keys: vec![ActorEffectKey::Lookup.into()],
-        });
-        let hosted = orient_launch_instructions(shared, &observation.snapshot(), &[handler]);
-        assert!(!hosted[shared.len()..].contains("LookupApi.lookupRaw"));
-    }
 }

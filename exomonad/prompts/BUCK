@@ -13,38 +13,8 @@ export_file(
 )
 
 export_file(
-    name = "root_prompt",
-    src = "root.md",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "recreated_root_prompt",
-    src = "recreated-root.md",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "worktree_agent_prompt",
-    src = "worktree-agent.md",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "readonly_agent_prompt",
-    src = "readonly-agent.md",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "scaffolding_agent_prompt",
-    src = "scaffolding-agent.md",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "integration_agent_prompt",
-    src = "integration-agent.md",
+    name = "agent_prompt",
+    src = "agent.md",
     visibility = ["PUBLIC"],
 )
 
@@ -115,8 +85,8 @@ export_file(
 )
 
 export_file(
-    name = "doc_unfold",
-    src = "docs/unfold.md",
+    name = "doc_agents",
+    src = "docs/agents.md",
     visibility = ["PUBLIC"],
 )
 

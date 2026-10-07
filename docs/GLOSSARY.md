@@ -35,11 +35,8 @@ relation, not "subtree" (the supervision tree, a different ancestry) or
 ## Model tiers
 
 **Sol**, **Luna**, and **Astra** name model tiers, not people or actor roles.
-Workspace configuration maps `executor` to Sol for shared decisions and root
-integration, `luna` to recursive component ownership, microtasks and review, and
-`planner` to Astra for initial planning and explicit hard questions. A person
-or actor may use a configured model without taking on that model tier's usual
-task.
+Workspace configuration may offer aliases for those tiers. A person or actor
+may use a configured model without taking on a prescribed task or role.
 
 ## Survivors table (what to write instead)
 
@@ -51,14 +48,12 @@ task.
 | scope / scope tree (lexical sense) | **lexical scope** / **scope tree** (fine — standard) |
 | hole card / opening card | **typed request prompt** |
 | custody / custody receipt / token | **owned handle** or **lease**, per actual behavior |
-| wave | A local scaffold/unfold/fold cycle; not a global barrier or runtime identity. |
 | ledger / receipt log | **journal** |
-| branch position (model-facing) | show the type: `Either ResponseFailure T` |
 | effect row (model-facing) | **available effects** / the effect list itself (row is fine internally) |
 | hylo boundary | say what crosses: the Haskell-expand / Rust-collapse split |
 | one-session collapse / pillar A/B/D / lane coordinates | name the mechanism plainly; project coordinates never leave `plans/` |
 | session (bare, for runtime state) | **machine session** (`ResidentSession` — the resident JIT machine + heap + bindings) |
-| context fork / self-fork (Exomonad actor surface) | **context unfold** for the applicative expansion |
+| context fork / self-fork (Exomonad actor surface) | **captured context** (`ForkCtx`) |
 | lane (model-facing work division) | **assignment**, **workstream**, or the actual named component |
 
 ## Reserved words (industry meaning only)
@@ -79,35 +74,39 @@ machine session: state genuinely stays in memory across calls);
 **`ContextRef` / frozen context snapshot** (an opaque capability reference
 to an exact retained transcript prefix).
 
-**context unfold** is the applicative admission of typed child actor applications.
-`unfold` publishes immediately from a captured checkpoint or selected fresh context;
-`unfoldDeferred` publishes after the enclosing call's real result is recorded.
-Context selection, checkout, authority and lifetime are independent choices.
-**fold** is ordinary Haskell composition of typed results and worktree evidence.
+`spawnSubagent` creates one idle child from an explicit captured or fresh context,
+a shared, granted, or forked workspace, and the actual typed `AgentSpec`. A
+successful spawn does not run inference; a typed request or human message does.
+`SameDir` shares actual writable files, index, and HEAD. Actor labels are ordinary
+optional text and do not determine identity or workspace selection.
 
-**invocation-owned work** is unfinished work cancelled when its creating invocation
-exits. Await it within that invocation or explicitly transfer its lifetime. Returning
-or capturing a handle does not transfer ownership. **actor-owned work** survives
-that invocation and remains with the actor until completion or explicit cleanup.
-Borrowed handles permit observation while available, never owner cancellation.
+**invocation-owned command work** is unfinished work cancelled when its creating
+invocation exits. Command handles do not transfer ownership when returned or
+captured. A child actor defaults to its parent actor's ownership, and a request
+defaults to its caller actor's ownership. Borrowed handles permit observation
+while available, never owner cancellation. Resources join a runtime scope only
+through explicit `InScope scope` options.
 
-An **`Await a`** describes typed readiness. `waitFor` suspends the current Haskell
-continuation and returns either `WatchFailure` or its result. A named **`Watch a`**
-is an inspectable subscription. An **`EventSource a`** delivers retained source
-state and subsequent events to serialized record-actor handlers. `R.start`
-creates a persistent record service with actor lifetime, independently of its
-creating invocation. Handlers without a hosted invocation use actor ownership
-and remain serialized.
+An **`Await a`** is a typed description of readiness. `result` projects a request
+into an `Await`; `await` observes it. `Await` values compose applicatively and
+traverse collections. `eitherOf` selects the first terminal branch, including a
+failure; all-branch composition requires each branch to succeed. A choice retained
+by its watch owner remains valid even if a losing response is later released.
+An **`EventSource a`** delivers retained source state and subsequent events to
+serialized record-actor handlers. `R.start` creates a persistent record service
+with actor lifetime. A **runtime scope** is an explicit cleanup delimiter;
+resources join it through `InScope scope`, not ambient defaults.
 
 ## Model-facing prompt rules
 
 1. Never address a model with "window", "residency", "plane", "realm",
-   "branch position", or "lane". Use "wave" only for a local work cycle.
+   or "lane".
 2. State mechanics directly: "you may use up to N model rounds", "top-level
    declarations persist beyond this session", "child sessions inherit
    ancestor declarations, never a sibling's".
-3. Let types carry concepts: show the effect list, show
-   `Either ResponseFailure T`, say `ContextRef` is runtime-issued and
-   unforgeable.
+3. Let types carry concepts: show the effect list and the concrete failure
+   channel, such as `Either RequestError T` for request admission or
+   `Either AwaitError T` for observation. A retained context reference is
+   runtime-issued and unforgeable.
 4. Prefer the vocabulary models already know: notebook cells, Haskell,
    `Control.Concurrent.Async`.
