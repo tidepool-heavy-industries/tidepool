@@ -4963,6 +4963,21 @@ fn matches_cached_original_reoffer(
         })
 }
 
+fn receipt_module_index(
+    receipt: &CertifiedReceipt,
+) -> CertResult<BTreeMap<(String, String), &CertifiedModuleReceipt>> {
+    let mut accepted = BTreeMap::new();
+    for module in &receipt.modules {
+        if accepted
+            .insert((module.unit.clone(), module.module.clone()), module)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch("duplicate receipt module"));
+        }
+    }
+    Ok(accepted)
+}
+
 #[cfg(test)]
 fn validate_exact_cached_closure(
     candidates: Option<&CandidateSet>,
@@ -4974,10 +4989,21 @@ fn validate_exact_cached_closure(
         Vec<crate::declaration_join::ExactModuleIdentity>,
     >,
 ) -> CertResult<()> {
+    let accepted = receipt_module_index(receipt)?;
+    if accepted
+        .values()
+        .all(|module| module.origin != ProductOrigin::Cached)
+    {
+        return Ok(());
+    }
+    let metadata = context
+        .compiler_metadata_snapshot()
+        .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
     validate_exact_cached_closure_with_validation(
         candidates,
         receipt,
         context,
+        &metadata,
         evidence,
         exact_imports,
         &mut PackageInterfaceValidation::default(),
@@ -4988,6 +5014,7 @@ fn validate_exact_cached_closure_with_validation(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
     context: &crate::declaration_context::ExactDeclarationContext,
+    metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
     evidence: &DependencyEvidence,
     exact_imports: &BTreeMap<
         crate::declaration_join::ExactModuleIdentity,
@@ -4997,15 +5024,7 @@ fn validate_exact_cached_closure_with_validation(
 ) -> CertResult<()> {
     use crate::cache::ImportQualifier;
     use crate::module_candidates::dependencies::CandidateDependencyInventory;
-    let mut accepted = BTreeMap::new();
-    for module in &receipt.modules {
-        if accepted
-            .insert((module.unit.clone(), module.module.clone()), module)
-            .is_some()
-        {
-            return Err(CertificationError::Mismatch("duplicate receipt module"));
-        }
-    }
+    let accepted = receipt_module_index(receipt)?;
     if accepted
         .values()
         .all(|module| module.origin != ProductOrigin::Cached)
@@ -5039,11 +5058,15 @@ fn validate_exact_cached_closure_with_validation(
             .map(|row| (row.unit.clone(), row.module.clone())),
     );
     // An offered dependency rejected by the worker cannot satisfy this receipt.
-    let originals = context.recovery_products();
-    let projected = context
-        .compiler_metadata_snapshot()
-        .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
-    let projected_originals = projected
+    let originals = metadata
+        .artifacts
+        .values()
+        .filter_map(|entry| match &entry.payload {
+            crate::artifact_inventory::ArtifactPayload::Original(product) => Some(product.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let projected_originals = metadata
         .entries
         .values()
         .filter_map(|entry| match &entry.payload {
@@ -5503,9 +5526,18 @@ pub(crate) fn certify_products_with_validation(
                 })
                 .collect()
         });
-    let inherited_products = exact
-        .map(|admission| admission.request.context.recovery_products())
-        .unwrap_or_default();
+    let inherited_products = projected_metadata.map_or_else(Vec::new, |metadata| {
+        metadata
+            .artifacts
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                    Some(product.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    });
     let mut retained_seals = BTreeMap::new();
     for interface in inherited_module_interfaces.iter().chain(
         projected_originals
@@ -5522,8 +5554,8 @@ pub(crate) fn certify_products_with_validation(
             ));
         }
     }
-    let inherited_interfaces = exact
-        .map(|admission| admission.request.context.artifact_view().descriptors())
+    let inherited_interfaces = projected_metadata
+        .map(|metadata| metadata.descriptors())
         .unwrap_or_default();
     if inherited_interfaces
         .iter()
@@ -5540,6 +5572,8 @@ pub(crate) fn certify_products_with_validation(
             candidates,
             receipt,
             &admission.request.context,
+            projected_metadata
+                .ok_or(CertificationError::Mismatch("compiler original projection"))?,
             final_evidence,
             &admission.source.exact_imports,
             validation,
