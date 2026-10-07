@@ -117,7 +117,7 @@ struct QueueCase {
     targeted: bool,
 }
 
-fn bytes_up_to(general: u64) -> impl Strategy<Value = u64> {
+fn bytes_up_to(general: u64) -> impl Strategy<Value = u64> + Clone {
     prop_oneof![5 => 1u64..=general, 1 => Just(general)]
 }
 
