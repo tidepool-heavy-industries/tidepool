@@ -117,6 +117,7 @@ library tidepool-extract-internal
     Tidepool.SessionArtifacts
     Tidepool.Timing
     Tidepool.TypePolicy
+    Tidepool.TypedSegment
     Tidepool.TurnSource
   other-modules:   Tidepool.LocalNativeDeclaration
   build-depends:
