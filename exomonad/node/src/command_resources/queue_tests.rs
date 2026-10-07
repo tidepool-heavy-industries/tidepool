@@ -513,6 +513,9 @@ fn generated_queue_histories_match_recomputed_accounting() {
         module_path!(),
         "::generated_queue_histories_match_recomputed_accounting"
     ));
+    let configured_cases = config.cases;
+    let configured_max_shrink_iters = config.max_shrink_iters;
+    let configuration = format!("{config:?}");
     let mut runner = TestRunner::new(config);
     let observed = std::cell::RefCell::new(QueueCoverage::default());
     let result = runner.run(&queue_histories(), |case| {
@@ -520,7 +523,7 @@ fn generated_queue_histories_match_recomputed_accounting() {
         Ok(())
     });
     eprintln!(
-        "command resource queue observations: {:?}",
+        "command resource queue observations: configured_cases={configured_cases}, configured_max_shrink_iters={configured_max_shrink_iters}, configuration={configuration}, runner_callbacks_including_replay_and_shrinking={:?}",
         *observed.borrow()
     );
     if let Err(error) = result {
