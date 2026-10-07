@@ -45,7 +45,6 @@ struct LaunchedChild {
     inherited_source: Option<crate::CheckpointSourceLayer>,
     source_layers: Option<crate::ActorSourceLayerResolver>,
     helper_branch: Option<String>,
-    bound_worktrees: Vec<String>,
 }
 
 pub(super) struct ChildLaunchResume {
@@ -287,7 +286,6 @@ where
             let admitted_worktree = prepared_workspace
                 .as_ref()
                 .map(|prepared| prepared.handle().clone());
-            let bound_worktrees = launch_worktrees.clone();
             let descriptor_scope = descriptor.placement().lexical_scope;
             let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
             let mut behavior = if let Some(definition) = spawn {
@@ -371,7 +369,7 @@ where
             }
             Ok(LaunchedChild {
                 actor: child, allocated_label, admitted_worktree, checkpoint_descriptor,
-                checkpoint_admission, inherited_source, source_layers, helper_branch, bound_worktrees,
+                checkpoint_admission, inherited_source, source_layers, helper_branch,
             })
     }).await;
     if let (Err(error), Some(authority)) = (&result, &continuation.spawn_admission) {
@@ -439,7 +437,6 @@ where
             inherited_source,
             source_layers,
             helper_branch,
-            bound_worktrees,
         } = started;
         let fork_group = continuation.fork_group;
         let checkpoint_lease = checkpoint_admission
