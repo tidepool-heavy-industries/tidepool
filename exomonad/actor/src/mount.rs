@@ -407,10 +407,9 @@ pub trait ActorSourceLayers: Send + Sync {
         checkpoint: &CheckpointSourceLayer,
         _creator: PrincipalId,
         helper_branch: &str,
-        worktrees: &[String],
     ) -> Result<Vec<PathBuf>, String> {
         self.validate_source_authority(checkpoint)?;
-        let selected = self.layer_include_for(helper_branch, worktrees)?;
+        let selected = self.layer_include_for(helper_branch)?;
         if checkpoint.identities().is_empty() && selected.is_empty() {
             Ok(selected)
         } else {
@@ -441,34 +440,12 @@ pub trait ActorSourceLayers: Send + Sync {
         Ok(String::new())
     }
 
-    /// Reserve one actor-private helper branch before the actor has an ID.
-    /// A prepared fork workspace may already have copied its branch.
-    fn prepare_helpers(
-        &self,
-        _creator: PrincipalId,
-        _worktrees: &[String],
-        _prepared_fork: bool,
-    ) -> Result<String, String> {
-        Ok(String::new())
+    /// Mutable helper publication selected explicitly by source ownership.
+    fn layer_include_for(&self, _helper_source: &str) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
     }
 
-    fn layer_include_for(
-        &self,
-        _helper_branch: &str,
-        worktrees: &[String],
-    ) -> Result<Vec<PathBuf>, String> {
-        self.layer_include(worktrees)
-    }
-
-    fn bind_for(&self, actor: PrincipalId, _helper_branch: &str, worktrees: &[String]) {
-        self.bind(actor, worktrees);
-    }
-
-    /// The actor's private helper roots, ahead of every shared root.
-    fn layer_include(&self, worktrees: &[String]) -> Result<Vec<PathBuf>, String>;
-
-    /// Bind the source authority and helper branch selected at launch.
-    fn bind(&self, actor: PrincipalId, worktrees: &[String]);
+    fn bind_for(&self, _actor: PrincipalId, _helper_source: &str) {}
 
     /// Re-read and publish the source layer this principal may own, with
     /// `also_check` naming modules to pull into the checked closure. Hosts

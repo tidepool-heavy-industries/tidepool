@@ -2967,11 +2967,11 @@ mod authority_tests {
                 .ok_or_else(|| "foreign source issuer".into())
         }
 
-        fn layer_include(&self, _: &[String]) -> Result<Vec<PathBuf>, String> {
+        fn layer_include_for(&self, _: &str) -> Result<Vec<PathBuf>, String> {
             Ok(Vec::new())
         }
 
-        fn bind(&self, _: tidepool_repr::PrincipalId, _: &[String]) {}
+        fn bind_for(&self, _: tidepool_repr::PrincipalId, _: &str) {}
     }
 
     fn context() -> crate::ActorSessionContext {

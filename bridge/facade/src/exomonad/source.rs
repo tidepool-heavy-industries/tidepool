@@ -995,14 +995,6 @@ impl ExomonadSourceReload {
             .unwrap_or(ActorSourceScope::RunReadOnly)
     }
 
-    fn helper_branch(worktrees: &[String]) -> String {
-        match worktrees {
-            [id] => id.clone(),
-            [] => "run".to_owned(),
-            _ => "run".to_owned(),
-        }
-    }
-
     fn helper_layer(&self, branch: &str) -> SourceLayer {
         let mut layers = self.helpers.lock();
         layers
@@ -1141,20 +1133,6 @@ impl ExomonadSourceReload {
 
     pub(crate) fn helper_branch_for(&self, actor: PrincipalId) -> Option<String> {
         self.helper_scopes.read().get(&actor).cloned()
-    }
-
-    fn fork_helper_branch(&self, creator: PrincipalId, branch: &str) -> Result<()> {
-        let parent_branch = self
-            .helper_branch_for(creator)
-            .ok_or("creator has no session helper branch")?;
-        let parent = self.helper_layer(&parent_branch);
-        let _parent_lock = parent.lock_helpers()?;
-        self.ensure_helper_active(&parent_branch)?;
-        let child_draft = self.helper_draft(branch);
-        crate::actor_host::copy_helper_draft(&self.helper_draft(&parent_branch), &child_draft)?;
-        self.helper_layer(branch)
-            .inherit_active_from(&parent, std::slice::from_ref(&child_draft))?;
-        Ok(())
     }
 
     fn ensure_helper_active(&self, branch: &str) -> Result<SourceRevision> {
@@ -2127,7 +2105,6 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         checkpoint: &exomonad_actor::CheckpointSourceLayer,
         creator: PrincipalId,
         helper_branch: &str,
-        _worktrees: &[String],
     ) -> std::result::Result<Vec<PathBuf>, String> {
         let _one_at_a_time = self.gate.lock();
         self.validate_source_authority(checkpoint)?;
@@ -2171,45 +2148,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .ok_or_else(|| "creator has no selected session helper source".into())
     }
 
-    fn prepare_helpers(
-        &self,
-        creator: PrincipalId,
-        worktrees: &[String],
-        prepared_fork: bool,
-    ) -> std::result::Result<String, String> {
-        if prepared_fork {
-            let [branch] = worktrees else {
-                return Err("prepared fork must have exactly one helper branch".into());
-            };
-            let draft = self.helper_draft(branch);
-            let active = self
-                .helper_layer(branch)
-                .read_active()
-                .map_err(|error| format!("prepared helper revision is unavailable: {error}"))?;
-            match (draft.exists(), active.is_some()) {
-                (true, true) => {}
-                (false, false) => self.fork_helper_branch(creator, branch).map_err(|error| {
-                    format!("could not snapshot creator's session helpers: {error}")
-                })?,
-                _ => return Err("prepared helper draft and active revision disagree".into()),
-            }
-            return Ok(branch.clone());
-        }
-        let branch = format!("actor-{}", uuid::Uuid::new_v4());
-        self.fork_helper_branch(creator, &branch)
-            .map_err(|error| format!("could not snapshot creator's session helpers: {error}"))?;
-        Ok(branch)
-    }
-
-    fn layer_include(&self, worktrees: &[String]) -> std::result::Result<Vec<PathBuf>, String> {
-        self.layer_include_for(&Self::helper_branch(worktrees), worktrees)
-    }
-
-    fn layer_include_for(
-        &self,
-        branch: &str,
-        _worktrees: &[String],
-    ) -> std::result::Result<Vec<PathBuf>, String> {
+    fn layer_include_for(&self, branch: &str) -> std::result::Result<Vec<PathBuf>, String> {
         self.ensure_helper_active(branch)
             .map_err(|error| format!("session helper layer could not be initialized: {error}"))?;
         self.helper_layer(branch)
@@ -2217,11 +2156,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .map_err(|error| format!("session helper layer has no include roots: {error}"))
     }
 
-    fn bind(&self, actor: PrincipalId, worktrees: &[String]) {
-        self.bind_for(actor, &Self::helper_branch(worktrees), worktrees);
-    }
-
-    fn bind_for(&self, actor: PrincipalId, helper_branch: &str, _worktrees: &[String]) {
+    fn bind_for(&self, actor: PrincipalId, helper_branch: &str) {
         self.helper_scopes
             .write()
             .insert(actor, helper_branch.to_owned());
@@ -2657,7 +2592,7 @@ mod tests {
         ));
         assert_eq!(
             reload
-                .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
+                .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run")
                 .unwrap(),
             captured.include_paths()
         );
@@ -2674,7 +2609,7 @@ mod tests {
             .unwrap();
         reload.layer.publish(pending).unwrap();
         let refusal = reload
-            .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
+            .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run")
             .unwrap_err();
         assert!(refusal.contains("source revisions differ"));
         assert!(captured.include_paths()[0].exists());
@@ -2779,21 +2714,15 @@ mod tests {
         assert!(!foreign.same_revision(&captured));
         assert!(reload.validate_source_authority(&foreign).is_err());
         assert!(reload.admit_retained_layer(&foreign).is_err());
-        assert!(
-            reload
-                .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run", &[])
-                .is_err()
-        );
-        assert!(
-            reload
-                .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
-                .is_err()
-        );
-        assert!(
-            reload
-                .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
-                .is_err()
-        );
+        assert!(reload
+            .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run")
+            .is_err());
+        assert!(reload
+            .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
+            .is_err());
+        assert!(reload
+            .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
+            .is_err());
         reload.validate_source_authority(&captured).unwrap();
     }
 
@@ -3361,36 +3290,6 @@ mod tests {
             Some(helper)
         );
         assert!(reload.layer.revisions().join(lower.identity).is_dir());
-    }
-
-    #[test]
-    fn prepared_helper_branch_refuses_a_partial_snapshot() {
-        use exomonad_actor::ActorSourceLayers;
-
-        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let reload = ExomonadSourceReload::new(
-            frozen,
-            project.path().to_path_buf(),
-            run.path().to_path_buf(),
-            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
-        );
-        let draft = reload.helper_draft("prepared");
-        std::fs::create_dir_all(&draft).unwrap();
-        let result = ActorSourceLayers::prepare_helpers(
-            &reload,
-            PrincipalId::SYSTEM,
-            &["prepared".to_owned()],
-            true,
-        );
-        assert!(result.unwrap_err().contains("disagree"));
-        assert!(
-            reload
-                .helper_layer("prepared")
-                .read_active()
-                .unwrap()
-                .is_none()
-        );
     }
 
     #[test]
@@ -4037,17 +3936,15 @@ mod tests {
         )
         .unwrap();
         let helper_actor = PrincipalId::new(1, 1);
-        exomonad_actor::ActorSourceLayers::bind(&reload, helper_actor, &[]);
-        exomonad_actor::ActorSourceLayers::layer_include(&reload, &[]).unwrap();
-        assert!(
-            reload
-                .helper_layer("run")
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .modules
-                .is_empty()
-        );
+        exomonad_actor::ActorSourceLayers::bind_for(&reload, helper_actor, "run");
+        exomonad_actor::ActorSourceLayers::layer_include_for(&reload, "run").unwrap();
+        assert!(reload
+            .helper_layer("run")
+            .read_active()
+            .unwrap()
+            .unwrap()
+            .modules
+            .is_empty());
         // A helper checks against the published run layer, including source
         // introduced after the frozen workspace was captured.
         std::fs::write(
@@ -4183,105 +4080,6 @@ mod tests {
             "retaining a selection must not copy drafts or publish source"
         );
         assert!(ActorSourceLayers::retain_helpers(&reload, PrincipalId::new(1, 2)).is_err());
-    }
-
-    #[test]
-    fn actors_on_one_worktree_publish_helpers_independently() {
-        use exomonad_actor::ActorSourceLayers;
-
-        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let helper_root = run.path().join("helpers");
-        let reload = ExomonadSourceReload::new(
-            frozen,
-            project.path().to_path_buf(),
-            run.path().to_path_buf(),
-            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
-        )
-        .with_helper_root(helper_root.clone());
-        let worktrees = vec!["shared-worktree".to_owned()];
-        let parent = PrincipalId::new(1, 1);
-        let child = PrincipalId::new(2, 1);
-        let parent_branch = "parent";
-        ActorSourceLayers::bind_for(&reload, parent, parent_branch, &worktrees);
-        let parent_draft = reload.helper_draft(parent_branch);
-        std::fs::write(
-            parent_draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 1\n",
-        )
-        .unwrap();
-        let parent_revision = match ActorSourceLayers::reload_helpers(&reload, parent, &[]) {
-            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
-            result => panic!("parent helper publish failed: {result:?}"),
-        };
-
-        let child_branch =
-            ActorSourceLayers::prepare_helpers(&reload, parent, &worktrees, false).unwrap();
-        assert_ne!(child_branch, parent_branch);
-        ActorSourceLayers::bind_for(&reload, child, &child_branch, &worktrees);
-        assert_eq!(
-            reload
-                .helper_layer(&child_branch)
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .identity,
-            parent_revision
-        );
-        let child_draft = reload.helper_draft(&child_branch);
-        assert!(
-            std::fs::read_to_string(child_draft.join("SessionHelpers.hs"))
-                .unwrap()
-                .contains("value = 1")
-        );
-        std::fs::write(
-            child_draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 2\n",
-        )
-        .unwrap();
-        let child_revision = match ActorSourceLayers::reload_helpers(&reload, child, &[]) {
-            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
-            result => panic!("child helper publish failed: {result:?}"),
-        };
-        assert_ne!(child_revision, parent_revision);
-        assert_eq!(
-            reload
-                .helper_layer(parent_branch)
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .identity,
-            parent_revision
-        );
-        assert!(
-            std::fs::read_to_string(parent_draft.join("SessionHelpers.hs"))
-                .unwrap()
-                .contains("value = 1")
-        );
-        assert_ne!(
-            ActorSourceLayers::layer_include_for(&reload, parent_branch, &worktrees).unwrap()[0],
-            ActorSourceLayers::layer_include_for(&reload, &child_branch, &worktrees).unwrap()[0]
-        );
-        std::fs::write(
-            parent_draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 3\n",
-        )
-        .unwrap();
-        let later_parent = match ActorSourceLayers::reload_helpers(&reload, parent, &[]) {
-            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
-            result => panic!("later parent helper publish failed: {result:?}"),
-        };
-        assert_ne!(later_parent, parent_revision);
-        assert_eq!(
-            reload
-                .helper_layer(&child_branch)
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .identity,
-            child_revision,
-            "a later parent publication cannot change an existing child"
-        );
     }
 
     #[test]
