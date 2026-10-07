@@ -3131,6 +3131,63 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
     assert_eq!(fields[0].as_text(), Some("TPEXACTITEM"));
     assert_eq!(fields[1].as_text(), Some("2"));
     assert_eq!(fields[8].as_array().unwrap().len(), 4);
+    assert_eq!(index, 0, "this control starts with one executable segment");
+    let module = fields[8].as_array().unwrap()[2].as_array().unwrap()[1]
+        .as_text()
+        .unwrap();
+    let segment = root.join("segment-0");
+    let source_path = segment.join(format!("{module}.hs"));
+    let source = std::fs::read(&source_path).unwrap();
+    let item_source = root.join("item-0").join(format!("{module}.hs"));
+    assert_eq!(std::fs::read(&item_source).unwrap(), source);
+    assert!(
+        !root.join("item-0/.exact-compilations").exists(),
+        "projection products must admit from their actual segment receipt owner"
+    );
+    struct RestoreDirectory {
+        original: PathBuf,
+        held: PathBuf,
+    }
+    impl Drop for RestoreDirectory {
+        fn drop(&mut self) {
+            std::fs::rename(&self.held, &self.original)
+                .expect("restore original compiler receipt directory");
+        }
+    }
+    let receipts = segment.join(".exact-compilations");
+    let held = tempfile::tempdir_in(&segment).unwrap();
+    let moved = RestoreDirectory {
+        original: receipts.clone(),
+        held: held.path().join("receipts"),
+    };
+    std::fs::rename(&receipts, &moved.held).unwrap();
+    assert!(matches!(
+        offer.admit_cell_program(root),
+        Err(CompileError::ExtractFailed(_))
+    ));
+    drop(moved);
+    offer
+        .admit_cell_program(root)
+        .expect("restored genuine segment receipts must admit");
+    let restore_source = RestoreReceipt {
+        path: source_path.clone(),
+        original: source.clone(),
+    };
+    let mut changed_source = source;
+    changed_source.extend_from_slice(b"\n-- changed after compilation\n");
+    std::fs::write(&source_path, changed_source).unwrap();
+    assert_ne!(
+        std::fs::read(&item_source).unwrap(),
+        std::fs::read(&source_path).unwrap()
+    );
+    assert!(matches!(
+        offer.admit_cell_program(root),
+        Err(CompileError::ExtractFailed(_))
+    ));
+    drop(restore_source);
+    offer
+        .admit_cell_program(root)
+        .expect("restored consumed segment source must admit independently");
     for field in 0..4 {
         let restore = RestoreReceipt {
             path: path.clone(),
