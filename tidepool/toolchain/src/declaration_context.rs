@@ -8908,8 +8908,13 @@ mod tests {
 
         // The subsequent item uses the evolved output view, while its source
         // authority still comes from the same successful physical request.
-        let mut projected = request.clone();
-        projected.context = context.clone();
+        let mut projected = request
+            .in_program_context(&directory.path().join("program-inputs"), context.clone())
+            .unwrap();
+        projected
+            .context
+            .validate_artifacts(&projected.artifacts)
+            .unwrap();
         let admission = segment
             .product_admission(&projected, &source_path, source, &evidence)
             .unwrap();
@@ -8922,14 +8927,26 @@ mod tests {
             .admit_program_segment(&output)
             .err()
             .expect("a new source receipt cannot replace an admitted owner");
-        assert!(ordinary_refusal
-            .to_string()
-            .contains("fresh module replaced an admitted exact owner"));
-        assert!(projected
+        let assert_context_refusal = |actual: &CompileError, reason: &str| {
+            let expected = failure(reason);
+            assert!(
+                matches!((actual, &expected),
+                    (CompileError::ExtractFailed(actual), CompileError::ExtractFailed(expected))
+                        if actual == expected),
+                "{actual:?}"
+            );
+        };
+        assert_context_refusal(
+            &ordinary_refusal,
+            "fresh module replaced an admitted exact owner",
+        );
+        let hidden_refusal = projected
             .admit_program_support(context.clone(), &support, segment.admissions(), None)
-            .unwrap_err()
-            .to_string()
-            .contains("program support cannot select a retained hidden owner"));
+            .unwrap_err();
+        assert_context_refusal(
+            &hidden_refusal,
+            "program support cannot select a retained hidden owner",
+        );
 
         let before = projected.context.semantic_sha256();
         let changed = support_view(&[support_product_with_interface(
@@ -8937,11 +8954,13 @@ mod tests {
             "Consumer",
             b"changed canonical interface".to_vec(),
         )]);
-        assert!(projected
+        let changed_refusal = projected
             .admit_program_segment_support(context, &changed, &segment, None)
-            .unwrap_err()
-            .to_string()
-            .contains("projected segment source changed its admitted canonical owner"));
+            .unwrap_err();
+        assert_context_refusal(
+            &changed_refusal,
+            "projected segment source changed its admitted canonical owner",
+        );
         assert_eq!(projected.context.semantic_sha256(), before);
         assert!(segment
             .product_admission(
