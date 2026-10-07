@@ -636,31 +636,32 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     campaign.hosted.await.unwrap();
 }
 
-fn open_test_fork(
+fn open_test_workspace(
     campaign: &TestCampaign,
     child: &exomonad_actor::LocalResidentInstallation,
-) -> Arc<dyn exomonad_actor::ForkWorkspaceCustody> {
+) -> Arc<dyn exomonad_actor::WorkspaceCustody> {
     let [worktree_id] = child.launch_worktrees.as_slice() else {
         panic!("child must have one worktree")
     };
+    let worktree_id = exomonad_worktree::WorktreeId::from_raw(worktree_id);
     let worktree = campaign
         .worktrees
-        .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree_id))
+        .lookup(&worktree_id)
         .unwrap()
         .unwrap();
+    assert!(worktree.cwd().is_dir(), "installation workspace must exist");
     let principal = WorktreePrincipal::exact_actor(
         &runtime_namespace(campaign.session_root.path()),
         child.actor.identity().id.0,
         child.actor.identity().incarnation.0,
     );
-    assert_eq!(
+    assert!(
         campaign
             .bindings
             .lock()
-            .current(worktree.id())
-            .unwrap()
-            .agent(),
-        &principal
+            .membership(&worktree_id, &principal)
+            .is_some(),
+        "installation must retain exact workspace membership"
     );
     let binding = child
         .worktree_custody
@@ -722,7 +723,7 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
             },
         )
         .await;
-    let _custody = open_test_fork(&campaign, &child);
+    let _custody = open_test_workspace(&campaign, &child);
     campaign
         .next_deployment(
             "review request activation",
@@ -781,7 +782,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             },
         )
         .await;
-    let _binding = open_test_fork(&campaign, &child);
+    let _binding = open_test_workspace(&campaign, &child);
     campaign
         .next_deployment(
             "guide example session readiness",
@@ -1268,7 +1269,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                 .await;
             match arrival {
                 Arrival::Child(child) => {
-                    bindings.push(open_test_fork(&campaign, &child));
+                    bindings.push(open_test_workspace(&campaign, &child));
                     children.push(child);
                 }
                 Arrival::Ready => ready += 1,
@@ -1332,7 +1333,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 .await;
             match arrival {
                 Arrival::Child(child) => {
-                    bindings.push(open_test_fork(&campaign, &child));
+                    bindings.push(open_test_workspace(&campaign, &child));
                     children.push(child);
                 }
                 Arrival::Ready => ready += 1,
@@ -1392,7 +1393,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 ReviewArrival::Child(child) => {
                     assert_eq!(child.context_parent, None);
                     assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
-                    bindings.push(open_test_fork(&campaign, &child));
+                    bindings.push(open_test_workspace(&campaign, &child));
                     reviewer = Some(child);
                 }
                 ReviewArrival::Ready { message } => {
@@ -1691,7 +1692,7 @@ async fn next_project_worker(
     campaign: &mut TestCampaign,
 ) -> (
     exomonad_actor::LocalResidentInstallation,
-    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
+    Arc<dyn exomonad_actor::WorkspaceCustody>,
 ) {
     let (installation, custody, _) = next_project_activation(campaign).await;
     (installation, custody)
@@ -1701,7 +1702,7 @@ async fn next_project_activation(
     campaign: &mut TestCampaign,
 ) -> (
     exomonad_actor::LocalResidentInstallation,
-    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
+    Arc<dyn exomonad_actor::WorkspaceCustody>,
     exomonad_actor::ResidentActivation,
 ) {
     enum WorkerArrival {
@@ -1746,7 +1747,7 @@ async fn next_project_activation(
             WorkerArrival::Child(child) => worker = Some(child),
             WorkerArrival::Ready(activation) => {
                 let child = worker.take().unwrap();
-                let binding = open_test_fork(campaign, &child);
+                let binding = open_test_workspace(campaign, &child);
                 return (*child, binding, activation);
             }
         }

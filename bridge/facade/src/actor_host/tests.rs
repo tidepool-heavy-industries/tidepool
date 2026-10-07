@@ -860,7 +860,7 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     assert_eq!(replaced["status"], "committed", "{replaced:?}");
     let published = dispatch_haskell_script(child.policy.as_ref(), "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)").await;
     assert_eq!(published["status"], "replied", "{published:?}");
-    let settled = dispatch_haskell_script(root.as_ref(), "settled <- watch (case watchLabel \"source-settled\" of { Right label -> label; Left _ -> error \"fixture label\" }) (awaitResponse answer)").await;
+    let settled = dispatch_haskell_script(root.as_ref(), "settled <- watch Nothing (result answer)").await;
     assert_eq!(settled["status"], "committed", "{settled:?}");
     campaign.await_watch_ready().await;
     let collected = dispatch_haskell_script(

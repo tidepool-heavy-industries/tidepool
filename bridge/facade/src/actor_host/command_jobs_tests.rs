@@ -131,7 +131,7 @@ async fn ordinary_command_report_skips_unrequested_source_probe() {
     let running = tokio::spawn(async move {
         dispatch_haskell_script(
             policy.as_ref(),
-            "job <- Cmd.background [bash|printf ordinary|]\nreport <- waitFor (Cmd.awaitFinished job)\nfmap Cmd.reportSource report",
+            "job <- Cmd.background [bash|printf ordinary|]\nreport <- await (Cmd.awaitFinished job)\nfmap Cmd.reportSource report",
         )
         .await
     });

@@ -402,7 +402,7 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
 
     let watch = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "inheritedWatch <- watch (\"inherited-ready\" :: WatchLabel) (awaitResponse worker)",
+        "inheritedWatch <- watch (Just \"inherited-ready\") (result worker)",
     )
     .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
@@ -463,7 +463,7 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
 
     let queued = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "queuedWatch <- watch (\"queued-ready\" :: WatchLabel) (awaitResponse worker)",
+        "queuedWatch <- watch (Just \"queued-ready\") (result worker)",
     )
     .await;
     assert_eq!(queued["status"], "committed", "{queued:?}");
@@ -729,7 +729,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     custody_assert_request(installed[0].policy.as_ref(), "nested", &activation).await;
     let watch = tests::dispatch_haskell_script(
         installed[0].policy.as_ref(),
-        "let readyLabel = \"custody-leaf-ready\" :: WatchLabel\nleafReady <- watch readyLabel (awaitResponse nested)",
+        "leafReady <- watch (Just \"custody-leaf-ready\") (result nested)",
     )
     .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
