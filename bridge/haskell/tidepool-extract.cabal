@@ -120,6 +120,7 @@ library tidepool-extract-internal
     Tidepool.TypedSegment
     Tidepool.TurnSource
   other-modules:   Tidepool.LocalNativeDeclaration
+                   Tidepool.TypedSegment.Types
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
