@@ -985,6 +985,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_launch_retention_fences_concurrent_root_and_nested_cleanup_proofs() {
+        for nested in [false, true] {
+            let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+            let (runner, machines, placement, captured, _root) = shared_fixture();
+            fixture.environment.runner = runner;
+            let actor = fixture.actor.identity();
+            let context =
+                ActorDescriptor::new("concurrent launch", placement).session_context(actor);
+            let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+            let owner = if nested {
+                work.new_scope().unwrap()
+            } else {
+                work.clone()
+            };
+            let custody = ChildPlacementCustody::new(placement);
+            let startup = custody.startup_guard();
+            owner
+                .retain_launch_placement(&context, custody.clone())
+                .unwrap();
+            drop(startup);
+
+            let mut checkout = machines.checkout_run(placement.session).unwrap();
+            let late_scope = checkout.machine().mint_isolated_scope();
+            let late_capture = checkout.machine().retain_lexical_scope(late_scope).unwrap();
+            checkout.machine().retire_scope(late_scope);
+            let late_placement = crate::ActorPlacement {
+                resource_scope: RealmId::fresh(),
+                lexical_scope: late_scope,
+                ..placement
+            };
+            let late_custody = ChildPlacementCustody::new(late_placement);
+            let late_startup = late_custody.startup_guard();
+            let mut cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
+            assert!(matches!(
+                futures_util::poll!(&mut cleanup),
+                std::task::Poll::Pending
+            ));
+            assert_eq!(
+                *custody.0.lock(),
+                ChildPlacementPhase::Reclaiming(placement)
+            );
+            assert!(owner
+                .retain_launch_placement(&context, late_custody)
+                .is_err());
+            drop(late_startup);
+            drop(checkout);
+            assert!(cleanup.await.uncertainty().is_some());
+            assert!(!capture_is_live(&machines, placement, &captured));
+            assert!(capture_is_live(&machines, late_placement, &late_capture));
+            assert_eq!(
+                work.cleanup(&fixture.environment, &fixture.kernel)
+                    .await
+                    .uncertainty(),
+                None
+            );
+            assert!(!capture_is_live(&machines, late_placement, &late_capture));
+            fixture.finish().await;
+        }
+    }
+
+    #[tokio::test]
     async fn failed_preactor_cleanup_keeps_exact_placement_for_confirmed_retry() {
         let id = SessionId(976);
         let root = tempfile::tempdir().unwrap();
