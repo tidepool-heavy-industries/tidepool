@@ -2123,12 +2123,14 @@ fn validate_original_group_receipts(
     Ok(original.admitted())
 }
 
-/// Merge the same authenticated group re-offered by a current receipt without
-/// changing the prior selected group's origin or immutable arenas.
+/// Merge equal current and prior selected groups using their original arenas.
+/// Proved promotions retain the current event; cached reoffers retain the prior
+/// selected event. Full-original equality is issued once at the owner boundary.
 fn append_original_selection(
     groups: &mut Vec<PendingCertifiedGroup>,
     inherited: &[PendingCertifiedGroup],
     operation: &InventoryOperation,
+    sharing: &ValidatedPromotionSharing,
 ) -> CertResult<()> {
     for group in groups.iter().chain(inherited) {
         operation.charge(
@@ -2157,7 +2159,8 @@ fn append_original_selection(
         }
         if let Some(index) = positions.get(&key) {
             let current = &groups[*index];
-            if current.origin != ProductOrigin::Cached
+            let shared = sharing.0.contains(&current.owner);
+            if (current.origin != ProductOrigin::Cached && !shared)
                 || current.group != group.group
                 || current.imports != group.imports
             {
@@ -2172,7 +2175,17 @@ fn append_original_selection(
                     },
                 ));
             }
-            groups[*index] = group.clone();
+            groups[*index] = if shared {
+                // Compiler input roles and selected execution groups are separate.
+                // The same proved original may be re-emitted and already selected;
+                // retain the current event while sharing immutable original arenas.
+                PendingCertifiedGroup {
+                    origin: current.origin,
+                    ..group.clone()
+                }
+            } else {
+                group.clone()
+            };
         } else {
             groups.push(group.clone());
         }
@@ -6552,6 +6565,7 @@ pub(crate) fn certify_products_with_validation(
             &mut groups,
             &admission.request.groups,
             &validation.inventory,
+            &sharing,
         )?;
         for product in &available_originals {
             if !recovery_products
@@ -8510,6 +8524,7 @@ pub(crate) mod tests {
             &mut selected,
             std::slice::from_ref(&inherited),
             &validation.inventory,
+            &ValidatedPromotionSharing::default(),
         )
         .unwrap();
         assert_eq!(selected, vec![inherited.clone()]);
@@ -8525,16 +8540,33 @@ pub(crate) mod tests {
             append_original_selection(
                 &mut vec![admitted.clone(), admitted.clone()],
                 &[],
-                &validation.inventory
+                &validation.inventory,
+                &ValidatedPromotionSharing::default(),
             ),
             Err(CertificationError::Mismatch(
                 "duplicate current original ordinal"
             ))
         ));
+        let mut unproved_promotion = admitted.clone();
+        unproved_promotion.origin = ProductOrigin::RetainedCore;
+        assert!(matches!(append_original_selection(
+            &mut vec![unproved_promotion], std::slice::from_ref(&inherited),
+            &validation.inventory, &ValidatedPromotionSharing::default(),
+        ), Err(CertificationError::OriginalGroupConflict(conflict))
+            if conflict.owner == *original.owner()
+                && conflict.failure == (OriginalGroupFailure::SelectionOverlap {
+                    ordinal: 11,
+                    current_origin: ProductOrigin::RetainedCore,
+                    inherited_origin: ProductOrigin::Cached,
+                    body_matches: true,
+                    imports_match: true,
+                })
+        ));
         let mut contradictory = inherited.clone();
         contradictory.imports = vec![retained(99)].into();
         assert!(matches!(
-            append_original_selection(&mut vec![admitted], &[contradictory], &validation.inventory),
+            append_original_selection(&mut vec![admitted], &[contradictory], &validation.inventory,
+                &ValidatedPromotionSharing::default()),
             Err(CertificationError::OriginalGroupConflict(conflict))
                 if conflict.owner == *original.owner()
                     && conflict.failure == (OriginalGroupFailure::SelectionOverlap {
