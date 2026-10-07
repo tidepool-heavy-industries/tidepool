@@ -12,6 +12,9 @@ use tidepool_runtime::session::WorkbenchForkBoundary;
 use crate::ActorRef;
 use crate::HostedCheckpointAttachment;
 
+mod spawn_admission;
+pub use spawn_admission::{SpawnAdmission, SpawnAdmissionOutcome};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorPathReservation {
     pub requested: ActorPath,
@@ -314,6 +317,7 @@ impl ForkGroupGate {
 #[derive(Default)]
 struct ForkGroupsState {
     next: u64,
+    spawns: HashMap<uuid::Uuid, spawn_admission::SpawnAdmissionRecord>,
     groups: HashMap<ForkGroupId, ForkGroup>,
     cleaned: HashSet<ForkGroupId>,
     parents: HashMap<ActorRef, ActorRef>,
@@ -509,6 +513,7 @@ impl ForkGroupRegistry {
             lineage,
             state: Arc::new(Mutex::new(ForkGroupsState {
                 next: 1,
+                spawns: HashMap::new(),
                 groups: HashMap::new(),
                 cleaned: HashSet::new(),
                 parents: HashMap::new(),

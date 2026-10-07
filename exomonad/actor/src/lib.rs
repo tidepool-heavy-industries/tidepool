@@ -105,7 +105,7 @@ pub use kernel::{
 pub use lineage::{
     ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
     ForkGroupCleanupOutcome, ForkGroupError, ForkGroupGate, ForkGroupId, ForkGroupPhase,
-    ForkGroupPublication, ForkGroupRegistry,
+    ForkGroupPublication, ForkGroupRegistry, SpawnAdmission, SpawnAdmissionOutcome,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,

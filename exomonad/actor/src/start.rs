@@ -74,6 +74,25 @@ pub enum WorkerLifetime {
     SwarmOwned,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
+pub enum SpawnContextWire {
+    CapturedSpawn(String),
+    FreshSpawn(String),
+}
+
+#[derive(Debug, Clone, tidepool_bridge_derive::ToHaskell)]
+pub enum SpawnError {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpawnRefused(String),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpawnPartiallyStarted((i64, i64), Option<tidepool_bridge_effects::WtWorktreeHandle>, String),
+}
+
+pub(crate) struct SpawnDefinition {
+    pub context: SpawnContextWire,
+    pub workspace: crate::fork_workspace::SpawnWorkspaceWire,
+}
+
 pub(crate) struct ActorStartRequest {
     pub label: String,
     pub role: ActorLaunchRoleWire,
@@ -212,6 +231,7 @@ pub struct ActorReplacementDefinition {
 pub(crate) struct CapturedChildLaunch {
     pub lifetime: WorkerLifetime,
     pub descriptor: ActorDescriptor,
+    pub spawn: Option<SpawnDefinition>,
     /// Still resident on the LAUNCHING session's machine, whether or not
     /// the descriptor's own placement names a different, freshly minted
     /// one (an eligible `SelectedContext` launch — see
@@ -354,6 +374,69 @@ impl ResidentActorStart {
                 unbound_label: None,
             },
         )
+    }
+
+    pub(crate) fn capture_spawn<H, O>(
+        session: &mut ResidentSession<H, O>,
+        parent_hole: ResidentHole,
+        context: SpawnContextWire,
+        workspace: crate::fork_workspace::SpawnWorkspaceWire,
+        effects: Vec<ActorEffectKeyWire>,
+        label: Option<String>,
+        model: Option<Model>,
+        effort: Option<ForkEffort>,
+        instructions: Option<String>,
+        lifetime: WorkerLifetime,
+        limits: Option<(i64, i64)>,
+        session_id: tidepool_repr::SessionId,
+        parent_actor: crate::ActorRef,
+    ) -> Result<Self, ActorStartCaptureError>
+    where H: DispatchEffect<O> + Send, O: OutputSink + Sync,
+    {
+        if model.as_ref().is_some_and(|model| {
+            model.value().is_empty() || model.value().chars().any(char::is_whitespace)
+        }) {
+            return Err(ActorStartCaptureError::InvalidModel);
+        }
+        let child_realm = RealmId::fresh();
+        let entry = session.live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
+            .ok_or(ActorStartCaptureError::MissingEntry)?;
+        // Only the explicit installer closure's exact dependencies cross a
+        // fresh context boundary; ambient parent lexical bindings do not.
+        let facade = materialize_entry_facade(session, entry.provenance())?;
+        let keys: Vec<_> = effects.into_iter().map(Into::into).collect();
+        let fresh = matches!(&context, SpawnContextWire::FreshSpawn(_));
+        let independent_machine = fresh && !keys.contains(&crate::ActorEffectKey::RepoEvent);
+        let seed = independent_machine.then(|| ChildSessionSeed {
+            facade: facade.clone(),
+            val_generation: session.val_gen(),
+            declaration_high_water: session.declaration_generation_high_water(),
+        });
+        let (child_session, lexical_scope) = if independent_machine {
+            (tidepool_runtime::session::fresh_session_id(), tidepool_codegen::scope::ScopeId::ROOT)
+        } else {
+            (session_id, session.mint_isolated_scope())
+        };
+        let checkpoint = match &context {
+            SpawnContextWire::CapturedSpawn(token) => Some(token.clone()),
+            SpawnContextWire::FreshSpawn(_) => None,
+        };
+        let mut descriptor = ActorDescriptor::new(label.unwrap_or_default(), crate::ActorPlacement {
+            session: child_session, resource_scope: child_realm, lexical_scope,
+        })
+        .with_effective_role(crate::EffectiveRole::coding().with_effect_keys(keys))
+        .with_creator(parent_actor)
+        .with_checkpoint_token(checkpoint)
+        .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()))
+        .with_model(model).with_fork_effort(effort).with_instructions(instructions)
+        .with_fork_budget(limits);
+        if lifetime != WorkerLifetime::SwarmOwned {
+            descriptor = descriptor.with_supervisor_parent(parent_actor);
+        }
+        Ok(Self { parent_hole, child: CapturedChildLaunch {
+            lifetime, descriptor, spawn: Some(SpawnDefinition { context, workspace }),
+            entry, launch_worktrees: Vec::new(), fork_workspace: None, seed,
+        } })
     }
 
     pub(crate) fn capture_decoded<H, O>(
@@ -526,6 +609,7 @@ impl ResidentActorStart {
             child: CapturedChildLaunch {
                 lifetime,
                 descriptor,
+                spawn: None,
                 entry,
                 launch_worktrees,
                 fork_workspace,

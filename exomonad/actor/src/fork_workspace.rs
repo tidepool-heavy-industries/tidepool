@@ -13,6 +13,18 @@ use tidepool_bridge_effects::{WtDirtyPolicy, WtWorktreeHandle, WtWorktreeSpec};
 
 use crate::ActorRef;
 
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
+pub struct WorkspaceHandle(pub String);
+
+#[derive(Debug, Clone, tidepool_bridge_derive::FromHaskell)]
+pub enum SpawnWorkspaceWire {
+    SameDirectory,
+    ExistingDirectory(WorkspaceHandle),
+    ForkDirectory(tidepool_bridge_effects::WtWorktreeSource),
+}
+
+pub type WorkspaceSelection = SpawnWorkspaceWire;
+
 #[derive(Debug, Clone)]
 pub enum ForkWorkspaceSeed {
     Explicit(WtWorktreeSpec),
@@ -28,7 +40,7 @@ pub struct ForkWorkspacePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{detail}")]
-pub struct ForkWorkspaceAdmissionError {
+pub struct WorkspaceAdmissionError {
     pub detail: String,
 }
 
@@ -37,12 +49,12 @@ pub struct ForkWorkspaceAdmissionError {
 /// After submission may have occurred, owned resources are conservatively retained.
 /// Legacy tmux cannot prove exact termination. A service namespace witness
 /// alone also cannot establish host HTTP/resident-work quiescence.
-pub trait ForkWorkspaceCustody: std::any::Any + Send + Sync {
+pub trait WorkspaceCustody: std::any::Any + Send + Sync {
     fn transfer_to(
         &self,
         _successor: ActorRef,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        Err(ForkWorkspaceAdmissionError {
+    ) -> Result<Arc<dyn WorkspaceCustody>, WorkspaceAdmissionError> {
+        Err(WorkspaceAdmissionError {
             detail: "workspace owner does not support custody transfer".into(),
         })
     }
@@ -54,22 +66,22 @@ pub trait ForkWorkspaceCustody: std::any::Any + Send + Sync {
 
 /// Installer invoked once, on the exact successor incarnation, to bind
 /// retained host resources and produce the owned handle for that actor.
-type ForkWorkspaceInstall = dyn FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
+type WorkspaceInstall = dyn FnOnce(ActorRef) -> Result<Arc<dyn WorkspaceCustody>, WorkspaceAdmissionError>
     + Send
     + Sync;
 
 /// Owned preparation travels into child bootstrap. Its installer may retain
 /// host resources that cannot be reconstructed from the model-facing receipt.
 /// Installation consumes the preparation and binds it to one exact incarnation.
-pub struct PreparedForkWorkspace {
+pub struct PreparedWorkspaceAttachment {
     handle: WtWorktreeHandle,
-    install: Box<ForkWorkspaceInstall>,
+    install: Box<WorkspaceInstall>,
 }
 
-impl PreparedForkWorkspace {
+impl PreparedWorkspaceAttachment {
     pub fn new(
         handle: WtWorktreeHandle,
-        install: impl FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
+        install: impl FnOnce(ActorRef) -> Result<Arc<dyn WorkspaceCustody>, WorkspaceAdmissionError>
             + Send
             + Sync
             + 'static,
@@ -87,18 +99,29 @@ impl PreparedForkWorkspace {
     pub fn install(
         self,
         actor: ActorRef,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn WorkspaceCustody>, WorkspaceAdmissionError> {
         (self.install)(actor)
     }
 }
 
-pub type ForkWorkspaceAdmissionFuture<'a> = Pin<
+pub type WorkspaceAdmissionFuture<'a> = Pin<
     Box<
-        dyn Future<Output = Result<PreparedForkWorkspace, ForkWorkspaceAdmissionError>> + Send + 'a,
+        dyn Future<Output = Result<PreparedWorkspaceAttachment, WorkspaceAdmissionError>> + Send + 'a,
     >,
 >;
 
-pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
+pub trait WorkspaceAdmission: Send + Sync + 'static {
+    fn prepare(
+        &self,
+        _owner: ActorRef,
+        _selection: WorkspaceSelection,
+        _access: crate::WorkspaceAccess,
+    ) -> WorkspaceAdmissionFuture<'_> {
+        Box::pin(async { Err(WorkspaceAdmissionError {
+            detail: "workspace attachment admission is unavailable".into(),
+        }) })
+    }
+
     /// Install owned resources before executing the child entry. This is separate from
     /// provider readiness; implementations must fail closed on stale ownership.
     /// `role` is the actor's resolved role: an actor that holds a worktree
@@ -109,8 +132,8 @@ pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
         &self,
         actor: ActorRef,
         worktree: &str,
-        role: crate::ActorRole,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>;
+        access: crate::WorkspaceAccess,
+    ) -> Result<Arc<dyn WorkspaceCustody>, WorkspaceAdmissionError>;
 
     /// Prepare the workspace before child bootstrap. Async native admission
     /// stays on the runtime; implementations isolate blocking Git work themselves.
@@ -120,7 +143,7 @@ pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
         actor_path: String,
         seed: ForkWorkspaceSeed,
         policy: ForkWorkspacePolicy,
-    ) -> ForkWorkspaceAdmissionFuture<'_>;
+    ) -> WorkspaceAdmissionFuture<'_>;
 }
 
-pub(crate) type SharedForkWorkspaceAdmission = Arc<dyn ForkWorkspaceAdmission>;
+pub(crate) type SharedWorkspaceAdmission = Arc<dyn WorkspaceAdmission>;
