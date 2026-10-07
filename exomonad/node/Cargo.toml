@@ -25,6 +25,7 @@ reqwest.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
 uuid.workspace = true
 
