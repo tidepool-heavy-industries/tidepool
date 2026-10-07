@@ -2061,6 +2061,7 @@ impl ExactCompilationRequest {
         context: Arc<ExactDeclarationContext>,
         support: &ArtifactView,
         admissions: &[ExactSourceAdmission],
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
         let mut selected_originals = BTreeMap::new();
@@ -2103,6 +2104,14 @@ impl ExactCompilationRequest {
             .cloned()
             .collect::<Vec<_>>();
         for (owner, entry) in &supplied {
+            // Reserved same-request output certificates retain type closure.
+            // They do not supply source admissions or become lexical roots.
+            if produced_types.is_some_and(|outputs| outputs.matches_artifact(entry)) {
+                if imports.contains_key(owner) || selected_originals.contains_key(owner) {
+                    return Err(failure("produced type output became source support"));
+                }
+                continue;
+            }
             if imports.contains_key(owner) {
                 if let Some(selected) = selected_originals.get(owner) {
                     let Some(previous) = retained.get(owner) else {
@@ -6866,7 +6875,12 @@ mod tests {
                 },
             );
         let effective = request
-            .admit_program_support(Arc::clone(&context), &support_view(&products), &[admission])
+            .admit_program_support(
+                Arc::clone(&context),
+                &support_view(&products),
+                &[admission],
+                None,
+            )
             .unwrap();
         let after = effective
             .artifact_view()
@@ -7099,7 +7113,7 @@ mod tests {
         request.context = Arc::clone(&context);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         let retained = request
-            .admit_program_support(Arc::clone(&context), &support_view(&[]), &[admission])
+            .admit_program_support(Arc::clone(&context), &support_view(&[]), &[admission], None)
             .unwrap();
         assert!(original_products(&retained.artifact_view().entries()).is_empty());
         assert_eq!(request.program_source_lexical().len(), 2);
@@ -7274,6 +7288,7 @@ mod tests {
                 baseline,
                 &support,
                 &[interface_only_agent_ref_admission(directory.path(), "main")],
+                None,
             )
             .unwrap();
         let owner = identity("main", "Tidepool.Agent.Ref");
@@ -7327,6 +7342,55 @@ mod tests {
     }
 
     #[test]
+    fn program_support_refuses_fresh_value_type_without_reserved_output_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), baseline.clone());
+        let context = request
+            .admit_program_support(
+                baseline,
+                &interface_only_agent_ref([2; 32], "main"),
+                &[interface_only_agent_ref_admission(directory.path(), "main")],
+                None,
+            )
+            .unwrap();
+        let value = receiver_value_interface();
+        let candidate = (*context)
+            .clone()
+            .extend_program_value_interface(value.clone())
+            .unwrap();
+        let support = candidate
+            .artifact_view()
+            .select_roots(vec![value.artifact_id()])
+            .unwrap();
+        let previous = request
+            .program_support
+            .as_ref()
+            .unwrap()
+            .artifacts
+            .artifact_ids();
+        let refusal = request
+            .admit_program_support(context.clone(), &support, &[], None)
+            .expect_err("a type certificate alone cannot supply fresh source or reserved outputs");
+        assert!(matches!(refusal, CompileError::ExtractFailed(_)));
+        assert_eq!(
+            request
+                .program_support
+                .as_ref()
+                .unwrap()
+                .artifacts
+                .artifact_ids(),
+            previous
+        );
+        assert!(!context
+            .artifact_view()
+            .artifact_ids()
+            .contains(&value.artifact_id()));
+        assert!(context.lexical_graph().is_empty());
+        assert!(context.recovery_products().is_empty());
+    }
+
+    #[test]
     fn interface_only_receiver_support_refuses_unavailable_wrong_owner_and_unadmitted_source() {
         let directory = tempfile::tempdir().unwrap();
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
@@ -7352,6 +7416,7 @@ mod tests {
                     directory.path(),
                     "foreign",
                 )],
+                None,
             )
             .unwrap();
         assert_missing_ref(
@@ -7373,6 +7438,7 @@ mod tests {
                 hidden.clone(),
                 &support,
                 &[interface_only_agent_ref_admission(directory.path(), "main")],
+                None,
             )
             .is_err());
         assert!(hidden.lexical_graph().is_empty());
@@ -7399,7 +7465,8 @@ mod tests {
                     .admit_program_support(
                         empty.clone(),
                         &interface_only_agent_ref(producer, "main"),
-                        &admissions
+                        &admissions,
+                        None
                     )
                     .is_err(),
                 "{case}"
@@ -7429,6 +7496,7 @@ mod tests {
                     support_product("InstanceRelay"),
                 ]),
                 &[admission],
+                None,
             )
             .unwrap();
         assert!(context.lexical_graph().is_empty());
@@ -7533,7 +7601,8 @@ mod tests {
             .admit_program_support(
                 baseline,
                 &support_view(&products),
-                &[support_admission(directory.path())]
+                &[support_admission(directory.path())],
+                None
             )
             .is_err());
         let original = support_admission(directory.path());
@@ -7567,7 +7636,8 @@ mod tests {
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay")
                 ]),
-                &[original, changed]
+                &[original, changed],
+                None
             )
             .is_err());
     }
@@ -7681,6 +7751,7 @@ mod tests {
                     support_product("InstanceRelay"),
                 ]),
                 &[support_admission(directory.path())],
+                None,
             )
             .unwrap();
         assert!(context.lexical_graph().is_empty());
@@ -7856,6 +7927,7 @@ mod tests {
                 baseline,
                 &support_view(&[hidden.clone(), owner.clone(), relay.clone()]),
                 &[support_admission(directory.path())],
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -7908,6 +7980,7 @@ mod tests {
                 context,
                 &support_view(&[hidden.clone(), owner, relay, support_product("Additional")]),
                 &[later],
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -7936,7 +8009,7 @@ mod tests {
             b"different inherited interface".to_vec(),
         );
         assert!(request
-            .admit_program_support(context, &support_view(&[altered]), &[])
+            .admit_program_support(context, &support_view(&[altered]), &[], None)
             .is_err());
     }
 
@@ -7983,7 +8056,7 @@ mod tests {
         };
         assert_native_refusal(
             request
-                .admit_program_support(context.clone(), &support, &[])
+                .admit_program_support(context.clone(), &support, &[], None)
                 .unwrap_err(),
         );
         assert!(request.program_support.is_none());
@@ -7992,7 +8065,7 @@ mod tests {
         let unchanged = context.recovery_products();
         let unchanged_support = support_view(&unchanged);
         let unchanged_context = request
-            .admit_program_support(context.clone(), &unchanged_support, &[])
+            .admit_program_support(context.clone(), &unchanged_support, &[], None)
             .unwrap();
         assert_eq!(
             unchanged_context.recovery_products()[0].owner(),
@@ -8013,7 +8086,7 @@ mod tests {
         );
         let mut canonical_request = program_request(directory.path(), canonical_context.clone());
         let promoted = canonical_request
-            .admit_program_support(canonical_context, &unchanged_support, &[])
+            .admit_program_support(canonical_context, &unchanged_support, &[], None)
             .unwrap();
         assert_eq!(
             promoted.recovery_products()[0].owner(),
@@ -8040,7 +8113,7 @@ mod tests {
         );
         assert_native_refusal(
             request
-                .admit_program_support(context.clone(), &support, &[admission])
+                .admit_program_support(context.clone(), &support, &[admission], None)
                 .unwrap_err(),
         );
         assert!(request.program_support.is_none());
@@ -8070,6 +8143,7 @@ mod tests {
                 baseline,
                 &support_view(&[support_product_in_unit("main", "Tidepool.Internal.Resume")]),
                 &[admission],
+                None,
             )
             .unwrap();
         assert!(request.program_source_lexical().is_empty());
@@ -8161,6 +8235,7 @@ mod tests {
                     support_product("InstanceRelay"),
                 ]),
                 &[support_admission(directory.path())],
+                None,
             )
             .unwrap();
         let value = |module: &str, requirements| {

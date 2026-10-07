@@ -331,7 +331,7 @@ mod program_source_support_history {
                     b"replacement interface".to_vec(),
                 )]);
                 assert!(request
-                    .admit_program_support(context.clone(), &conflict, &[])
+                    .admit_program_support(context.clone(), &conflict, &[], None)
                     .is_err());
                 coverage.artifact_refusals += 1;
                 let after = request.program_support.as_ref().unwrap();
@@ -346,7 +346,7 @@ mod program_source_support_history {
                     &mut coverage,
                 );
                 let retried = request
-                    .admit_program_support(context.clone(), &all_artifacts, &[])
+                    .admit_program_support(context.clone(), &all_artifacts, &[], None)
                     .unwrap();
                 coverage.extensions += 1;
                 assert_eq!(retried.as_ref(), context.as_ref());

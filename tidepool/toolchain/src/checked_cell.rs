@@ -1002,6 +1002,21 @@ pub(crate) struct ProducedValueTypeInterfaces {
 }
 
 impl ProducedValueTypeInterfaces {
+    pub(crate) fn matches_artifact(
+        &self,
+        entry: &crate::artifact_inventory::ArtifactEntry,
+    ) -> bool {
+        matches!(
+            &entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Interface(
+                _,
+                crate::artifact_inventory::JoinedInterfaceRole::ValueInterface
+            )
+        ) && self
+            .interfaces()
+            .any(|interface| interface.artifact_id() == entry.descriptor.id)
+    }
+
     pub(crate) fn interfaces(
         &self,
     ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {

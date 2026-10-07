@@ -1696,6 +1696,7 @@ impl ModuleCandidateOffer {
                         context,
                         &output,
                         &source_admissions,
+                        Some(&produced_types),
                     )?;
                     admissions.extend(source_admissions);
                     let generation = match &planned.slots[index] {
@@ -1889,6 +1890,7 @@ impl ModuleCandidateOffer {
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
         output: &ProgramNativeOutput,
         admissions: &[crate::declaration_context::ExactSourceAdmission],
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
         let generated = admissions
             .iter()
@@ -1915,7 +1917,7 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             generated,
         )?;
-        request.admit_program_support(context, &support, admissions)
+        request.admit_program_support(context, &support, admissions, produced_types)
     }
 
     fn admit_program_value(
@@ -2690,6 +2692,7 @@ fn seal_turn_outputs_with_validation(
             exact_source
                 .as_ref()
                 .expect("checked output has exact source"),
+            produced_types,
         )?;
         Some(match checked {
             NativeCheckedOffer::ActivationPreview(preview) => {
@@ -2775,6 +2778,7 @@ fn checked_output_context(
     offer: &ModuleCandidateOffer,
     artifacts: &crate::artifact_inventory::ArtifactView,
     source_admission: &crate::declaration_context::ExactSourceAdmission,
+    produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
 ) -> Result<
     (
         Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -2792,6 +2796,7 @@ fn checked_output_context(
         exact.context.clone(),
         &support,
         std::slice::from_ref(source_admission),
+        produced_types,
     )?;
     Ok((context, request.program_source_lexical().to_vec()))
 }
