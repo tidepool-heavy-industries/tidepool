@@ -59,6 +59,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", 
 reqwest.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tidepool-protocol.workspace = true
 tidepool-testing.workspace = true
 tidepool-test-data.workspace = true

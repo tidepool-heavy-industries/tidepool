@@ -3391,6 +3391,560 @@ mod tests {
              existing typed path, unchanged"
         );
     }
+
+    // Direct registry histories cover queues and authority checks. Delayed clocks,
+    // mailbox coalescing, observation sources and authored scheduling are separate.
+    mod registry_properties {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Watch {
+            Commit(u8),
+            Head(u8),
+            Async(u8),
+            Mailbox(u8),
+            Immediate(bool),
+        }
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Subscribe(Option<u8>, u8, Vec<Watch>),
+            Publish(u8, u8),
+            Drain(u8, u8),
+            Unsubscribe(u8, u8),
+            CloseOwner(u8),
+            FireDue,
+        }
+
+        fn watch() -> impl Strategy<Value = Watch> {
+            prop_oneof![
+                (0u8..2).prop_map(Watch::Commit),
+                (0u8..2).prop_map(Watch::Head),
+                (0u8..2).prop_map(Watch::Async),
+                (0u8..2).prop_map(Watch::Mailbox),
+                any::<bool>().prop_map(Watch::Immediate),
+            ]
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                3 => (prop::option::of(0u8..2), 0u8..4, prop::collection::vec(watch(), 0..5))
+                    .prop_map(|(owner, principal, watches)| Op::Subscribe(owner, principal, watches)),
+                5 => (0u8..4, 0u8..2).prop_map(|(kind, key)| Op::Publish(kind, key)),
+                3 => (0u8..12, 0u8..4).prop_map(|(id, principal)| Op::Drain(id, principal)),
+                1 => (0u8..12, 0u8..4).prop_map(|(id, principal)| Op::Unsubscribe(id, principal)),
+                1 => (0u8..2).prop_map(Op::CloseOwner),
+                2 => Just(Op::FireDue),
+            ]
+        }
+
+        fn witness(mut prefix: Vec<Op>, suffix: Vec<Op>) -> Vec<Op> {
+            let slow = prefix
+                .iter()
+                .filter(|op| matches!(op, Op::Subscribe(..)))
+                .count() as u8;
+            let fast = slow + 1;
+            let new = slow + 2;
+            let unowned = slow + 3;
+            prefix.extend([
+                Op::Publish(0, 0),
+                Op::Subscribe(
+                    Some(0),
+                    1,
+                    vec![Watch::Commit(0), Watch::Commit(0), Watch::Immediate(false)],
+                ),
+                Op::Subscribe(Some(1), 2, vec![Watch::Commit(0)]),
+                Op::Drain(slow, 1),
+                Op::Publish(0, 0),
+                Op::Drain(fast, 1), // refused caller must not consume the queued fact
+                Op::Drain(fast, 2),
+                Op::Publish(1, 0), // another kind on the same tree must not match
+                Op::Publish(0, 0),
+                Op::Drain(fast, 2),
+                Op::Publish(0, 0),
+                Op::Drain(slow, 1), // poison at either valid generated bound
+                Op::Drain(fast, 2),
+                Op::FireDue,
+                Op::FireDue,
+                Op::Drain(fast, 2), // another subscriber's deadline must not broadcast here
+                Op::Drain(slow, 1),
+                Op::Unsubscribe(slow, 2),
+                Op::Unsubscribe(slow, 1),
+                Op::Drain(slow, 1),
+                Op::CloseOwner(1),
+                Op::Drain(fast, 2),
+                Op::Subscribe(
+                    Some(0),
+                    2,
+                    vec![
+                        Watch::Immediate(true),
+                        Watch::Immediate(false),
+                        Watch::Head(1),
+                    ],
+                ),
+                Op::Drain(new, 2), // registration starts empty, even after earlier fires
+                Op::Subscribe(
+                    None,
+                    0,
+                    vec![
+                        Watch::Head(1),
+                        Watch::Immediate(false),
+                        Watch::Async(1),
+                        Watch::Mailbox(0),
+                    ],
+                ),
+                Op::Drain(unowned, 0),
+                Op::FireDue,
+                Op::FireDue,
+                Op::Drain(new, 2),
+                Op::Drain(unowned, 0),
+                Op::CloseOwner(0),
+                Op::CloseOwner(1),
+                Op::Publish(1, 1),
+                Op::Drain(unowned, 0),
+                Op::Publish(2, 0),
+                Op::Publish(2, 1),
+                Op::Drain(unowned, 0),
+                Op::Publish(3, 1),
+                Op::Publish(3, 0),
+                Op::Drain(unowned, 0),
+            ]);
+            prefix.extend(suffix);
+            prefix
+        }
+
+        fn histories() -> impl Strategy<Value = (usize, Vec<Op>)> {
+            (
+                1usize..=2,
+                prop_oneof![
+                    prop::collection::vec(op(), 1..49),
+                    (
+                        prop::collection::vec(op(), 0..6),
+                        prop::collection::vec(op(), 0..6)
+                    )
+                        .prop_map(|(prefix, suffix)| witness(prefix, suffix)),
+                ],
+            )
+        }
+
+        fn principal(code: u8) -> PrincipalId {
+            match code {
+                0 => PrincipalId::SYSTEM,
+                1 => PrincipalId::new(1, 1),
+                2 => PrincipalId::new(1, 2),
+                3 => PrincipalId::new(2, 1),
+                _ => unreachable!(),
+            }
+        }
+
+        fn tree(key: u8) -> WtWorktreeId {
+            wt(&format!("tree-{key}"))
+        }
+        fn mailbox(key: u8) -> EvMailboxId {
+            EvMailboxId {
+                raw: format!("mailbox-{key}"),
+            }
+        }
+        fn wire_watch(watch: Watch) -> EvWatch {
+            match watch {
+                Watch::Commit(key) => EvWatch::WatchCommit(tree(key)),
+                Watch::Head(key) => EvWatch::WatchHead(tree(key)),
+                Watch::Async(key) => EvWatch::WatchAsync(i64::from(key)),
+                Watch::Mailbox(key) => EvWatch::WatchMailbox(mailbox(key)),
+                Watch::Immediate(negative) => EvWatch::WatchDeadline(if negative { -1 } else { 0 }),
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        enum Expected {
+            Published(u8, u8, usize),
+            Tick,
+        }
+
+        struct ModelSub {
+            id: EvSubscriptionId,
+            owner: Option<u8>,
+            principal: u8,
+            live: bool,
+            // Logical event coordinates; never production's matches/index helpers.
+            targets: Vec<(u8, u8)>,
+            worktrees: Vec<u8>,
+            armed: usize,
+            queue: Vec<Expected>,
+            dropped: i64,
+        }
+
+        fn deliver(sub: &mut ModelSub, event: Expected, bound: usize) -> bool {
+            if sub.dropped != 0 || sub.queue.len() == bound {
+                sub.dropped += 1;
+                false
+            } else {
+                sub.queue.push(event);
+                true
+            }
+        }
+
+        #[derive(Default, Debug)]
+        struct Coverage {
+            callbacks: usize,
+            steps: usize,
+            subscriptions: usize,
+            duplicate_watches: usize,
+            matching_deliveries: usize,
+            matched_kinds: [usize; 4],
+            broadcasts: usize,
+            overflow_losses: usize,
+            poisoned_reads: usize,
+            empty_reads: usize,
+            fifo_reads: usize,
+            denied: usize,
+            unknown: usize,
+            unsubscribed: usize,
+            owner_closures: usize,
+            immediate_fires: usize,
+            repeated_due_passes: usize,
+            successful_reads: usize,
+        }
+
+        fn id_at(subs: &[ModelSub], logical: u8) -> EvSubscriptionId {
+            subs.get(logical as usize)
+                .map(|sub| sub.id.clone())
+                .unwrap_or_else(|| EvSubscriptionId {
+                    raw: format!("unissued-{logical}"),
+                })
+        }
+
+        fn expected_access(
+            subs: &[ModelSub],
+            logical: u8,
+            caller: u8,
+            operation: &str,
+        ) -> Result<(), EventError> {
+            let id = id_at(subs, logical);
+            match subs.get(logical as usize).filter(|sub| sub.live) {
+                None => Err(EventError::EventUnknownSubscription(id.raw)),
+                Some(sub) if sub.principal != caller => {
+                    let owner = principal(sub.principal);
+                    let caller = principal(caller);
+                    Err(EventError::EventSubscriptionDenied(
+                        operation.into(),
+                        id.raw,
+                        format!("{}:{}", owner.identity, owner.incarnation),
+                        format!("{}:{}", caller.identity, caller.incarnation),
+                    ))
+                }
+                Some(_) => Ok(()),
+            }
+        }
+
+        fn published(kind: u8, key: u8, step: usize) -> EvRepositoryEvent {
+            let event_id = EvEventId {
+                raw: -(step as i64 + 1),
+            };
+            let tag = format!("event-{step}");
+            match kind {
+                0 => commit_event(event_id.raw, &tree(key).raw, &tag),
+                1 => head_event(event_id.raw, &tree(key).raw, &tag),
+                2 => EvRepositoryEvent::ObservedAsyncDone(event_id, i64::from(key)),
+                3 => EvRepositoryEvent::ObservedMessage(
+                    event_id,
+                    mailbox(key),
+                    serde_json::json!({"step": step}),
+                ),
+                _ => unreachable!(),
+            }
+        }
+
+        fn read(
+            registry: &mut SubscriptionRegistry,
+            subs: &mut [ModelSub],
+            logical: u8,
+            caller: u8,
+            seen_ticks: &mut Vec<i64>,
+            covered: &mut Coverage,
+        ) -> Result<(), TestCaseError> {
+            let id = id_at(subs, logical);
+            let access = expected_access(subs, logical, caller, "drain");
+            let actual_access = registry.check_caller(&id, principal(caller), "drain");
+            prop_assert_eq!(&actual_access, &access);
+            if let Err(error) = access {
+                match error {
+                    EventError::EventUnknownSubscription(_) => covered.unknown += 1,
+                    EventError::EventSubscriptionDenied(..) => covered.denied += 1,
+                    _ => unreachable!(),
+                }
+                return Ok(());
+            }
+            let sub = &mut subs[logical as usize];
+            let actual = registry.drain(id.clone());
+            if sub.dropped != 0 {
+                covered.poisoned_reads += 1;
+                prop_assert_eq!(
+                    actual,
+                    Err(EventError::EventQueueOverflow(id.raw, sub.dropped))
+                );
+                return Ok(());
+            }
+            let actual = actual.map_err(|error| {
+                TestCaseError::fail(format!("unexpected drain error: {error:?}"))
+            })?;
+            prop_assert_eq!(actual.len(), sub.queue.len());
+            covered.empty_reads += usize::from(actual.is_empty());
+            covered.fifo_reads += usize::from(actual.len() > 1);
+            covered.successful_reads += 1;
+            for (actual, expected) in actual.into_iter().zip(&sub.queue) {
+                match expected {
+                    Expected::Published(kind, key, step) => {
+                        prop_assert_eq!(actual, published(*kind, *key, *step))
+                    }
+                    Expected::Tick => {
+                        let EvRepositoryEvent::ObservedTick(id, stamp) = actual else {
+                            return Err(TestCaseError::fail("expected subscriber-local tick"));
+                        };
+                        prop_assert!(id.raw > 0);
+                        prop_assert!(
+                            !seen_ticks.contains(&id.raw),
+                            "minted tick identity reused: {}",
+                            id.raw
+                        );
+                        seen_ticks.push(id.raw);
+                        prop_assert!(stamp.fired_at_ms >= 0);
+                    }
+                }
+            }
+            sub.queue.clear();
+            Ok(())
+        }
+
+        fn replay(bound: usize, ops: &[Op], covered: &mut Coverage) -> Result<(), TestCaseError> {
+            covered.callbacks += 1;
+            let mut registry =
+                SubscriptionRegistry::with_namespace(bound, "property-registry".into());
+            let mut subs = Vec::<ModelSub>::new();
+            let mut minted_ids = Vec::<String>::new();
+            let mut seen_ticks = Vec::<i64>::new();
+            let mut previous_due = false;
+            for (step, op) in ops.iter().enumerate() {
+                covered.steps += 1;
+                match op {
+                    Op::Subscribe(owner, caller, watches) => {
+                        let id = registry.subscribe_owned(
+                            watches.iter().copied().map(wire_watch).collect(),
+                            owner.map(u64::from),
+                            principal(*caller),
+                        );
+                        prop_assert!(
+                            !minted_ids.contains(&id.raw),
+                            "minted subscription identity reused: {}",
+                            id.raw
+                        );
+                        minted_ids.push(id.raw.clone());
+                        let mut targets = Vec::new();
+                        let mut worktrees = Vec::new();
+                        let mut armed = 0;
+                        for watch in watches {
+                            let target = match *watch {
+                                Watch::Commit(key) => {
+                                    worktrees.push(key);
+                                    Some((0, key))
+                                }
+                                Watch::Head(key) => {
+                                    worktrees.push(key);
+                                    Some((1, key))
+                                }
+                                Watch::Async(key) => Some((2, key)),
+                                Watch::Mailbox(key) => Some((3, key)),
+                                Watch::Immediate(_) => {
+                                    armed += 1;
+                                    None
+                                }
+                            };
+                            if let Some(target) = target {
+                                covered.duplicate_watches += usize::from(targets.contains(&target));
+                                targets.push(target);
+                            }
+                        }
+                        subs.push(ModelSub {
+                            id,
+                            owner: *owner,
+                            principal: *caller,
+                            live: true,
+                            targets,
+                            worktrees,
+                            armed,
+                            queue: Vec::new(),
+                            dropped: 0,
+                        });
+                        covered.subscriptions += 1;
+                    }
+                    Op::Publish(kind, key) => {
+                        registry.publish(&published(*kind, *key, step));
+                        let mut matched = 0;
+                        for sub in subs.iter_mut().filter(|sub| sub.live) {
+                            if sub.targets.contains(&(*kind, *key)) {
+                                matched += 1;
+                                covered.matched_kinds[*kind as usize] += 1;
+                                covered.matching_deliveries += usize::from(deliver(
+                                    sub,
+                                    Expected::Published(*kind, *key, step),
+                                    bound,
+                                ));
+                                covered.overflow_losses += usize::from(sub.dropped != 0);
+                            }
+                        }
+                        covered.broadcasts += usize::from(matched > 1);
+                    }
+                    Op::Drain(logical, caller) => read(
+                        &mut registry,
+                        &mut subs,
+                        *logical,
+                        *caller,
+                        &mut seen_ticks,
+                        covered,
+                    )?,
+                    Op::Unsubscribe(logical, caller) => {
+                        let id = id_at(&subs, *logical);
+                        let expected = expected_access(&subs, *logical, *caller, "unsubscribe");
+                        let actual = registry
+                            .check_caller(&id, principal(*caller), "unsubscribe")
+                            .and_then(|()| registry.unsubscribe(id));
+                        prop_assert_eq!(&actual, &expected);
+                        if expected.is_ok() {
+                            subs[*logical as usize].live = false;
+                            covered.unsubscribed += 1;
+                        } else if matches!(expected, Err(EventError::EventSubscriptionDenied(..))) {
+                            covered.denied += 1;
+                        } else {
+                            covered.unknown += 1;
+                        }
+                    }
+                    Op::CloseOwner(owner) => {
+                        registry.close_owner(u64::from(*owner));
+                        for sub in &mut subs {
+                            if sub.owner == Some(*owner) {
+                                sub.live = false;
+                            }
+                        }
+                        covered.owner_closures += 1;
+                    }
+                    Op::FireDue => {
+                        // All modeled durations are zero or negative; this instant
+                        // is taken after registration, with no sleeps or clock injection.
+                        registry.fire_due_deadlines(Instant::now());
+                        for sub in subs.iter_mut().filter(|sub| sub.live) {
+                            for _ in 0..sub.armed {
+                                covered.immediate_fires += 1;
+                                if !deliver(sub, Expected::Tick, bound) {
+                                    covered.overflow_losses += 1;
+                                }
+                            }
+                            sub.armed = 0;
+                        }
+                        covered.repeated_due_passes += usize::from(previous_due);
+                    }
+                }
+                previous_due = matches!(op, Op::FireDue);
+                let expected_ids = subs
+                    .iter()
+                    .filter(|sub| sub.live)
+                    .map(|sub| sub.id.clone())
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(registry.live_ids(), expected_ids);
+                let mut expected_trees = Vec::new();
+                for key in subs
+                    .iter()
+                    .filter(|sub| sub.live)
+                    .flat_map(|sub| &sub.worktrees)
+                {
+                    if !expected_trees.contains(key) {
+                        expected_trees.push(*key);
+                    }
+                }
+                prop_assert_eq!(
+                    registry.watched_worktrees(),
+                    expected_trees.into_iter().map(tree).collect::<Vec<_>>()
+                );
+            }
+            // Observe remaining FIFO/poison state only after the sparse history.
+            for logical in 0..subs.len() {
+                let caller = subs[logical].principal;
+                read(
+                    &mut registry,
+                    &mut subs,
+                    logical as u8,
+                    caller,
+                    &mut seen_ticks,
+                    covered,
+                )?;
+            }
+            Ok(())
+        }
+
+        fn config() -> Config {
+            let mut config = Config::default();
+            if std::env::var_os("PROPTEST_CASES").is_none() {
+                config.cases = 64;
+            }
+            if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+                config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+            }
+            let mut config = proptest::test_runner::contextualize_config(config);
+            config.source_file = Some(file!());
+            config.test_name = Some(concat!(
+                module_path!(),
+                "::generated_subscription_histories_match_independent_queues"
+            ));
+            config
+        }
+
+        #[test]
+        fn generated_subscription_histories_match_independent_queues() {
+            let covered = RefCell::new(Coverage::default());
+            let config = config();
+            let configured_cases = config.cases;
+            let mut runner = TestRunner::new(config);
+            let result = runner.run(&histories(), |(bound, ops)| {
+                replay(bound, &ops, &mut covered.borrow_mut())
+            });
+            eprintln!("subscription registry actual observations: configured_fresh_cases={configured_cases}, {:?}", *covered.borrow());
+            if let Err(error) = result {
+                panic!("subscription registry history failed: {error}");
+            }
+        }
+
+        #[test]
+        fn fixed_subscription_history_exercises_fifo_broadcast_poison_and_retirement() {
+            let ops = witness(Vec::new(), Vec::new());
+            for bound in [1, 2] {
+                let mut covered = Coverage::default();
+                replay(bound, &ops, &mut covered).unwrap();
+                assert!(covered.broadcasts >= 3);
+                assert!(covered.matched_kinds.iter().all(|count| *count > 0));
+                assert!(covered.duplicate_watches >= 1);
+                assert!(covered.poisoned_reads >= 2);
+                assert!(covered.denied >= 2);
+                assert!(covered.unknown >= 2);
+                assert!(covered.empty_reads >= 2);
+                assert!(covered.immediate_fires >= 3);
+                assert!(covered.repeated_due_passes >= 2);
+                assert!(covered.unsubscribed >= 1);
+                assert!(covered.owner_closures >= 3);
+                assert!(covered.successful_reads >= 4);
+                if bound == 2 {
+                    assert!(covered.fifo_reads >= 1);
+                }
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "the per-subscription queue bound must be positive")]
+        fn zero_subscription_queue_bound_is_refused() {
+            SubscriptionRegistry::new(0);
+        }
+    }
 }
 
 impl tidepool_mcp::InstalledEffectSupport for RepoEventHandler {
