@@ -1713,7 +1713,12 @@ impl CertifiedSourceSelection {
             })
             .collect::<Vec<_>>();
         let mut selection = Self::from_projected_originals(&products, operation)?;
-        for entry in entries.values().filter(|entry| !entry.is_native()) {
+        for entry in entries.values().filter(|entry| {
+            !matches!(
+                &entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Original(_)
+            )
+        }) {
             selection.admit_interface(entry, operation)?;
         }
         Ok(selection)
@@ -1744,7 +1749,12 @@ impl CertifiedSourceSelection {
             let interface = metadata
                 .artifacts
                 .get(&selected.interface())
-                .filter(|entry| !entry.is_native())
+                .filter(|entry| {
+                    !matches!(
+                        &entry.payload,
+                        crate::artifact_inventory::ArtifactPayload::Original(_)
+                    )
+                })
                 .ok_or(CertificationError::Mismatch(
                     "issued compiler interface artifact",
                 ))?;
@@ -1828,7 +1838,10 @@ impl CertifiedSourceSelection {
         entry: &crate::artifact_inventory::ArtifactEntry,
         operation: &InventoryOperation,
     ) -> CertResult<()> {
-        if entry.is_native() {
+        if matches!(
+            &entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Original(_)
+        ) {
             return Err(CertificationError::Mismatch("compiler interface role"));
         }
         let key = (
