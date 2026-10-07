@@ -984,9 +984,7 @@ fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
         .unwrap();
     assert_eq!(session.resident.binding_names_in(session.public), before);
     assert!(session.observed().is_empty());
-    session
-        .execute("zero_let_order", inline, 0)
-        .unwrap();
+    session.execute("zero_let_order", inline, 0).unwrap();
     assert_eq!(session.observed(), [1, 2]);
 }
 
@@ -1043,7 +1041,11 @@ fn zero_capture_action_runs_once_before_the_next_item() {
 fn strict_let_group_forces_before_retaining_its_closure_capture() {
     let mut session = SemanticSession::new();
     session
-        .execute("strict_closure_prior", "let preservedStrictValue = (3 :: Int)", 0)
+        .execute(
+            "strict_closure_prior",
+            "let preservedStrictValue = (3 :: Int)",
+            0,
+        )
         .unwrap();
     let before = session
         .resident
@@ -1071,7 +1073,11 @@ fn strict_let_group_forces_before_retaining_its_closure_capture() {
         before
     );
     session
-        .execute("strict_closure_retry", "segmentRecord preservedStrictValue", 0)
+        .execute(
+            "strict_closure_retry",
+            "segmentRecord preservedStrictValue",
+            0,
+        )
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
 }
