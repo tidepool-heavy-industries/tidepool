@@ -853,3 +853,6 @@ fn redelivery_after_a_lost_retirement_write_does_not_queue_twice() {
     assert_eq!(phase(&reopened, stuck.sequence), DeliveryPhase::Withdrawn);
     assert_eq!(reopened.front_pending().unwrap().unwrap().sequence, 2);
 }
+
+#[path = "history_properties.rs"]
+mod history_properties;
