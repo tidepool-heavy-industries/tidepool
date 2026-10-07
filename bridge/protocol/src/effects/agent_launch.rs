@@ -84,7 +84,7 @@ pub fn agent_launch() -> Effect {
                     ),
                 ],
                 ret: HsType::either(
-                    HsType::Named("SpawnError"),
+                    HsType::Named("SpawnErrorWire"),
                     HsType::Tuple(vec![
                         HsType::Int,
                         HsType::Int,
@@ -236,7 +236,7 @@ fn spawn_types() -> Vec<TypeDef> {
             ],
         ),
         sum_type(
-            "SpawnRetainedResources",
+            "SpawnRetainedResourcesWire",
             None,
             vec![
                 (
@@ -262,14 +262,14 @@ fn spawn_types() -> Vec<TypeDef> {
             ],
         ),
         sum_type(
-            "SpawnError",
+            "SpawnErrorWire",
             None,
             vec![
                 ("SpawnRefused", vec![HsType::Text]),
                 (
                     "SpawnPartialFailure",
                     vec![
-                        HsType::Named("SpawnRetainedResources"),
+                        HsType::Named("SpawnRetainedResourcesWire"),
                         HsType::Named("SpawnCleanup"),
                         HsType::Text,
                     ],

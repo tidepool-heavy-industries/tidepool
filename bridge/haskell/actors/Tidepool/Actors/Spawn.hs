@@ -40,10 +40,11 @@ import Tidepool.Agent.Ref.Internal (AgentRef (..), agentIdentity)
 import Tidepool.Effects.Row (KnownEffects (knownEffects), effectKeys)
 import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort
-  , WorkerLifetime (..), SpawnContextWire (..), SpawnError (..)
-  , SpawnRetainedResources (..), SpawnCleanup (..)
+  , WorkerLifetime (..), SpawnContextWire (..)
+  , SpawnCleanup (..)
   , SpecReplacementError (..)
   )
+import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ActorRef (ActorRef (..))
 import Tidepool.Internal.ExitCell (newExitCell)
 
@@ -59,6 +60,17 @@ checkpoint name = fmap ContextCheckpoint <$> send (AgentLaunchCheckpointWith nam
 
 releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint -> Eff effects (Either CheckpointRefusal ())
 releaseCheckpoint (ContextCheckpoint token) = send (AgentLaunchReleaseCheckpointWith token)
+
+-- | A partial admission retains usable runtime-issued handles for cleanup.
+data SpawnRetainedResources
+  = SpawnRetainedWorkspace Core.WorktreeHandle
+  | SpawnRetainedActor AgentRef (Maybe Core.WorktreeHandle)
+  deriving (Show)
+
+data SpawnError
+  = SpawnRefused Text
+  | SpawnPartialFailure SpawnRetainedResources SpawnCleanup Text
+  deriving (Show)
 
 -- | The real typed spec is retained with all its compiled closure dependencies.
 data SpawnOptions tools childEffects = SpawnOptions
@@ -94,7 +106,24 @@ spawnSubagent context workspace options = do
     (spawnInstructions options)
     (spawnLifetime options)
     (spawnLimits options))
-  pure $ fmap (\(actor, incarnation, tree) -> AgentRef (ActorRef actor incarnation (newExitCell ())) tree) admitted
+  pure $ case admitted of
+    Left failure -> Left (spawnError failure)
+    Right (actor, incarnation, tree) -> Right (admittedAgent actor incarnation tree)
+
+-- These identities come only from the interpreter's admission receipt.
+admittedAgent :: Int -> Int -> Maybe Core.WorktreeHandle -> AgentRef
+admittedAgent actor incarnation tree =
+  AgentRef (ActorRef actor incarnation (newExitCell ())) tree
+
+spawnError :: Core.SpawnErrorWire -> SpawnError
+spawnError (Core.SpawnRefused cause) = SpawnRefused cause
+spawnError (Core.SpawnPartialFailure retained cleanup cause) =
+  SpawnPartialFailure (retainedResources retained) cleanup cause
+
+retainedResources :: Core.SpawnRetainedResourcesWire -> SpawnRetainedResources
+retainedResources (Core.SpawnRetainedWorkspace workspace) = SpawnRetainedWorkspace workspace
+retainedResources (Core.SpawnRetainedActor (actor, incarnation) workspace) =
+  SpawnRetainedActor (admittedAgent actor incarnation workspace) workspace
 
 contextWire :: SpawnContext -> SpawnContextWire
 contextWire (ForkCtx (ContextCheckpoint token)) = CapturedSpawn token

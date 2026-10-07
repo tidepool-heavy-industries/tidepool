@@ -45,7 +45,7 @@ scopeLifetime :: Scope.Scope -> Core.WorkerLifetime
 scopeLifetime = Core.InScope
 
 -- The child's declared effects are independent of the helper's executed row.
-idleChild :: Member Core.AgentLaunch effects => Eff effects (Either Core.SpawnError AgentRef)
+idleChild :: Member Core.AgentLaunch effects => Eff effects (Either Spawn.SpawnError AgentRef)
 idleChild = Spawn.spawnSubagent (Spawn.FreshCtx "Review the supplied value") Spawn.SameDir
   (Spawn.defaultSpawnOptions (defaultSpec :: AgentSpec NoTools '[]))
 
@@ -66,3 +66,9 @@ issuedWorkspace = fmap (fmap Spawn.ExistingWorkspace) Spawn.currentWorkspace
 
 abstractWorkspace :: Authored.WorkspaceHandle -> Spawn.Workspace
 abstractWorkspace = Spawn.ExistingWorkspace
+
+-- Partial admission exposes a real reference that ordinary typed cleanup accepts.
+cleanupPartialSpawn :: Member Core.AgentControl effects => Spawn.SpawnError -> Eff effects (Maybe Agent.StopOutcome)
+cleanupPartialSpawn (Spawn.SpawnPartialFailure (Spawn.SpawnRetainedActor agent _) _ _) =
+  Just <$> Agent.stopAgent agent
+cleanupPartialSpawn _ = pure Nothing
