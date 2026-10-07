@@ -604,6 +604,45 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn failed_bound_child_keeps_capacity_until_its_exact_incarnation_retires() {
+        let registry = ActorAdmissionRegistry::new();
+        let owner = ActorRef::first(crate::ActorId(1));
+        let child = ActorRef::first(crate::ActorId(2));
+        let admission = registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .unwrap();
+        admission.authority.reserve_child(owner, child).unwrap();
+        admission.authority.bind(owner, child).unwrap();
+        admission.authority.fail("provider startup failed".into());
+        admission
+            .authority
+            .retain_cleanup(SpawnCleanupOutcome::Unconfirmed("host retained".into()));
+        assert!(matches!(
+            registry.claim_spawn(owner, SessionId(1), None, Some(1)),
+            Err(SpawnClaimError::DescendantLimit { .. })
+        ));
+        registry.retire_actor(ActorRef {
+            incarnation: crate::Incarnation(2),
+            ..child
+        });
+        assert!(registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .is_err());
+        registry.retire_actor(child);
+        let replacement = registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .unwrap();
+        registry.retire_actor(child);
+        assert_eq!(
+            replacement.authority.outcome(),
+            SpawnAdmissionOutcome::Pending
+        );
+        assert!(registry
+            .claim_spawn(owner, SessionId(1), None, Some(1))
+            .is_err());
+    }
+
     #[derive(Clone, Debug)]
     enum AccountingOperation {
         Claim { creator: usize, checkpoint: bool },
@@ -764,9 +803,10 @@ mod tests {
         }
 
         #[test]
-        fn concurrent_checkpoint_admissions_share_one_sponsor_ceiling(
+        fn concurrent_independent_admissions_share_one_sponsor_ceiling(
             maximum in 1u16..5,
             contenders in 2usize..9,
+            use_checkpoint in proptest::bool::ANY,
         ) {
             let registry = ActorAdmissionRegistry::new();
             let issuer = ActorRef::first(crate::ActorId(1));
@@ -778,9 +818,11 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
+                    let owner = if use_checkpoint {
+                        ActorRef::first(crate::ActorId(index as u64 + 2))
+                    } else { issuer };
                     registry.claim_spawn(
-                        ActorRef::first(crate::ActorId(index as u64 + 2)),
-                        SessionId(1), Some(&token), None,
+                        owner, SessionId(1), use_checkpoint.then_some(token.as_str()), None,
                     )
                 })
             }).collect::<Vec<_>>();
@@ -799,15 +841,16 @@ mod tests {
                     claim.authority.acknowledge(child).unwrap();
                 }
             }
+            let owner = if use_checkpoint { ActorRef::first(crate::ActorId(999)) } else { issuer };
             let replacement = registry.claim_spawn(
-                ActorRef::first(crate::ActorId(999)), SessionId(1), Some(&token), None,
+                owner, SessionId(1), use_checkpoint.then_some(token.as_str()), None,
             );
             proptest::prop_assert!(replacement.is_ok(), "one failed reservation must free capacity");
             if contenders >= usize::from(maximum) {
                 proptest::prop_assert!(matches!(
-                    registry.claim_spawn(ActorRef::first(crate::ActorId(1000)), SessionId(1), Some(&token), None),
+                    registry.claim_spawn(owner, SessionId(1), use_checkpoint.then_some(token.as_str()), None),
                     Err(SpawnClaimError::DescendantLimit { .. })
-                ));
+                ), "remaining live children and replacement retain the sponsor ceiling");
             }
         }
     }
