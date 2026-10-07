@@ -15,7 +15,7 @@ module Tidepool.FinalizedModuleArtifacts
 import Codec.CBOR.Decoding qualified as D
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding
-import Control.Exception (Exception, IOException, evaluate, throwIO, try)
+import Control.Exception (Exception, IOException, bracket, evaluate, throwIO, try)
 import Control.Monad (forM, forM_, unless, when, replicateM)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -30,9 +30,10 @@ import GHC.Unit.Module (ModuleName, moduleName, moduleUnit, moduleNameString, mk
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitIdString, unitString, stringToUnit)
 import Numeric (showHex)
-import System.Directory (makeAbsolute, createDirectoryIfMissing)
+import System.Directory (makeAbsolute, createDirectoryIfMissing, removeFile)
 import System.FilePath ((</>), normalise, isAbsolute)
 import System.IO.Error (isAlreadyExistsError)
+import System.IO (openBinaryTempFile, hClose, hIsClosed)
 import System.Posix.Files (createLink, getSymbolicLinkStatus, isRegularFile)
 import System.Mem.StableName (StableName, makeStableName)
 
@@ -224,7 +225,8 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
 
 -- Each packet owns every relative payload it encodes, even when projection
 -- reuses a finalization captured for another packet in the same transaction.
--- Exclusive links preserve the original bytes and compiler-object identity.
+-- Destination-local exclusive publication preserves the captured bytes and
+-- compiler-object identity without requiring the capture filesystem to match.
 materializeFinalizedModuleArtifacts :: FilePath -> FinalizedModuleArtifacts -> IO FinalizedModuleArtifacts
 materializeFinalizedModuleArtifacts directory artifacts@(FinalizedModuleArtifacts units captured values) =
   case captured of
@@ -247,16 +249,27 @@ materializeFinalizedModuleArtifacts directory artifacts@(FinalizedModuleArtifact
           originalStatus <- getSymbolicLinkStatus original
           unless (isRegularFile originalStatus) $
             throwIO (CapturedFinalizedPayloadChanged original)
-          linked <- try (createLink original output) :: IO (Either IOException ())
-          case linked of
-            Left failure | isAlreadyExistsError failure -> pure ()
-                         | otherwise -> throwIO failure
-            Right () -> pure ()
+          bytes <- readFileAtMost original (count + 1)
+          unless (BS.length bytes == count && digest bytes == sha) $
+            throwIO (CapturedFinalizedPayloadChanged original)
+          bracket (openBinaryTempFile destination "finalized-payload.tmp")
+            (\(temporary,handle) -> do
+              closed <- hIsClosed handle
+              unless closed (hClose handle)
+              removeFile temporary)
+            (\(temporary,handle) -> do
+              BS.hPut handle bytes
+              hClose handle
+              linked <- try (createLink temporary output) :: IO (Either IOException ())
+              case linked of
+                Left failure | isAlreadyExistsError failure -> pure ()
+                             | otherwise -> throwIO failure
+                Right () -> pure ())
           outputStatus <- getSymbolicLinkStatus output
           unless (isRegularFile outputStatus) $
             throwIO (CapturedFinalizedPayloadChanged output)
-          bytes <- readFileAtMost output (count + 1)
-          unless (BS.length bytes == count && digest bytes == sha) $
+          owned <- readFileAtMost output (count + 1)
+          unless (owned == bytes) $
             throwIO (CapturedFinalizedPayloadChanged output)
         pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values)
 

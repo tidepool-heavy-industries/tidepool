@@ -404,6 +404,19 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
       (fail "projected packet omitted or changed a captured payload")
   let (changedPath,_) = head payloads
   originalPayload <- BS.readFile (root </> changedPath)
+  when (BS.null originalPayload) (fail "captured payload is empty")
+  let changedOutput = BS.cons (BS.head originalPayload + 1) (BS.tail originalPayload)
+  BS.writeFile (projected </> changedPath) changedOutput
+  unchangedOrigin <- BS.readFile (root </> changedPath)
+  unless (unchangedOrigin == originalPayload)
+    (fail "packet output mutation also changed its independent original capture")
+  conflicting <- try (materializeFinalizedModuleArtifacts projected finalized)
+    `finally` BS.writeFile (projected </> changedPath) originalPayload
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  case conflicting of
+    Left _ -> pure ()
+    Right _ -> fail "conflicting existing packet bytes were replaced or accepted"
+  _ <- materializeFinalizedModuleArtifacts projected finalized
   BS.appendFile (root </> changedPath) "changed"
   changed <- try (materializeFinalizedModuleArtifacts (root </> "changed-packet") finalized)
     `finally` BS.writeFile (root </> changedPath) originalPayload
