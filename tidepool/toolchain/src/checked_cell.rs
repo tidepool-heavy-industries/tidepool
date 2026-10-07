@@ -2508,7 +2508,6 @@ impl CheckedTypedEntry {
         source: &str,
         target: &tidepool_repr::execution_schema::PreparedProgram,
         owner: &crate::declaration_join::ExactModuleIdentity,
-        groups: &[crate::certified_products::PendingCertifiedGroup],
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         producer: [u8; 32],
     ) -> Result<Self, CompileError> {
@@ -2548,18 +2547,15 @@ impl CheckedTypedEntry {
                 Group::Recursive(bindings) => bindings.as_slice(),
             })
             .find(|binding| binding.binding.id == target.entry());
-        let matches = groups
-            .iter()
-            .filter(|group| {
-                group.owner().unit == entry.unit
-                    && group.owner().module == entry.module
-                    && group.group().original_ordinal() == original_ordinal
-                    && group.group().binders().contains(&entry)
-            })
-            .collect::<Vec<_>>();
         let originals = products
             .iter()
-            .filter(|product| matches.len() == 1 && product.owner() == matches[0].owner())
+            .filter(|product| {
+                crate::certified_products::authenticates_original_native_entry(
+                    product,
+                    original_ordinal,
+                    &entry,
+                )
+            })
             .collect::<Vec<_>>();
         if string(&proof[0])? != plan.digest
             || origin.occurrence != plan.root
@@ -2569,7 +2565,6 @@ impl CheckedTypedEntry {
             || entry.unit != origin.unit
             || entry.module != origin.module
             || target_entry.is_none_or(|binding| binding.identity != entry)
-            || matches.len() != 1
             || originals.len() != 1
         {
             return Err(typed_entry_failure());

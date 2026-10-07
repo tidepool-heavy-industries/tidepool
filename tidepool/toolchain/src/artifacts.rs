@@ -2667,7 +2667,6 @@ fn seal_turn_outputs_with_validation(
                 source,
                 prepared,
                 &admission.source.generated_source_owner()?,
-                &certified_groups,
                 &certified.recovery_products,
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     &offer.producer,
