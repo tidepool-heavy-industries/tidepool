@@ -386,10 +386,10 @@ sendMessage
 sendMessage recipient message =
   fmap (fmap NotificationReceipt) (send (NotifyWith (agentIdentity recipient) message))
 
--- | The supervising actor: it receives this actor's 'sendMessage' and
--- settles its request. Every child has one, whether its context was
--- inherited or selected; a root answers 'Nothing'. The reference carries bare
--- identity, no bound worktree.
+-- | The supervising actor, independent of context and request ownership.
+-- Every child has one; a root answers 'Nothing'. 'sendMessage' addresses its
+-- explicit recipient, and replies settle the active request for its caller.
+-- The reference carries bare identity, no bound worktree.
 parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)
 parentAgent = do
   context <- Core.actorContext

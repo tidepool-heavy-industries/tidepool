@@ -276,7 +276,7 @@ consequential user corrections to affected children.
 
 `respond value` settles the current typed request; `reportProgress value` and
 ending your final message do not, however final that message reads. A turn that
-ends without `respond` delivers nothing to the parent. Keep requests pending
+ends without `respond` does not deliver the final typed reply. Keep requests pending
 across dependencies.
 
 Passive status and overview reads inspect retained state without acknowledging a

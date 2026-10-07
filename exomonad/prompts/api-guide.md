@@ -142,8 +142,9 @@ them in a workspace.
 `Cmd.run` returns a retained result: `Cmd.stdout` is complete successful stdout
 or an explicit issue; inspect failed outcomes and stderr. `J.ask` batches
 judgments over supplied evidence; load `exomonad-jev` for composition. `me` is
-lexically captured. `parentAgent` is your supervisor, receiving `sendMessage`
-and settling requests, or `Nothing` for a root.
+lexically captured. `parentAgent` returns your supervisor, or `Nothing` for a
+root. `sendMessage recipient text` addresses the chosen actor. `respond value`
+settles the active typed request for its caller, who may differ from your supervisor.
 
 Run a shell string with `Cmd.run (Cmd.bashCommand "git status --short")`;
 `[bash|...|]` is a literal Bash quotation that constructs the same `Command`.

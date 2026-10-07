@@ -5,7 +5,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 61;
+    pub(super) const CATALOG_VERSION: u32 = 62;
 
     /// Digest of every prompt body in [`PromptId::ALL`] order — the guard
     /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
@@ -13,7 +13,7 @@ impl PromptId {
     /// matching `CATALOG_VERSION` bump.
     #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
-        "64be2cdff3f384a5546c632bf4594730716da95d8bc542a0420bc0fd7c42b8ef";
+        "aad872f04d2a8438801521fcfcfbd1a2f4715e99890f2e02ec0701cdd3c67d4f";
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 2] = [Self::ExomonadBase, Self::Agent];
@@ -191,7 +191,10 @@ mod tests {
         assert!(absent.len() > installed.len());
         let selected = FrozenBasePrompt::selected_body(Some("project core"), JevSurface::Absent);
         assert!(selected.starts_with("project core"));
-        assert_ne!(selected, FrozenBasePrompt::selected_body(None, JevSurface::Absent));
+        assert_ne!(
+            selected,
+            FrozenBasePrompt::selected_body(None, JevSurface::Absent)
+        );
     }
 
     #[test]
@@ -250,5 +253,4 @@ mod tests {
             64
         );
     }
-
 }
