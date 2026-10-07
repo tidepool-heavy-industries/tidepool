@@ -2486,16 +2486,24 @@ semicolonStatementRefinement flags = do
     assertEqual (label ++ " semicolon statement identities") expected (identities inline)
     assertEqual (label ++ " ordered authored ordinals") [0 .. length statements - 1]
       (map cellAnalysisSourceOrdinal (concatMap cellAnalysisSourceItems inline))
-    assertEqual (label ++ " source slices exclude synthetic terminal") statements
-      (map cellAnalysisSource inline)
+    assertEqual (label ++ " positioned text retains exact authored AST slices") statements
+      (map authoredSlice inline)
+    forM_ inline $ \item -> do
+      tokens <- split flags (cellAnalysisSource item)
+      case tokens of
+        first : _ -> assertEqual (label ++ " rendered first token keeps original column")
+          (cellStartColumn (cellAnalysisSpan item)) (cellStartColumn (cellSourceSpan first))
+        [] -> fail (label ++ ": positioned statement has no actual GHC tokens")
   coordinates <- analyze "pure \"λ;γ\";\tpure \"δ\""
   assertEqual "Unicode and tab source slices" ["pure \"λ;γ\"", "pure \"δ\""]
-    (map cellAnalysisSource coordinates)
+    (map authoredSlice coordinates)
   assertEqual "GHC tab columns in original source" [1, 17]
     (map (cellStartColumn . cellAnalysisSpan) coordinates)
   indented <- analyze "\n  pure \"a\"; pure \"b\""
   assertEqual "indented statements preserve exact authored token slices"
-    ["pure \"a\"", "pure \"b\""] (map cellAnalysisSource indented)
+    ["pure \"a\"", "pure \"b\""] (map authoredSlice indented)
+  assertEqual "positioned text separates source prefix from authored slice"
+    ["  pure \"a\"", "            pure \"b\""] (map cellAnalysisSource indented)
   assertEqual "leading blank line remains in authored coordinates" [2, 2]
     (map (cellStartLine . cellAnalysisSpan) indented)
   assertEqual "non-column-one original items preserve parser columns" [3, 13]
@@ -2504,7 +2512,13 @@ semicolonStatementRefinement flags = do
   assertEqual "comment semicolons do not become statements" [KExpr, KExpr]
     (map (sbKind . cellAnalysisVerdict) comments)
   assertEqual "trailing comment cannot swallow parser terminal"
-    ["pure (17 :: Int)", "pure (19 :: Int)"] (map cellAnalysisSource comments)
+    ["pure (17 :: Int)", "pure (19 :: Int)"] (map authoredSlice comments)
+  multiline <- analyze "pure (); let first = (1 :: Int)\n             second = first + 1"
+  assertEqual "later inline implicit let retains complete binder group"
+    [(KExpr, Nothing, []), (KBind, Just LetBinding, ["first", "second"])] (identities multiline)
+  assertEqual "first-line positioning preserves implicit let layout"
+    ["pure ()", "         let first = (1 :: Int)\n             second = first + 1"]
+    (map cellAnalysisSource multiline)
   empty <- analyze "-- only; a comment\n"
   assertEqual "comment-only cell has no executable statements" [] empty
   declarations <- analyze "identity :: a -> a; identity value = value"
@@ -2520,6 +2534,7 @@ semicolonStatementRefinement flags = do
     identities = map (\item ->
       (sbKind (cellAnalysisVerdict item), cellAnalysisBindingForm item,
         sbBinders (cellAnalysisVerdict item)))
+    authoredSlice = dropWhile (== ' ') . cellAnalysisSource
     cases =
       [ ("two observations", ["pure (17 :: Int)", "pure (19 :: Int)"],
           [(KExpr, Nothing, []), (KExpr, Nothing, [])])

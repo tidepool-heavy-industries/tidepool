@@ -308,6 +308,28 @@ fn genuine_let_generalization_and_unused_inner_bottom_match_ghc() {
             )
             .unwrap();
         assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        let (multiline_let, multiline_do) = if separator == "; " {
+            (
+                "segmentRecord 29; let offset = (1 :: Int)\n                      applied = segmentIdentity (31 + offset)\n; segmentRecord applied",
+                "segmentRecord 37; nested <- (do\n                      pure ()\n                      pure (segmentIdentity (41 :: Int)))\n; segmentRecord nested",
+            )
+        } else {
+            (
+                "segmentRecord 29\nlet offset = (1 :: Int)\n    applied = segmentIdentity (31 + offset)\nsegmentRecord applied",
+                "segmentRecord 37\nnested <- (do\n  pure ()\n  pure (segmentIdentity (41 :: Int)))\nsegmentRecord nested",
+            )
+        };
+        for (name, authored, expected_trace) in [
+            ("retained_multiline_let", multiline_let, [29, 32]),
+            ("retained_multiline_do", multiline_do, [37, 41]),
+        ] {
+            assert_eq!(
+                ghc_trace_with_language("", "segmentIdentity value = value", authored),
+                expected_trace
+            );
+            session.execute(name, authored, 0).unwrap();
+        }
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19, 29, 32, 37, 41]);
         let snapshot = session
             .resident
             .public_visibility_snapshot_in(session.public)
@@ -319,7 +341,7 @@ fn genuine_let_generalization_and_unused_inner_bottom_match_ghc() {
             matches!(&error, ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(diagnostics))) if !diagnostics.is_empty()),
             "malformed statements must retain parser diagnostics: {error:?}"
         );
-        assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19, 29, 32, 37, 41]);
         assert_eq!(
             session
                 .resident

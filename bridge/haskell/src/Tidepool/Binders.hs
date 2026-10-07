@@ -258,8 +258,9 @@ data CellSourceSpan = CellSourceSpan
   , cellEndColumn :: Int
   } deriving (Eq, Show)
 
--- | One source item in a notebook cell. The text is sliced from the original
--- payload, so quotation bodies and line endings are not reconstructed.
+-- | One source item in a notebook cell. Lexical items retain complete original
+-- lines. Parsed statement fragments retain their original columns and interior
+-- bytes; preceding statements on the first line become column-preserving spaces.
 data CellSourceItem = CellSourceItem
   { cellSourceSpan :: CellSourceSpan
   , cellSourceText :: String
@@ -675,8 +676,9 @@ analyzeCellWithGrouping ordered dflags template source = do
     -- the real problem. Reject it here, before any such wrapping, with a
     -- diagnostic that names the actual operator. Other verdicts (KBind,
     -- KDecl) are spliced without an enclosing section and are not at risk.
-    classify effective ordinal (item, (verdict, bindingForm)) =
-      if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
+    classify effective ordinal (fragment, (verdict, bindingForm)) =
+      let item = positionedExecutableSource fragment
+       in if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
         then Left (CellUnsupportedLocalFixity (cellSourceSpan item))
         else case (sbKind verdict, cellSourceDanglingOperator item) of
           (KExpr, Just operatorText) ->
@@ -744,11 +746,26 @@ analyzeCellWithGrouping ordered dflags template source = do
         then ""
         else "\n"
 
+-- The origin of the first source character differs between a complete lexical
+-- line and an exact parsed statement span. Preserve that distinction until the
+-- parser issues the position-preserving source consumed by both renderers.
+data ExecutableSourceFragment
+  = CompleteSourceLine CellSourceItem
+  | ParsedStatementSpan CellSourceSpan String
+
+positionedExecutableSource :: ExecutableSourceFragment -> CellSourceItem
+positionedExecutableSource (CompleteSourceLine item) = item
+positionedExecutableSource (ParsedStatementSpan sourceSpan source) = CellSourceItem
+  { cellSourceSpan = sourceSpan
+  , cellSourceText = replicate (cellStartColumn sourceSpan - 1) ' ' ++ source
+  , cellSourceDanglingOperator = Nothing
+  }
+
 -- A physical source slice can contain several explicit do statements. GHC's
 -- statement-list parser owns their boundaries, including nested layout and
 -- quotations; classification consumes those same parsed statements.
 refineExecutableSourceItems :: DynFlags -> CellSourceItem
-  -> Either CellSplitError [(CellSourceItem, (StmtBinders, Maybe CellBindingForm))]
+  -> Either CellSplitError [(ExecutableSourceFragment, (StmtBinders, Maybe CellBindingForm))]
 refineExecutableSourceItems flags item
   | sbKind (fst originalClassification) == KDecl = unchanged
   | otherwise = case unP parseStatement state of
@@ -759,7 +776,7 @@ refineExecutableSourceItems flags item
               | length reversed > 1 && isSyntheticTerminal terminal ->
                   traverse (refine parsedState) (reverse reversed)
             terminal : [authored] | isSyntheticTerminal terminal ->
-              Right [(item, classifyWithFlagsExactFormUsing flags source
+              Right [(CompleteSourceLine item, classifyWithFlagsExactFormUsing flags source
                 (Just (POk parsedState authored)))]
             _ -> parseFailure
         _ -> parseFailure
@@ -767,7 +784,7 @@ refineExecutableSourceItems flags item
   where
     source = cellSourceText item
     originalClassification = classifyWithFlagsExactForm flags source
-    unchanged = Right [(item, originalClassification)]
+    unchanged = Right [(CompleteSourceLine item, originalClassification)]
     parseFailure = case cellSourceDanglingOperator item of
       Just operatorText -> Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
       Nothing -> Left (CellStatementParseFailure (cellSourceSpan item))
@@ -789,16 +806,14 @@ refineExecutableSourceItems flags item
         start <- sourceOffset (srcSpanStart span')
         end <- sourceOffset (srcSpanEnd span')
         let baseLine = cellStartLine (cellSourceSpan item) - srcLocLine sourceLocation
-            authored = CellSourceItem
-              { cellSourceSpan = CellSourceSpan
+            authored = ParsedStatementSpan
+                (CellSourceSpan
                   (baseLine + srcSpanStartLine span') (srcSpanStartCol span')
-                  (baseLine + srcSpanEndLine span') (srcSpanEndCol span')
-              , cellSourceText = take (end - start) (drop start source)
-              , cellSourceDanglingOperator = Nothing
-              }
+                  (baseLine + srcSpanEndLine span') (srcSpanEndCol span'))
+                (take (end - start) (drop start source))
         if end <= start then Left CellLexFailure
           else Right (authored, classifyWithFlagsExactFormUsing flags
-            (cellSourceText authored) (Just (POk parsedState statement)))
+            (cellSourceText (positionedExecutableSource authored)) (Just (POk parsedState statement)))
       _ -> Left CellLexFailure
     sourceOffset target = go 0 sourceLocation source
       where
