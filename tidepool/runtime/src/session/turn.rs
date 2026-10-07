@@ -722,7 +722,7 @@ pub fn prepared_resume_apply_binding() -> String {
 #[must_use]
 pub fn resume_import_targets() -> String {
     format!(
-        "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
+        "qualified \"tidepool-resume\" Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
          qualified Data.Text as {TEXT_ALIAS}\n\
          qualified GHC.Exts as {SCAFFOLD_EXTS_ALIAS}"
     )
@@ -734,6 +734,7 @@ pub fn resume_import_targets() -> String {
 #[must_use]
 pub fn with_resume_import(preamble_with_imports: &str) -> String {
     let preamble_with_imports = with_magic_hash(preamble_with_imports);
+    let preamble_with_imports = with_package_imports(&preamble_with_imports);
     insert_preamble_imports(&preamble_with_imports, &resume_import_targets())
 }
 
@@ -750,6 +751,15 @@ fn with_magic_hash(preamble: &str) -> String {
         return preamble.to_string();
     }
     format!("{{-# LANGUAGE MagicHash #-}}\n{preamble}")
+}
+
+/// Package-qualified imports keep the fixed scaffold independent of any home
+/// source with the same module name.
+fn with_package_imports(preamble: &str) -> String {
+    if preamble.contains("PackageImports") {
+        return preamble.to_string();
+    }
+    format!("{{-# LANGUAGE PackageImports #-}}\n{preamble}")
 }
 
 /// Failure from the shared resident-turn boundary.
@@ -8653,6 +8663,24 @@ mod tests {
         assert_eq!(PREAMBLE_DEFAULT_DECL, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
         assert_eq!(PREAMBLE_IMPORT_MARKER, tidepool_mcp::PREAMBLE_IMPORT_MARKER);
         assert!(PREAMBLE_DEFAULT_DECL.starts_with(PREAMBLE_IMPORT_MARKER));
+    }
+
+    #[test]
+    fn prepared_resume_import_is_package_qualified_and_enables_its_syntax() {
+        let preamble = format!("module Expr where\n{PREAMBLE_IMPORT_MARKER}\n");
+        let source = with_resume_import(&preamble);
+        assert_eq!(source.matches("{-# LANGUAGE PackageImports #-}").count(), 1);
+        assert_eq!(source.matches("{-# LANGUAGE MagicHash #-}").count(), 1);
+        assert!(source.contains(
+            "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\n"
+        ));
+        assert!(!source
+            .lines()
+            .any(|line| line == "import qualified Tidepool.Internal.Resume as TidepoolResume"));
+        let enabled = format!("{{-# LANGUAGE PackageImports, MagicHash #-}}\n{preamble}");
+        let source = with_resume_import(&enabled);
+        assert_eq!(source.matches("PackageImports").count(), 1);
+        assert_eq!(source.matches("MagicHash").count(), 1);
     }
 
     #[test]

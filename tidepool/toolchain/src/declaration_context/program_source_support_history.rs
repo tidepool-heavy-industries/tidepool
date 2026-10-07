@@ -210,7 +210,7 @@ mod program_source_support_history {
             .unwrap();
         let sparse = [
             support_product("Consumer"),
-            support_product_in_unit("main", "Tidepool.Internal.Resume"),
+            support_product_in_unit("main", "CachedSparseHelper"),
         ];
         let (sparse_view, sparse_projection) = original_offer(&sparse);
         assert_eq!(sparse.len(), 2);
@@ -279,7 +279,7 @@ mod program_source_support_history {
                 expected
             );
 
-            // The sparse output adds its generated target and Resume. Only the
+            // The sparse output adds its generated target and a cached helper. Only the
             // authenticated generated target leaves the continuation offer.
             let continuation_artifacts = full_view
                 .select_roots(
