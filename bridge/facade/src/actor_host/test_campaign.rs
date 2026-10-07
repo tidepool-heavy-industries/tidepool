@@ -159,7 +159,7 @@ pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
     );
 }
 
-struct FixtureJev;
+pub(super) struct FixtureJev;
 
 impl exomonad_actor::JevBackend for FixtureJev {
     fn ask(

@@ -1608,9 +1608,10 @@ async fn workspace_campaign() -> TestCampaign {
 }
 
 async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
-    TestCampaign::start_with_config(
+    TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
+            config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
             crate::exomonad::workspace::copy_authored(
                 &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
@@ -1627,6 +1628,10 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                 .unwrap(),
             );
         },
+        // The model-free fixture has no provider conversation to read.
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
     )
     .await
 }
