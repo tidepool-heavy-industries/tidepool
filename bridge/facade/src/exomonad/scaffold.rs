@@ -28,10 +28,6 @@ planner = "gpt-6-astra"
 executor = "gpt-6.1-sol"
 luna = "gpt-6-luna"
 
-[research]
-default_depth = 1
-maximum_depth = 8
-
 [haskell]
 source_roots = [".", "workspace"]
 modules = [
