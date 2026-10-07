@@ -16127,7 +16127,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 inject_modules: &[], gen: 1, verdict: None, target: None, retained_imports: &[],
             }).unwrap();
             let TurnResult::Bind { bound, compiled, .. } = turn else { panic!("installer bind") };
-            assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
+            assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], tidepool_repr::Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
             let installer = Arc::new(session.retain_binding_custody("installer").unwrap().unwrap());
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
