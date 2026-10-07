@@ -26,13 +26,28 @@ data Tools mode = Tools
 
 data Narrow mode = Narrow { narrow :: mode :- HaskellCell '[] } deriving (Generic)
 
-data Unpresented mode = Unpresented { unpresented :: mode :- Call Text Text } deriving (Generic)
-data UnpresentedRaw mode = UnpresentedRaw { unpresentedRaw :: mode :- RawCall Text } deriving (Generic)
-data UnpresentedSync mode = UnpresentedSync { unpresentedSync :: mode :- Sync (Call Text Text) } deriving (Generic)
-data UnpresentedSyncRaw mode = UnpresentedSyncRaw { unpresentedSyncRaw :: mode :- Sync (RawCall Text) } deriving (Generic)
+data SemanticTools mode = SemanticTools
+  { semanticCall :: mode :- Call Text Text
+  , semanticRaw :: mode :- RawCall Text
+  , semanticNotify :: mode :- Notify Text
+  } deriving (Generic)
+
+data NestedTools mode = NestedTools
+  { semantic :: SemanticTools mode
+  } deriving (Generic)
+
+semanticTools :: NestedTools (AsServerT (Eff '[]))
+semanticTools = NestedTools $ SemanticTools
+  { semanticCall = presentWith (const "selected call") $ tool "Echo semantic text" pure
+  , semanticRaw = presentWith (const "selected raw") $ rawTool "Echo literal text" pure
+  , semanticNotify = presentWith (const "selected notice") $ notify "Accept notification" (const (pure ()))
+  }
 
 data ActorTools mode = ActorTools
   { actorCall :: mode :- Call Text Value
+  , actorRaw :: mode :- RawCall Text
+  , actorNotify :: mode :- Notify Text
+  , actorUpdate :: mode :- Update Text Text
   , actorFinish :: mode :- Finish Text Text
   } deriving (Generic)
 
@@ -41,10 +56,13 @@ data ActorHarness = ActorHarness
   , actorReplies :: [Value]
   }
 
-actorTools :: ActorTools (AsActorT (Eff '[AgentTools, State ActorHarness]) () Text)
-actorTools = ActorTools
+actorTools :: Text -> ActorTools (AsActorT (Eff '[AgentTools, State ActorHarness]) Text Text)
+actorTools state = ActorTools
   { actorCall = tool "Structured semantic output" (\_ -> pure (object ["meaning" .= ("payload" :: Text)]))
-  , actorFinish = finishTool "Finish" (\value -> pure (value, value))
+  , actorRaw = rawTool "Literal semantic output" pure
+  , actorNotify = notify "Semantic notification" (const (pure ()))
+  , actorUpdate = updateTool "Replace resident state" (\value -> pure (value, value))
+  , actorFinish = finishTool "Finish with resident state" (\value -> pure (state, value))
   }
 
 data ContextNotebook mode = ContextNotebook
@@ -89,23 +107,6 @@ actorRuntime _ = error "unexpected actor tool operation"
 
 installedToolContracts :: IO ()
 installedToolContracts = do
-  let missing = compileInstalledTools
-        (Unpresented (tool "Echo" pure) :: Unpresented (AsServerT (Eff '[])))
-      missingRaw = compileInstalledTools
-        (UnpresentedRaw (rawTool "Echo" pure) :: UnpresentedRaw (AsServerT (Eff '[])))
-      missingSync = compileInstalledTools
-        (UnpresentedSync (syncTool "Echo" pure) :: UnpresentedSync (AsServerT (Eff '[])))
-      missingSyncRaw = compileInstalledTools
-        (UnpresentedSyncRaw (syncRawTool "Echo" pure) :: UnpresentedSyncRaw (AsServerT (Eff '[])))
-      rejected result = case result of Left MissingToolPresentation {} -> True; _ -> False
-  require "installed named handlers require explicit presentation"
-    (rejected missing)
-  require "installed raw handlers require explicit presentation before dispatch"
-    (rejected missingRaw)
-  require "installed sync handlers require explicit presentation before dispatch"
-    (rejected missingSync)
-  require "installed sync raw handlers require explicit presentation before dispatch"
-    (rejected missingSyncRaw)
   compiled <- either (error . show) pure (compileInstalledTools tools)
   let declared = declarations compiled
       runTool name = run $ runState [] $ reinterpret context $ dispatch compiled name (toJSON ("executor" :: Text))
@@ -127,13 +128,21 @@ installedToolContracts = do
     (toolDispatchReply (Right (ToolDispatchSuccess (toJSON ("payload" :: Text)) "model text"))
       == object ["status" .= ("success" :: Text), "output" .= ("payload" :: Text), "presentation" .= ("model text" :: Text)])
   let actorInitial = ActorHarness
-        [("actor_call", toJSON ("call" :: Text)), ("actor_finish", toJSON ("done" :: Text))]
+        [ ("actor_call", toJSON ("call" :: Text))
+        , ("actor_raw", toJSON ("literal" :: Text))
+        , ("actor_notify", toJSON ("notice" :: Text))
+        , ("actor_update", toJSON ("updated" :: Text))
+        , ("actor_finish", toJSON ("done" :: Text))
+        ]
         []
-      (actorExit, actorFinal) = run $ runState actorInitial $ interpret actorRuntime (serveTools actorTools)
+      (actorExit, actorFinal) = run $ runState actorInitial $ interpret actorRuntime (serveToolsWith "initial" actorTools)
   require "programmatic actor tools need no presenter and return structured semantic output"
     (actorExit == "done" && actorReplies actorFinal ==
       [ object ["status" .= ("success" :: Text), "output" .= object ["meaning" .= ("payload" :: Text)]]
-      , object ["status" .= ("success" :: Text), "output" .= ("done" :: Text)]
+      , object ["status" .= ("success" :: Text), "output" .= ("literal" :: Text)]
+      , object ["status" .= ("success" :: Text), "output" .= ()]
+      , object ["status" .= ("success" :: Text), "output" .= ("updated" :: Text)]
+      , object ["status" .= ("success" :: Text), "output" .= ("updated" :: Text)]
       ])
   require "sync compiled handler emits context effect in shared dispatcher"
     (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), ["executor"]))
@@ -162,17 +171,39 @@ installedToolContracts = do
     field name (Object values) = KM.lookup (KM.fromText name) values
     field _ _ = Nothing
 
+presentedCompositionContracts :: IO ()
+presentedCompositionContracts = do
+  bounded <- either (error . show) pure (compileTools semanticTools)
+  installed <- either (error . show) pure (compileInstalledTools semanticTools)
+  let names = ["semantic_call", "semantic_raw", "semantic_notify"]
+      input = toJSON ("payload" :: Text)
+      expected =
+        [ Right (ToolDispatchSuccess input "selected call")
+        , Right (ToolDispatchSuccess input "selected raw")
+        , Right (ToolDispatchSuccess (toJSON ()) "selected notice")
+        ]
+      inRow = run (traverse (\name -> dispatch bounded name input) names)
+      raised = run $ interpret (\(_ :: ContextReadWrite a) -> error "unexpected context request") $
+        traverse (\name -> dispatch installed name input) names
+  require "nested presentation composes under bounded and installed compilation"
+    (declarations bounded == declarations installed && map dtdName (declarations bounded) == names)
+  require "nested call raw and notification retain independent semantics and presentation"
+    (inRow == expected && raised == expected)
+
 data CompileExpectation = Accepted | Rejected [String]
 
 compileProfile :: String -> CompileExpectation -> IO ()
-compileProfile fixture expectation = do
+compileProfile fixture = compileAt fixture ("test-check/tool-profiles/" ++ fixture ++ ".hs")
+
+compileAt :: String -> FilePath -> CompileExpectation -> IO ()
+compileAt fixture source expectation = do
   support <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
   let output = "profile-fixture-objects/" ++ fixture
   createDirectoryIfMissing True output
   (status, out, err) <- readProcessWithExitCode "ghc"
     [ "-fno-code", "-fforce-recomp", "-i" ++ support
     , "-ilib", "-iactors"
-    , "-outputdir", output, "test-check/tool-profiles/" ++ fixture ++ ".hs"
+    , "-outputdir", output, source
     ] ""
   writeFile (output ++ "/compile.log") (out ++ err)
   case expectation of
@@ -180,9 +211,83 @@ compileProfile fixture expectation = do
     Rejected fragments -> require (fixture ++ " rejects at its intended type boundary\n" ++ out ++ err)
       (status /= ExitSuccess && all (`isInfixOf` (out ++ err)) fragments)
 
+compileGenerated :: String -> [String] -> CompileExpectation -> IO ()
+compileGenerated fixture declarations expectation = do
+  let output = "profile-fixture-objects/" ++ fixture
+      source = output ++ "/Fixture.hs"
+  createDirectoryIfMissing True output
+  writeFile source $ unlines $
+    [ "{-# LANGUAGE DataKinds, DeriveGeneric, FlexibleContexts, OverloadedStrings, ScopedTypeVariables, TypeFamilies, TypeOperators #-}"
+    , "module Fixture where"
+    , "import Control.Monad.Freer (Eff)"
+    , "import Data.Text (Text)"
+    , "import GHC.Generics (Generic)"
+    , "import Tidepool.Agent.Contract"
+    , "import Tidepool.Effects.Core (ModelCall)"
+    , "import qualified Tidepool.Model as Model"
+    ] ++ declarations
+  compileAt fixture source expectation
+
+presentationTests :: [TestTree]
+presentationTests =
+  [ testCase (name ++ " requires presentation at construction") $
+      compileGenerated name
+        [ "data Tools mode = Tools { probe :: mode :- " ++ endpoint ++ " } deriving Generic"
+        , "tools :: Tools (AsServerT (Eff '[]))"
+        , "tools = Tools (" ++ builder ++ ")"
+        ] (Rejected ["Presented"])
+  | (name, endpoint, builder) <-
+      [ ("MissingCallPresentation", "Call Text Text", "tool \"Echo\" pure")
+      , ("MissingRawPresentation", "RawCall Text", "rawTool \"Echo\" pure")
+      , ("MissingNotifyPresentation", "Notify Text", "notify \"Notice\" (const (pure ()))")
+      , ("MissingSyncPresentation", "Sync (Call Text Text)", "syncTool \"Echo\" pure")
+      , ("MissingSyncRawPresentation", "Sync (RawCall Text)", "syncRawTool \"Echo\" pure")
+      , ("MissingSyncNotifyPresentation", "Sync (Notify Text)", "syncNotify \"Notice\" (const (pure ()))")
+      ]
+  ] ++
+  [ testCase (name ++ policy ++ " cannot bypass hosted presentation") $
+      compileGenerated (name ++ policy)
+        [ "data Tools mode = Tools { probe :: " ++ concrete ++ " } deriving Generic"
+        , "tools :: Tools (AsServerT (Eff '[]))"
+        , "tools = Tools (" ++ builder ++ ")"
+        , "invalid = " ++ compile ++ " tools"
+        ] (Rejected ["GCompileTools"])
+  | (name, concrete, builder) <-
+      [ ("ConcreteCall", "Tool (Eff '[]) Text Text", "tool \"Echo\" pure")
+      , ("ConcreteRaw", "RawTool (Eff '[]) Text", "rawTool \"Echo\" pure")
+      ]
+  , (policy, compile) <- [("Bounded", "compileTools"), ("Installed", "compileInstalledTools")]
+  ] ++
+  [ testCase "nested handler requires presentation at construction" $
+      compileGenerated "MissingNestedPresentation"
+        [ "data Inner mode = Inner { probe :: mode :- Call Text Text } deriving Generic"
+        , "data Outer mode = Outer { inner :: Inner mode } deriving Generic"
+        , "tools :: Outer (AsServerT (Eff '[]))"
+        , "tools = Outer (Inner (tool \"Echo\" pure))"
+        ] (Rejected ["Presented"])
+  , testCase "renderer must consume the handler output type" $
+      compileGenerated "WrongPresentationOutput"
+        [ "data Tools mode = Tools { probe :: mode :- Call Text Text } deriving Generic"
+        , "tools :: Tools (AsServerT (Eff '[]))"
+        , "tools = Tools (presentWith (\\(_ :: Int) -> \"rendered\") (tool \"Echo\" pure))"
+        ] (Rejected ["Int", "Text"])
+  , testCase "presentation completion composes with generic helpers and bounded model turns" $
+      compileGenerated "GenericPresentedModel"
+        [ "data Inner mode = Inner { probe :: mode :- Call Text Text } deriving Generic"
+        , "data Outer mode = Outer { inner :: Inner mode } deriving Generic"
+        , "rendered :: PresentableTool handler => (ToolOutput handler -> Text) -> handler -> Presented handler"
+        , "rendered = presentWith"
+        , "tools :: Outer (AsServerT (Eff '[ModelCall]))"
+        , "tools = Outer (Inner (rendered id (tool \"Echo\" pure)))"
+        , "installed = compileInstalledTools tools"
+        , "bounded = Model.invokeModel (Model.textTurn (defaultSpec { specTools = tools }) \"instructions\") \"input\""
+        ] Accepted
+  ]
+
 tests :: TestTree
-tests = testGroup "tool profile contract"
+tests = testGroup "tool profile contract" $
   [ testCase "compiled installation dispatch scheduling presentation and actor profiles" installedToolContracts
+  , testCase "nested bounded and installed handlers preserve semantic presentation" presentedCompositionContracts
   , testCase "ordinary compiled model program can be raised into sync context" $
       compileProfile "RaisedModelTurn" Accepted
   , testCase "sync context admits explicit effort changes" $
@@ -201,7 +306,7 @@ tests = testGroup "tool profile contract"
       compileProfile "ConcreteNativeProfile" (Rejected ["Commands"])
   , testCase "model hook cannot borrow caller sync context authority" $
       compileProfile "ModelContext" (Rejected ["cannot be used by an asynchronous tool"])
-  ]
+  ] ++ presentationTests
 
 main :: IO ()
 main = runTests tests
