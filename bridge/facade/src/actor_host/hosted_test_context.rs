@@ -434,6 +434,7 @@ pub(super) struct ObservedInstallation {
 pub(super) struct HostTestObserver {
     installations: Arc<Mutex<HashMap<ActorRef, ObservedInstallation>>>,
     changed: watch::Sender<u64>,
+    coordination_failure: watch::Sender<Option<String>>,
 }
 
 impl Default for HostTestObserver {
@@ -441,11 +442,29 @@ impl Default for HostTestObserver {
         Self {
             installations: Arc::default(),
             changed: watch::channel(0).0,
+            coordination_failure: watch::channel(None).0,
         }
     }
 }
 
 impl HostTestObserver {
+    pub(super) fn fail_coordination(&self, message: &str) {
+        self.coordination_failure.send_replace(Some(message.into()));
+    }
+
+    pub(super) async fn wait_coordination_failure(&self) -> String {
+        let mut failure = self.coordination_failure.subscribe();
+        loop {
+            if let Some(message) = failure.borrow_and_update().clone() {
+                return message;
+            }
+            failure
+                .changed()
+                .await
+                .expect("test coordination observer remains owned");
+        }
+    }
+
     pub(super) fn installed(&self, installation: &LocalResidentInstallation) {
         self.installations.lock().insert(
             installation.actor.identity(),

@@ -130,11 +130,20 @@ pub(super) async fn run_interactive_applications(
             )
             .map_err(|error| format!("embedded actor history projection failed: {error}"))?;
     }
+    let test_failure = async {
+        #[cfg(test)]
+        if let Some(observer) = &test_observer {
+            return observer.wait_coordination_failure().await;
+        }
+        std::future::pending::<String>().await
+    };
+    tokio::pin!(test_failure);
     let failure = AssertUnwindSafe(async {
         let failure = loop {
         tokio::select! {
             biased;
             _ = wait_for_shutdown(shutdown.clone()) => break None,
+            failure = &mut test_failure => break Some(failure),
             changed = root_config.changed() => {
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
             }
