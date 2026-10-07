@@ -317,7 +317,12 @@ async fn custody_assert_request(
 
 #[tokio::test]
 async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let mut campaign = test_campaign::TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        test_campaign::configure_notebook_jev_workspace,
+    )
+    .await;
     let root = campaign.root_installation.policy.clone();
     let first = tests::dispatch_haskell_script(
         root.as_ref(),

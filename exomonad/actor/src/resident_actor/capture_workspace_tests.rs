@@ -78,25 +78,31 @@ impl ForkWorkspaceAdmission for PausedWorkspace {
     }
 }
 
-async fn run_cell(actor: LocalActorRef, text: String) -> serde_json::Value {
-    run_cell_with_context(actor, text, None).await
+async fn run_host_cell(actor: LocalActorRef, text: String) -> serde_json::Value {
+    run_host_cell_with_context(actor, text, None).await
 }
 
-async fn run_cell_with_context(
+async fn run_host_cell_with_context(
     actor: LocalActorRef,
     text: String,
     context: Option<exomonad_tool::ToolInvocationContext>,
 ) -> serde_json::Value {
-    crate::ResidentInteractivePolicy::local(actor)
-        .dispatch_boxed(ToolInvocation {
-            context,
-            name: crate::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(text),
-        })
+    dispatch_host_cell(actor, text, context)
         .await
-        .expect("production Haskell endpoint succeeds")
-        .into_json()
-        .expect("resident response serializes for this structured test helper")
+        .expect("host workbench cell succeeds")
+}
+
+// new_workbench provisions a host entry without an installed AgentSpec. Its
+// owning client retains the execution boundary and normal workbench admission;
+// children below use their actual installed tool policies.
+async fn dispatch_host_cell(
+    actor: LocalActorRef,
+    text: String,
+    context: Option<exomonad_tool::ToolInvocationContext>,
+) -> Result<serde_json::Value, crate::ResidentToolError> {
+    crate::resident_tools::ResidentToolClient::local(actor)
+        .dispatch_workbench(WorkbenchRequest::from_cell_input(&text), context)
+        .await
 }
 
 fn assert_committed(reply: &serde_json::Value) {
@@ -157,7 +163,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .new_workbench("checkpoint-issuer".into(), role.clone())
         .await
         .expect("issuer");
-    assert_committed(&run_cell(issuer.clone(), "let capturedValue = 41 :: Int".into()).await);
+    assert_committed(&run_host_cell(issuer.clone(), "let capturedValue = 41 :: Int".into()).await);
     let original_interface = root
         .path()
         .join(tidepool_repr::SessionModule::val(tidepool_repr::Generation(1)).relative_hi_path());
@@ -241,7 +247,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .replace("CHILD_PATH", &reservations[0].allocated.to_string())
             .replace("GROUP_ID", &group.0.to_string())
             .replace("CHECKPOINT_TOKEN", &token);
-        calls.push(tokio::spawn(run_cell_with_context(
+        calls.push(tokio::spawn(run_host_cell_with_context(
             launcher.clone(),
             source,
             Some(invocation),
@@ -273,7 +279,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     assert!(calls.iter().all(|call| !call.is_finished()));
     let progressing = tokio::time::timeout(
         std::time::Duration::from_secs(240),
-        run_cell(launcher.clone(), "pure (42 :: Int)".into()),
+        run_host_cell(launcher.clone(), "pure (42 :: Int)".into()),
     )
     .await
     .expect("third cell progresses while both launches wait");
@@ -435,7 +441,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .new_workbench("private-capture-parent".into(), role.clone())
         .await
         .expect("parent");
-    assert_committed(&run_cell(parent.clone(), "let capturedValue = 41 :: Int".into()).await);
+    assert_committed(&run_host_cell(parent.clone(), "let capturedValue = 41 :: Int".into()).await);
     let context = forest
         .directory
         .session_context(parent.identity())
@@ -474,16 +480,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .expect("private capture completed");
     eprintln!("captured reader fixture: original private capture is published");
     let source = include_str!("captured_readers_parent.hs").replace("CHECKPOINT_TOKEN", &token);
-    let endpoint = crate::ResidentInteractivePolicy::local(parent.clone());
-    let call = tokio::spawn(async move {
-        endpoint
-            .dispatch_boxed(ToolInvocation {
-                context: None,
-                name: crate::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw(source),
-            })
-            .await
-    });
+    let call = tokio::spawn(dispatch_host_cell(parent.clone(), source, None));
     let mut children = Vec::new();
     while children.len() < 2 {
         let event = tokio::time::timeout(std::time::Duration::from_secs(240), deployments.recv())
@@ -566,7 +563,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
     workspaces.release.add_permits(1);
     eprintln!("captured reader fixture: parent cell failed, supervising actor remains live");
     let reused = include_str!("captured_reader_reuse.hs").replace("CHECKPOINT_TOKEN", &token);
-    assert_committed(&run_cell(parent.clone(), reused).await);
+    assert_committed(&run_host_cell(parent.clone(), reused).await);
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(240), deployments.recv())
             .await
@@ -836,7 +833,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         .new_workbench("partial-capture-parent".into(), role.clone())
         .await
         .expect("parent");
-    assert_committed(&run_cell(parent.clone(), "let capturedValue = 41 :: Int".into()).await);
+    assert_committed(&run_host_cell(parent.clone(), "let capturedValue = 41 :: Int".into()).await);
     let context = forest
         .directory
         .session_context(parent.identity())
@@ -875,7 +872,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         .expect("independently completed capture");
 
     let reuse = include_str!("captured_reader_reuse.hs").replace("CHECKPOINT_TOKEN", &token);
-    assert_committed(&run_cell(parent.clone(), reuse.clone()).await);
+    assert_committed(&run_host_cell(parent.clone(), reuse.clone()).await);
     let survivor_path = entered_rx
         .recv()
         .await
@@ -902,16 +899,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
     workspaces.release.add_permits(1);
     let source =
         include_str!("capture_partial_startup_failure.hs").replace("CHECKPOINT_TOKEN", &token);
-    let endpoint = crate::ResidentInteractivePolicy::local(parent.clone());
-    let mut call = tokio::spawn(async move {
-        endpoint
-            .dispatch_boxed(ToolInvocation {
-                context: None,
-                name: crate::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw(source),
-            })
-            .await
-    });
+    let mut call = tokio::spawn(dispatch_host_cell(parent.clone(), source, None));
     let paths = tokio::time::timeout(std::time::Duration::from_secs(240), async {
         let mut paths = Vec::new();
         while paths.len() < 2 {
@@ -1037,7 +1025,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         .reject
         .store(false, std::sync::atomic::Ordering::SeqCst);
     workspaces.release.add_permits(1);
-    assert_committed(&run_cell(parent.clone(), reuse).await);
+    assert_committed(&run_host_cell(parent.clone(), reuse).await);
     let fresh_path = tokio::time::timeout(std::time::Duration::from_secs(240), entered_rx.recv())
         .await
         .expect("fresh reader workspace admission settles")
