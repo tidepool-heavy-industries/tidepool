@@ -44,6 +44,11 @@ spawnWithActualSpec options = spawnSubagent (FreshCtx "inspect the project") Sam
 submitRaw :: AgentRef -> Int -> Eff ActorEffects (Either RequestError (Request Text))
 submitRaw agent input = request @Text agent input defaultRequestOptions
 
+submitWithOnlyReplies
+  :: AgentRef
+  -> Eff '[Replies] (Either RequestError (Request Text))
+submitWithOnlyReplies agent = request @Text agent ("inspect this" :: Text) defaultRequestOptions
+
 submitConfigured :: AgentRef -> Text -> Eff ActorEffects (Either RequestError (Request Text))
 submitConfigured agent input = request @Text agent input
   (defaultRequestOptions
@@ -58,6 +63,12 @@ submitWithProgress
   -> Eff ActorEffects (Either RequestError (Request Text, Progress Int))
 submitWithProgress agent input =
   requestWithProgress @Int @Text agent input defaultRequestOptions
+
+subSecondRequest
+  :: AgentRef
+  -> Eff ActorEffects (Either RequestError (Request Text))
+subSecondRequest agent = request @Text agent ("quick check" :: Text)
+  (defaultRequestOptions { requestDeadline = Just (milliseconds 25) })
 
 composeSettlements
   :: Request left
@@ -93,11 +104,17 @@ cancel = cancelRequest
 releaseRequest :: Request value -> Eff '[Replies] ForgetResponseOutcome
 releaseRequest = forgetResponse
 
+retainRequestForActor :: Request value -> Eff '[Replies] (Either ReplyError ())
+retainRequestForActor pending = retainRequest pending ActorOwned
+
 releaseWatch :: Watch value -> Eff '[Watches] ForgetWatchOutcome
 releaseWatch = forgetWatch
 
 releaseAgent :: AgentRef -> Eff ActorEffects AgentForgetOutcome
 releaseAgent = forgetAgent
+
+retainAgentForActor :: AgentRef -> Eff '[AgentControl] (Either AgentRetentionError ())
+retainAgentForActor agent = retainAgent agent ActorOwned
 
 retainedAgentDependencies :: AgentForgetOutcome -> ([RequestId], [WatchId])
 retainedAgentDependencies outcome = case outcome of

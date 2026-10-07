@@ -10,4 +10,4 @@ oidText :: Exomonad.GitOid -> Text
 oidText = Exomonad.renderGitOid
 
 result :: Text
-result = oidText (Exomonad.GitOid "0000000000000000000000000000000000000000")
+result = oidText ("0000000000000000000000000000000000000000" :: Exomonad.GitOid)

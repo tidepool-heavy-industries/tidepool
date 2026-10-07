@@ -18,8 +18,8 @@ minimalSpec = defaultSpec
 
 data DelegationError
   = SpawnFailed SpawnError
-  | RequestFailed RequestError
-  | AwaitFailed AwaitError
+  | RequestFailed AgentRef RequestError
+  | AwaitFailed AgentRef AwaitError
 
 delegateAndAwait :: Text -> Eff ActorEffects (Either DelegationError Text)
 delegateAndAwait input = do
@@ -30,23 +30,23 @@ delegateAndAwait input = do
     Right agent -> do
       admitted <- request @Text agent input defaultRequestOptions
       case admitted of
-        Left issue -> pure (Left (RequestFailed issue))
+        Left issue -> pure (Left (RequestFailed agent issue))
         Right pending -> do
           observed <- await (Exomonad.result pending)
-          pure (either (Left . AwaitFailed) Right observed)
+          pure (either (Left . AwaitFailed agent) Right observed)
 
 delegateAndWatch
   :: Text
-  -> Eff ActorEffects (Either SpawnError AgentRef, Maybe (Watch Text))
+  -> Eff ActorEffects (Either DelegationError (AgentRef, Watch Text))
 delegateAndWatch input = do
   spawned <- spawnSubagent (FreshCtx "answer the next typed request") SameDir
     (defaultSpawnOptions minimalSpec)
   case spawned of
-    Left issue -> pure (Left issue, Nothing)
+    Left issue -> pure (Left (SpawnFailed issue))
     Right agent -> do
       admitted <- request @Text agent input defaultRequestOptions
       case admitted of
-        Left _ -> pure (Right agent, Nothing)
+        Left issue -> pure (Left (RequestFailed agent issue))
         Right pending -> do
           observed <- watch (Just "answer ready") (Exomonad.result pending)
-          pure (Right agent, Just observed)
+          pure (Right (agent, observed))

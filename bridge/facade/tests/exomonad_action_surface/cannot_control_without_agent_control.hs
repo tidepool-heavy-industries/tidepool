@@ -7,5 +7,5 @@ import Tidepool.Actors.Exomonad
 
 type NarrowEffects = '[Replies, ActorContext]
 
-cancelNeedsControl :: AgentRef -> Eff NarrowEffects StopOutcome
-cancelNeedsControl = stopAgent
+stopNeedsControl :: AgentRef -> Eff NarrowEffects StopOutcome
+stopNeedsControl = stopAgent
