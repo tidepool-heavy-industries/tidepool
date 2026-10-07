@@ -2345,34 +2345,6 @@ impl ExactCompilationRequest {
             original_products: std::sync::OnceLock::new(),
         })
     }
-    #[cfg(test)]
-    pub(crate) fn admit_program_segment_support(
-        &mut self,
-        context: Arc<ExactDeclarationContext>,
-        support: &ArtifactView,
-        segment: &ExactProgramSegmentAdmission,
-        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        segment.validate_request(self)?;
-        self.admit_program_support_inner(
-            context,
-            support,
-            &segment.admissions,
-            produced_types,
-            Some(&segment.request.context),
-            None,
-        )
-    }
-    #[cfg(test)]
-    pub(crate) fn admit_program_support(
-        &mut self,
-        context: Arc<ExactDeclarationContext>,
-        support: &ArtifactView,
-        admissions: &[ExactSourceAdmission],
-        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.admit_program_support_inner(context, support, admissions, produced_types, None, None)
-    }
     pub(crate) fn admit_program_segment_support_with_selection(
         &mut self,
         context: Arc<ExactDeclarationContext>,
@@ -2388,7 +2360,7 @@ impl ExactCompilationRequest {
             segment.admissions(),
             produced_types,
             Some(&segment.request.context),
-            Some(selection),
+            selection,
         )
     }
     pub(crate) fn admit_program_support_with_selection(
@@ -2405,7 +2377,7 @@ impl ExactCompilationRequest {
             admissions,
             produced_types,
             None,
-            Some(selection),
+            selection,
         )
     }
     fn admit_program_support_inner(
@@ -2415,7 +2387,7 @@ impl ExactCompilationRequest {
         admissions: &[ExactSourceAdmission],
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         segment_input: Option<&ExactDeclarationContext>,
-        selection: Option<&crate::certified_products::CertifiedSourceSelection>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
         let mut selected_originals = BTreeMap::new();
@@ -2445,39 +2417,27 @@ impl ExactCompilationRequest {
                 }
             }
         }
-        let issued = match selection {
-            Some(selection) => {
-                let entries = support.entries();
-                let mut originals = Vec::new();
-                for owner in selection.selected_original_owners() {
-                    let matching = entries.iter().filter(|entry| {
-                        matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
-                    }).cloned().collect::<Vec<_>>();
-                    // A selected original may be the generated target, excluded
-                    // from this support view by its authenticated source owner.
-                    if matching.len() > 1 {
-                        return Err(failure(
-                            "compiler support offer has conflicting exact original artifacts",
-                        ));
-                    }
-                    originals.extend(matching);
-                }
-                CompilerInputProjection::from_interface_view(support)?
-                    .merge(&CompilerInputProjection::from_issued_entries(&originals)?)?
+        let entries = support.entries();
+        let mut originals = Vec::new();
+        for owner in selection.selected_original_owners() {
+            let matching = entries
+                .iter()
+                .filter(|entry| {
+                    matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            // The generated target is excluded from this support view by its
+            // authenticated source owner.
+            if matching.len() > 1 {
+                return Err(failure(
+                    "compiler support offer has conflicting exact original artifacts",
+                ));
             }
-            None => {
-                // Historical unit cases supply explicit original fixtures;
-                // every production consumer passes current receipt authority.
-                #[cfg(test)]
-                {
-                    CompilerInputProjection::from_issued_entries(&support.entries())?
-                }
-                #[cfg(not(test))]
-                {
-                    return Err(failure("program support lacks current compiler selection"));
-                }
-            }
-        };
+            originals.extend(matching);
+        }
+        let issued = CompilerInputProjection::from_interface_view(support)?
+            .merge(&CompilerInputProjection::from_issued_entries(&originals)?)?;
         let supplied = issued
             .project_metadata(support.metadata_snapshot())?
             .entries;
@@ -2517,7 +2477,6 @@ impl ExactCompilationRequest {
                 } else if retained_source_input
                     .get(owner)
                     .is_some_and(|entry| entry.is_native())
-                    || (selection.is_none() && retained_source_input.contains_key(owner))
                 {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
@@ -2533,8 +2492,6 @@ impl ExactCompilationRequest {
                         "fresh program support lacks a canonical source seal",
                     ));
                 }
-            } else if !retained.contains_key(owner) && selection.is_none() {
-                return Err(failure("program support lacks its fresh source admission"));
             } else if canonical_source_interface(entry).is_none()
                 && retained
                     .get(owner)
@@ -5732,21 +5689,14 @@ mod tests {
         module: &str,
         interface: Vec<u8>,
     ) -> CertifiedRecoveryProduct {
-        let mut product = Vec::new();
-        ciborium::ser::into_writer(
-            &Value::Array(vec![
-                text("TPMOD"),
-                Value::Integer(1.into()),
-                Value::Array(vec![Value::Array(vec![
-                    text(unit),
-                    text(module),
-                    Value::Bytes(interface.clone()),
-                    Value::Array(vec![]),
-                ])]),
-            ]),
-            &mut product,
-        )
-        .unwrap();
+        let product = tidepool_test_data::prepared_encode::encode_module_products(&[
+            tidepool_repr::execution_schema::RawModuleProduct {
+                unit: unit.into(),
+                module: module.into(),
+                interface: interface.clone(),
+                groups: Vec::new(),
+            },
+        ]);
         let owner = CachedHomeOwner {
             unit: unit.into(),
             module: module.into(),
@@ -5773,16 +5723,20 @@ mod tests {
             &mut packages,
         )
         .unwrap();
-        crate::certified_products::fixture_finalized_product(
-            CertifiedRecoveryProduct::from_certification(
-                owner,
-                interface,
-                product,
-                packages,
-                certification,
+        crate::certified_products::tests::recovered_witness_fixtures(&[
+            crate::certified_products::fixture_finalized_product(
+                CertifiedRecoveryProduct::from_certification(
+                    owner,
+                    interface,
+                    product,
+                    packages,
+                    certification,
+                ),
+                [2; 32],
             ),
-            [2; 32],
-        )
+        ])
+        .remove(0)
+        .product
     }
 
     // Retain the old identity encoder to prove selection-aware keys invalidate it.
@@ -5888,6 +5842,121 @@ mod tests {
             .and_then(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
         certified_product_artifact_view(producer, products, &[], None).unwrap()
+    }
+
+    struct CompilerSupportFixture {
+        artifacts: ArtifactView,
+        projection: CompilerInputProjection,
+    }
+
+    fn support_offer(products: &[CertifiedRecoveryProduct]) -> CompilerSupportFixture {
+        let producer = products
+            .first()
+            .and_then(|product| product.module_interface())
+            .map_or([2; 32], |interface| interface.producer_sha256());
+        let entries = products
+            .iter()
+            .map(|product| Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap()))
+            .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        CompilerSupportFixture {
+            artifacts: support_view(products),
+            projection,
+        }
+    }
+
+    impl ExactCompilationRequest {
+        fn admit_fixture_support(
+            &mut self,
+            context: Arc<ExactDeclarationContext>,
+            fixture: &CompilerSupportFixture,
+            admissions: &[ExactSourceAdmission],
+            produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &fixture.projection,
+                    &fixture.artifacts,
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )?;
+            self.admit_program_support_with_selection(
+                context,
+                &fixture.artifacts,
+                admissions,
+                produced_types,
+                &selection,
+            )
+        }
+
+        fn admit_fixture_segment_support(
+            &mut self,
+            context: Arc<ExactDeclarationContext>,
+            fixture: &CompilerSupportFixture,
+            segment: &ExactProgramSegmentAdmission,
+            produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &fixture.projection,
+                    &fixture.artifacts,
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )?;
+            self.admit_program_segment_support_with_selection(
+                context,
+                &fixture.artifacts,
+                segment,
+                produced_types,
+                &selection,
+            )
+        }
+    }
+
+    #[test]
+    fn program_support_requires_explicit_authenticated_original_offer() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let product = support_product("Hidden");
+        let offer = support_offer(std::slice::from_ref(&product));
+        let mut request = program_request(directory.path(), empty.clone());
+        let native = request
+            .admit_fixture_support(empty.clone(), &offer, &[], None)
+            .unwrap();
+        assert_eq!(native.compiler_original_products().unwrap().len(), 1);
+        assert!(request.program_source_lexical().is_empty());
+
+        let types = CompilerSupportFixture {
+            projection: CompilerInputProjection::from_issued_entries(&[Arc::new(
+                ArtifactEntry::canonical(product.module_interface().unwrap().clone()),
+            )])
+            .unwrap(),
+            artifacts: offer.artifacts.clone(),
+        };
+        let mut request = program_request(directory.path(), empty.clone());
+        let retained = request
+            .admit_fixture_support(empty.clone(), &types, &[], None)
+            .unwrap();
+        assert_eq!(retained.recovery_products().len(), 1);
+        assert!(retained.compiler_original_products().unwrap().is_empty());
+        assert!(request.program_support.is_none());
+        assert!(retained.lexical_graph().is_empty());
+
+        let uncertified = CertifiedRecoveryProduct::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
+            product.certification_bytes().to_vec(),
+        )
+        .with_module_interface(product.module_interface().unwrap().clone())
+        .unwrap();
+        let mut request = program_request(directory.path(), empty.clone());
+        assert!(matches!(
+            request.admit_fixture_support(empty.clone(), &support_offer(&[uncertified]), &[], None),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Mismatch("compiler original native witness"))
+        ));
+        assert!(request.program_support.is_none());
+        assert!(empty.artifact_view().is_empty());
     }
 
     fn support_admission(root: &Path) -> ExactSourceAdmission {
@@ -7293,64 +7362,41 @@ mod tests {
         Arc<ExactDeclarationContext>,
         PathBuf,
     ) {
-        let (graph, owners) = if dependency {
-            crate::execution_source::test_graph_with_local_source_dependency(root)
-        } else {
-            crate::execution_source::test_graph(root)
-        };
-        source_selected_receipt_with_graph(root, dependency, shadow, graph, owners)
-    }
-
-    fn source_selected_receipt_with_graph(
-        root: &Path,
-        dependency: bool,
-        shadow: Option<&Path>,
-        graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
-        owners: Vec<CachedHomeOwner>,
-    ) -> (
-        ExactCompilationRequest,
-        Arc<ExactDeclarationContext>,
-        PathBuf,
-    ) {
         let inventory = ArtifactInventory::default();
-        // The graph's generated Input target is not an admitted original and
-        // deliberately has no source replay capability. Retain only A and B.
-        let originals = &owners[..2];
-        assert!(originals
+        let products = ["A", "B"].map(|module| {
+            let source = format!("module {module} where\nvalue = 1\n");
+            std::fs::write(root.join(format!("{module}.hs")), &source).unwrap();
+            let imports = if dependency && module == "A" {
+                vec![crate::certified_products::CanonicalSourceImport {
+                    qualifier: crate::cache::ImportQualifier::Unqualified,
+                    module: "B".into(),
+                    boot: false,
+                    home_unit: Some("main".into()),
+                }]
+            } else {
+                vec![]
+            };
+            crate::certified_products::fixture_source_finalized_product(
+                support_product_in_unit("main", module)
+                    .with_source_sha256(Sha256::digest(source.as_bytes()).into()),
+                [7; 32],
+                imports,
+            )
+        });
+        // Current-source replay and native availability are separate proofs.
+        // These zero-group originals have genuine production recovery witnesses.
+        let products = crate::certified_products::tests::recovered_witness_fixtures(&products)
+            .into_iter()
+            .map(|recovered| recovered.product)
+            .collect::<Vec<_>>();
+        let originals = products
             .iter()
-            .all(|owner| graph.eligible_source_replay_root(owner)));
-        let entries = originals
+            .map(|product| product.owner())
+            .collect::<Vec<_>>();
+        let entries = products
             .iter()
-            .map(|owner| {
-                let entry = execution_entry(owner.clone(), Arc::clone(&graph));
-                let ArtifactPayload::Original(product) = &entry.payload else {
-                    unreachable!()
-                };
-                let original_imports = if dependency && owner.module == "A" {
-                    vec![crate::certified_products::CanonicalSourceImport {
-                        qualifier: crate::cache::ImportQualifier::Unqualified,
-                        module: "B".into(),
-                        boot: false,
-                        home_unit: Some(owner.unit.clone()),
-                    }]
-                } else {
-                    vec![]
-                };
-                let product = crate::certified_products::fixture_source_finalized_product(
-                    product.clone().with_source_sha256(
-                        Sha256::digest(
-                            std::fs::read(root.join(format!("{}.hs", owner.module))).unwrap(),
-                        )
-                        .into(),
-                    ),
-                    [7; 32],
-                    original_imports,
-                )
-                .with_execution_source(Arc::clone(&graph))
-                .unwrap();
-                Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
-            })
-            .collect();
+            .map(|product| Arc::new(ArtifactEntry::original([7; 32], product.clone()).unwrap()))
+            .collect::<Vec<_>>();
         let context = Arc::new(ExactDeclarationContext {
             producer: [7; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -7397,7 +7443,7 @@ mod tests {
         let mut sources = Vec::new();
         let mut modules = Vec::new();
         let mut claims = Vec::new();
-        for owner in &owners[..count] {
+        for owner in &originals[..count] {
             let source = root.join(format!("{}.hs", owner.module));
             sources.push(crate::cache::SourceEvidence {
                 path: source.clone(),
@@ -7502,9 +7548,9 @@ mod tests {
                 },
             );
         let effective = request
-            .admit_program_support(
+            .admit_fixture_support(
                 Arc::clone(&context),
-                &support_view(&products),
+                &support_offer(&products),
                 &[admission],
                 None,
             )
@@ -7740,7 +7786,12 @@ mod tests {
         request.context = Arc::clone(&context);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         let retained = request
-            .admit_program_support(Arc::clone(&context), &support_view(&[]), &[admission], None)
+            .admit_fixture_support(
+                Arc::clone(&context),
+                &support_offer(&[]),
+                &[admission],
+                None,
+            )
             .unwrap();
         assert!(original_products(&retained.artifact_view().entries()).is_empty());
         assert_eq!(request.program_source_lexical().len(), 2);
@@ -7878,7 +7929,7 @@ mod tests {
         admission
     }
 
-    fn interface_only_agent_ref(producer: [u8; 32], unit: &str) -> ArtifactView {
+    fn interface_only_agent_ref_offer(producer: [u8; 32], unit: &str) -> CompilerSupportFixture {
         let interface = crate::certified_products::fixture_source_module_interface(
             producer,
             unit,
@@ -7887,7 +7938,14 @@ mod tests {
             BTreeMap::new(),
             None,
         );
-        certified_product_artifact_view(producer, &[], &[interface], None).unwrap()
+        let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(
+            ArtifactEntry::canonical(interface.clone()),
+        )])
+        .unwrap();
+        CompilerSupportFixture {
+            artifacts: certified_product_artifact_view(producer, &[], &[interface], None).unwrap(),
+            projection,
+        }
     }
 
     fn receiver_value_interface() -> Arc<CertifiedValueInterface> {
@@ -7909,9 +7967,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
-        let support = interface_only_agent_ref([2; 32], "main");
+        let support = interface_only_agent_ref_offer([2; 32], "main");
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
                 &support,
                 &[interface_only_agent_ref_admission(directory.path(), "main")],
@@ -7940,7 +7998,7 @@ mod tests {
                 .unwrap()
                 .artifacts
                 .artifact_ids(),
-            support.artifact_ids()
+            support.artifacts.artifact_ids()
         );
         // These are the two value-interface consumers after checked/program support.
         for context in [
@@ -7974,9 +8032,9 @@ mod tests {
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
-                &interface_only_agent_ref([2; 32], "main"),
+                &interface_only_agent_ref_offer([2; 32], "main"),
                 &[interface_only_agent_ref_admission(directory.path(), "main")],
                 None,
             )
@@ -7986,10 +8044,30 @@ mod tests {
             .clone()
             .extend_program_value_interface(value.clone())
             .unwrap();
-        let support = candidate
-            .artifact_view()
-            .select_roots(vec![value.artifact_id()])
-            .unwrap();
+        let support = CompilerSupportFixture {
+            projection: CompilerInputProjection::from_issued_entries(&[
+                Arc::new(ArtifactEntry::interface(
+                    value.interface().clone(),
+                    JoinedInterfaceRole::ValueInterface,
+                    value.requirements().to_vec(),
+                )),
+                Arc::new(ArtifactEntry::canonical(
+                    crate::certified_products::fixture_source_module_interface(
+                        [2; 32],
+                        "main",
+                        "Tidepool.Agent.Ref",
+                        Sha256::digest(RECEIVER_INTERFACE_SOURCE.as_bytes()).into(),
+                        BTreeMap::new(),
+                        None,
+                    ),
+                )),
+            ])
+            .unwrap(),
+            artifacts: candidate
+                .artifact_view()
+                .select_roots(vec![value.artifact_id()])
+                .unwrap(),
+        };
         let previous = request
             .program_support
             .as_ref()
@@ -7997,7 +8075,7 @@ mod tests {
             .artifacts
             .artifact_ids();
         let refusal = request
-            .admit_program_support(context.clone(), &support, &[], None)
+            .admit_fixture_support(context.clone(), &support, &[], None)
             .expect_err("a type certificate alone cannot supply fresh source or reserved outputs");
         assert!(matches!(refusal, CompileError::ExtractFailed(_)));
         assert_eq!(
@@ -8018,7 +8096,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_only_receiver_support_refuses_unavailable_wrong_owner_and_unadmitted_source() {
+    fn interface_only_receiver_support_separates_type_custody_from_source_and_native_authority() {
         let directory = tempfile::tempdir().unwrap();
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let assert_missing_ref = |error: CompileError| {
@@ -8036,9 +8114,9 @@ mod tests {
         );
         let mut request = program_request(directory.path(), empty.clone());
         let wrong_owner = request
-            .admit_program_support(
+            .admit_fixture_support(
                 empty.clone(),
-                &interface_only_agent_ref([2; 32], "foreign"),
+                &interface_only_agent_ref_offer([2; 32], "foreign"),
                 &[interface_only_agent_ref_admission(
                     directory.path(),
                     "foreign",
@@ -8052,24 +8130,25 @@ mod tests {
                 .extend_program_value_interface(receiver_value_interface())
                 .unwrap_err(),
         );
-        let support = interface_only_agent_ref([2; 32], "main");
+        let support = interface_only_agent_ref_offer([2; 32], "main");
         let hidden = Arc::new(
             (*empty)
                 .clone()
-                .extend_interface_artifacts(&support)
+                .extend_interface_artifacts(&support.artifacts)
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), hidden.clone());
-        assert!(request
-            .admit_program_support(
+        let retained = request
+            .admit_fixture_support(
                 hidden.clone(),
                 &support,
                 &[interface_only_agent_ref_admission(directory.path(), "main")],
                 None,
             )
-            .is_err());
+            .unwrap();
+        assert!(retained.lexical_graph().is_empty());
+        assert!(retained.recovery_products().is_empty());
         assert!(hidden.lexical_graph().is_empty());
-        assert!(request.program_support.is_none());
         let uncaptured = interface_only_agent_ref_admission(directory.path(), "main");
         let mut uncaptured = uncaptured.evidence.into_evidence();
         uncaptured.modules[0].source = directory.path().join("uncaptured.hs");
@@ -8078,29 +8157,32 @@ mod tests {
             "module Target where\n",
         )
         .is_err());
-        for (case, producer, admissions) in [
-            ("unadmitted source", [2; 32], vec![]),
-            (
-                "different producer",
-                [3; 32],
-                vec![interface_only_agent_ref_admission(directory.path(), "main")],
-            ),
-        ] {
-            let mut request = program_request(directory.path(), empty.clone());
-            assert!(
-                request
-                    .admit_program_support(
-                        empty.clone(),
-                        &interface_only_agent_ref(producer, "main"),
-                        &admissions,
-                        None
-                    )
-                    .is_err(),
-                "{case}"
-            );
-            assert!(empty.artifact_view().is_empty(), "{case}");
-            assert!(request.program_support.is_none(), "{case}");
-        }
+        // A canonical certificate without consumed source grants type custody
+        // while leaving authored names and source support unselected.
+        let mut request = program_request(directory.path(), empty.clone());
+        let retained = request
+            .admit_fixture_support(
+                empty.clone(),
+                &interface_only_agent_ref_offer([2; 32], "main"),
+                &[],
+                None,
+            )
+            .unwrap();
+        assert!(retained.recovery_products().is_empty());
+        assert!(retained.lexical_graph().is_empty());
+        assert!(request.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        let mut foreign = program_request(directory.path(), empty.clone());
+        assert!(foreign
+            .admit_fixture_support(
+                empty.clone(),
+                &interface_only_agent_ref_offer([3; 32], "main"),
+                &[interface_only_agent_ref_admission(directory.path(), "main")],
+                None,
+            )
+            .is_err());
+        assert!(foreign.program_support.is_none());
+        assert!(empty.artifact_view().is_empty());
     }
 
     #[test]
@@ -8116,9 +8198,9 @@ mod tests {
         let mut request = program_request(directory.path(), baseline.clone());
         let admission = support_admission(directory.path());
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline.clone(),
-                &support_view(&[
+                &support_offer(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
@@ -8225,9 +8307,9 @@ mod tests {
         );
         let mut request = program_request(directory.path(), baseline.clone());
         assert!(request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
-                &support_view(&products),
+                &support_offer(&products),
                 &[support_admission(directory.path())],
                 None
             )
@@ -8257,9 +8339,9 @@ mod tests {
         )
         .unwrap();
         assert!(request
-            .admit_program_support(
+            .admit_fixture_support(
                 empty,
-                &support_view(&[
+                &support_offer(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay")
                 ]),
@@ -8293,6 +8375,12 @@ mod tests {
             .unwrap();
         let mut request = program_request(directory.path(), context.clone());
         request.program_support = Some(ProgramSourceSupport {
+            compiler_projection: CompilerInputProjection::from_issued_entries(&[entries
+                [&identity("fixture", "InstanceRelay")]
+                .clone()])
+            .unwrap()
+            .merge(&CompilerInputProjection::from_interface_view(context.artifact_view()).unwrap())
+            .unwrap(),
             artifacts: context
                 .artifact_view()
                 .select_roots(vec![
@@ -8371,9 +8459,9 @@ mod tests {
         );
         let mut request = program_request(directory.path(), baseline.clone());
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
-                &support_view(&[
+                &support_offer(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
@@ -8550,9 +8638,9 @@ mod tests {
         );
         let mut request = program_request(directory.path(), baseline.clone());
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
-                &support_view(&[hidden.clone(), owner.clone(), relay.clone()]),
+                &support_offer(&[hidden.clone(), owner.clone(), relay.clone()]),
                 &[support_admission(directory.path())],
                 None,
             )
@@ -8603,9 +8691,9 @@ mod tests {
             vec![identity("fixture", "InstanceRelay")],
         );
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 context,
-                &support_view(&[hidden.clone(), owner, relay, support_product("Additional")]),
+                &support_offer(&[hidden.clone(), owner, relay, support_product("Additional")]),
                 &[later],
                 None,
             )
@@ -8636,7 +8724,7 @@ mod tests {
             b"different inherited interface".to_vec(),
         );
         assert!(request
-            .admit_program_support(context, &support_view(&[altered]), &[], None)
+            .admit_fixture_support(context, &support_offer(&[altered]), &[], None)
             .is_err());
     }
 
@@ -8654,7 +8742,7 @@ mod tests {
                 Sha256::digest(interface.certificate_bytes()).into(),
             )
             .unwrap();
-            CertifiedRecoveryProduct::from_certification(
+            let mut variant = CertifiedRecoveryProduct::from_certification(
                 owner,
                 product.interface_bytes().to_vec(),
                 product.product_bytes().to_vec(),
@@ -8662,7 +8750,13 @@ mod tests {
                 certification,
             )
             .with_module_interface(interface)
-            .unwrap()
+            .unwrap();
+            if let Some(source_sha256) = product.source_sha256() {
+                variant = variant.with_source_sha256(source_sha256);
+            }
+            crate::certified_products::tests::recovered_witness_fixtures(&[variant])
+                .remove(0)
+                .product
         };
         let directory = tempfile::tempdir().unwrap();
         let original = support_product("Hidden");
@@ -8676,23 +8770,23 @@ mod tests {
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), context.clone());
-        let support = support_view(&[variant]);
+        let support = support_offer(&[variant]);
         let assert_native_refusal = |error| {
-            assert!(matches!(error, CompileError::ExtractFailed(detail)
-                if detail == "exact declaration context: supporting original differs from retained owner"));
+            assert!(matches!(error, CompileError::ArtifactInventory(error)
+                if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { .. })));
         };
         assert_native_refusal(
             request
-                .admit_program_support(context.clone(), &support, &[], None)
+                .admit_fixture_support(context.clone(), &support, &[], None)
                 .unwrap_err(),
         );
         assert!(request.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
         assert_eq!(context.recovery_products().len(), 1);
         let unchanged = context.recovery_products();
-        let unchanged_support = support_view(&unchanged);
+        let unchanged_support = support_offer(&unchanged);
         let unchanged_context = request
-            .admit_program_support(context.clone(), &unchanged_support, &[], None)
+            .admit_fixture_support(context.clone(), &unchanged_support, &[], None)
             .unwrap();
         assert_eq!(
             unchanged_context.recovery_products()[0].owner(),
@@ -8713,7 +8807,7 @@ mod tests {
         );
         let mut canonical_request = program_request(directory.path(), canonical_context.clone());
         let promoted = canonical_request
-            .admit_program_support(canonical_context, &unchanged_support, &[], None)
+            .admit_fixture_support(canonical_context, &unchanged_support, &[], None)
             .unwrap();
         assert_eq!(
             promoted.recovery_products()[0].owner(),
@@ -8726,7 +8820,7 @@ mod tests {
         let (mut request, context, receipt) = source_selected_receipt(directory.path(), true, None);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         let products = context.recovery_products();
-        let support = support_view(
+        let support = support_offer(
             &products
                 .iter()
                 .map(|product| {
@@ -8740,7 +8834,7 @@ mod tests {
         );
         assert_native_refusal(
             request
-                .admit_program_support(context.clone(), &support, &[admission], None)
+                .admit_fixture_support(context.clone(), &support, &[admission], None)
                 .unwrap_err(),
         );
         assert!(request.program_support.is_none());
@@ -8766,9 +8860,9 @@ mod tests {
         )
         .unwrap();
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
-                &support_view(&[support_product_in_unit("main", "Tidepool.Internal.Resume")]),
+                &support_offer(&[support_product_in_unit("main", "Tidepool.Internal.Resume")]),
                 &[admission],
                 None,
             )
@@ -8855,9 +8949,9 @@ mod tests {
         let baseline = Arc::new(baseline);
         let mut request = program_request(directory.path(), baseline.clone());
         let context = request
-            .admit_program_support(
+            .admit_fixture_support(
                 baseline,
-                &support_view(&[
+                &support_offer(&[
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
@@ -9410,9 +9504,9 @@ mod tests {
         evidence.cache_safe = false;
         evidence.selection_complete = false;
         let evidence = serde_json::to_vec(&evidence).unwrap();
-        let support = support_view(&[support_product("Consumer")]);
+        let support = support_offer(&[support_product("Consumer")]);
         let context = request
-            .admit_program_segment_support(baseline, &support, &segment, None)
+            .admit_fixture_segment_support(baseline, &support, &segment, None)
             .unwrap();
         assert!(context
             .interface_owners()
@@ -9433,7 +9527,7 @@ mod tests {
             .unwrap();
         assert!(admission.request.context.interface_owners().is_empty());
         let repeated = projected
-            .admit_program_segment_support(context.clone(), &support, &segment, None)
+            .admit_fixture_segment_support(context.clone(), &support, &segment, None)
             .unwrap();
         assert_eq!(repeated.semantic_sha256(), context.semantic_sha256());
         let ordinary_refusal = projected
@@ -9454,7 +9548,7 @@ mod tests {
             "fresh module replaced an admitted exact owner",
         );
         let hidden_refusal = projected
-            .admit_program_support(context.clone(), &support, segment.admissions(), None)
+            .admit_fixture_support(context.clone(), &support, segment.admissions(), None)
             .unwrap_err();
         assert_context_refusal(
             &hidden_refusal,
@@ -9462,13 +9556,13 @@ mod tests {
         );
 
         let before = projected.context.semantic_sha256();
-        let changed = support_view(&[support_product_with_interface(
+        let changed = support_offer(&[support_product_with_interface(
             "fixture",
             "Consumer",
             b"changed canonical interface".to_vec(),
         )]);
         let changed_refusal = projected
-            .admit_program_segment_support(context, &changed, &segment, None)
+            .admit_fixture_segment_support(context, &changed, &segment, None)
             .unwrap_err();
         assert_context_refusal(
             &changed_refusal,
@@ -9699,6 +9793,7 @@ mod tests {
         );
         let mut local = request.clone();
         local.program_support = Some(ProgramSourceSupport {
+            compiler_projection: persisted.compiler_input_projection().clone(),
             artifacts: persisted.artifact_view().clone(),
             imports: Arc::new(BTreeMap::new()),
         });
@@ -9755,11 +9850,15 @@ mod tests {
         )
         .expect("actual compiler issues the changed original proof");
         std::fs::write(&support_path, support).unwrap();
+        let changed_interfaces = changed
+            .artifact_view()
+            .interface_projection(&[owner])
+            .unwrap();
         local.program_support = Some(ProgramSourceSupport {
-            artifacts: changed
-                .artifact_view()
-                .interface_projection(&[owner])
-                .unwrap(),
+            compiler_projection: changed
+                .compiler_input_projection()
+                .within_view(&changed_interfaces),
+            artifacts: changed_interfaces,
             imports: Arc::new(BTreeMap::new()),
         });
         assert!(
