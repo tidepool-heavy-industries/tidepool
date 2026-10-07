@@ -3,6 +3,7 @@
 
 module Tidepool.TypedSegment
   ( TypedSegmentPlan, typedSegmentPlan, typedSegmentPlanRoot
+  , GeneratedSegmentOperations
   , typedSegmentPlanItems, typedSegmentReservationDigest, typedSegmentPlanDigest
   , TypedItemPlan(..), TypedItemBody(..)
   , TypedSegment, typedSegmentOriginalRoot, typedSegmentItems, typedSegmentRoots

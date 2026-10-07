@@ -78,7 +78,7 @@ import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction, makeThreadSafe)
-import Tidepool.TypedSegment (TypedSegmentPlan, TypedSegment, TypedSegmentFailure(..),
+import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, TypedSegmentFailure(..),
   typedSegmentItems, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
@@ -638,9 +638,9 @@ data PipelineResult = PipelineResult
   }
 
 checkCellInstances
-  :: (CellSourcePlan -> IO CheckedEnvironmentResult)
+  :: (CellSourcePlan -> IO result)
   -> CellSourcePlan
-  -> IO (CellSourcePlan, CheckedEnvironmentResult)
+  -> IO (CellSourcePlan, result)
 checkCellInstances compile plan = do
   attempted <- try (compile plan)
   case attempted of
@@ -1194,7 +1194,7 @@ data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCo
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | HostActivationPreviewCompile CheckedSignature
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
-  | TypedSegmentCompile TypedSegmentPlan CompilePurpose
+  | TypedSegmentCompile TypedSegmentPlan GeneratedSegmentOperations CompilePurpose
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | ExactScopeCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
@@ -1210,7 +1210,7 @@ withSourceImportIntents prologue = ParsedImportSelection
   (map locatedImportIntent (prologueImports prologue))
 
 sourceImportIntents :: CompilePurpose -> [ImportIntent]
-sourceImportIntents (TypedSegmentCompile _ inner) = sourceImportIntents inner
+sourceImportIntents (TypedSegmentCompile _ _ inner) = sourceImportIntents inner
 sourceImportIntents (ParsedImportSelection intents inner) = intents ++ sourceImportIntents inner
 sourceImportIntents (CompletedProgramImports _ inner) = sourceImportIntents inner
 sourceImportIntents (GeneratedInstanceCheck _ inner) = sourceImportIntents inner
@@ -1219,7 +1219,7 @@ sourceImportIntents (ExactScopeCompile inner _) = sourceImportIntents inner
 sourceImportIntents _ = []
 
 generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
-generatedInstanceRecipe (TypedSegmentCompile _ inner) = generatedInstanceRecipe inner
+generatedInstanceRecipe (TypedSegmentCompile _ _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (ParsedImportSelection _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (CompletedProgramImports _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
@@ -1230,7 +1230,7 @@ generatedInstanceRecipe _ = Nothing
 -- A request supplies its admitted baseline; an inner ordered-cell stage may
 -- carry a scope extended with freshly admitted originals from that request.
 purposeExactScope :: CompilePurpose -> Maybe ExactScope
-purposeExactScope (TypedSegmentCompile _ inner) = purposeExactScope inner
+purposeExactScope (TypedSegmentCompile _ _ inner) = purposeExactScope inner
 purposeExactScope (ParsedImportSelection _ inner) = purposeExactScope inner
 purposeExactScope (CompletedProgramImports _ inner) = purposeExactScope inner
 purposeExactScope (GeneratedInstanceCheck _ inner) = purposeExactScope inner
@@ -1240,7 +1240,7 @@ purposeExactScope (PlannedDeclarationCheck _ scope) = Just scope
 purposeExactScope _ = Nothing
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
-generatedRecipe (TypedSegmentCompile _ inner) = generatedRecipe inner
+generatedRecipe (TypedSegmentCompile _ _ inner) = generatedRecipe inner
 generatedRecipe (ParsedImportSelection _ inner) = generatedRecipe inner
 generatedRecipe (CompletedProgramImports _ inner) = generatedRecipe inner
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
@@ -1249,7 +1249,7 @@ generatedRecipe (GeneratedInstanceCheck _ inner) = generatedRecipe inner
 generatedRecipe _ = Nothing
 
 originalPurpose :: CompilePurpose -> CompilePurpose
-originalPurpose (TypedSegmentCompile _ inner) = originalPurpose inner
+originalPurpose (TypedSegmentCompile _ _ inner) = originalPurpose inner
 originalPurpose (ParsedImportSelection _ inner) = originalPurpose inner
 originalPurpose (CompletedProgramImports _ inner) = originalPurpose inner
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
@@ -1258,7 +1258,7 @@ originalPurpose (GeneratedInstanceCheck _ inner) = originalPurpose inner
 originalPurpose purpose = purpose
 
 typedPurposePlan :: CompilePurpose -> Maybe TypedSegmentPlan
-typedPurposePlan (TypedSegmentCompile plan _) = Just plan
+typedPurposePlan (TypedSegmentCompile plan _ _) = Just plan
 typedPurposePlan (ParsedImportSelection _ inner) = typedPurposePlan inner
 typedPurposePlan (CompletedProgramImports _ inner) = typedPurposePlan inner
 typedPurposePlan (GeneratedInstanceCheck _ inner) = typedPurposePlan inner
@@ -1297,9 +1297,9 @@ transformFor (ProgramItemCompile original annotations originals _) target env su
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
   | otherwise = pure . unannotatedModule
-transformFor (TypedSegmentCompile plan inner) target env summary
+transformFor (TypedSegmentCompile plan operations inner) target env summary
   | ms_mod_name summary == target = \parsed ->
-      transformFor inner target env summary parsed >>= mapNativeModule (rewriteParsedSegmentRoot plan)
+      transformFor inner target env summary parsed >>= mapNativeModule (rewriteParsedSegmentRoot operations plan)
   | otherwise = transformFor inner target env summary
 transformFor (ExactScopeCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
@@ -1310,10 +1310,10 @@ transformFor (CompletedProgramImports _ purpose) target env summary = transformF
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
-  TypedSegmentCompile plan inner
+  TypedSegmentCompile plan operations inner
     | ms_mod_name summary == target -> \parsed ->
         transformWithCompletedValues captured inner target env summary parsed
-          >>= mapNativeModule (rewriteParsedSegmentRoot plan)
+          >>= mapNativeModule (rewriteParsedSegmentRoot operations plan)
     | otherwise -> transformWithCompletedValues captured inner target env summary
   ParsedImportSelection _ inner -> transformWithCompletedValues captured inner target env summary
   CompletedProgramImports _ inner -> transformWithCompletedValues captured inner target env summary
@@ -3842,7 +3842,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
 
 compilePurposeLabel :: CompilePurpose -> String
 compilePurposeLabel purpose = case purpose of
-  TypedSegmentCompile _ _ -> "typed_segment"
+  TypedSegmentCompile _ _ _ -> "typed_segment"
   GeneralCompile -> "general"
   LookupTypeCompile -> "lookup_type"
   CertifyHomeProductsCompile -> "certify_home_products"

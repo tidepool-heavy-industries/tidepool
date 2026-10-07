@@ -12,7 +12,14 @@ import GHC.Core (CoreBind, CoreExpr, Bind(..))
 import GHC.Core.Type (Type)
 import GHC.Types.Fixity (Fixity)
 import GHC.Types.Id (Id, idType)
+import GHC.Unit.Module.Name (ModuleName)
 import Numeric (showHex)
+
+-- The source factory reserves this qualifier before the authored frontend.
+-- Rendered source and its existing recipe bind it; it grants no Core authority.
+newtype GeneratedSegmentOperations = GeneratedSegmentOperations
+  { generatedSegmentQualifier :: ModuleName
+  } deriving (Eq, Show)
 
 -- Reservations are inputs to the compiler transformation, not derived from
 -- simplified groups. The complete ordered plan has one semantic identity.
