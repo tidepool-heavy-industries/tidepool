@@ -55,6 +55,82 @@ impl tracing::field::Visit for RequestFields {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompilerModeObservation {
+    mode: String,
+    publication_generation: Option<u64>,
+}
+
+impl CompilerModeObservation {
+    fn is_publication_join(&self, generation: u64) -> bool {
+        self.mode == "declaration_interface" && self.publication_generation == Some(generation)
+    }
+}
+
+#[derive(Clone, Default)]
+struct CompilerModeObserver(Arc<CaptureMutex<Vec<CompilerModeObservation>>>);
+
+struct PublicationGeneration(u64);
+
+impl<S> tracing_subscriber::Layer<S> for CompilerModeObserver
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = RequestFields::default();
+        attributes.record(&mut fields);
+        if attributes.metadata().name() == "publication_declaration_certification" {
+            let generation = fields.0["reserved_generation"].parse().unwrap();
+            context
+                .span(id)
+                .unwrap()
+                .extensions_mut()
+                .insert(PublicationGeneration(generation));
+            return;
+        }
+        if attributes.metadata().target() != "tidepool_extract_cmd::endpoint"
+            || attributes.metadata().name() != "compile_request"
+        {
+            return;
+        }
+        match fields.0.get("execution_layer").map(String::as_str) {
+            Some("transaction_wrapper") => return,
+            Some("physical" | "endpoint_submission") => {}
+            other => panic!("unclassified compiler execution layer: {other:?}"),
+        }
+        let publication_generation = context.span(id).unwrap().scope().find_map(|span| {
+            span.extensions()
+                .get::<PublicationGeneration>()
+                .map(|generation| generation.0)
+        });
+        let mut requests = self.0.lock();
+        assert!(requests.len() < MAX_REQUESTS_PER_CELL);
+        requests.push(CompilerModeObservation {
+            mode: fields
+                .0
+                .get("request_mode")
+                .expect("typed request mode")
+                .clone(),
+            publication_generation,
+        });
+    }
+}
+
+fn with_compiler_mode_capture<T>(action: impl FnOnce() -> T) -> (T, Vec<CompilerModeObservation>) {
+    let observer = CompilerModeObserver::default();
+    let result = tracing::subscriber::with_default(
+        tracing_subscriber::registry().with(observer.clone()),
+        action,
+    );
+    let requests = observer.0.lock().clone();
+    (result, requests)
+}
+
 #[derive(Default)]
 struct RequestState {
     active: Option<CellCaptureState>,
@@ -453,6 +529,35 @@ where
 #[cfg(test)]
 mod cell_request_observer_tests {
     use super::*;
+
+    #[test]
+    fn publication_mode_capture_requires_scoped_join_and_excludes_transaction_wrappers() {
+        let (_, requests) = with_compiler_mode_capture(|| {
+            let outside = tracing::info_span!(target: "tidepool_extract_cmd::endpoint",
+                "compile_request", request_mode = "declaration_interface",
+                execution_layer = "physical");
+            drop(outside);
+            let publication = tracing::info_span!("publication_declaration_certification",
+                reserved_generation = 7_u64);
+            let _entered = publication.enter();
+            for mode in ["declaration_interface", "cell_program", "unknown"] {
+                let wrapper = tracing::info_span!(target: "tidepool_extract_cmd::endpoint",
+                    "compile_request", request_mode = mode,
+                    execution_layer = "transaction_wrapper");
+                let _wrapper = wrapper.enter();
+                let physical = tracing::info_span!(target: "tidepool_extract_cmd::endpoint",
+                    "compile_request", request_mode = mode,
+                    execution_layer = "endpoint_submission");
+                drop(physical);
+            }
+        });
+        assert_eq!(requests.len(), 4);
+        assert!(!requests[0].is_publication_join(7));
+        assert!(requests[1].is_publication_join(7));
+        assert!(!requests[1].is_publication_join(8));
+        assert!(!requests[2].is_publication_join(7));
+        assert!(!requests[3].is_publication_join(7));
+    }
 
     fn active<'a>(observer: &'a CellRequestObserver, label: &str) -> ActiveCell<'a> {
         let mut state = observer.0.lock();
@@ -1764,7 +1869,12 @@ where
         }
     }
     .unwrap();
-    let (ticket, certification_ns, stage_ns) = match publication {
+    let submissions_before_publication = tidepool_extract_cmd::extract_spawn_count();
+    assert_eq!(
+        submissions_before_publication, submissions_before_effects,
+        "freezing and restaging completed native execution must issue no compiler requests"
+    );
+    let (ticket, certification_ns, stage_ns, certified_generation) = match publication {
         ExecutionPublication::Bindings(base) => {
             let (ticket, stage_ns) = measured_duration(
                 resident,
@@ -1774,20 +1884,34 @@ where
                 None,
                 |_| base.stage().unwrap(),
             );
-            (ticket, None, stage_ns)
+            (ticket, None, stage_ns, None)
         }
         ExecutionPublication::Declarations(base) => {
+            let reserved = base.reserved_generation();
             let (certified, certification_ns) = measured_duration(
                 resident,
                 images,
                 scenario,
                 &format!("{label}.declaration_certification"),
                 None,
-                |_| base.certify().unwrap(),
+                |_| {
+                    let span = tracing::info_span!(
+                        "publication_declaration_certification",
+                        reserved_generation = reserved.0,
+                    );
+                    let _entered = span.enter();
+                    base.certify().unwrap()
+                },
             );
             let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
                 panic!("actual original declaration/prefix publication was rejected")
             };
+            assert_eq!(accepted.intent().reserved_generation(), reserved);
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                submissions_before_publication + 1,
+                "public declaration certification issues one source-less interface join"
+            );
             let (ticket, stage_ns) = measured_duration(
                 resident,
                 images,
@@ -1796,7 +1920,7 @@ where
                 None,
                 |_| accepted.stage().unwrap(),
             );
-            (ticket, Some(certification_ns), stage_ns)
+            (ticket, Some(certification_ns), stage_ns, Some(reserved))
         }
     };
     let recovery_work = ticket.recovery_work();
@@ -1819,6 +1943,21 @@ where
             );
         },
     );
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        submissions_before_publication + u64::from(certified_generation.is_some()),
+        "staging and publishing an accepted interface must issue no compiler requests"
+    );
+    if let Some(generation) = certified_generation {
+        assert_eq!(
+            resident
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .declaration_tip,
+            generation,
+            "publication installs the accepted join reservation"
+        );
+    }
     assert_eq!(
         resident
             .public_visibility_snapshot_in(public)
