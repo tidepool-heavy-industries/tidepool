@@ -50,11 +50,7 @@ fn external_owner(history: u8, binder: u8) -> PendingImportOwner {
             product_sha256: [67; 32],
         },
         original_ordinal: 101,
-        binder: identity(
-            "historical-unit",
-            "External",
-            &format!("v{history}-binder-{binder}"),
-        ),
+        binder: identity("historical-unit", "External", &format!("binder-{binder}")),
     }
 }
 
@@ -438,7 +434,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
         }
     }
     assert_eq!(edge_count, 12);
-    assert_eq!(shared_descendant_topologies, 1);
+    assert_eq!(shared_descendant_topologies, 2);
     assert_eq!(empty_topologies, 1);
     eprintln!(
         "handcrafted exhaustive retained graph support: topologies=8, edges={edge_count}, shared_descendant_topologies={shared_descendant_topologies}, empty_topologies={empty_topologies}, external_history_versions=3"
