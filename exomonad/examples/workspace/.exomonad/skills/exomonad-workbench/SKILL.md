@@ -77,12 +77,13 @@ Use raw typed values for requests.
 
 ## A cell splits into units
 
-A cell splits at column-1 lines into units that run in order. When a later unit
-fails, the receipt names what the earlier units did ("unit 1 submitted the
-reply", "unit 2 bound x"); read it before resubmitting. Keep `respond value` on
-one line with nothing after it: a trailing `.`, `$` or backquoted operator is
-rejected as a dangling operator, and a stray `) :: Text` on the next line is a
-separate unit that fails to parse.
+A cell splits at column-1 lines into ordered units, but the whole cell typechecks
+before any unit runs. A dangling `.`, `$` or backquoted operator, or a stray
+`) :: Text` on the next line, rejects the whole cell before execution. Runtime
+failure or cancellation before publication installs no names from that cell,
+though completed effects and independently owned captures remain real; inspect
+receipts before retrying. Keep `respond value` as its own single-line unit with
+nothing after it.
 
 ## Keep bindings and display selected evidence
 
