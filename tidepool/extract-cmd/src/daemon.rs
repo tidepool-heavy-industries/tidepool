@@ -3168,6 +3168,10 @@ fn path_from_bytes(bytes: Vec<u8>) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
+#[path = "response_properties.rs"]
+mod response_properties;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
