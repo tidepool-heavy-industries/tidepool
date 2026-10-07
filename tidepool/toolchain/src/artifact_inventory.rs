@@ -1929,7 +1929,8 @@ mod tests {
     fn cold_original_admission_distinguishes_supplied_rows_from_retained_vertices() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let original = native_entry("ColdOriginal", &[]);
+        let original =
+            issued_native_groups("ColdOriginal", vec![(3, Vec::new())], &[], &BTreeMap::new());
         let id = original.descriptor.id;
         let groups = original
             .native_group_ordinals
@@ -1966,7 +1967,8 @@ mod tests {
     #[test]
     fn admitted_closure_never_adds_unknown_artifact_or_group_seeds() {
         let inventory = ArtifactInventory::default();
-        let original = native_entry("Existing", &[]);
+        let original =
+            issued_native_groups("Existing", vec![(11, Vec::new())], &[], &BTreeMap::new());
         let id = original.descriptor.id;
         let retained = inventory
             .admit(&inventory.empty_view(), vec![original])
@@ -1978,6 +1980,10 @@ mod tests {
         };
         let state = inventory.0.lock().unwrap();
         let known = admitted_closure(&state, retained.roots().into_iter());
+        assert!(known.contains(&InventoryNodeKey::Group(NativeGroupKey {
+            artifact: id,
+            original_ordinal: 11
+        })));
         let mixed = admitted_closure(
             &state,
             retained.roots().into_iter().chain([
