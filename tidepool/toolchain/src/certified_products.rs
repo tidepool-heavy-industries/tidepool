@@ -10980,6 +10980,340 @@ pub(crate) mod tests {
         exact_current_original_history(true);
     }
 
+    #[test]
+    fn repeated_retained_core_promotion_preserves_exact_original_membership() {
+        use crate::artifact_inventory::CanonicalProducerIdentity;
+        use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        let root = tempfile::tempdir().unwrap();
+        let source = "module Target where";
+        let support_source = "module Fresh where";
+        let support = root.path().join("Fresh.hs");
+        std::fs::write(&support, support_source).unwrap();
+        let mut admitted = evidence(support_source);
+        admitted.sources[0].path = support.clone();
+        admitted.modules[0].source = support;
+        admitted.sources.push(SourceEvidence {
+            path: "@generated-source".into(),
+            sha256: hex(&sha(source.as_bytes())),
+        });
+        let producer = [3; 32];
+        let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(&producer).sha256();
+        let include = [root.path().to_path_buf()];
+        let bytes = nonempty_sidecar(0);
+        let parsed = ParsedModuleProducts::decode(&bytes, &empty_package_bundle()).unwrap();
+        let normalized =
+            CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap();
+        let initial_input = root.path().join("Target.hs");
+        std::fs::write(&initial_input, source).unwrap();
+        let mut worker = admitted.clone();
+        worker.sources[1].path = initial_input.clone();
+        let initial_evidence = serde_json::to_vec(&worker).unwrap();
+        let mut accepted = receipt(&bytes, &admitted, support_source);
+        {
+            accepted.groups = [7, 11]
+                .into_iter()
+                .map(|original_ordinal| AcceptedGroup {
+                    original_ordinal,
+                    globals: vec![],
+                })
+                .collect();
+            assert_eq!(
+                parsed.products()[0]
+                    .groups
+                    .iter()
+                    .map(|group| group.binders().len())
+                    .sum::<usize>(),
+                2,
+            );
+        }
+        accepted.dependency_witness_sha256 = sha(&initial_evidence);
+        let mut packet = CertifiedReceipt {
+            source_recipe: WorkerExecutionSource::Ordinary,
+            finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
+            modules: vec![accepted],
+            targets: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        };
+        let initial = certify_products(
+            None,
+            &packet,
+            &parsed,
+            &initial_evidence,
+            &initial_input,
+            root.path(),
+            &normalized,
+            source,
+            &producer,
+            &include,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut prior = vec![initial.recovery_products[0].clone()];
+        let mut context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(canonical_producer, &prior)
+            .unwrap();
+
+        let canonical = prior[0].module_interface().unwrap().clone();
+        packet.modules[0].origin = ProductOrigin::RetainedCore;
+        packet.modules[0].module_version = None;
+        packet.modules[0].dependency_witness_sha256 = sha(canonical.certificate_bytes());
+        packet.finalization = fixture_finalization(None, &packet.modules);
+        packet.source_recipe =
+            WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals);
+        let mut expected_owners = BTreeSet::from([prior[0].owner().clone()]);
+        let mut first_promoted = None;
+        for (index, body_tag) in [0, 0, 1, 0].into_iter().enumerate() {
+            context = context
+                .with_compiler_input_projection(
+                    context.compiler_input_projection().interface_only(),
+                )
+                .unwrap();
+            let directory = root.path().join(format!("promotion-{index}"));
+            std::fs::create_dir(&directory).unwrap();
+            let input = directory.join("Target.hs");
+            std::fs::write(&input, source).unwrap();
+            let request = Arc::new(context.clone())
+                .prepare_compilation(&directory.join("inputs"), &producer)
+                .unwrap();
+            assert!(request.compiler_original_products().unwrap().is_empty());
+            assert_eq!(
+                request.context.recovery_products().len(),
+                expected_owners.len()
+            );
+            let mut worker = admitted.clone();
+            worker.sources[1].path = input.clone();
+            let receipt_root = directory.join(".exact-compilations/current");
+            std::fs::create_dir_all(&receipt_root).unwrap();
+            let snapshot = receipt_root.join("source.hs");
+            std::fs::write(&snapshot, source).unwrap();
+            let exact_receipt = value_array([
+                value_text("TPEXACTCOMPILE"),
+                value_text("3"),
+                value_text(&request.request_sha256),
+                value_text(hex(&request.semantic_sha256)),
+                value_text(input.to_string_lossy()),
+                value_text(hex(&sha(source.as_bytes()))),
+                value_text(snapshot.to_string_lossy()),
+                value_text(String::from_utf8(serde_json::to_vec(&worker).unwrap()).unwrap()),
+                value_array([value_array([
+                    value_text("main"),
+                    value_text("Fresh"),
+                    Value::Bool(false),
+                    value_array([]),
+                ])]),
+                value_array([value_array([]), Value::Null]),
+            ]);
+            std::fs::write(
+                receipt_root.join("receipt.cbor"),
+                receipt_bytes(&exact_receipt),
+            )
+            .unwrap();
+            worker.cache_safe = false;
+            worker.selection_complete = false;
+            let evidence_bytes = serde_json::to_vec(&worker).unwrap();
+            let admission = request
+                .admit_source(&input, source, &evidence_bytes)
+                .unwrap();
+            let exact = ExactProductAdmission {
+                request: &request,
+                source: &admission,
+            };
+            let bytes = nonempty_sidecar(body_tag);
+            let parsed = ParsedModuleProducts::decode(&bytes, &empty_package_bundle()).unwrap();
+            packet.modules[0].product_sha256 = sha(&bytes);
+            // Independent finite graph oracle: this fixture has two complete groups
+            // and no imports. Neither membership nor the production graph builder
+            // supplies the expected owner or group census.
+            let package_bytes =
+                &parsed.package_imports.as_ref().unwrap()[&("main".into(), "Fresh".into())];
+            let graph =
+                value_array([value_array([
+                    value_text("main"),
+                    value_text("Fresh"),
+                    value_text(hex(&sha(canonical.certificate_bytes()))),
+                    value_text(hex(&sha(&parsed.sidecars[0]))),
+                    value_text(hex(&sha(package_bytes))),
+                    value_array([7_u32, 11].into_iter().map(|ordinal| {
+                        value_array([Value::Integer(ordinal.into()), value_array([])])
+                    })),
+                ])]);
+            let graph_bytes = receipt_bytes(&graph);
+            let mut hash = Sha256::new();
+            for field in [
+                b"retained-core-home-v1".as_slice(),
+                b"main",
+                b"Fresh",
+                graph_bytes.as_slice(),
+            ] {
+                hash.update((field.len() as u64).to_be_bytes());
+                hash.update(field);
+            }
+            let owner = CachedHomeOwner {
+                unit: "main".into(),
+                module: "Fresh".into(),
+                module_version: ModuleVersion(hash.finalize().into()),
+                skinny_iface_sha256: sha(&[0x42]),
+                product_sha256: sha(&parsed.sidecars[0]),
+            };
+            if body_tag == 0 {
+                if let Some(first) = &first_promoted {
+                    assert_eq!(&owner, first);
+                } else {
+                    first_promoted = Some(owner.clone());
+                }
+            } else {
+                assert_ne!(Some(&owner), first_promoted.as_ref());
+            }
+            let issued = certify_products(
+                None,
+                &packet,
+                &parsed,
+                &evidence_bytes,
+                &input,
+                root.path(),
+                &normalized,
+                source,
+                &producer,
+                &include,
+                Some(&exact),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                issued
+                    .source_selection
+                    .selected_original_owners()
+                    .collect::<Vec<_>>(),
+                vec![&owner]
+            );
+            let current = issued
+                .recovery_products
+                .iter()
+                .find(|product| product.owner() == &owner)
+                .unwrap();
+            assert_eq!(current.original_native().unwrap().groups.len(), 2);
+            assert!(issued.retained_core_products.contains_original(current));
+            let selected = issued
+                .groups
+                .iter()
+                .filter(|group| group.owner() == &owner)
+                .collect::<Vec<_>>();
+            assert_eq!(selected.len(), 2);
+            for (group, ordinal) in selected.iter().zip([7, 11]) {
+                assert_eq!(group.origin, ProductOrigin::RetainedCore);
+                assert_eq!(group.group().original_ordinal(), ordinal);
+                assert_eq!(
+                    group.group(),
+                    &parsed.products()[0]
+                        .groups
+                        .iter()
+                        .find(|raw| raw.original_ordinal() == ordinal)
+                        .unwrap()
+                        .clone()
+                );
+                assert!(group.imports().is_empty());
+            }
+            for old in &prior {
+                let retained = issued
+                    .recovery_products
+                    .iter()
+                    .find(|product| product.owner() == old.owner())
+                    .unwrap();
+                assert!(retained
+                    .original_byte_anchors()
+                    .iter()
+                    .zip(old.original_byte_anchors())
+                    .all(|(actual, expected)| Arc::ptr_eq(actual, expected)));
+            }
+            expected_owners.insert(owner.clone());
+            assert_eq!(
+                issued
+                    .recovery_products
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_owners
+            );
+            let expected_keys = expected_owners
+                .iter()
+                .flat_map(|owner| {
+                    [7, 11].map(|ordinal| {
+                        (
+                            owner.clone(),
+                            ordinal,
+                            SymbolIdentity {
+                                unit: "main".into(),
+                                module: "Fresh".into(),
+                                namespace: "value".into(),
+                                occurrence: format!("entry_{ordinal}"),
+                                record_parent: None,
+                            },
+                        )
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            for count in 0..=2 {
+                let subset = selected
+                    .iter()
+                    .take(count)
+                    .map(|group| (*group).clone())
+                    .collect::<Vec<_>>();
+                let available = available_original_source_map(
+                    &issued.recovery_products,
+                    &subset,
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+                assert_eq!(
+                    available.groups.keys().cloned().collect::<BTreeSet<_>>(),
+                    expected_keys
+                );
+            }
+            let mut duplicate = packet.clone();
+            let duplicated = duplicate.modules[0].groups[0].clone();
+            duplicate.modules[0].groups.push(duplicated);
+            assert!(certify_products(
+                None,
+                &duplicate,
+                &parsed,
+                &evidence_bytes,
+                &input,
+                root.path(),
+                &normalized,
+                source,
+                &producer,
+                &include,
+                Some(&exact),
+                None
+            )
+            .is_err());
+            let mut wrong_canonical = packet.clone();
+            wrong_canonical.modules[0].dependency_witness_sha256[0] ^= 1;
+            assert!(certify_products(
+                None,
+                &wrong_canonical,
+                &parsed,
+                &evidence_bytes,
+                &input,
+                root.path(),
+                &normalized,
+                source,
+                &producer,
+                &include,
+                Some(&exact),
+                None
+            )
+            .is_err());
+            context = context
+                .extend_checked_original_products(canonical_producer, std::slice::from_ref(current))
+                .unwrap();
+            prior = context.recovery_products();
+        }
+        assert_eq!(expected_owners.len(), 3);
+    }
+
     fn exact_current_original_history(nonempty: bool) {
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
