@@ -1163,7 +1163,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 }).await.expect("other exact provider operation is issued");
                 let active_actor = campaign.observer.installations().into_iter()
                     .find(|installation| campaign.binding(installation.actor.identity())
-                        .is_some_and(|binding| binding.identity() == active_origin)).unwrap().actor;
+                        .is_some_and(|binding| embedded_harness::original_operation(binding.identity(), &active).is_ok())).unwrap().actor;
                 let target = harness::embedding::HostIdentity {
                     run: runtime_namespace(&campaign.config.run_directory.path()),
                     actor: active_origin.actor().clone(),
