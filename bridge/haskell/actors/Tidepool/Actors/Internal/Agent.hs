@@ -210,7 +210,7 @@ requestWithProgressSited site agent input options =
   requestWithProgressIntoSited site agent input options (const (pure ()))
 
 -- | Retain both exact typed handles before publishing a request. If retaining
--- fails, admission has not occurred; its selected owner cleans the reservation.
+-- fails, admission has not occurred; the creating invocation rolls back the draft.
 {-# OPAQUE requestWithProgressInto #-}
 requestWithProgressInto
   :: forall progress result input effs. Member Replies effs
@@ -248,6 +248,9 @@ requestConfiguredSited site agent@(AgentRef target targetWorktree) input options
         (RunRequest (runRequest targetWorktree response replyHandle)) (requestDeadline options)
       case admitted of
         Left failure -> do
+          -- Submission refusal occurs before queue admission. Abandon eagerly;
+          -- the creating invocation's rollback fence also owns this draft,
+          -- independently of the requested cleanup lifetime.
           _ <- abandonResponse response
           pure (Left failure)
         Right () -> pure (Right response)
