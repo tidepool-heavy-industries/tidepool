@@ -1308,14 +1308,31 @@ impl ResidentToolClient {
                 }
             };
             let result = match self.actor.address().send_message(message) {
-                Ok(()) => receive
-                    .await
-                    .map_err(|_| {
-                        ResidentToolError::Unavailable(
-                            "actor stopped before provider finalization reply".into(),
-                        )
-                    })
-                    .and_then(|reply| reply.map_err(ResidentToolError::Invocation)),
+                Ok(()) => {
+                    if let Some(owner) = &retained {
+                        // Retirement may confirm cleanup while the queued RPC
+                        // can no longer run. Observe the owning proof directly;
+                        // waiting for mailbox destruction can block host release.
+                        tokio::select! {
+                            acknowledgement = owner.acknowledge() => {
+                                acknowledgement?;
+                                return Ok(serde_json::Value::Null);
+                            }
+                            reply = receive => reply.map_err(|_| ResidentToolError::Unavailable(
+                                "actor stopped before provider finalization reply".into(),
+                            )).and_then(|reply| reply.map_err(ResidentToolError::Invocation)),
+                        }
+                    } else {
+                        receive
+                            .await
+                            .map_err(|_| {
+                                ResidentToolError::Unavailable(
+                                    "actor stopped before provider finalization reply".into(),
+                                )
+                            })
+                            .and_then(|reply| reply.map_err(ResidentToolError::Invocation))
+                    }
+                }
                 Err(_) => Err(ResidentToolError::Unavailable(
                     "the owning actor has stopped".into(),
                 )),
