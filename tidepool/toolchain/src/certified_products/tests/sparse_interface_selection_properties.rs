@@ -1,14 +1,14 @@
 use super::*;
 use crate::artifact_inventory::{
     ArtifactEntry, ArtifactId, ArtifactInventory, ArtifactPayload, ArtifactView,
-    CompilerInputProjection,
+    CompilerInputProjection, NativeGroupKey,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tidepool_repr::execution_schema::{CachedHomeOwner, InventoryOperation, NativeGroupKey};
+use tidepool_repr::execution_schema::{CachedHomeOwner, InventoryOperation};
 
 type SelectedRoles = BTreeMap<crate::declaration_join::ExactModuleIdentity, RoleFacts>;
 
@@ -318,7 +318,7 @@ fn generated_archive_histories_keep_sparse_selection_exact() {
         let mut archive_states = prefix;
         archive_states.extend([0, 15, 0]);
         archive_states.extend(suffix);
-        let mut previous_extras = None;
+        let mut previous_extras: Option<u8> = None;
         for raw_archive in archive_states {
             let archived_interfaces = selected | (raw_archive & 3);
             let archived_native = raw_archive >> 2;
