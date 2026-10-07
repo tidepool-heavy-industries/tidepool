@@ -788,6 +788,28 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_presentation_survives_a_late_lease_drop() {
+        let (registry, owner, target, request) = active();
+        let (update, delivery) = registry
+            .update_request(owner, request, "tabs".into())
+            .unwrap();
+        let reconciler = delivery
+            .bind_correlation(RequestUpdateCorrelation {
+                producer: "run/inbox/actor".into(),
+                sequence: NonZeroU64::new(1).unwrap(),
+            })
+            .unwrap();
+        let presentation = delivery.begin().unwrap();
+        reconciler.reconcile(LateUpdateEvidence::Presented).unwrap();
+        drop(presentation);
+        assert_eq!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdatePresented)
+        );
+        registry.begin_reply(target, request).unwrap();
+    }
+
+    #[test]
     fn repeated_terminal_evidence_is_idempotent_and_conflict_is_retained() {
         let (registry, owner, _, request) = active();
         let (update, delivery) = registry
