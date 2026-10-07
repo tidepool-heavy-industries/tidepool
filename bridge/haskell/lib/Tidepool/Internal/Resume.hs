@@ -20,7 +20,7 @@ module Tidepool.Internal.Resume
   , segmentBind
   ) where
 
-import Control.Monad.Freer.Internal (Arrs, Eff (..), qApp, (|>))
+import Control.Monad.Freer.Internal (Arrs, Eff (..), qApp)
 import Data.OpenUnion (Union)
 import Prelude
 
@@ -57,6 +57,5 @@ segmentPure = Val
 -- A completed value enters the next segment immediately; a suspended effect
 -- retains its request and appends the next segment to its continuation.
 segmentBind :: Eff effs a -> (a -> Eff effs b) -> Eff effs b
-segmentBind (Val a) next = next a
-segmentBind (E u q) next = E u (q |> next)
+segmentBind = (>>=)
 {-# NOINLINE segmentBind #-}
