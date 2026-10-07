@@ -353,27 +353,26 @@ async fn assert_captured_reader(child: &LocalResidentInstallation) {
         child.policy.dispatch_boxed(ToolInvocation {
             context: None,
             name: crate::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw("pure (capturedValue + 1)".into()),
+            arguments: ToolArguments::Raw(
+                concat!(
+                    "if capturedValue + 1 == (42 :: Int) ",
+                    "then (pure () :: Eff '[] ()) ",
+                    "else Tidepool.Effects.error \"reader lost the original checkpoint value 41\""
+                )
+                .into(),
+            ),
         }),
     )
     .await
     .expect("checkpoint notebook request bounded")
-    .expect("checkpoint notebook request")
+    .expect("checkpoint notebook executes the original-value assertion")
     .into_json()
     .expect("notebook receipt");
     assert_committed(&reply);
-    assert_eq!(
-        reply["items"]
-            .as_array()
-            .expect("item receipts")
-            .last()
-            .unwrap()["output"]
-            .as_str()
-            .unwrap()
-            .trim(),
-        "42",
-        "{reply:?}"
-    );
+    let [item] = reply["items"].as_array().expect("item receipts").as_slice() else {
+        panic!("one original-value assertion receipt: {reply:?}");
+    };
+    assert_eq!(item["status"], "committed", "{reply:?}");
 }
 
 async fn stop_reader(child: Box<LocalResidentInstallation>) {
