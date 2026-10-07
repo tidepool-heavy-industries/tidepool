@@ -775,7 +775,31 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
             .await
             .is_err()
     );
-    let successor_policy = exomonad_actor::ResidentInteractivePolicy::local(successor.clone());
+    let successor_identity = successor.identity();
+    let successor_installation = campaign
+        .next_deployment(
+            "recovered root installed policy",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(installation)
+                    if installation.actor.identity() == successor_identity =>
+                {
+                    Ok(installation)
+                }
+                LocalResidentDeployment::Retired { actor, terminal }
+                    if actor == successor_identity =>
+                {
+                    panic!("recovered root retired before installing its policy: {terminal:?}")
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let successor_policy = successor_installation.policy;
+    assert!(successor_policy
+        .tools()
+        .iter()
+        .any(|tool| tool.name() == exomonad_actor::HASKELL_TOOL));
     let mut retry = tokio::spawn(successor_policy.dispatch_json_boxed(request.clone()));
     let replay = tokio::time::timeout(Duration::from_secs(60), async {
         loop {

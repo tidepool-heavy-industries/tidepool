@@ -158,14 +158,16 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
     assert!(forest
         .authorize_provider_attachment(actor.identity())
         .is_err());
-    let error = crate::ResidentInteractivePolicy::local(actor)
-        .dispatch_boxed(exomonad_tool::ToolInvocation {
-            context: None,
-            name: crate::HASKELL_TOOL.into(),
-            arguments: exomonad_tool::ToolArguments::Raw("undefined".into()),
-        })
-        .await
-        .expect_err("pending actor cannot begin compiler work");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        crate::resident_tools::ResidentToolClient::local(actor).dispatch_workbench(
+            tidepool_runtime::session::WorkbenchRequest::from_cell_input("undefined"),
+            None,
+        ),
+    )
+    .await
+    .expect("pending durable admission refuses without compiler work")
+    .expect_err("pending actor cannot begin compiler work");
     assert!(matches!(error, crate::ResidentToolError::Invocation(
         KernelInvocationFailure::Rejected { detail, .. }
     ) if detail == "durable actor public surface is not initialized"));
