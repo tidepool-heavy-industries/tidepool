@@ -3,7 +3,8 @@
 //! selection and publication.
 use super::*;
 use proptest::prelude::*;
-use proptest::test_runner::FileFailurePersistence;
+use proptest::test_runner::{FileFailurePersistence, TestCaseError, TestCaseResult, TestRunner};
+use std::cell::RefCell;
 use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion, SymbolIdentity};
 
 const MAX_NODES: usize = 6;
@@ -209,6 +210,165 @@ fn property_config() -> ProptestConfig {
     config
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MutationFact {
+    CanonicalSeal,
+    ProductSeal,
+    PackageSeal,
+    ExternalVersion,
+    ExternalBinder,
+    RepresentationOrder,
+}
+
+#[derive(Default, serde::Serialize)]
+struct MutationCoverage {
+    evaluations: usize,
+    expected_changed_roots: usize,
+    expected_unchanged_roots: usize,
+    observed_changed_roots: usize,
+    observed_noops: usize,
+    semantic_rejections: usize,
+}
+
+#[derive(Default, serde::Serialize)]
+struct ObservedCoverage {
+    // Runner callbacks include persisted replay and shrinking, not just newly
+    // generated cases. These counters describe inputs observed in this process.
+    inputs: usize,
+    completed_inputs: usize,
+    nodes: [usize; MAX_NODES + 1],
+    local_edges: [usize; MAX_NODES * (MAX_NODES - 1) / 2 + 1],
+    maximum_local_depth: [usize; MAX_NODES],
+    inputs_with_shared_descendants: usize,
+    shared_descendants: usize,
+    inputs_with_isolated_nodes: usize,
+    isolated_nodes: usize,
+    canonical_mutation_target_positions: [usize; MAX_NODES],
+    untargeted_canonical_nodes: usize,
+    semantic_rejections: usize,
+    mutations: BTreeMap<MutationFact, MutationCoverage>,
+}
+
+impl ObservedCoverage {
+    fn observe_graph(&mut self, graph: &LogicalGraph) {
+        self.inputs += 1;
+        self.nodes[graph.len()] += 1;
+        let mut incoming = vec![0; graph.len()];
+        let mut depth = vec![0; graph.len()];
+        let mut edges = 0;
+        for from in (0..graph.len()).rev() {
+            for to in &graph[from].dependencies {
+                incoming[*to] += 1;
+                edges += 1;
+                depth[from] = depth[from].max(1 + depth[*to]);
+            }
+        }
+        self.local_edges[edges] += 1;
+        self.maximum_local_depth[*depth.iter().max().unwrap()] += 1;
+        let shared = incoming.iter().filter(|count| **count > 1).count();
+        self.shared_descendants += shared;
+        self.inputs_with_shared_descendants += usize::from(shared > 0);
+        let isolated = graph
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| incoming[*index] == 0 && node.dependencies.is_empty())
+            .count();
+        self.isolated_nodes += isolated;
+        self.inputs_with_isolated_nodes += usize::from(isolated > 0);
+    }
+
+    fn check_mutation(
+        &mut self,
+        fact: MutationFact,
+        before: &BTreeMap<Key, ModuleVersion>,
+        candidate: CertResult<BTreeMap<Key, ModuleVersion>>,
+        expected: BTreeSet<usize>,
+    ) -> TestCaseResult {
+        let observed = self.mutations.entry(fact).or_default();
+        observed.evaluations += 1;
+        observed.expected_changed_roots += expected.len();
+        observed.expected_unchanged_roots += before.len() - expected.len();
+        let after = match candidate {
+            Ok(after) => after,
+            Err(error) => {
+                observed.semantic_rejections += 1;
+                self.semantic_rejections += 1;
+                return Err(TestCaseError::fail(format!("{fact:?} rejected: {error:?}")));
+            }
+        };
+        let actual = changed_versions(before, &after);
+        observed.observed_changed_roots += actual.len();
+        observed.observed_noops += usize::from(actual.is_empty());
+        prop_assert_eq!(actual, expected, "mutation fact={:?}", fact);
+        Ok(())
+    }
+}
+
+fn check_graph(graph: &LogicalGraph, coverage: &mut ObservedCoverage) -> TestCaseResult {
+    coverage.observe_graph(graph);
+    let promoted = promote(graph, false);
+    prop_assert!(promoted
+        .values()
+        .all(|node| node.groups.values().flatten().next().is_some()));
+    let before = module_versions(&promoted, &BTreeMap::new()).map_err(|error| {
+        coverage.semantic_rejections += 1;
+        TestCaseError::fail(format!("initial graph rejected: {error:?}"))
+    })?;
+    // Distinct positions avoid counting the middle/last node twice at size two.
+    // This deliberately samples positions rather than mutating every node.
+    let targets = BTreeSet::from([0, graph.len() / 2, graph.len() - 1]);
+    coverage.untargeted_canonical_nodes += graph.len() - targets.len();
+    for target in targets {
+        coverage.canonical_mutation_target_positions[target] += 1;
+        let expected = affected_by(graph, target);
+        for fact in [
+            MutationFact::CanonicalSeal,
+            MutationFact::ProductSeal,
+            MutationFact::PackageSeal,
+            MutationFact::ExternalVersion,
+        ] {
+            let mut changed = graph.clone();
+            let node = &mut changed[target];
+            match fact {
+                MutationFact::CanonicalSeal => node.body = node.body.wrapping_add(1),
+                MutationFact::ProductSeal => node.product = node.product.wrapping_add(1),
+                MutationFact::PackageSeal => node.package = node.package.wrapping_add(1),
+                MutationFact::ExternalVersion => {
+                    node.external_history = node.external_history.wrapping_add(1)
+                }
+                MutationFact::ExternalBinder | MutationFact::RepresentationOrder => unreachable!(),
+            }
+            coverage.check_mutation(
+                fact,
+                &before,
+                module_versions(&promote(&changed, false), &BTreeMap::new()),
+                expected.clone(),
+            )?;
+        }
+    }
+    // Every node has an external import, including graphs with no local edges.
+    let target = graph.len() / 2;
+    let mut changed = graph.clone();
+    changed[target].external_binder = changed[target].external_binder.wrapping_add(1);
+    coverage.check_mutation(
+        MutationFact::ExternalBinder,
+        &before,
+        module_versions(&promote(&changed, false), &BTreeMap::new()),
+        affected_by(graph, target),
+    )?;
+    // BTreeMap normalizes insertion order before traversal. This is a
+    // representation-order control, not an arbitrary traversal-order claim.
+    coverage.check_mutation(
+        MutationFact::RepresentationOrder,
+        &before,
+        module_versions(&promote(graph, true), &BTreeMap::new()),
+        BTreeSet::new(),
+    )?;
+    coverage.completed_inputs += 1;
+    Ok(())
+}
+
 #[test]
 fn retained_graph_chain_diamond_shares_descendants_and_isolates_disconnected_nodes() {
     let graph = vec![
@@ -312,6 +472,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
     let mut edge_count = 0;
     let mut shared_descendant_topologies = 0;
     let mut empty_topologies = 0;
+    let mut support = ObservedCoverage::default();
     for topology in 0u8..8 {
         let graph = vec![
             LogicalNode {
@@ -352,6 +513,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
                 binder: 9,
             },
         ];
+        check_graph(&graph, &mut support).unwrap();
         edge_count += graph
             .iter()
             .map(|node| node.dependencies.len())
@@ -436,55 +598,89 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
     assert_eq!(edge_count, 12);
     assert_eq!(shared_descendant_topologies, 2);
     assert_eq!(empty_topologies, 1);
+    // These exact partitions come from the eight deterministic topologies;
+    // random campaign frequencies never gate correctness.
+    assert_eq!(support.inputs, 8);
+    assert_eq!(support.completed_inputs, 8);
+    assert_eq!(&support.local_edges[..4], &[1, 3, 3, 1]);
+    assert_eq!(&support.maximum_local_depth[..3], &[1, 5, 2]);
+    assert_eq!(support.inputs_with_shared_descendants, 2);
+    assert_eq!(support.inputs_with_isolated_nodes, 4);
+    assert_eq!(support.isolated_nodes, 6);
+    assert_eq!(
+        &support.canonical_mutation_target_positions[..3],
+        &[8, 8, 8]
+    );
+    assert_eq!(support.untargeted_canonical_nodes, 0);
+    assert_eq!(support.semantic_rejections, 0);
+    for fact in [
+        MutationFact::CanonicalSeal,
+        MutationFact::ProductSeal,
+        MutationFact::PackageSeal,
+        MutationFact::ExternalVersion,
+        MutationFact::ExternalBinder,
+    ] {
+        assert!(support.mutations[&fact].expected_changed_roots > 0);
+        assert!(support.mutations[&fact].expected_unchanged_roots > 0);
+        assert_eq!(support.mutations[&fact].observed_noops, 0);
+    }
+    assert_eq!(
+        support.mutations[&MutationFact::RepresentationOrder].observed_noops,
+        8
+    );
     eprintln!(
         "handcrafted exhaustive retained graph support: topologies=8, edges={edge_count}, shared_descendant_topologies={shared_descendant_topologies}, empty_topologies={empty_topologies}, external_history_versions=3"
     );
+    eprintln!(
+        "retained_graph_deterministic_support={}",
+        serde_json::to_string(&support).unwrap()
+    );
 }
 
-proptest! {
-    #![proptest_config(property_config())]
-    #[test]
-    fn retained_graph_identity_tracks_logical_dependency_facts(
-        count in 2usize..=MAX_NODES,
-        masks in proptest::collection::vec(any::<u8>(), MAX_NODES),
-        bodies in proptest::collection::vec(1u8..=240, MAX_NODES),
-        histories in proptest::collection::vec(1u8..=240, MAX_NODES),
-        binders in proptest::collection::vec(1u8..=240, MAX_NODES),
-    ) {
-        let mut graph = sample_graph(&masks[..count], &bodies[..count], &histories[..count], &binders[..count]);
-        let before = versions(&graph);
-
-        // Canonical body, product seal, package seal, and historical module
-        // version are independent inputs and affect exactly their ancestors.
-        for target in [0, count / 2, count - 1] {
-            let expected = affected_by(&graph, target);
-            let mut changed = graph.clone();
-            changed[target].body = changed[target].body.wrapping_add(1);
-            prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected.clone());
-
-            let mut changed = graph.clone();
-            changed[target].product = changed[target].product.wrapping_add(1);
-            prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected.clone());
-
-            let mut changed = graph.clone();
-            changed[target].package = changed[target].package.wrapping_add(1);
-            prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected.clone());
-
-            let mut changed = graph.clone();
-            changed[target].external_history = changed[target].external_history.wrapping_add(1);
-            prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected);
-        }
-
-        // Every module has an external import; its binder identity can be
-        // varied independently even when this generated topology has no edge.
-        let target = count / 2;
-        let expected = affected_by(&graph, target);
-        graph[target].external_binder = graph[target].external_binder.wrapping_add(1);
-        prop_assert_eq!(changed_versions(&before, &versions(&graph)), expected);
-
-        let forward = promote(&graph, false);
-        let reverse = promote(&graph, true);
-        prop_assert_eq!(module_versions(&forward, &BTreeMap::new()).unwrap(), module_versions(&reverse, &BTreeMap::new()).unwrap());
-        prop_assert!(forward.values().all(|node| node.groups.values().flatten().next().is_some()));
+#[test]
+fn retained_graph_identity_tracks_logical_dependency_facts() {
+    let mut config = property_config();
+    // Match proptest!'s Cargo source/test identity; native Direct persistence
+    // still uses the owning package's declared path rather than this source path.
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::retained_graph_identity_tracks_logical_dependency_facts"
+    ));
+    let configured_cases = config.cases;
+    let configured_max_shrink_iters = config.max_shrink_iters;
+    let configuration = format!("{config:?}");
+    let strategy = (
+        2usize..=MAX_NODES,
+        proptest::collection::vec(any::<u8>(), MAX_NODES),
+        proptest::collection::vec(1u8..=240, MAX_NODES),
+        proptest::collection::vec(1u8..=240, MAX_NODES),
+        proptest::collection::vec(1u8..=240, MAX_NODES),
+    );
+    let coverage = RefCell::new(ObservedCoverage::default());
+    let mut runner = TestRunner::new(config);
+    let result = runner.run(&strategy, |(count, masks, bodies, histories, binders)| {
+        let graph = sample_graph(
+            &masks[..count],
+            &bodies[..count],
+            &histories[..count],
+            &binders[..count],
+        );
+        check_graph(&graph, &mut coverage.borrow_mut())
+    });
+    // Emit on failure too. Counts are callback evaluations in this process,
+    // including persisted replay/shrinking, not a claim about fresh random cases.
+    eprintln!(
+        "retained_graph_campaign={}",
+        serde_json::json!({
+            "configured_cases": configured_cases,
+            "configured_max_shrink_iters": configured_max_shrink_iters,
+            "configuration": configuration,
+            "observation_scope": "runner callbacks in this process, including replay and shrinking",
+            "observed": &*coverage.borrow(),
+        })
+    );
+    if let Err(error) = result {
+        panic!("retained graph property failed: {error}");
     }
 }
