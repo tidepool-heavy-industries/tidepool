@@ -662,6 +662,47 @@ impl CommandJobs {
         destination: ResourceCleanupOwner,
         publish_membership: impl FnOnce(Option<&str>) -> T,
     ) -> Result<T, CommandError> {
+        self.transfer_cleanup_owner_internal(
+            None,
+            caller,
+            id,
+            expected,
+            destination,
+            publish_membership,
+        )
+    }
+
+    pub(crate) fn transfer_cleanup_owner_in_context<T>(
+        &self,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        id: &str,
+        expected: &ResourceCleanupOwner,
+        destination: ResourceCleanupOwner,
+        publish_membership: impl FnOnce(Option<&str>) -> T,
+    ) -> Result<T, CommandError> {
+        if kernel.identity() != caller {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.transfer_cleanup_owner_internal(
+            Some(kernel),
+            caller,
+            id,
+            expected,
+            destination,
+            publish_membership,
+        )
+    }
+
+    fn transfer_cleanup_owner_internal<T>(
+        &self,
+        kernel: Option<&KernelContext>,
+        caller: ActorRef,
+        id: &str,
+        expected: &ResourceCleanupOwner,
+        destination: ResourceCleanupOwner,
+        publish_membership: impl FnOnce(Option<&str>) -> T,
+    ) -> Result<T, CommandError> {
         let command = self.shared(id)?;
         let probe_id = command.source_probe.lock();
         let mut owners = vec![(id.to_owned(), command.clone())];
@@ -670,6 +711,22 @@ impl CommandJobs {
         }
         owners.sort_by(|(left, _), (right, _)| left.cmp(right));
         owners.dedup_by(|(left, _), (right, _)| left == right);
+        let cells = {
+            let entries = self.entries.lock();
+            owners
+                .iter()
+                .map(|(id, _)| {
+                    entries
+                        .get(id)
+                        .map(|entry| entry.actor.get_cell())
+                        .ok_or_else(|| {
+                            CommandError::CommandUnavailable(
+                                "command resource is no longer retained".into(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let mut authority = Vec::new();
         let mut membership = Vec::new();
         for (_, owner) in &owners {
@@ -684,7 +741,22 @@ impl CommandJobs {
             }
             membership.push(marker);
         }
-        let result = publish_membership(probe_id.as_deref());
+        let source_run = *expected == ResourceCleanupOwner::Run;
+        let destination_run = destination == ResourceCleanupOwner::Run;
+        let result = if source_run || destination_run {
+            let kernel = kernel.ok_or_else(|| {
+                CommandError::CommandUnavailable(
+                    "run transfer requires its actor resource owner".into(),
+                )
+            })?;
+            kernel
+                .with_resource_lifetime_transfer(&cells, source_run, destination_run, || {
+                    Ok::<_, CommandError>(publish_membership(probe_id.as_deref()))
+                })
+                .map_err(CommandError::CommandUnavailable)??
+        } else {
+            publish_membership(probe_id.as_deref())
+        };
         for marker in &mut membership {
             **marker = destination.clone();
         }

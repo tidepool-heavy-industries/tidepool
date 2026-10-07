@@ -205,8 +205,9 @@ fn advance_actor_ids_past(actor: crate::ActorId) {
 ///
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
 /// owns runnable actors and mailboxes; each actor owns its terminal cell. The
-/// directory only resolves the identity carried by a live Haskell `ActorRef`
-/// to that pair of owners. Entries intentionally live for the routing
+/// directory resolves the identity carried by a live Haskell `ActorRef`
+/// to that pair of owners and retains native resources whose cleanup belongs
+/// to the run. Entries intentionally live for the routing
 /// domain's lifetime: an exited exact reference must remain resolvable so any
 /// number of late `wait` operations can observe its retained result. Logical
 /// actor IDs are process-unique (see [`NEXT_ACTOR_ID`]); this directory's own
@@ -217,6 +218,11 @@ pub struct LocalActorDirectory {
     actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, DirectoryEntry>>>,
     sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
     identities: std::sync::Arc<parking_lot::Mutex<DirectoryIdentities>>,
+    // Native resources transfer their existing Ractor identity and finalizer
+    // here when their lifetime belongs to this run rather than an actor.
+    run_resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
+    run_admission_closed: Arc<tokio::sync::RwLock<bool>>,
+    run_cleanup_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -234,6 +240,27 @@ struct DirectoryEntry {
 }
 
 impl LocalActorDirectory {
+    pub(crate) fn with_run_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
+        let admission = self
+            .run_admission_closed
+            .try_read()
+            .map_err(|_| "run resource admission is closing".to_string())?;
+        if *admission {
+            return Err("run resource admission is closed".into());
+        }
+        Ok(operation())
+    }
+
+    pub(crate) async fn close_run_admission(&self) {
+        *self.run_admission_closed.write().await = true;
+    }
+
+    pub(crate) async fn shutdown_run_resources(&self) -> crate::CleanupComponentOutcome {
+        self.close_run_admission().await;
+        let _cleanup = self.run_cleanup_lock.lock().await;
+        shutdown_resources(&self.run_resources, SHUTDOWN_BUDGET).await
+    }
+
     fn reserve(&self, incarnation: crate::Incarnation) -> Result<ActorRef, String> {
         loop {
             let next = NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
@@ -355,6 +382,58 @@ impl KernelContext {
         );
         drop(task);
         Ok(child)
+    }
+
+    /// Transfer existing native-resource finalizers while the actor and run
+    /// admission fences hold. Membership publication cannot await or reenter
+    /// these resource maps; a refused publication leaves supervision intact.
+    pub(crate) fn with_resource_lifetime_transfer<T, E>(
+        &self,
+        cells: &[ractor::ActorCell],
+        source_run: bool,
+        destination_run: bool,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, String> {
+        let actor_admission = self
+            .child_admission_closed
+            .try_read()
+            .map_err(|_| "actor resource admission is closing".to_string())?;
+        if *actor_admission {
+            return Err("actor resource admission is closed".into());
+        }
+        self.directory.with_run_admission(|| {
+            let mut actor = self.resources.lock();
+            let mut run = self.directory.run_resources.lock();
+            let (source, destination) = if source_run {
+                (&mut run, &mut actor)
+            } else {
+                (&mut actor, &mut run)
+            };
+            for cell in cells {
+                let id = cell.get_id();
+                if !source.contains_key(&id) {
+                    if destination.contains_key(&id)
+                        || cell.get_status() != ractor::ActorStatus::Stopped
+                    {
+                        return Err("native resource has another cleanup owner".to_string());
+                    }
+                }
+            }
+            let result = operation();
+            if result.is_ok() && source_run != destination_run {
+                for cell in cells {
+                    if let Some(resource) = source.remove(&cell.get_id()) {
+                        if destination_run {
+                            resource.cell.unlink(self.myself.get_cell());
+                        } else {
+                            resource.cell.link(self.myself.get_cell());
+                        }
+                        destination.insert(cell.get_id(), resource);
+                    }
+                }
+            }
+            Ok(result)
+        })?
     }
 
     pub(crate) fn supervisor_identity(&self) -> Option<ActorRef> {
@@ -3335,19 +3414,19 @@ impl Drop for StartupCustody {
     }
 }
 
-async fn shutdown_children(
-    context: &KernelContext,
-    owner_exit: ActorExitKind,
+async fn shutdown_resources(
+    resources: &Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
-    let resources: Vec<_> = context.resources.lock().values().cloned().collect();
-    for resource in &resources {
+    let snapshot: Vec<_> = resources.lock().values().cloned().collect();
+    for resource in &snapshot {
         resource.cell.stop(None);
     }
-    let mut resource_shutdowns = FuturesUnordered::new();
-    for resource in resources {
-        resource_shutdowns.push(async move {
-            match tokio::time::timeout(timeout, async {
+    let mut shutdowns = FuturesUnordered::new();
+    for resource in snapshot {
+        shutdowns.push(async move {
+            let id = resource.cell.get_id();
+            let outcome = match tokio::time::timeout(timeout, async {
                 resource.cell.wait(Some(timeout)).await?;
                 Ok::<_, ractor::concurrency::Timeout>(
                     (resource.cleanup)(ResourceCleanup::Retire).await,
@@ -3359,12 +3438,29 @@ async fn shutdown_children(
                 _ => crate::CleanupComponentOutcome::Unconfirmed(
                     "resource child cleanup is unconfirmed".into(),
                 ),
-            }
+            };
+            (id, outcome)
         });
     }
-    while let Some(outcome) = resource_shutdowns.next().await {
+    let mut outcome = crate::CleanupComponentOutcome::Confirmed;
+    while let Some((id, settled)) = shutdowns.next().await {
+        if settled == crate::CleanupComponentOutcome::Confirmed {
+            resources.lock().remove(&id);
+        }
+        outcome = combine_cleanup(outcome, settled);
+    }
+    outcome
+}
+
+async fn shutdown_children(
+    context: &KernelContext,
+    owner_exit: ActorExitKind,
+    timeout: Duration,
+) -> crate::CleanupComponentOutcome {
+    let resources = shutdown_resources(&context.resources, timeout).await;
+    {
         let mut retained = context.forgotten_children.lock();
-        *retained = combine_cleanup(retained.clone(), outcome);
+        *retained = combine_cleanup(retained.clone(), resources);
     }
     let (children, mut outcome) = {
         let children = context.children.lock();

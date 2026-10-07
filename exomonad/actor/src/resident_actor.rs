@@ -15563,6 +15563,7 @@ where
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
         *self.environment.root_admission_closed.write().await = true;
+        self.directory.close_run_admission().await;
         let roots = self
             .environment
             .actors
@@ -15571,7 +15572,10 @@ where
             .filter(|(_, record)| record.scheduler_root)
             .filter_map(|(actor, _)| self.directory.resolve(*actor))
             .collect::<Vec<_>>();
-        let mut outcomes = Vec::with_capacity(roots.len());
+        let mut outcomes = Vec::with_capacity(roots.len() + 1);
+        outcomes.push(crate::ForestRootShutdown::RunResources(
+            self.directory.shutdown_run_resources().await,
+        ));
         for root in roots {
             outcomes.push(shutdown_forest_root(&root, std::time::Duration::from_secs(30)).await);
         }

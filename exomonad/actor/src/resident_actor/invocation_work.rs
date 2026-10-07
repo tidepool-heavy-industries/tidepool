@@ -447,6 +447,9 @@ impl InvocationWork {
                         }
                     }
                     state.detached_commands.remove(id);
+                    if let Some(probe) = probe {
+                        state.detached_commands.remove(probe);
+                    }
                 },
             )
         })
@@ -487,6 +490,76 @@ impl InvocationWork {
                     state.detached_commands.insert(id.into());
                     if let Some(probe) = probe {
                         state.detached_commands.insert(probe.into());
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn transfer_command_to_run(
+        &self,
+        jobs: &CommandJobs,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.with_admission_state(|state| {
+            if !state.commands.iter().any(|command| command == id) {
+                return Err(CommandError::CommandUnauthorized);
+            }
+            jobs.transfer_cleanup_owner_in_context(
+                kernel,
+                caller,
+                id,
+                &self.resource_cleanup_owner(),
+                ResourceCleanupOwner::Run,
+                |probe| {
+                    state
+                        .commands
+                        .retain(|job| job != id && probe != Some(job.as_str()));
+                    state.detached_commands.insert(id.into());
+                    if let Some(probe) = probe {
+                        state.detached_commands.insert(probe.into());
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn adopt_run_command(
+        &self,
+        jobs: &CommandJobs,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.with_admission_state(|state| {
+            jobs.transfer_cleanup_owner_in_context(
+                kernel,
+                caller,
+                id,
+                &ResourceCleanupOwner::Run,
+                self.resource_cleanup_owner(),
+                |probe| {
+                    if !state.commands.iter().any(|job| job == id) {
+                        state.commands.push(id.into());
+                    }
+                    if let Some(probe) = probe {
+                        if !state.commands.iter().any(|job| job == probe) {
+                            state.commands.push(probe.into());
+                        }
+                    }
+                    state.detached_commands.remove(id);
+                    if let Some(probe) = probe {
+                        state.detached_commands.remove(probe);
                     }
                 },
             )
@@ -536,6 +609,9 @@ impl InvocationWork {
                         }
                     }
                     states[target].detached_commands.remove(id);
+                    if let Some(probe) = probe {
+                        states[target].detached_commands.remove(probe);
+                    }
                 },
             )
         })

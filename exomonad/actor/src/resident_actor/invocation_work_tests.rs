@@ -339,6 +339,132 @@ async fn competing_command_retention_has_one_cleanup_owner() {
 }
 
 #[tokio::test]
+async fn run_owned_command_and_probe_survive_actor_retirement_until_run_cleanup() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let work = InvocationWork::new(owner, reservation());
+    let scope = work.new_scope().unwrap();
+    let (job, backend) = fixture.pending_command().await;
+    let (probe, probe_backend) = fixture.pending_command().await;
+    jobs.set_source_probe(&job, probe.clone()).unwrap();
+    scope.register_command_with_jobs(jobs, &job).unwrap();
+    scope
+        .transfer_command_to_run(jobs, &fixture.kernel, owner, &job)
+        .unwrap();
+    fixture.cleanup(&work).await;
+    let retired = fixture
+        .actor
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "issuing actor retired".into(),
+            diagnostic: None,
+        })
+        .await
+        .unwrap();
+    assert!(retired.cleanup.is_confirmed());
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    assert_eq!(probe_backend.cancellations.load(Ordering::Relaxed), 0);
+    assert_eq!(jobs.owner(&job).unwrap(), owner);
+    assert_eq!(jobs.owner(&probe).unwrap(), owner);
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        ResourceCleanupOwner::Run
+    );
+    assert_eq!(
+        jobs.cleanup_owner(owner, &probe).unwrap(),
+        ResourceCleanupOwner::Run
+    );
+    assert!(!matches!(
+        jobs.status(owner, &job).await.unwrap(),
+        CommandStatus::CommandFinished(_)
+    ));
+    assert_eq!(
+        fixture.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert!(backend.cancellations.load(Ordering::Relaxed) > 0);
+    assert!(probe_backend.cancellations.load(Ordering::Relaxed) > 0);
+    let cancellations = backend.cancellations.load(Ordering::Relaxed);
+    assert_eq!(
+        fixture.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), cancellations);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn run_command_can_return_to_scope_and_refused_transfer_keeps_run_attachment() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let work = InvocationWork::new(owner, reservation());
+    let closed = work.new_scope().unwrap();
+    let target = work.new_scope().unwrap();
+    let (job, backend) = fixture.pending_command().await;
+    let (probe, probe_backend) = fixture.pending_command().await;
+    jobs.set_source_probe(&job, probe.clone()).unwrap();
+    target.register_command_with_jobs(jobs, &job).unwrap();
+    target
+        .transfer_command_to_run(jobs, &fixture.kernel, owner, &job)
+        .unwrap();
+    closed.close();
+    assert!(closed
+        .adopt_run_command(jobs, &fixture.kernel, owner, &job)
+        .is_err());
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        ResourceCleanupOwner::Run
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    target
+        .adopt_run_command(jobs, &fixture.kernel, owner, &job)
+        .unwrap();
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        target.resource_cleanup_owner()
+    );
+    assert!(!target.state.lock().detached_commands.contains(&job));
+    assert!(!target.state.lock().detached_commands.contains(&probe));
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        fixture.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(probe_backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn closed_run_refuses_command_transfer_without_detaching_actor_cleanup() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let work = InvocationWork::new(owner, reservation());
+    let (job, backend) = fixture.pending_command().await;
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    fixture.directory.close_run_admission().await;
+    assert!(work
+        .transfer_command_to_run(jobs, &fixture.kernel, owner, &job)
+        .is_err());
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        work.resource_cleanup_owner()
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        fixture.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn scope_worker_transfer_preserves_exact_identity_without_scope_retirement() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
@@ -717,6 +843,7 @@ impl crate::KernelBehavior for Owner {
 pub(in crate::resident_actor) struct Fixture {
     pub(in crate::resident_actor) actor: LocalActorRef,
     task: ractor::concurrency::JoinHandle<()>,
+    directory: crate::LocalActorDirectory,
     pub(in crate::resident_actor) kernel: KernelContext,
     pub(in crate::resident_actor) environment:
         ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -726,9 +853,15 @@ pub(in crate::resident_actor) struct Fixture {
 impl Fixture {
     pub(in crate::resident_actor) async fn start() -> Self {
         let (send, receive) = tokio::sync::oneshot::channel();
-        let (actor, task) = crate::spawn_local_actor(None, Owner::new(send))
-            .await
-            .unwrap();
+        let directory = crate::LocalActorDirectory::default();
+        let (actor, task) = crate::local_actor::spawn_local_actor_in_directory(
+            None,
+            Owner::new(send),
+            crate::Incarnation(1),
+            directory.clone(),
+        )
+        .await
+        .unwrap();
         let kernel = receive.await.unwrap();
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
         let environment = ResidentEnvironment {
@@ -756,6 +889,7 @@ impl Fixture {
         Self {
             actor,
             task,
+            directory,
             kernel,
             environment,
             deployments: receiver,
@@ -804,6 +938,10 @@ impl Fixture {
     }
 
     pub(in crate::resident_actor) async fn finish(self) {
+        assert_eq!(
+            self.directory.shutdown_run_resources().await,
+            crate::CleanupComponentOutcome::Confirmed
+        );
         self.actor
             .retire_by(
                 self.actor.identity(),
