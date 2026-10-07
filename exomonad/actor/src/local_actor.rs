@@ -1397,7 +1397,7 @@ async fn handle_parked_message<B: KernelBehavior>(
                     diagnostic: None,
                 });
                 if let Some(control) = control {
-                    control.settle(rejection.clone());
+                    control.settle_not_admitted(rejection.clone());
                     state.mailbox_admission.hosted_cell().complete(&control);
                 }
                 reply.send(rejection).ok();
@@ -1958,7 +1958,7 @@ where
                         diagnostic: None,
                     });
                     if let Some(control) = control {
-                        control.settle(rejection.clone());
+                        control.settle_not_admitted(rejection.clone());
                         state.mailbox_admission.hosted_cell().complete(&control);
                     }
                     reply.send(rejection).ok();
@@ -2099,7 +2099,7 @@ fn start_workbench<B: KernelBehavior>(
             diagnostic: None,
         });
         if let Some(control) = control {
-            control.settle(failure.clone());
+            control.settle_not_admitted(failure.clone());
             state.mailbox_admission.hosted_cell().complete(&control);
         }
         reply.send(failure).ok();
@@ -2810,10 +2810,11 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
 
 fn settle_pending_workbench(pending: PendingWorkbench, mut reply: crate::KernelWorkbenchReply) {
     if let Some(control) = pending.control {
-        if matches!(&reply, Err(KernelInvocationFailure::Rejected { .. })) {
-            control.provider_finalization.reject_before_admission();
-        }
-        reply = control.settle_reply(reply);
+        reply = if matches!(&reply, Err(KernelInvocationFailure::Rejected { .. })) {
+            control.settle_not_admitted(reply)
+        } else {
+            control.settle_reply(reply)
+        };
         pending.hosted_cell.complete(&control);
     }
     let delivered = pending.reply.send(reply).is_ok();

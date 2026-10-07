@@ -9,7 +9,7 @@ pub enum ProviderFinalizationKind {
     /// Confirms resource settlement after retirement, never publication.
     RetirementAborted,
     /// Confirms that no native execution was admitted for this issued call.
-    RejectedBeforeAdmission,
+    NotAdmitted,
 }
 
 #[derive(Clone, Debug)]
@@ -47,8 +47,12 @@ impl ProviderFinalization {
 
     pub(crate) fn reject_before_admission(&self) {
         if !self.admitted.load(std::sync::atomic::Ordering::Acquire) {
-            self.finish(Ok(ProviderFinalizationKind::RejectedBeforeAdmission));
+            self.finish(Ok(ProviderFinalizationKind::NotAdmitted));
         }
+    }
+
+    pub(crate) fn successfully_settled(&self) -> bool {
+        matches!(*self.result.lock(), Some(Ok(_)))
     }
 
     fn observation(&self) -> HostedOperationFinalization {
@@ -139,6 +143,12 @@ impl HostedOperationSettlement {
             && Arc::ptr_eq(&self.finalization, &other.finalization)
     }
 
+    pub(crate) fn native_admitted(&self) -> bool {
+        self.finalization
+            .admitted
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn key(&self) -> &WorkbenchCallKey {
         &self.key
     }
@@ -205,9 +215,7 @@ impl HostedOperationSettlement {
                         "native operation lacks an immutable terminal reply".into(),
                     )
                 })?;
-                if !control.cell_finished()
-                    && result != ProviderFinalizationKind::RejectedBeforeAdmission
-                {
+                if !control.cell_finished() && result != ProviderFinalizationKind::NotAdmitted {
                     return Err(ResidentToolError::Unavailable(
                         "native cleanup lacks an owning cell exit".into(),
                     ));
@@ -486,7 +494,7 @@ mod tests {
         let owner = slot.retained_boundary(&boundary).unwrap();
         assert_eq!(
             owner.acknowledge().await.unwrap(),
-            ProviderFinalizationKind::RejectedBeforeAdmission
+            ProviderFinalizationKind::NotAdmitted
         );
     }
 }

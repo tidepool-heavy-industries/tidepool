@@ -1236,11 +1236,12 @@ struct UneditedInvocationCompletion;
 
 impl UneditedInvocationCompletion {
     fn project(output: JobOutput) -> ProviderCompletion {
-        ProviderCompletion {
-            full_success: matches!(&output, JobOutput::Completed(Ok(_))),
+        let full_success = matches!(&output, JobOutput::Completed(Ok(_)));
+        ProviderCompletion::provider(
             output,
-            context: harness::provider::ContextDisposition::Unedited,
-        }
+            full_success,
+            harness::provider::ContextDisposition::Unedited,
+        )
     }
 }
 
@@ -1281,11 +1282,11 @@ impl CancellationOwner for EmbeddedDispatcher {
 }
 
 fn unavailable_context_completion(output: JobOutput) -> ProviderCompletion {
-    ProviderCompletion {
+    ProviderCompletion::provider(
         output,
-        full_success: false,
-        context: harness::provider::ContextDisposition::Unavailable,
-    }
+        false,
+        harness::provider::ContextDisposition::Unavailable,
+    )
 }
 
 fn workbench_reply_receipt(

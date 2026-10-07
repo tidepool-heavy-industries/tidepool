@@ -349,6 +349,17 @@ impl WorkbenchExecutionControl {
 
     /// The actor publishes the first terminal reply; transport failure may
     /// fill the slot only when no actor-owned reply arrived.
+    /// Issued refusal before native admission. The same cutoff covers schema,
+    /// selected-tool and mailbox denial; ordinary settlement is not evidence
+    /// that an unconfirmed admitted execution never ran.
+    pub(crate) fn settle_not_admitted(
+        &self,
+        reply: crate::KernelWorkbenchReply,
+    ) -> crate::KernelWorkbenchReply {
+        self.provider_finalization.reject_before_admission();
+        self.settle_reply(reply)
+    }
+
     pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {
         let _ = self.settle_reply(reply);
     }
@@ -829,6 +840,25 @@ pub trait ResidentToolEndpoint: Send + Sync {
             self.dispatch_with_checkpoint_boxed(invocation, capture)
         }
     }
+    /// Pure host argument validation crosses the same dispatch boundary. An
+    /// interactive owner issues its operation before accepting or refusing the
+    /// validated input; legacy endpoints keep their ordinary dispatch contract.
+    fn dispatch_validated_with_context_boxed(
+        &self,
+        mut invocation: ToolInvocation,
+        arguments: Result<ToolArguments, ResidentToolError>,
+        capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context: Option<Arc<dyn crate::HostedContextBinding>>,
+    ) -> ResidentToolDispatchFuture {
+        match arguments {
+            Ok(arguments) => {
+                invocation.arguments = arguments;
+                self.dispatch_with_context_boxed(invocation, capture, context)
+            }
+            Err(error) => Box::pin(async move { Err(error) }),
+        }
+    }
+
     fn cancel_workbench_boxed(
         &self,
         _invocation: ToolInvocationContext,
@@ -996,6 +1026,11 @@ pub(crate) async fn expand_display_response(
         })?
         .map_err(ResidentToolError::Invocation)?;
     Ok(reply)
+}
+
+pub(crate) struct IssuedWorkbenchCall {
+    control: Arc<WorkbenchExecutionControl>,
+    publication: Option<HostedCellPublication>,
 }
 
 impl ResidentToolClient {
@@ -1313,65 +1348,117 @@ impl ResidentToolClient {
             })
     }
 
+    pub(crate) fn issue_workbench_call(
+        &self,
+        invocation: Option<ToolInvocationContext>,
+    ) -> IssuedWorkbenchCall {
+        let control = WorkbenchExecutionControl::from_invocation(invocation);
+        let publication = control
+            .invocation
+            .as_ref()
+            .map(|_| HostedCellPublication::publish(&self.actor, &control));
+        IssuedWorkbenchCall {
+            control,
+            publication,
+        }
+    }
+
+    pub(crate) fn reject_workbench_call(
+        &self,
+        issued: &IssuedWorkbenchCall,
+        error: &ResidentToolError,
+    ) {
+        if let Some(publication) = &issued.publication {
+            publication.accept();
+        }
+        issued
+            .control
+            .settle_not_admitted(Err(crate::KernelInvocationFailure::Rejected {
+                actor: self.actor.identity(),
+                receipts: Vec::new(),
+                detail: error.to_string(),
+                diagnostic: None,
+            }));
+        self.actor.hosted_cell().complete(&issued.control);
+    }
+
     pub(crate) async fn dispatch_workbench_issued_with_context(
         &self,
-        mut request: WorkbenchRequest,
+        request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
         installed_tools: Option<crate::InstalledToolLease>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
     ) -> Result<WorkbenchResponse, ResidentToolError> {
-        let Some(invocation) = invocation else {
-            if hosted_checkpoint_capture.is_some() || context_binding.is_some() {
-                return Err(ResidentToolError::Unavailable(
-                    "hosted authority requires an exact provider invocation".into(),
-                ));
-            }
-            let control = WorkbenchExecutionControl::untracked();
-            return self
-                .dispatch_registered_workbench(
-                    request,
-                    control,
-                    None,
-                    installed_tools,
-                    None,
-                    None,
-                    selected_tool,
-                )
-                .await;
-        };
-        if let Some(operation) = invocation.model_operation() {
-            request = request.with_fork_boundary(
-                tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation.clone()),
-            );
-        }
-        let operation = WorkbenchCallKey::from(invocation);
-        let execution = execution_id(self.actor.identity(), &operation);
-        request = request.with_execution_id(execution.clone());
-        let control = WorkbenchExecutionControl::new(Some(operation.clone()));
-        // The original control remains visible from transport admission through
-        // actor settlement, including while an independent execution is parked.
-        let published = HostedCellPublication::publish(&self.actor, &control);
+        let issued = self.issue_workbench_call(invocation);
+        self.dispatch_prepared_workbench(
+            request,
+            issued,
+            installed_tools,
+            hosted_checkpoint_capture,
+            context_binding,
+            selected_tool,
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_prepared_workbench(
+        &self,
+        mut request: WorkbenchRequest,
+        issued: IssuedWorkbenchCall,
+        installed_tools: Option<crate::InstalledToolLease>,
+        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
+        selected_tool: Option<HostedTool>,
+    ) -> Result<WorkbenchResponse, ResidentToolError> {
+        if let Some(operation) = issued
+            .control
+            .invocation
+            .as_ref()
+            .filter(|key| key.invocation().model_operation().is_some())
         {
-            // The cell runs under the actor span, so its span cannot be a
-            // child of the tool call. This event is the join: the provider's
-            // call id and the execution id the cell span carries, recorded
-            // while both are in one scope.
-            tracing::info!(
-                actor = %self.actor.identity(),
-                execution = %execution,
+            if issued.control.provider_owner.get().is_none() {
+                let original = self
+                    .actor
+                    .hosted_cell()
+                    .retained_operation(operation)
+                    .map_err(ResidentToolError::Unavailable)?;
+                if original
+                    .as_ref()
+                    .is_none_or(|owner| !owner.native_admitted())
+                {
+                    let error = ResidentToolError::InvalidInvocation(
+                        "the original operation was not admitted; a physical retry cannot acquire its authority".into(),
+                    );
+                    self.reject_workbench_call(&issued, &error);
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(operation) = &issued.control.invocation {
+            if let Some(original) = operation.invocation().model_operation() {
+                request = request.with_fork_boundary(
+                    tidepool_runtime::session::WorkbenchForkBoundary::Hosted(original.clone()),
+                );
+            }
+            let execution = issued.control.execution_id(self.actor.identity());
+            request = request.with_execution_id(execution.clone());
+            tracing::info!(actor = %self.actor.identity(), execution = %execution,
                 call_id = %operation.0.call_id,
                 context_call_id = operation.0.model_operation().map(|original| original.call_id.as_str()).unwrap_or(""),
-                turn_id = %operation.0.request_id(),
-                items = request.items.len(),
-                "workbench cell dispatched to its actor"
+                turn_id = %operation.0.request_id(), items = request.items.len(), "workbench cell dispatched to its actor");
+        } else if hosted_checkpoint_capture.is_some() || context_binding.is_some() {
+            let error = ResidentToolError::Unavailable(
+                "hosted authority requires an exact provider invocation".into(),
             );
+            self.reject_workbench_call(&issued, &error);
+            return Err(error);
         }
         self.dispatch_registered_workbench(
             request,
-            control,
-            Some(&published),
+            issued.control.clone(),
+            issued.publication.as_ref(),
             installed_tools,
             hosted_checkpoint_capture,
             context_binding,
@@ -1405,8 +1492,7 @@ impl ResidentToolClient {
             })
             .map_err(|failure| hosted_admission_failure(self.actor.identity(), failure))
         {
-            control.settle(Err(error.clone()));
-            control.provider_finalization.reject_before_admission();
+            control.settle_not_admitted(Err(error.clone()));
             if let Some(publication) = publication {
                 publication.accept();
             }

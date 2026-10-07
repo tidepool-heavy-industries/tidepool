@@ -270,34 +270,59 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
         context: Option<Arc<dyn crate::HostedContextBinding>>,
     ) -> ResidentToolDispatchFuture {
+        let arguments = Ok(invocation.arguments.clone());
+        self.dispatch_validated_with_context_boxed(invocation, arguments, capture, context)
+    }
+
+    fn dispatch_validated_with_context_boxed(
+        &self,
+        mut invocation: ToolInvocation,
+        arguments: Result<ToolArguments, ResidentToolError>,
+        capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        context: Option<Arc<dyn crate::HostedContextBinding>>,
+    ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         let installed_tools = self.issued_tools.clone();
         Box::pin(async move {
-            let declaration = tools
-                .iter()
-                .find(|tool| tool.name() == invocation.name)
-                .ok_or_else(|| {
-                    ResidentToolError::InvalidInvocation(format!(
-                        "unknown actor tool {:?}",
+            let issued = client.issue_workbench_call(invocation.context.clone());
+            let validated = (|| {
+                invocation.arguments = arguments?;
+                let declaration = tools
+                    .iter()
+                    .find(|tool| tool.name() == invocation.name)
+                    .ok_or_else(|| {
+                        ResidentToolError::InvalidInvocation(format!(
+                            "unknown actor tool {:?}",
+                            invocation.name
+                        ))
+                    })?;
+                if !declaration.accepts(&invocation.arguments) {
+                    return Err(ResidentToolError::InvalidInvocation(format!(
+                        "invalid argument kind for {:?}",
                         invocation.name
-                    ))
-                })?;
-            if !declaration.accepts(&invocation.arguments) {
-                return Err(ResidentToolError::InvalidInvocation(format!(
-                    "invalid argument kind for {:?}",
-                    invocation.name
-                )));
-            }
-            let request = request_for_tool(declaration, invocation.arguments)?;
+                    )));
+                }
+                Ok((
+                    request_for_tool(declaration, invocation.arguments)?,
+                    selected_contract(declaration),
+                ))
+            })();
+            let (request, selected) = match validated {
+                Ok(validated) => validated,
+                Err(error) => {
+                    client.reject_workbench_call(&issued, &error);
+                    return Err(error);
+                }
+            };
             client
-                .dispatch_workbench_issued_with_context(
+                .dispatch_prepared_workbench(
                     request,
-                    invocation.context,
+                    issued,
                     installed_tools,
                     capture,
                     context,
-                    selected_contract(declaration),
+                    selected,
                 )
                 .await
                 .map(ResidentToolResponse::Workbench)

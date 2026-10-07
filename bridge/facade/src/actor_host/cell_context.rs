@@ -109,11 +109,7 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
             } else {
                 ContextDisposition::Unedited
             };
-        Some(ProviderCompletion {
-            output,
-            full_success,
-            context,
-        })
+        Some(ProviderCompletion::provider(output, full_success, context))
     }
 }
 

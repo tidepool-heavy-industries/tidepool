@@ -11668,6 +11668,20 @@ where
             return Ok(());
         }
         let context = self.context(kernel.identity());
+        if boundary.hosted().is_some()
+            && self
+                .workbench_executions
+                .lock()
+                .at_boundary(&boundary)
+                .is_some()
+        {
+            workbench_ledger::settle_provider_children(
+                &self.workbench_executions,
+                kernel,
+                &boundary,
+            )
+            .await?;
+        }
         let owner = WorkbenchExecutions::boundary_abort_owner(
             &self.workbench_executions,
             &boundary,
@@ -12452,113 +12466,106 @@ where
         Box::pin(async move {
             let proof_boundary = boundary.clone();
             let result = async {
-            if !self
-                .workbench_executions
-                .lock()
-                .cell_allows_publication(&boundary)
-            {
-                return self.tool_aborted(kernel, boundary).await;
-            }
-            let context = self.context(kernel.identity());
-            self.environment
-                .fork_groups
-                .settle_checkpoints(context.actor, &boundary, true);
-            self.finish_pending_fork_publication(kernel, &context, &boundary)
-                .await?;
-            for child in self
-                .environment
-                .fork_groups
-                .abort_incomplete_at_boundary(context.actor, &boundary)
-            {
-                if let Some(child) = kernel.resolve(child) {
-                    // A child already gone from a failed fork-group admission is
-                    // the common case here; log anything else so an actor that
-                    // refused shutdown does not silently linger.
-                    if let Err(error) = child
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "fork admission stopped before tool completion".into(),
-                            diagnostic: None,
-                        })
-                        .await
-                    {
-                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                    }
+                if !self
+                    .workbench_executions
+                    .lock()
+                    .cell_allows_publication(&boundary)
+                {
+                    return self.tool_aborted(kernel, boundary).await;
                 }
-            }
-            let groups = self
-                .environment
-                .fork_groups
-                .ready_groups_at_boundary(context.actor, &boundary);
-            let groups: Vec<_> = groups
-                .into_iter()
-                .filter(|(_, children)| {
-                    let actors = self.environment.actors.lock();
-                    children.iter().all(|child| {
-                        actors.get(child).is_some_and(|record| {
-                            // The group closes on this coordinator call. A checkpoint
-                            // child's provider ancestry names the earlier capture call.
-                            record.descriptor.fork_boundary() == Some(&boundary)
-                                || record.descriptor.checkpoint_token().is_some()
+                let context = self.context(kernel.identity());
+                self.environment
+                    .fork_groups
+                    .settle_checkpoints(context.actor, &boundary, true);
+                self.finish_pending_fork_publication(kernel, &context, &boundary)
+                    .await?;
+                let incomplete = self
+                    .environment
+                    .fork_groups
+                    .abort_incomplete_at_boundary(context.actor, &boundary);
+                self.workbench_executions
+                    .lock()
+                    .retain_provider_children(&boundary, incomplete)?;
+                workbench_ledger::settle_provider_children(
+                    &self.workbench_executions,
+                    kernel,
+                    &boundary,
+                )
+                .await?;
+                let groups = self
+                    .environment
+                    .fork_groups
+                    .ready_groups_at_boundary(context.actor, &boundary);
+                let groups: Vec<_> = groups
+                    .into_iter()
+                    .filter(|(_, children)| {
+                        let actors = self.environment.actors.lock();
+                        children.iter().all(|child| {
+                            actors.get(child).is_some_and(|record| {
+                                // The group closes on this coordinator call. A checkpoint
+                                // child's provider ancestry names the earlier capture call.
+                                record.descriptor.fork_boundary() == Some(&boundary)
+                                    || record.descriptor.checkpoint_token().is_some()
+                            })
                         })
                     })
-                })
-                .collect();
-            if groups.is_empty() {
+                    .collect();
+                if groups.is_empty() {
+                    if !self.settled_fork_boundaries.contains(&boundary) {
+                        self.workbench_executions
+                            .lock()
+                            .release_fork_source(&boundary);
+                        self.settled_fork_boundaries.push(boundary);
+                    }
+                    return Ok(());
+                }
+                let children: Vec<_> = {
+                    let actors = self.environment.actors.lock();
+                    groups
+                        .iter()
+                        .flat_map(|(_, children)| children.iter().copied())
+                        .filter(|child| {
+                            actors
+                                .get(child)
+                                .is_some_and(|record| record.terminal.is_none())
+                                && kernel
+                                    .resolve(*child)
+                                    .is_some_and(|child| child.terminal().get().is_none())
+                        })
+                        .collect()
+                };
+                let releases = {
+                    let actors = self.environment.actors.lock();
+                    children
+                        .into_iter()
+                        .map(|child| PendingForkChildRelease {
+                            child,
+                            session: actors[&child].descriptor.placement().session,
+                            scope: actors[&child].descriptor.placement().lexical_scope,
+                            lexical: Arc::new(OnceLock::new()),
+                        })
+                        .collect()
+                };
+                self.pending_fork_publications.push(PendingForkPublication {
+                    boundary: Some(boundary.clone()),
+                    phase: PendingForkPublicationPhase::Prepared(
+                        groups.into_iter().map(|(group, _)| group).collect(),
+                    ),
+                    releases,
+                    unused_scopes: Vec::new(),
+                    inherited: Arc::new(OnceLock::new()),
+                });
+                self.finish_pending_fork_publication(kernel, &context, &boundary)
+                    .await?;
                 if !self.settled_fork_boundaries.contains(&boundary) {
                     self.workbench_executions
                         .lock()
                         .release_fork_source(&boundary);
                     self.settled_fork_boundaries.push(boundary);
                 }
-                return Ok(());
+                Ok(())
             }
-            let children: Vec<_> = {
-                let actors = self.environment.actors.lock();
-                groups
-                    .iter()
-                    .flat_map(|(_, children)| children.iter().copied())
-                    .filter(|child| {
-                        actors
-                            .get(child)
-                            .is_some_and(|record| record.terminal.is_none())
-                            && kernel
-                                .resolve(*child)
-                                .is_some_and(|child| child.terminal().get().is_none())
-                    })
-                    .collect()
-            };
-            let releases = {
-                let actors = self.environment.actors.lock();
-                children
-                    .into_iter()
-                    .map(|child| PendingForkChildRelease {
-                        child,
-                        session: actors[&child].descriptor.placement().session,
-                        scope: actors[&child].descriptor.placement().lexical_scope,
-                        lexical: Arc::new(OnceLock::new()),
-                    })
-                    .collect()
-            };
-            self.pending_fork_publications.push(PendingForkPublication {
-                boundary: Some(boundary.clone()),
-                phase: PendingForkPublicationPhase::Prepared(
-                    groups.into_iter().map(|(group, _)| group).collect(),
-                ),
-                releases,
-                unused_scopes: Vec::new(),
-                inherited: Arc::new(OnceLock::new()),
-            });
-            self.finish_pending_fork_publication(kernel, &context, &boundary)
-                .await?;
-            if !self.settled_fork_boundaries.contains(&boundary) {
-                self.workbench_executions
-                    .lock()
-                    .release_fork_source(&boundary);
-                self.settled_fork_boundaries.push(boundary);
-            }
-            Ok(())
-            }.await;
+            .await;
             self.workbench_executions.lock().finalize_provider_boundary(
                 &proof_boundary,
                 result

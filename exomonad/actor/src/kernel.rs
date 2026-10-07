@@ -672,10 +672,26 @@ impl HostedCellPublications {
         actor: crate::ActorRef,
         control: std::sync::Arc<crate::WorkbenchExecutionControl>,
     ) {
-        let provider = crate::HostedOperationSettlement::issue(actor, control.clone());
-        self.0.lock().push(HostedCellEntry {
+        let mut entries = self.0.lock();
+        // One logical owner per operation. Native physical retries have no
+        // independent provider acknowledgement: Harness's durable claim and
+        // scheduler admit an OperationId only once. The native journal alone
+        // may alias an exact terminal replay to this existing owner.
+        let duplicate = entries
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+            .any(|owner| control.invocation.as_ref() == Some(owner.key()));
+        let provider = if duplicate {
+            None
+        } else {
+            Some(crate::HostedOperationSettlement::issue(
+                actor,
+                control.clone(),
+            ))
+        };
+        entries.push(HostedCellEntry {
             control: Some(control),
-            provider: Some(provider),
+            provider,
             accepted: false,
         });
     }
