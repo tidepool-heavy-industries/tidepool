@@ -843,6 +843,7 @@ def runtime_test_cases(binary):
         "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
     ])]
     semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
+        "signed_template_helpers_execute_recursion_and_polymorphism_once",
         "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
         "scalar_publication_forces_after_effect_without_publishing_then_recovers",
         "retained_action_closure_demand_does_not_repeat_completed_effect",

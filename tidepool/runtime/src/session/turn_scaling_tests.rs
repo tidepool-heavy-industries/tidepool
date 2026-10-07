@@ -1336,6 +1336,43 @@ fn try_execute_cell_with_template_imports_expectation_observed<H>(
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
 {
+    try_execute_cell_with_template_preamble_observed(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        publication_target,
+        authority_checks,
+        template_imports,
+        expected_observation,
+        effects.preamble(),
+        observe,
+    )
+}
+
+fn try_execute_cell_with_template_preamble_observed<H>(
+    resident: &mut ScaleSession<H>,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: CellDeclarationExpectation,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks<'_>,
+    template_imports: &SourceImports,
+    expected_observation: Option<i64>,
+    preamble: &str,
+    observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -1346,8 +1383,8 @@ where
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
     let imports = view.turn_imports(template_imports);
-    let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
-    let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+    let template = resident_cell_check_template(preamble, effects.row(), &imports);
+    let templates = resident_workbench_templates(preamble, effects.row(), &imports);
     let specification = CheckedCellSpecification {
         admission_digest: [0; 32],
         cell_source: source.into(),

@@ -13,6 +13,7 @@ enum ProbeRequest {
 
 struct ProbeHandler {
     trace: Arc<CaptureMutex<Vec<i64>>>,
+    raw_result: Option<Arc<CaptureMutex<Vec<String>>>>,
     compiler_counts: Arc<CaptureMutex<Vec<u64>>>,
     cancel_after_record: Arc<CaptureMutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
 }
@@ -26,9 +27,13 @@ impl EffectHandler<QuietOutput> for ProbeHandler {
         cx: &EffectContext<'_, QuietOutput>,
     ) -> Result<Response, EffectError> {
         let ProbeRequest::Print(value) = request;
-        self.trace
-            .lock()
-            .push(value.parse().expect("recorded decimal Int"));
+        if let Some(result) = &self.raw_result {
+            result.lock().push(value);
+        } else {
+            self.trace
+                .lock()
+                .push(value.parse().expect("recorded decimal Int"));
+        }
         self.compiler_counts
             .lock()
             .push(tidepool_extract_cmd::extract_spawn_count());
@@ -55,6 +60,10 @@ struct SemanticSession {
 
 impl SemanticSession {
     fn new() -> Self {
+        Self::with_raw_result(None)
+    }
+
+    fn with_raw_result(raw_result: Option<Arc<CaptureMutex<Vec<String>>>>) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -87,6 +96,7 @@ impl SemanticSession {
         let resident = ResidentSession::from_persistent_for_test(
             frunk::hlist![ProbeHandler {
                 trace: trace.clone(),
+                raw_result,
                 compiler_counts: compiler_counts.clone(),
                 cancel_after_record: cancel_after_record.clone()
             }],
@@ -275,6 +285,54 @@ fn is_raised_exception(error: &ResidentError) -> bool {
         )) if matches!(failure.cause,
             tidepool_codegen::host_fns::RuntimeError::RaisedException
             | tidepool_codegen::host_fns::RuntimeError::RaisedExceptionMessage(_)))
+}
+
+#[test]
+fn signed_template_helpers_execute_recursion_and_polymorphism_once() {
+    let results = Arc::new(CaptureMutex::new(Vec::new()));
+    let mut session = SemanticSession::with_raw_result(Some(results.clone()));
+    let definitions = include_str!("fixtures/typed-segment-template-helpers.hs")
+        .replace("__EFFECT_ROW__", session.effects.row());
+    let preamble = crate::session::insert_preamble_imports(
+        &crate::session::insert_preamble_imports(
+            &format!("{}\n{definitions}", session.effects.preamble()),
+            "qualified Control.Monad.Freer as SegmentHelperEff",
+        ),
+        "qualified Data.Text as SegmentHelperText",
+    );
+    try_execute_cell_with_template_preamble_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "signed_template_helpers",
+        include_str!("fixtures/typed-segment-template-helper-use.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::SegmentWorkCounts(7),
+        &SourceImports::new(),
+        None,
+        &preamble,
+        |program| assert_eq!(program.items().len(), 7),
+    )
+    .unwrap();
+    let observed = results.lock().clone();
+    let [result] = observed.as_slice() else {
+        panic!("the single authored report must execute exactly once: {observed:?}");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(result).unwrap(),
+        serde_json::json!([7, 7, 3, 3.0]),
+    );
+    assert_eq!(session.compiler_counts.lock().len(), 1);
+    session.assert_no_compiler_since_last_effect();
+    for name in ["replyValue", "recursiveValue", "integerStep", "doubleStep"] {
+        assert!(session
+            .resident
+            .current_binding_in(session.public, name)
+            .is_some());
+    }
 }
 
 #[test]
