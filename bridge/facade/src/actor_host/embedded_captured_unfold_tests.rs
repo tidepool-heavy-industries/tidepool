@@ -1202,6 +1202,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     .expect("the real owned gate actor is installed");
                 assert!(gate.terminal.is_none(), "gate must remain live before host teardown: {gate:?}");
                 assert!(!gate.model_actor, "the gate is a record actor, not a provider branch");
+                assert_eq!(gate.creator, Some(actor), "the root owns the parked gate");
                 eprintln!("[captured-engine] exact sibling parks on owned actor gate {:?}", gate.actor);
                 assert!(runtime.store().claims_for_operation(&transport.operation(&root_origin, PENDING_CALL))
                     .unwrap().iter().any(|claim| claim.state == harness::store::ClaimState::Pending));
