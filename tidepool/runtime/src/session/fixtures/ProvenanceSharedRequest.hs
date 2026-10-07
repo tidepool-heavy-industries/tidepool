@@ -11,6 +11,6 @@ import qualified Tidepool.Actors.Internal.Agent as Agents
 emit :: Text -> Eff '[Replies] ()
 emit input = do
   let target = Ref.internalAgentRef 17 1
-      requestLabel = either (error . show) id (Agents.labelFromText "shared-site")
-  _ <- Agents.request @() target (Agents.assignment requestLabel input)
+      options = Agents.defaultRequestOptions { Agents.requestLabel = Just "shared-site" }
+  _ <- Agents.request @() target input options
   pure ()

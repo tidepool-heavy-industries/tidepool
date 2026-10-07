@@ -1,9 +1,8 @@
 {-# LANGUAGE QuasiQuotes #-}
 module SameCellImportSupport (answerValue) where
 
-import Tidepool.Agent.Assignment (Label, labelText)
 import qualified Tidepool.Data.Text as T
-import Tidepool.QQ.Label (label)
+import Tidepool.QQ.Fmt (fmt)
 
 answerValue :: Int
-answerValue = T.length (labelText ([label|same-cell-quote-proof|] :: Label))
+answerValue = T.length ([fmt|same-cell-quote-proof|])
