@@ -213,7 +213,7 @@ async fn run_native_reply_case(case: NativeReplyCase) {
             let reply = execute(&child, "respond (42 :: Int)", Some(control.clone()))
                 .await
                 .expect("request-local helper settles its actual typed request");
-            assert_eq!(reply.status, WorkbenchRunStatus::Committed, "{reply:?}");
+            assert_eq!(reply.status, WorkbenchRunStatus::Replied, "{reply:?}");
             assert_eq!(
                 reply
                     .items
