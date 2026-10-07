@@ -585,6 +585,15 @@ impl Effect {
             }
             let mut seen: Vec<&str> = Vec::new();
             for a in &v.args {
+                if a.rust == RustBinding::Derived && derive_rust_type(&a.ty).is_none() {
+                    errs.push(format!(
+                        "{}::{}::{}: {} needs an explicit RustBinding",
+                        self.name,
+                        v.ctor,
+                        a.name,
+                        a.ty.render()
+                    ));
+                }
                 if seen.contains(&a.name) {
                     errs.push(format!(
                         "{}: verb {} has two arguments named `{}`",

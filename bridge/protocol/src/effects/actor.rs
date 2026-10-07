@@ -265,7 +265,7 @@ pub fn actor() -> Effect {
                     Arg {
                         name: "workspace",
                         ty: HsType::Maybe(Box::new(HsType::Named("WorkspaceHandle"))),
-                        rust: RustBinding::Derived,
+                        rust: RustBinding::External,
                     },
                 ],
                 ret: launched_actor_type(),

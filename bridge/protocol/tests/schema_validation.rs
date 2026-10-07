@@ -1,6 +1,44 @@
 //! Schema validation and narrow rendering pins; generated consumers are build outputs.
 
 #[test]
+fn record_actor_workspace_binding_uses_its_declared_external_wire_type() {
+    use tidepool_protocol::schema::RustBinding;
+
+    let mut actor = tidepool_protocol::effects::actor::actor();
+    let start = actor
+        .verbs
+        .iter()
+        .find(|verb| verb.ctor == "ActorStartWith")
+        .unwrap();
+    let workspace = start
+        .args
+        .iter()
+        .find(|arg| arg.name == "workspace")
+        .unwrap();
+    assert_eq!(
+        workspace
+            .rust
+            .rust_type(&workspace.ty, "ActorStartWith::workspace", &actor),
+        "Option<tidepool_bridge_effects::WtWorkspaceHandle>"
+    );
+
+    actor
+        .verbs
+        .iter_mut()
+        .find(|verb| verb.ctor == "ActorStartWith")
+        .unwrap()
+        .args
+        .iter_mut()
+        .find(|arg| arg.name == "workspace")
+        .unwrap()
+        .rust = RustBinding::Derived;
+    let errors = actor.validate().unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error == "Actor::ActorStartWith::workspace: Maybe WorkspaceHandle needs an explicit RustBinding"
+    }));
+}
+
+#[test]
 fn authored_projection_hides_capability_constructors_and_record_selectors() {
     use tidepool_protocol::gen::decl_rs;
     use tidepool_protocol::schema::{SumVariant, TypeShape, VariantFields};
