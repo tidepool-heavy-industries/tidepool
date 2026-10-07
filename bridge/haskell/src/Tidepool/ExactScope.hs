@@ -778,10 +778,19 @@ validateInterfaceEvidence producer rows offered = do
 -- Cold captures receive their producer from Rust at admission. Both paths use
 -- TPFINALMODULE identity; capture paths are custody, never semantic identity.
 -- The current target is retained by its own checked/native declaration owner.
+-- Only checked cells retain supporting source originals between their segments.
+-- Other requests keep finalization evidence for its independent origin issuer.
 captureFinalizedSourceOriginals
   :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
   -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureFinalizedSourceOriginals compilation accepted target finalized evidence = do
+captureFinalizedSourceOriginals compilation accepted target finalized evidence
+  | Nothing <- scopeCheckedCell (compilationScope compilation) = pure Map.empty
+  | otherwise = captureCheckedSourceOriginals compilation accepted target finalized evidence
+
+captureCheckedSourceOriginals
+  :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
+  -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
+captureCheckedSourceOriginals compilation accepted target finalized evidence = do
   let scope = compilationScope compilation
       admissions = Map.delete target (finalizedLocalAdmissions finalized)
       rows = map localFinalizedInterface (Map.elems admissions)
