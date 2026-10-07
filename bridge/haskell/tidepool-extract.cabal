@@ -3,6 +3,8 @@ name:          tidepool-extract
 version:       0.1.0.0
 build-type:    Simple
 extra-source-files:
+  test-display-tree/EmitFormWireFixtures.hs
+  test-model-turn/form-choice-response.json
   test/Suite.hs
   lib/Tidepool/Aeson/Scientific.hs
   lib/Tidepool/Aeson/Value.hs
@@ -750,8 +752,16 @@ test-suite model-turn-test
   -- Buck compiles against the generated artifact providers. Local Cabal
   -- compatibility requires these explicit directories from the same outputs;
   -- missing generated modules are errors, never a skipped suite.
-  hs-source-dirs:   test-model-turn generated/effects generated/protocol lib
+  hs-source-dirs:   test-model-turn ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
   other-modules:
+    FormJevDialogueTest
+    Jev.Core
+    Jev.Core.Contract
+    Jev.Core.Json
+    Jev.Core.Schema
+    Jev.Host
+    Jev.Operators
+    Jev.Tidepool
     FormLifecycleTest
     Tidepool.Form
     Tidepool.Form.Algebra

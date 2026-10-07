@@ -28,6 +28,8 @@ formViewTests = testGroup "form-view"
   , testProperty "applicative composition retains decode" applicativeComposition
   , testProperty "reused subform occurrences stay independent" reusedOccurrences
   , testCase "duplicate previews retain distinct closure payloads" duplicatePreviews
+  , testCase "empty many descriptor and submission retain the empty list" emptyMany
+  , testCase "blank numbers stay typed field errors" blankNumbers
   , testCase "many returns original values in offered order" manyOriginalOrder
   , testCase "many rejects unknown and duplicate identities" manyInvalidIdentities
   , testCase "inactive alternative validators are never run" inactiveAlternative
@@ -198,3 +200,18 @@ instance Display RichOnly where
   displayView _ = text "rich preview"
 richDisplayText :: IO ()
 richDisplayText = assertEqual "text interpretation follows rich view without a new class" ("rich",True) (displayWith 4 RichOnly)
+
+emptyMany :: IO ()
+emptyMany = do
+  let p = prepareForm (choices "Actions" ([] :: [Option Int]))
+      descriptor = case nodeValue "root" (formDescriptor p) of Just root -> root; Nothing -> error "prepared form lost root"
+  assertEqual "empty many remains many" (Just (String "many")) (nodeValue "kind" descriptor)
+  assertEqual "zero options are a valid collection" (Just (Array [])) (nodeValue "options" descriptor)
+  assertEqual "empty selection seed" (Just (Array [])) (nodeValue "initial" descriptor)
+  assertEqual "empty choice list decodes without inventing a value" (Right []) (decodeSubmission p (draft [("f0",Array [])]))
+blankNumbers :: IO ()
+blankNumbers = do
+  let p = prepareForm (numberInput "Number" Nothing)
+  mapM_ (\value -> case decodeSubmission p value of
+    Left errors -> assertEqual "blank value reaches owning field validator" [Just "f0"] (map errorField errors)
+    Right _ -> error "blank number was accepted") [draft [("f0",Null)],draft []]
