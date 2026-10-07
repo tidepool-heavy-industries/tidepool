@@ -33,6 +33,7 @@ pub fn agent_launch() -> Effect {
             crate::schema::ExternalType { haskell_name: "ActorEffectKey", rust_wire: "crate::ActorEffectKeyWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "Model", rust_wire: "crate::Model", core_module: None },
             crate::schema::ExternalType { haskell_name: "ForkEffort", rust_wire: "crate::ForkEffort", core_module: None },
+            crate::schema::ExternalType { haskell_name: "WorkspaceHandle", rust_wire: "tidepool_bridge_effects::WtWorkspaceHandle", core_module: None },
             crate::schema::ExternalType { haskell_name: "WorktreeSource", rust_wire: "tidepool_bridge_effects::WtWorktreeSource", core_module: None },
             crate::schema::ExternalType { haskell_name: "WorktreeHandle", rust_wire: "tidepool_bridge_effects::WtWorktreeHandle", core_module: None },
             crate::schema::ExternalType {
@@ -187,7 +188,6 @@ fn sum_type(name: &'static str, wire_rust: Option<&'static str>, variants: Vec<(
 fn spawn_types() -> Vec<TypeDef> {
     vec![
         sum_type("SpawnContextWire", Some("crate::start::SpawnContextWire"), vec![("CapturedSpawn", vec![HsType::Text]), ("FreshSpawn", vec![HsType::Text])]),
-        sum_type("WorkspaceHandle", Some("crate::fork_workspace::WorkspaceHandle"), vec![("WorkspaceHandle", vec![HsType::Text])]),
         sum_type("SpawnWorkspaceWire", Some("crate::fork_workspace::SpawnWorkspaceWire"), vec![("SameDirectory", vec![]), ("ExistingDirectory", vec![HsType::Named("WorkspaceHandle")]), ("ForkDirectory", vec![HsType::Named("WorktreeSource")])]),
         sum_type("SpawnError", None, vec![("SpawnRefused", vec![HsType::Text]), ("SpawnPartiallyStarted", vec![HsType::Tuple(vec![HsType::Int, HsType::Int]), HsType::maybe(HsType::Named("WorktreeHandle")), HsType::Text])]),
         sum_type("SpecReplacementError", None, vec![("SpecReplacementUnavailable", vec![]), ("SpecReplacementUnauthorized", vec![]), ("SpecReplacementSurfaceChanged", vec![]), ("SpecReplacementFailed", vec![HsType::Text])]),
