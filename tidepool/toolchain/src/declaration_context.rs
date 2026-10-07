@@ -8927,16 +8927,25 @@ mod tests {
             .admit_program_segment(&output)
             .err()
             .expect("a new source receipt cannot replace an admitted owner");
-        assert!(
-            matches!(&ordinary_refusal, CompileError::ExtractFailed(_)),
-            "{ordinary_refusal:?}"
+        let assert_context_refusal = |actual: &CompileError, reason: &str| {
+            let expected = failure(reason);
+            assert!(
+                matches!((actual, &expected),
+                    (CompileError::ExtractFailed(actual), CompileError::ExtractFailed(expected))
+                        if actual == expected),
+                "{actual:?}"
+            );
+        };
+        assert_context_refusal(
+            &ordinary_refusal,
+            "fresh module replaced an admitted exact owner",
         );
         let hidden_refusal = projected
             .admit_program_support(context.clone(), &support, segment.admissions(), None)
             .unwrap_err();
-        assert!(
-            matches!(&hidden_refusal, CompileError::ExtractFailed(_)),
-            "{hidden_refusal:?}"
+        assert_context_refusal(
+            &hidden_refusal,
+            "program support cannot select a retained hidden owner",
         );
 
         let before = projected.context.semantic_sha256();
@@ -8948,9 +8957,9 @@ mod tests {
         let changed_refusal = projected
             .admit_program_segment_support(context, &changed, &segment, None)
             .unwrap_err();
-        assert!(
-            matches!(&changed_refusal, CompileError::ExtractFailed(_)),
-            "{changed_refusal:?}"
+        assert_context_refusal(
+            &changed_refusal,
+            "projected segment source changed its admitted canonical owner",
         );
         assert_eq!(projected.context.semantic_sha256(), before);
         assert!(segment
