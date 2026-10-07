@@ -1524,7 +1524,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=7f6e5e6315610b0a95b6fbf67f87aeeaccf82179#7f6e5e6315610b0a95b6fbf67f87aeeaccf82179"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=5f0999723e8e0a5cceb9c340960fbfbb65b57ab7#5f0999723e8e0a5cceb9c340960fbfbb65b57ab7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1536,6 +1536,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "reqwest 0.12.28",
+ "roxmltree",
  "rusqlite",
  "schemars 1.2.2",
  "serde",
@@ -2790,6 +2791,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
