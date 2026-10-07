@@ -5670,3 +5670,814 @@ mod checkpoint_scope_tests {
         session.retire_scope(deferred);
     }
 }
+
+#[cfg(test)]
+mod maintained_binding_lifetime_properties {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    const SOURCE_GENERATION: u64 = 12_100;
+    const ALIAS_GENERATION: u64 = 12_101;
+    const SHADOW_GENERATION: u64 = 12_102;
+    const ROOTED_IDS: [u64; 3] = [12_100, 12_103, 12_104];
+    const ALIAS_ID: u64 = 12_105;
+
+    #[derive(Clone, Debug)]
+    struct Plan {
+        chain_capture: bool,
+        capture_first: bool,
+        release_ranks: Vec<u8>,
+        reads: Vec<(u8, u8)>,
+    }
+
+    fn plan() -> impl Strategy<Value = Plan> {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            proptest::collection::vec(any::<u8>(), 5),
+            proptest::collection::vec((0_u8..4, 0_u8..4), 1..20),
+        )
+            .prop_map(
+                |(chain_capture, capture_first, release_ranks, reads)| Plan {
+                    chain_capture,
+                    capture_first,
+                    release_ranks,
+                    reads,
+                },
+            )
+    }
+
+    #[derive(Clone, Debug)]
+    struct ModelBinding {
+        id: SessionVarId,
+        name: String,
+        module: SessionModule,
+        identity: tidepool_repr::execution_schema::SymbolIdentity,
+        handle_group: u8,
+        owner: ScopeId,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct ModelScope {
+        live: bool,
+        visible: BTreeMap<String, SessionVarId>,
+        custody: HashSet<SessionVarId>,
+    }
+
+    #[derive(Debug, Default)]
+    struct Model {
+        bindings: Vec<ModelBinding>,
+        scopes: BTreeMap<ScopeId, ModelScope>,
+        explicit: Vec<Option<HashSet<SessionVarId>>>,
+        owner_retired: bool,
+    }
+
+    #[derive(Debug, Default)]
+    struct Support {
+        same_generation_originals: usize,
+        same_generation_identity_pair: usize,
+        shared_handle_bindings: usize,
+        aliases: usize,
+        shadows: usize,
+        captures_before_shadow: usize,
+        captures_after_shadow: usize,
+        chained_captures: usize,
+        explicit_alias_leases: usize,
+        capture_releases: usize,
+        explicit_releases: usize,
+        pending_owner_bindings: usize,
+        released_handles: usize,
+        alias_hidden_from_capture: usize,
+        held_root_receipts: usize,
+        owner_retired_with_holders: usize,
+        shared_pair_survived_member_eviction: usize,
+        interface_survived_single_member: usize,
+        capture_before_explicit_release: usize,
+        explicit_before_capture_release: usize,
+    }
+
+    fn model_live_ids(model: &Model) -> HashSet<SessionVarId> {
+        let mut retained = HashSet::new();
+        for scope in model.scopes.values().filter(|scope| scope.live) {
+            retained.extend(scope.custody.iter().copied());
+        }
+        for lease in model.explicit.iter().flatten() {
+            retained.extend(lease.iter().copied());
+        }
+        model
+            .bindings
+            .iter()
+            .filter(|binding| !model.owner_retired || retained.contains(&binding.id))
+            .map(|binding| binding.id)
+            .collect()
+    }
+
+    fn model_handles(model: &Model, live: &HashSet<SessionVarId>) -> BTreeSet<u8> {
+        model
+            .bindings
+            .iter()
+            .filter(|binding| live.contains(&binding.id))
+            .map(|binding| binding.handle_group)
+            .collect()
+    }
+
+    fn alias_dependency_closure(
+        alias: SessionVarId,
+        source: SessionVarId,
+    ) -> HashSet<SessionVarId> {
+        HashSet::from([alias, source])
+    }
+
+    fn check_state(
+        state: &PersistentSession,
+        model: &Model,
+        handles: &BTreeMap<u8, tidepool_codegen::prepared_program::PreparedHandle>,
+        interfaces: &HashMap<SessionModule, Arc<[u8]>>,
+    ) -> HashSet<SessionVarId> {
+        let expected_live = model_live_ids(model);
+        let actual_live: HashSet<_> = state.bindings().iter_live().map(|entry| entry.id).collect();
+        assert_eq!(actual_live, expected_live, "live binding IDs");
+        for binding in &model.bindings {
+            match state.bindings().get(binding.id) {
+                Some(actual) => {
+                    assert!(expected_live.contains(&binding.id));
+                    assert_eq!(
+                        actual.name.0, binding.name,
+                        "binding name for {:?}",
+                        binding.id
+                    );
+                    assert_eq!(
+                        actual.module, binding.module,
+                        "binding module for {:?}",
+                        binding.id
+                    );
+                    assert_eq!(
+                        actual.value.identity, binding.identity,
+                        "binding identity for {:?}",
+                        binding.id
+                    );
+                    assert_eq!(
+                        actual.scope, binding.owner,
+                        "binding owner for {:?}",
+                        binding.id
+                    );
+                    assert_eq!(
+                        actual.value.handle, handles[&binding.handle_group],
+                        "actual adopted handle for {:?}",
+                        binding.id
+                    );
+                }
+                None => assert!(!expected_live.contains(&binding.id)),
+            }
+        }
+
+        assert_eq!(
+            state
+                .live_val_modules()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            model
+                .bindings
+                .iter()
+                .filter(|binding| expected_live.contains(&binding.id))
+                .map(|binding| binding.module.module_name())
+                .collect(),
+            "live interface modules"
+        );
+
+        let expected_pairs: BTreeSet<_> = model
+            .bindings
+            .iter()
+            .filter(|binding| expected_live.contains(&binding.id))
+            .map(|binding| (binding.identity.clone(), binding.module.gen().0))
+            .collect();
+        assert_eq!(
+            state
+                .binding_index
+                .prepared_retained()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            expected_pairs,
+            "prepared identity/generation pairs"
+        );
+        for binding in &model.bindings {
+            let eligible: Vec<_> = model
+                .bindings
+                .iter()
+                .filter(|candidate| {
+                    candidate.identity == binding.identity && expected_live.contains(&candidate.id)
+                })
+                .collect();
+            let newest = eligible
+                .iter()
+                .map(|candidate| candidate.module.gen().0)
+                .max();
+            match (
+                state
+                    .binding_index
+                    .resolve_prepared(&binding.identity, None),
+                newest,
+            ) {
+                (Some(id), Some(generation)) => assert!(eligible.iter().any(|candidate| {
+                    candidate.id == id && candidate.module.gen().0 == generation
+                })),
+                (None, None) => {}
+                (actual, expected) => panic!(
+                    "prepared resolution mismatch for {:?}: {actual:?}, newest {expected:?}",
+                    binding.identity
+                ),
+            }
+        }
+
+        for (scope_id, scope) in &model.scopes {
+            for name in ["source", "pair", "other", "alias"] {
+                let expected = scope
+                    .live
+                    .then(|| scope.visible.get(name).copied())
+                    .flatten()
+                    .filter(|id| expected_live.contains(id));
+                assert_eq!(
+                    state.resolve_in(*scope_id, name).map(|entry| entry.id),
+                    expected,
+                    "resolve_in({scope_id:?}, {name})"
+                );
+            }
+        }
+
+        for (module, bytes) in interfaces {
+            let is_live = model
+                .bindings
+                .iter()
+                .any(|binding| binding.module == *module && expected_live.contains(&binding.id));
+            assert_eq!(
+                state.retained_value_interface(*module),
+                is_live.then_some(bytes),
+                "retained test interface for {module:?}"
+            );
+        }
+
+        let expected_handles = model_handles(model, &expected_live);
+        assert_eq!(state.value_handle_count(), expected_handles.len());
+        for (group, handle) in handles {
+            let actual = state
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(handle.raw()));
+            assert_eq!(
+                actual.is_some(),
+                expected_handles.contains(group),
+                "prepared handle group {group}"
+            );
+            if let Some(actual) = actual {
+                assert_eq!(actual, *handle);
+            }
+        }
+        expected_live
+    }
+
+    fn capture_model(
+        model: &mut Model,
+        capture: ScopeId,
+        parent: ScopeId,
+        visible: BTreeMap<String, SessionVarId>,
+    ) {
+        let parent_scope = model.scopes.get(&parent).expect("live parent modeled");
+        model.scopes.insert(
+            capture,
+            ModelScope {
+                live: true,
+                visible,
+                custody: parent_scope.custody.clone(),
+            },
+        );
+    }
+
+    fn captured_visible(
+        visible: &BTreeMap<String, SessionVarId>,
+    ) -> BTreeMap<String, SessionVarId> {
+        visible
+            .iter()
+            .filter(|(name, _)| name.as_str() != "alias")
+            .map(|(name, id)| (name.clone(), *id))
+            .collect()
+    }
+
+    fn owner_custody(model: &Model, owner: ScopeId) -> HashSet<SessionVarId> {
+        let mut custody: HashSet<_> = model
+            .bindings
+            .iter()
+            .filter(|binding| binding.owner == owner)
+            .map(|binding| binding.id)
+            .collect();
+        if let Some(alias) = model
+            .bindings
+            .iter()
+            .find(|binding| binding.name == "alias")
+        {
+            // This fixture publishes one alias whose sole dependency is source.
+            custody.insert(SessionVarId::from_extract(ROOTED_IDS[0]));
+            custody.insert(alias.id);
+        }
+        custody
+    }
+
+    fn run_history(plan: Plan) -> Support {
+        let mut state = PersistentSession::new(None, 64 * 1024);
+        let mut support = Support::default();
+        let owner = state.mint_isolated_scope();
+        let mut source_identity = super::super::prepared::tests::rooted_publication_fixture(
+            &mut state,
+            "source",
+            SOURCE_GENERATION,
+        );
+        let source_handle = source_identity.value.handle;
+        source_identity.value.identity.occurrence = "source".into();
+        let source_identity = source_identity.value.identity.clone();
+        source_identity_entry(&mut state, owner, source_identity.clone(), source_handle);
+        support.same_generation_originals += 1;
+        support.shared_handle_bindings += 1;
+
+        let source_id = SessionVarId::from_extract(ROOTED_IDS[0]);
+        let source_value = tidepool_codegen::binding_table::BoundValue {
+            handle: source_handle,
+            identity: source_identity.clone(),
+        };
+        let alias_module = SessionModule::val(tidepool_repr::Generation(ALIAS_GENERATION));
+        let mut alias_identity = source_identity.clone();
+        alias_identity.module = alias_module.module_name();
+        alias_identity.occurrence = "alias".into();
+        let mut alias_value = source_value.clone();
+        alias_value.identity = alias_identity.clone();
+        let alias_shares_source_handle = alias_value.handle == source_handle;
+        let alias_id = SessionVarId::from_extract(ALIAS_ID);
+        state
+            .publish_alias_in(
+                owner,
+                BindingEntry {
+                    name: tidepool_repr::BindingName("alias".into()),
+                    id: alias_id,
+                    module: alias_module,
+                    value: alias_value,
+                    type_display: None,
+                    defining_expr: None,
+                    scope: owner,
+                },
+                source_id,
+            )
+            .unwrap();
+        support.aliases += 1;
+        support.shared_handle_bindings += usize::from(alias_shares_source_handle);
+
+        let source_module = SessionModule::val(tidepool_repr::Generation(SOURCE_GENERATION));
+        let mut model = Model::default();
+        let source_model = ModelBinding {
+            id: source_id,
+            name: "source".into(),
+            module: source_module,
+            identity: source_identity.clone(),
+            handle_group: 0,
+            owner,
+        };
+        let alias_model = ModelBinding {
+            id: alias_id,
+            name: "alias".into(),
+            module: alias_module,
+            identity: alias_identity,
+            handle_group: 0,
+            owner,
+        };
+        model.bindings.extend([source_model, alias_model]);
+        let mut visible = BTreeMap::from([
+            ("source".to_owned(), source_id),
+            ("alias".to_owned(), alias_id),
+        ]);
+        model.scopes.insert(
+            owner,
+            ModelScope {
+                live: true,
+                visible: visible.clone(),
+                custody: owner_custody(&model, owner),
+            },
+        );
+
+        let before = state.mint_detached_scope(owner).unwrap();
+        capture_model(&mut model, before, owner, captured_visible(&visible));
+        assert!(state.resolve_in(before, "alias").is_none());
+        support.captures_before_shadow += 1;
+        support.alias_hidden_from_capture +=
+            usize::from(state.resolve_in(before, "alias").is_none());
+
+        let mut other_identity = source_identity.clone();
+        other_identity.occurrence = "other".into();
+        for (name, id, identity) in [
+            ("pair", ROOTED_IDS[1], source_identity.clone()),
+            ("other", ROOTED_IDS[2], other_identity.clone()),
+        ] {
+            let mut value = source_value.clone();
+            value.identity = identity.clone();
+            state
+                .bind_in(
+                    owner,
+                    BindingEntry {
+                        name: tidepool_repr::BindingName(name.into()),
+                        id: SessionVarId::from_extract(id),
+                        module: source_module,
+                        value,
+                        type_display: None,
+                        defining_expr: None,
+                        scope: owner,
+                    },
+                )
+                .unwrap();
+            support.same_generation_originals += 1;
+            let bound_handle = state
+                .bindings()
+                .get(SessionVarId::from_extract(id))
+                .unwrap()
+                .value
+                .handle;
+            support.shared_handle_bindings += usize::from(bound_handle == source_handle);
+            if identity == source_identity {
+                support.same_generation_identity_pair += 1;
+            }
+        }
+        model.bindings.extend([
+            ModelBinding {
+                id: SessionVarId::from_extract(ROOTED_IDS[1]),
+                name: "pair".into(),
+                module: source_module,
+                identity: source_identity.clone(),
+                handle_group: 0,
+                owner,
+            },
+            ModelBinding {
+                id: SessionVarId::from_extract(ROOTED_IDS[2]),
+                name: "other".into(),
+                module: source_module,
+                identity: other_identity,
+                handle_group: 0,
+                owner,
+            },
+        ]);
+        visible.insert("pair".into(), SessionVarId::from_extract(ROOTED_IDS[1]));
+        visible.insert("other".into(), SessionVarId::from_extract(ROOTED_IDS[2]));
+        model.scopes.get_mut(&owner).unwrap().visible = visible.clone();
+        model.scopes.get_mut(&owner).unwrap().custody = owner_custody(&model, owner);
+
+        let mut shadow = super::super::prepared::tests::rooted_publication_fixture(
+            &mut state,
+            "source",
+            SHADOW_GENERATION,
+        );
+        let shadow_handle = shadow.value.handle;
+        shadow.value.identity = source_identity.clone();
+        shadow.scope = owner;
+        state.bind_in(owner, shadow).unwrap();
+        support.shadows += 1;
+        let shadow_id = SessionVarId::from_extract(SHADOW_GENERATION);
+        let shadow_binding = ModelBinding {
+            id: shadow_id,
+            name: "source".into(),
+            module: SessionModule::val(tidepool_repr::Generation(SHADOW_GENERATION)),
+            identity: source_identity.clone(),
+            handle_group: 1,
+            owner,
+        };
+        model.bindings.push(shadow_binding.clone());
+        visible.insert("source".into(), shadow_id);
+        model.scopes.get_mut(&owner).unwrap().visible = visible.clone();
+        model.scopes.get_mut(&owner).unwrap().custody = owner_custody(&model, owner);
+
+        let after = state.mint_detached_scope(owner).unwrap();
+        capture_model(&mut model, after, owner, captured_visible(&visible));
+        support.captures_after_shadow += 1;
+        let chained = if plan.chain_capture {
+            let capture = state.mint_detached_scope(before).unwrap();
+            let chain_visible = model.scopes[&before].visible.clone();
+            capture_model(&mut model, capture, before, chain_visible);
+            support.chained_captures += 1;
+            Some(capture)
+        } else {
+            None
+        };
+
+        // These fixture bytes exercise generation/interface lifetime only; they
+        // are not Haskell compiler authority or checked-interface evidence.
+        let modules = [source_module, alias_module, shadow_binding.module];
+        let interfaces: HashMap<_, _> = modules
+            .into_iter()
+            .enumerate()
+            .map(|(index, module)| {
+                let bytes: Arc<[u8]> = Arc::from([index as u8 + 17]);
+                state.retain_fixture_value_interface(module, bytes.clone());
+                (module, bytes)
+            })
+            .collect();
+
+        let alias_lease_baseline = state.bindings().lease_count(alias_id);
+        let source_lease_baseline = state.bindings().lease_count(source_id);
+        let expected_lease = alias_dependency_closure(alias_id, source_id);
+        let first_lease = state.acquire_binding_leases([alias_id]);
+        assert_eq!(first_lease, expected_lease);
+        assert_eq!(
+            state.bindings().lease_count(alias_id),
+            alias_lease_baseline + 1
+        );
+        assert_eq!(
+            state.bindings().lease_count(source_id),
+            source_lease_baseline + 1
+        );
+        let second_lease = state.acquire_binding_leases([alias_id]);
+        assert_eq!(second_lease, expected_lease);
+        assert_eq!(
+            state.bindings().lease_count(alias_id),
+            alias_lease_baseline + 2
+        );
+        assert_eq!(
+            state.bindings().lease_count(source_id),
+            source_lease_baseline + 2
+        );
+        model.explicit = vec![Some(expected_lease.clone()), Some(expected_lease)];
+        support.explicit_alias_leases = 2;
+
+        let handles = BTreeMap::from([(0, source_handle), (1, shadow_handle)]);
+        let live = check_state(&state, &model, &handles, &interfaces);
+        assert_eq!(live.len(), 5);
+
+        let captures = [Some(before), Some(after), chained];
+        let mut explicit_sets = vec![Some(first_lease), Some(second_lease)];
+        let mut actions = (0_u8..6).collect::<Vec<_>>();
+        actions.sort_by_key(|action| {
+            if *action == 0 {
+                (0_u8, 0_u8, 0_u8, 0_u8, *action)
+            } else {
+                let capture = (1..=3).contains(action);
+                let partition = if plan.capture_first {
+                    if capture {
+                        1
+                    } else {
+                        2
+                    }
+                } else if capture {
+                    2
+                } else {
+                    1
+                };
+                let capture_tier = if capture { u8::from(*action == 1) } else { 0 };
+                (
+                    1,
+                    partition,
+                    capture_tier,
+                    plan.release_ranks[usize::from(*action - 1)],
+                    *action,
+                )
+            }
+        });
+        let capture_position = actions
+            .iter()
+            .position(|action| (1..=3).contains(action))
+            .unwrap();
+        let explicit_position = actions.iter().position(|action| *action >= 4).unwrap();
+        if capture_position < explicit_position {
+            support.capture_before_explicit_release += 1;
+        } else {
+            support.explicit_before_capture_release += 1;
+        }
+        for action in actions {
+            let before_live = model_live_ids(&model);
+            let before_handles = model_handles(&model, &before_live);
+            let before_roots = state.persistent_roots_count();
+            let released_roots = match action {
+                0 => {
+                    let receipt = state.retire_scope(owner);
+                    model.owner_retired = true;
+                    model.scopes.get_mut(&owner).unwrap().live = false;
+                    let retained = model_live_ids(&model);
+                    support.pending_owner_bindings += retained.len();
+                    support.owner_retired_with_holders += usize::from(!retained.is_empty());
+                    receipt.roots_released
+                }
+                1..=3 => {
+                    let index = usize::from(action - 1);
+                    if let Some(scope) = captures[index] {
+                        let receipt = state.retire_scope(scope);
+                        model.scopes.get_mut(&scope).unwrap().live = false;
+                        support.capture_releases += 1;
+                        receipt.roots_released
+                    } else {
+                        0
+                    }
+                }
+                4..=5 => {
+                    let index = usize::from(action - 4);
+                    if let Some(lease) = explicit_sets[index].take() {
+                        let prior_counts: BTreeMap<_, _> = lease
+                            .iter()
+                            .map(|id| (*id, state.bindings().lease_count(*id)))
+                            .collect();
+                        let released = state.release_binding_leases(lease.iter().copied());
+                        let released_roots = state.release_binding_roots(released);
+                        model.explicit[index] = None;
+                        for id in lease {
+                            assert_eq!(
+                                state.bindings().lease_count(id),
+                                prior_counts[&id].saturating_sub(1),
+                                "explicit lease decrement for {id:?}"
+                            );
+                        }
+                        support.explicit_releases += 1;
+                        released_roots
+                    } else {
+                        0
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let after_live = model_live_ids(&model);
+            let after_handles = model_handles(&model, &after_live);
+            let expected_released = before_handles.difference(&after_handles).count();
+            assert_eq!(released_roots, expected_released, "release action {action}");
+            assert_eq!(
+                before_roots - state.persistent_roots_count(),
+                released_roots,
+                "GC-root ledger delta for action {action}"
+            );
+            support.held_root_receipts +=
+                usize::from(expected_released == 0 && !before_handles.is_empty());
+            support.released_handles += expected_released;
+            check_state(&state, &model, &handles, &interfaces);
+            let after_source = after_live.contains(&source_id);
+            let after_pair = after_live.contains(&SessionVarId::from_extract(ROOTED_IDS[1]));
+            if after_source && !after_pair {
+                support.shared_pair_survived_member_eviction += 1;
+                if state.retained_value_interface(source_module).is_some() {
+                    support.interface_survived_single_member += 1;
+                }
+            }
+
+            for &(scope_selector, name_selector) in &plan.reads {
+                let query_scopes = [owner, before, after, chained.unwrap_or(before)];
+                let query_names = ["source", "pair", "other", "alias"];
+                let scope = query_scopes[usize::from(scope_selector) % query_scopes.len()];
+                let name = query_names[usize::from(name_selector) % query_names.len()];
+                let scope_model = &model.scopes[&scope];
+                let expected = scope_model
+                    .live
+                    .then(|| scope_model.visible.get(name).copied())
+                    .flatten()
+                    .filter(|id| after_live.contains(id));
+                assert_eq!(
+                    state.resolve_in(scope, name).map(|entry| entry.id),
+                    expected,
+                    "generated read {scope:?}/{name} after action {action}"
+                );
+            }
+        }
+
+        assert_eq!(support.same_generation_originals, 3);
+        assert_eq!(support.same_generation_identity_pair, 2);
+        assert_eq!(support.shared_handle_bindings, 4);
+        assert_eq!(support.aliases, 1);
+        assert_eq!(support.shadows, 1);
+        assert_eq!(support.captures_before_shadow, 1);
+        assert_eq!(support.captures_after_shadow, 1);
+        assert_eq!(support.explicit_alias_leases, 2);
+        assert_eq!(support.capture_releases, 2 + support.chained_captures);
+        assert_eq!(support.explicit_releases, 2);
+        assert_eq!(support.released_handles, 2);
+        assert_eq!(support.alias_hidden_from_capture, 1);
+        assert!(
+            support.owner_retired_with_holders > 0,
+            "support: {support:?}"
+        );
+        assert!(
+            support.shared_pair_survived_member_eviction > 0,
+            "support: {support:?}"
+        );
+        assert!(
+            support.interface_survived_single_member > 0,
+            "support: {support:?}"
+        );
+        assert_eq!(
+            model_live_ids(&model),
+            HashSet::new(),
+            "support: {support:?}"
+        );
+        assert_eq!(state.value_handle_count(), 0, "support: {support:?}");
+        assert!(state.live_val_modules().is_empty());
+
+        let old_raw = source_handle.raw();
+        let fresh =
+            super::super::prepared::tests::rooted_publication_fixture(&mut state, "fresh", 12_200);
+        let fresh_handle = fresh.value.handle;
+        assert_ne!(
+            old_raw,
+            fresh_handle.raw(),
+            "released handle identity cannot revive"
+        );
+        assert!(state
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(old_raw)
+            .is_none());
+        let fresh_scope = state.mint_isolated_scope();
+        state.bind_in(fresh_scope, fresh).unwrap();
+        assert_eq!(state.retire_scope(fresh_scope).roots_released, 1);
+        assert_eq!(state.value_handle_count(), 0);
+        support
+    }
+
+    fn source_identity_entry(
+        state: &mut PersistentSession,
+        owner: ScopeId,
+        identity: tidepool_repr::execution_schema::SymbolIdentity,
+        handle: tidepool_codegen::prepared_program::PreparedHandle,
+    ) {
+        state
+            .bind_in(
+                owner,
+                BindingEntry {
+                    name: tidepool_repr::BindingName("source".into()),
+                    id: SessionVarId::from_extract(ROOTED_IDS[0]),
+                    module: SessionModule::val(tidepool_repr::Generation(SOURCE_GENERATION)),
+                    value: tidepool_codegen::binding_table::BoundValue { handle, identity },
+                    type_display: None,
+                    defining_expr: None,
+                    scope: owner,
+                },
+            )
+            .unwrap();
+    }
+
+    fn config() -> Config {
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+            config.max_shrink_iters = 4096;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        config
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        #[test]
+        fn actual_binding_lifetime_histories_match_rooted_model(history in plan()) {
+            let support = run_history(history);
+            prop_assert_eq!(support.same_generation_originals, 3, "{support:?}");
+            prop_assert_eq!(support.same_generation_identity_pair, 2, "{support:?}");
+            prop_assert_eq!(support.shared_handle_bindings, 4, "{support:?}");
+            prop_assert_eq!(support.aliases, 1, "{support:?}");
+            prop_assert_eq!(support.shadows, 1, "{support:?}");
+            prop_assert_eq!(support.captures_before_shadow, 1, "{support:?}");
+            prop_assert_eq!(support.captures_after_shadow, 1, "{support:?}");
+            prop_assert!(support.chained_captures <= 1, "{support:?}");
+            prop_assert_eq!(support.explicit_alias_leases, 2, "{support:?}");
+            prop_assert_eq!(support.capture_releases, 2 + support.chained_captures, "{support:?}");
+            prop_assert_eq!(support.explicit_releases, 2, "{support:?}");
+            prop_assert_eq!(support.released_handles, 2, "{support:?}");
+            prop_assert_eq!(support.alias_hidden_from_capture, 1, "{support:?}");
+            prop_assert!(support.owner_retired_with_holders > 0, "{support:?}");
+            prop_assert!(support.shared_pair_survived_member_eviction > 0, "{support:?}");
+            prop_assert!(support.interface_survived_single_member > 0, "{support:?}");
+        }
+    }
+
+    #[test]
+    fn guided_actual_release_partitions_retain_pair_and_alias_custody() {
+        for chain_capture in [false, true] {
+            for capture_first in [true, false] {
+                let support = run_history(Plan {
+                    chain_capture,
+                    capture_first,
+                    release_ranks: if capture_first {
+                        vec![4, 0, 2, 3, 4]
+                    } else {
+                        vec![3, 2, 4, 0, 1]
+                    },
+                    reads: vec![(0, 0), (1, 3), (2, 1), (3, 2)],
+                });
+                assert_eq!(support.owner_retired_with_holders, 1, "{support:?}");
+                assert!(support.held_root_receipts > 0, "{support:?}");
+                assert!(
+                    support.shared_pair_survived_member_eviction > 0,
+                    "{support:?}"
+                );
+                assert!(support.interface_survived_single_member > 0, "{support:?}");
+                if capture_first {
+                    assert_eq!(support.capture_before_explicit_release, 1, "{support:?}");
+                    assert_eq!(support.explicit_before_capture_release, 0, "{support:?}");
+                } else {
+                    assert_eq!(support.explicit_before_capture_release, 1, "{support:?}");
+                    assert_eq!(support.capture_before_explicit_release, 0, "{support:?}");
+                }
+                eprintln!(
+                    "actual binding lifetime partition chain={chain_capture} capture_first={capture_first}: {support:?}"
+                );
+            }
+        }
+    }
+}
