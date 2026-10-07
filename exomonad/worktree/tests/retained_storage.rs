@@ -158,7 +158,9 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
         let receipt = WorktreeReceipt {
             worktree_id: id,
             cwd,
-            branch: Some(BranchName::from_raw(format!("exomonad/worktree/tiny-{number}"))),
+            branch: Some(BranchName::from_raw(format!(
+                "exomonad/worktree/tiny-{number}"
+            ))),
             source_head: GitOid::from_raw("a".repeat(40)),
             snapshot_ref: None,
             origin: WorktreeOrigin::CurrentRepository,

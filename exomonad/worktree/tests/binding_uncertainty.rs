@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 use exomonad_worktree::{
-    AgentRef, BindingTable, EventJournal, WorktreeError, WorktreeId, WorktreeRegistry,
-    WorkspaceAccess,
+    AgentRef, BindingTable, EventJournal, WorkspaceAccess, WorktreeError, WorktreeId,
+    WorktreeRegistry,
 };
 use std::{fs, path::PathBuf, process::Command};
 use tidepool_atomic_write::DirectoryAnchor;
@@ -22,7 +22,9 @@ fn binding_fault_child() {
     let other = WorktreeId::from_raw("wt-other");
     let agent = AgentRef::from_raw("agent-one");
     if operation == "reopen" {
-        let lease = table.bind(&id, &agent, WorkspaceAccess::ReadWrite, 1).unwrap();
+        let lease = table
+            .bind(&id, &agent, WorkspaceAccess::ReadWrite, 1)
+            .unwrap();
         drop(table);
         fs::write(&arm, "armed").unwrap();
         BindingTable::open(&anchor, relative)
@@ -41,7 +43,9 @@ fn binding_fault_child() {
         return;
     }
     let other_agent = AgentRef::from_raw("agent-other");
-    let prior = table.bind(&other, &other_agent, WorkspaceAccess::ReadWrite, 1).unwrap();
+    let prior = table
+        .bind(&other, &other_agent, WorkspaceAccess::ReadWrite, 1)
+        .unwrap();
     let mut transferred = None;
     if operation == "bind" {
         fs::write(&arm, "armed").unwrap();
@@ -49,14 +53,18 @@ fn binding_fault_child() {
             .bind(&id, &agent, WorkspaceAccess::ReadWrite, 2)
             .expect_err("uncertain bind returns no lease");
     } else if operation == "transfer" {
-        let mut lease = table.bind(&id, &agent, WorkspaceAccess::ReadWrite, 2).unwrap();
+        let mut lease = table
+            .bind(&id, &agent, WorkspaceAccess::ReadWrite, 2)
+            .unwrap();
         fs::write(&arm, "armed").unwrap();
         table
             .transfer(&mut lease, &AgentRef::from_raw("agent-two"), 3)
             .expect_err("uncertain transfer retains custody without granting authority");
         transferred = Some(lease);
     } else {
-        let lease = table.bind(&id, &agent, WorkspaceAccess::ReadWrite, 2).unwrap();
+        let lease = table
+            .bind(&id, &agent, WorkspaceAccess::ReadWrite, 2)
+            .unwrap();
         fs::write(&arm, "armed").unwrap();
         lease
             .release(&mut table)
@@ -78,8 +86,14 @@ fn binding_fault_child() {
         table.membership(&id, &agent).is_none(),
         "uncertainty cannot grant custody through current"
     );
-    assert!(table.membership(&other, &other_agent).is_none(), "whole table is fenced");
-    assert!(table.participants(&id).is_err(), "uncertainty refuses diagnostics too");
+    assert!(
+        table.membership(&other, &other_agent).is_none(),
+        "whole table is fenced"
+    );
+    assert!(
+        table.participants(&id).is_err(),
+        "uncertainty refuses diagnostics too"
+    );
     assert!(table.active_for_agent(&agent).is_none());
     if let Some(lease) = &mut transferred {
         assert_eq!(rows[1]["state"], "Active");
@@ -130,9 +144,13 @@ fn binding_fault_child() {
             .unwrap();
     } else {
         assert!(table.membership(&id, &agent).is_none());
-        let lease = table.bind(&id, &agent, WorkspaceAccess::ReadWrite, 4).unwrap();
+        let lease = table
+            .bind(&id, &agent, WorkspaceAccess::ReadWrite, 4)
+            .unwrap();
         lease.complete(&mut table).unwrap();
-        let lease = table.bind(&id, &agent, WorkspaceAccess::ReadWrite, 5).unwrap();
+        let lease = table
+            .bind(&id, &agent, WorkspaceAccess::ReadWrite, 5)
+            .unwrap();
         lease.release(&mut table).unwrap();
     }
     if let Some(lease) = transferred {
@@ -252,7 +270,14 @@ fn directory_admission_fault_child() {
         "binding" => {
             let mut table = BindingTable::open(&anchor, relative).unwrap();
             let id = WorktreeId::from_raw("wt-admitted");
-            let lease = table.bind(&id, &AgentRef::from_raw("agent"), WorkspaceAccess::ReadWrite, 1).unwrap();
+            let lease = table
+                .bind(
+                    &id,
+                    &AgentRef::from_raw("agent"),
+                    WorkspaceAccess::ReadWrite,
+                    1,
+                )
+                .unwrap();
             lease.complete(&mut table).unwrap();
         }
         "journal" => {

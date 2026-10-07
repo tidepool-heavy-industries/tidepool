@@ -1,6 +1,4 @@
-use exomonad_worktree::{
-    AgentRef, BindingTable, BindingState, WorktreeId, WorkspaceAccess,
-};
+use exomonad_worktree::{AgentRef, BindingState, BindingTable, WorkspaceAccess, WorktreeId};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence};
 use std::collections::BTreeMap;
@@ -69,7 +67,9 @@ fn check_model(table: &BindingTable, active: &BTreeMap<usize, Active>) {
                 assert_eq!(table.active_for_agent(&actor), Some(&tree));
             }
             Some(membership) => {
-                assert!(table.membership(&worktree(membership.worktree), &actor).is_none());
+                assert!(table
+                    .membership(&worktree(membership.worktree), &actor)
+                    .is_none());
                 assert!(table.active_for_agent(&actor).is_none());
             }
             None => {
@@ -144,7 +144,10 @@ fn replay(history: &[(u8, u8, u8)]) {
                 }
             }
             1 | 2 => {
-                if active.get(&actor_index).is_some_and(|membership| membership.authorized) {
+                if active
+                    .get(&actor_index)
+                    .is_some_and(|membership| membership.authorized)
+                {
                     let membership = active.remove(&actor_index).expect("active actor");
                     let lease = leases.remove(&actor_index).expect("issued lease");
                     if op % 6 == 1 {
@@ -152,7 +155,9 @@ fn replay(history: &[(u8, u8, u8)]) {
                     } else {
                         lease.complete(&mut table).expect("complete membership");
                     }
-                    assert!(table.membership(&worktree(membership.worktree), &actor).is_none());
+                    assert!(table
+                        .membership(&worktree(membership.worktree), &actor)
+                        .is_none());
                 }
             }
             3 => {
@@ -163,43 +168,41 @@ fn replay(history: &[(u8, u8, u8)]) {
                 drop(table);
                 table = BindingTable::open(&anchor, "bindings").expect("reopen binding table");
             }
-            4 => {
-                match active.get_mut(&actor_index) {
-                    Some(membership) if !membership.authorized => {
-                        let predecessor_index = membership.predecessor.unwrap_or(actor_index);
-                        let wrong_index = (0..4)
-                            .find(|candidate| {
-                                *candidate != predecessor_index && *candidate != actor_index
-                            })
-                            .expect("actor domain has a distinct incorrect predecessor");
-                        let wrong_predecessor = agent(wrong_index);
-                        assert!(table
-                            .recover_active(
-                                &worktree(membership.worktree),
-                                &wrong_predecessor,
-                                &actor,
-                                99,
-                            )
-                            .is_err());
-                        let lease = table
-                            .recover_active(
-                                &worktree(membership.worktree),
-                                &agent(predecessor_index),
-                                &actor,
-                                100,
-                            )
-                            .expect("recover retained exact actor");
-                        membership.authorized = true;
-                        leases.insert(actor_index, lease);
-                    }
-                    Some(membership) => {
-                        assert!(table
-                            .recover_active(&worktree(membership.worktree), &actor, &actor, 100)
-                            .is_err());
-                    }
-                    None => assert!(table.recover_active(&tree, &actor, &actor, 100).is_err()),
+            4 => match active.get_mut(&actor_index) {
+                Some(membership) if !membership.authorized => {
+                    let predecessor_index = membership.predecessor.unwrap_or(actor_index);
+                    let wrong_index = (0..4)
+                        .find(|candidate| {
+                            *candidate != predecessor_index && *candidate != actor_index
+                        })
+                        .expect("actor domain has a distinct incorrect predecessor");
+                    let wrong_predecessor = agent(wrong_index);
+                    assert!(table
+                        .recover_active(
+                            &worktree(membership.worktree),
+                            &wrong_predecessor,
+                            &actor,
+                            99,
+                        )
+                        .is_err());
+                    let lease = table
+                        .recover_active(
+                            &worktree(membership.worktree),
+                            &agent(predecessor_index),
+                            &actor,
+                            100,
+                        )
+                        .expect("recover retained exact actor");
+                    membership.authorized = true;
+                    leases.insert(actor_index, lease);
                 }
-            }
+                Some(membership) => {
+                    assert!(table
+                        .recover_active(&worktree(membership.worktree), &actor, &actor, 100)
+                        .is_err());
+                }
+                None => assert!(table.recover_active(&tree, &actor, &actor, 100).is_err()),
+            },
             5 => {
                 let successor_index = raw_tree_access as usize % 4;
                 let Some(membership) = active.get(&actor_index).copied() else {
@@ -242,7 +245,10 @@ fn replay(history: &[(u8, u8, u8)]) {
     }
     assert!(support[0] > 0 && support[1] > 0 && support[2] > 0);
     assert!(support[3] > 0 && support[4] > 0 && support[5] > 0);
-    assert!(support[6] >= 2, "the history must exercise shared membership");
+    assert!(
+        support[6] >= 2,
+        "the history must exercise shared membership"
+    );
 }
 
 proptest! {

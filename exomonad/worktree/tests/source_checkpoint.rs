@@ -439,7 +439,12 @@ fn failed_workspace_initialization_retains_a_provisional_checkout() {
                 "rev-parse",
                 &format!(
                     "refs/heads/{}",
-                    summary.receipt.branch.as_ref().expect("managed branch").as_str()
+                    summary
+                        .receipt
+                        .branch
+                        .as_ref()
+                        .expect("managed branch")
+                        .as_str()
                 )
             ]
         )

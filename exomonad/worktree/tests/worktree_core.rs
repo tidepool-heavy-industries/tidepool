@@ -14,8 +14,7 @@ use exomonad_worktree::testing::{fingerprint, TestRepo};
 use exomonad_worktree::{
     AgentRef, BindingTable, BranchName, DirtySummary, GitCli, GitOid, GitRef, InProgressKind,
     WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
-    WorktreeRecordStatus, WorktreeRegistry, WorktreeSource, WorktreeSpec,
-    EXOMONAD_BRANCH_PREFIX,
+    WorktreeRecordStatus, WorktreeRegistry, WorktreeSource, WorktreeSpec, EXOMONAD_BRANCH_PREFIX,
 };
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
@@ -78,8 +77,20 @@ fn caller_labels_do_not_enter_allocated_branch_names() {
     let before = capture_state(&git, repo.path());
 
     for label in [
-        "a..b", "a...b", "a-..-b", "a/.b", "a/../b", "a/.../b", "a.lock/b",
-        "a/.lock/b", "a.lock.lock/b", "a.lock", "a/b.lock", "a./b", "a/b", "a.b.c",
+        "a..b",
+        "a...b",
+        "a-..-b",
+        "a/.b",
+        "a/../b",
+        "a/.../b",
+        "a.lock/b",
+        "a/.lock/b",
+        "a.lock.lock/b",
+        "a.lock",
+        "a/b.lock",
+        "a./b",
+        "a/b",
+        "a.b.c",
     ] {
         let handle = manager
             .create(&WorktreeSpec::from_current_repository(label))
@@ -93,7 +104,10 @@ fn caller_labels_do_not_enter_allocated_branch_names() {
             repo.path(),
             &[
                 "check-ref-format",
-                &format!("refs/heads/{}", handle.branch().expect("created branch").as_str()),
+                &format!(
+                    "refs/heads/{}",
+                    handle.branch().expect("created branch").as_str()
+                ),
             ],
         )
         .expect("generated branch is a valid Git ref");
@@ -135,7 +149,10 @@ fn overlong_caller_labels_do_not_change_allocated_branch_names() {
             repo.path(),
             &[
                 "check-ref-format",
-                &format!("refs/heads/{}", handle.branch().expect("created branch").as_str()),
+                &format!(
+                    "refs/heads/{}",
+                    handle.branch().expect("created branch").as_str()
+                ),
             ],
         )
         .expect("generated branch is a valid Git ref");
@@ -505,7 +522,10 @@ fn source_checkout_registration_is_idempotent_and_non_mutating() {
     assert_eq!(first.id(), second.id());
     assert_eq!(first.cwd(), repo.path());
     assert_eq!(first.receipt().origin, WorktreeOrigin::SourceCheckout);
-    assert_eq!(first.branch().map(|branch| branch.as_str()), before.branch.as_deref());
+    assert_eq!(
+        first.branch().map(|branch| branch.as_str()),
+        before.branch.as_deref()
+    );
     assert_untouched(&before, &capture_state(&git, repo.path()));
 }
 
@@ -516,10 +536,16 @@ fn source_checkout_registration_adopts_dirty_detached_checkout_by_identity() {
         .commit_file("base.txt", "base", "base")
         .expect("commit base");
     let writer = repo.writer();
-    writer.write_file("base.txt", "staged").expect("stage content");
+    writer
+        .write_file("base.txt", "staged")
+        .expect("stage content");
     writer.stage("base.txt").expect("stage file");
-    writer.write_file("base.txt", "staged and unstaged").expect("modify file");
-    writer.write_file("untracked.txt", "mine").expect("write user file");
+    writer
+        .write_file("base.txt", "staged and unstaged")
+        .expect("modify file");
+    writer
+        .write_file("untracked.txt", "mine")
+        .expect("write user file");
     repo.git()
         .try_run(repo.path(), &["checkout", "--detach", "-q"])
         .expect("detach source checkout");
@@ -553,7 +579,10 @@ fn source_checkout_registration_adopts_dirty_detached_checkout_by_identity() {
         std::fs::read_to_string(repo.path().join("base.txt")).expect("read staged file"),
         "staged and unstaged"
     );
-    assert_eq!(std::fs::read_to_string(repo.path().join("untracked.txt")).unwrap(), "mine");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("untracked.txt")).unwrap(),
+        "mine"
+    );
 }
 
 #[test]
@@ -607,10 +636,16 @@ fn equal_labels_do_not_alias_worktree_allocations() {
         GitCli::new()
             .try_run(
                 repo.path(),
-                &["check-ref-format", &format!("refs/heads/{}", branch.as_str())],
+                &[
+                    "check-ref-format",
+                    &format!("refs/heads/{}", branch.as_str()),
+                ],
             )
             .expect("allocated branch is valid");
-        assert_eq!(manager.lookup(handle.id()).unwrap().unwrap().id(), handle.id());
+        assert_eq!(
+            manager.lookup(handle.id()).unwrap().unwrap().id(),
+            handle.id()
+        );
     }
 }
 
@@ -640,7 +675,10 @@ fn worker_commit_is_visible_in_shared_namespace_without_moving_source_head() {
         repo.writer().head().expect("source head after work"),
         source_head
     );
-    let source_worker_ref = format!("refs/heads/{}", handle.branch().expect("created branch").as_str());
+    let source_worker_ref = format!(
+        "refs/heads/{}",
+        handle.branch().expect("created branch").as_str()
+    );
     assert_eq!(
         git.run(
             repo.path(),
@@ -907,7 +945,10 @@ fn provisional_row_with_no_directory_is_visible_not_recreated() {
     let receipt = WorktreeReceipt {
         worktree_id: id.clone(),
         cwd: cwd.clone(),
-        branch: Some(BranchName::from_raw(format!("exomonad/worktree/provisional-{}", id.as_str()))),
+        branch: Some(BranchName::from_raw(format!(
+            "exomonad/worktree/provisional-{}",
+            id.as_str()
+        ))),
         source_head: GitOid::from_raw("f".repeat(40)),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -1085,20 +1126,41 @@ fn binding_allows_exact_actor_peers_but_one_active_workspace_per_actor() {
         .permits(exomonad_worktree::WorkspaceAccess::ReadWrite));
 
     let lease_a = table
-        .bind(&worktree, &agent_a, exomonad_worktree::WorkspaceAccess::ReadWrite, 1000)
+        .bind(
+            &worktree,
+            &agent_a,
+            exomonad_worktree::WorkspaceAccess::ReadWrite,
+            1000,
+        )
         .expect("first bind succeeds");
     let lease_b = table
-        .bind(&worktree, &agent_b, exomonad_worktree::WorkspaceAccess::ReadOnly, 2000)
+        .bind(
+            &worktree,
+            &agent_b,
+            exomonad_worktree::WorkspaceAccess::ReadOnly,
+            2000,
+        )
         .expect("a peer may attach to the same worktree");
-    assert_eq!(table.membership(&worktree, &agent_a).unwrap().access(), exomonad_worktree::WorkspaceAccess::ReadWrite);
-    assert_eq!(table.membership(&worktree, &agent_b).unwrap().access(), exomonad_worktree::WorkspaceAccess::ReadOnly);
+    assert_eq!(
+        table.membership(&worktree, &agent_a).unwrap().access(),
+        exomonad_worktree::WorkspaceAccess::ReadWrite
+    );
+    assert_eq!(
+        table.membership(&worktree, &agent_b).unwrap().access(),
+        exomonad_worktree::WorkspaceAccess::ReadOnly
+    );
     assert_eq!(table.participants(&worktree).unwrap().count(), 2);
     assert_eq!(table.active_for_agent(&agent_a), Some(&worktree));
     assert_eq!(table.active_for_agent(&agent_b), Some(&worktree));
 
     let other = WorktreeId::from_raw("wt-other");
     assert!(matches!(
-        table.bind(&other, &agent_a, exomonad_worktree::WorkspaceAccess::ReadOnly, 3000),
+        table.bind(
+            &other,
+            &agent_a,
+            exomonad_worktree::WorkspaceAccess::ReadOnly,
+            3000
+        ),
         Err(WorktreeError::WorktreeAuthorityDenied(_))
     ));
 
@@ -1118,9 +1180,14 @@ fn binding_allows_exact_actor_peers_but_one_active_workspace_per_actor() {
     let recovered = fresh
         .recover_active(&worktree, &agent_b, &agent_b, 4000)
         .expect("recover confirmed peer attachment");
-    assert_eq!(fresh.membership(&worktree, &agent_b).unwrap().access(), exomonad_worktree::WorkspaceAccess::ReadOnly);
+    assert_eq!(
+        fresh.membership(&worktree, &agent_b).unwrap().access(),
+        exomonad_worktree::WorkspaceAccess::ReadOnly
+    );
     assert_eq!(fresh.active_for_agent(&agent_b), Some(&worktree));
-    recovered.release(&mut fresh).expect("release recovered membership");
+    recovered
+        .release(&mut fresh)
+        .expect("release recovered membership");
 }
 
 #[test]
@@ -1133,11 +1200,28 @@ fn settling_a_released_binding_also_permits_rebind() {
     let agent_a = AgentRef::from_raw("agent-a");
     let agent_b = AgentRef::from_raw("agent-b");
 
-    let lease = table.bind(&worktree, &agent_a, exomonad_worktree::WorkspaceAccess::ReadWrite, 1000).expect("bind");
-    let peer = table.bind(&worktree, &agent_b, exomonad_worktree::WorkspaceAccess::ReadOnly, 1001).expect("peer bind");
+    let lease = table
+        .bind(
+            &worktree,
+            &agent_a,
+            exomonad_worktree::WorkspaceAccess::ReadWrite,
+            1000,
+        )
+        .expect("bind");
+    let peer = table
+        .bind(
+            &worktree,
+            &agent_b,
+            exomonad_worktree::WorkspaceAccess::ReadOnly,
+            1001,
+        )
+        .expect("peer bind");
     lease.release(&mut table).expect("release");
     assert!(table.membership(&worktree, &agent_a).is_none());
-    assert_eq!(table.membership(&worktree, &agent_b).unwrap().access(), exomonad_worktree::WorkspaceAccess::ReadOnly);
+    assert_eq!(
+        table.membership(&worktree, &agent_b).unwrap().access(),
+        exomonad_worktree::WorkspaceAccess::ReadOnly
+    );
     assert_eq!(table.participants(&worktree).unwrap().count(), 1);
     peer.complete(&mut table).expect("complete peer");
 }

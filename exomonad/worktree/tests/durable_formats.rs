@@ -171,7 +171,9 @@ fn receipt_provisional() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-provisional-0001"),
         cwd: PathBuf::from("/var/exomonad/worktrees/wt-provisional-0001"),
-        branch: Some(BranchName::from_raw("exomonad/worktree/sample-wt-provisional-0001")),
+        branch: Some(BranchName::from_raw(
+            "exomonad/worktree/sample-wt-provisional-0001",
+        )),
         source_head: oid('a'),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -185,7 +187,9 @@ fn receipt_finalized_ref_origin() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-finalized-0002"),
         cwd: PathBuf::from("/var/exomonad/worktrees/wt-finalized-0002"),
-        branch: Some(BranchName::from_raw("exomonad/worktree/sample-wt-finalized-0002")),
+        branch: Some(BranchName::from_raw(
+            "exomonad/worktree/sample-wt-finalized-0002",
+        )),
         source_head: oid('b'),
         snapshot_ref: Some(GitRef::from_raw(
             "refs/exomonad/snapshots/wt-finalized-0002",
@@ -201,7 +205,9 @@ fn receipt_finalized_worktree_origin() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-finalized-0003"),
         cwd: PathBuf::from("/var/exomonad/worktrees/wt-finalized-0003"),
-        branch: Some(BranchName::from_raw("exomonad/worktree/sample-wt-finalized-0003")),
+        branch: Some(BranchName::from_raw(
+            "exomonad/worktree/sample-wt-finalized-0003",
+        )),
         source_head: oid('c'),
         snapshot_ref: None,
         origin: WorktreeOrigin::Worktree(WorktreeId::from_raw("wt-parent-0000")),
@@ -552,7 +558,8 @@ fn binding_field_shape_is_pinned_inline() {
     let json = serde_json::to_string(&sample)
         .unwrap_or_else(|e| panic!("failed to serialize the inline Binding pin: {e}"));
     assert_eq!(
-        json, r#"{"worktree":"wt-pin","agent":"agent-pin","state":"Active","access":"ReadWrite","bound_at_ms":1}"#,
+        json,
+        r#"{"worktree":"wt-pin","agent":"agent-pin","state":"Active","access":"ReadWrite","bound_at_ms":1}"#,
         "Binding's serde shape (field names, field order, or the BindingState \
          variant tags) drifted — this is an inline literal, independent of \
          tests/goldens/durable/, so no regen command can launder this away. \
