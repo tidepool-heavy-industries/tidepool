@@ -161,9 +161,14 @@ impl InvocationWork {
     }
 
     pub(super) fn new_scope(self: &Arc<Self>) -> Result<Arc<Self>, String> {
-        static NEXT_SCOPE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        static NEXT_SCOPE: OnceLock<std::sync::atomic::AtomicI64> = OnceLock::new();
+        let issuer = NEXT_SCOPE.get_or_init(|| {
+            let mut seed = [0; 8];
+            seed.copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..8]);
+            std::sync::atomic::AtomicI64::new((i64::from_le_bytes(seed) & (i64::MAX >> 1)) + 1)
+        });
         self.with_admission_state(|state| {
-            let token = NEXT_SCOPE
+            let token = issuer
                 .fetch_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,

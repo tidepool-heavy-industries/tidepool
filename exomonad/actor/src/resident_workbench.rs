@@ -9239,22 +9239,6 @@ where
             .await
     }
 
-    pub(crate) async fn run_scope_callback(
-        &self,
-        context: crate::ActorSessionContext,
-        callback: RootCustody,
-        realm: RealmId,
-        token: i64,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .run_rooted_entry("scope_callback", callback, token, realm, None)
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await
-    }
-
     pub(crate) async fn run_owned_scope_callback(
         &self,
         context: crate::ActorSessionContext,
@@ -19793,7 +19777,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         };
         let body_realm = RealmId::fresh();
         let body = runner
-            .run_scope_callback(context.clone(), callback, body_realm, 41)
+            .run_rooted_entry(context.clone(), callback, body_realm)
             .await
             .unwrap();
         let boundary = runner
@@ -19802,7 +19786,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .unwrap();
         assert!(matches!(
             boundary,
-            ResidentActorBoundary::ScopeDone { token: 41, .. }
+            ResidentActorBoundary::ScopeDone { token: 0, .. }
         ));
         runner
             .close_realm(context.clone(), body_realm)
