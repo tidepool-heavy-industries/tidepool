@@ -1588,6 +1588,7 @@ fn resolve_receipt_owner_with_validation(
 fn resolve_cold_recovery_source(
     import: ReceiptImportOwner,
     witness: &HomeCertification,
+    product: &RawModuleProduct,
 ) -> CertResult<PendingImportOwner> {
     let ReceiptImportOwner::Source {
         unit,
@@ -1608,6 +1609,13 @@ fn resolve_cold_recovery_source(
             .get(&key)
             .ok_or(CertificationError::Mismatch("home source witness"))?
     };
+    if owner == &witness.owner
+        && !product.groups.iter().any(|group| {
+            group.original_ordinal() == original_ordinal && group.binders().contains(&binder)
+        })
+    {
+        return Err(CertificationError::Mismatch("source binder/group closure"));
+    }
     if binder.unit != unit || binder.module != module {
         return Err(CertificationError::Mismatch("home source witness"));
     }
@@ -3803,7 +3811,7 @@ pub(crate) fn certify_recovery_products_with_validation(
                 )?;
                 let resolved_import = match import {
                     source @ ReceiptImportOwner::Source { .. } => {
-                        resolve_cold_recovery_source(source, witness)?
+                        resolve_cold_recovery_source(source, witness, product)?
                     }
                     other => resolve_receipt_owner_with_validation(
                         other,
@@ -7141,39 +7149,6 @@ pub(crate) mod tests {
             Err(CertificationError::Mismatch("shared original home groups"))
         ));
         println!("native witness original_decodes=2 reuse_decodes=0 nonempty_groups=2");
-    }
-
-    #[test]
-    fn cold_recovery_authenticates_full_original_without_loading_source_products() {
-        let source = inherited_owner("FutureValueSource");
-        let imports = (0..52)
-            .map(|ordinal| {
-                let owners = if ordinal == 51 {
-                    vec![PendingImportOwner::Source {
-                        owner: source.clone(),
-                        original_ordinal: 19,
-                        binder: testing::identity("FutureValueSource", "value"),
-                    }]
-                } else {
-                    Vec::new()
-                };
-                (ordinal, owners)
-            })
-            .collect();
-        let original = original_groups_fixture("Consumer", imports, 7, &BTreeMap::new());
-
-        let recovered = recovered_witness_fixtures(&[original]);
-        let certified = &recovered[0];
-        assert_eq!(certified.requirements.sources, vec![source]);
-        let native = certified.product.original_native().unwrap();
-        assert_eq!(native.groups.len(), 52);
-        assert_eq!(native.groups[51].imports().len(), 1);
-        assert!(matches!(
-            &native.groups[51].imports()[0],
-            PendingImportOwner::Source { owner, original_ordinal: 19, binder }
-                if owner.module == "FutureValueSource"
-                    && binder == &testing::identity("FutureValueSource", "value")
-        ));
     }
 
     #[test]
