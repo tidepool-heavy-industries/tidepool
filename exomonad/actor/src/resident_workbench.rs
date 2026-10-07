@@ -2766,6 +2766,7 @@ pub(crate) enum ResidentActorBoundary {
     WatchPoll(WatchPoll),
     WatchAwait(WatchPoll),
     WatchForget(WatchForget),
+    WatchRelease(WatchForget),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2996,6 +2997,7 @@ impl ResidentActorBoundary {
             Self::WatchPoll(_) => "pollWatch",
             Self::WatchAwait(_) => "awaitWatch",
             Self::WatchForget(_) => "forgetWatch",
+            Self::WatchRelease(_) => "release watch observation",
         }
     }
 }
@@ -3390,6 +3392,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "await",
+            Self::Watches(WatchesReq::ReleaseAwaitWith(..)) => "release watch observation",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
             Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
@@ -9135,6 +9138,9 @@ where
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, path, job)) => {
                         Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ReleaseAwaitWith(watch_id)) => {
+                        Ok(ResidentActorBoundary::WatchRelease(WatchForget { continuation: hole, watch: crate::request_effect::watch_id(watch_id)? }))
                     }
                     ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchForget(WatchForget {
@@ -17966,10 +17972,28 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn compiled_observed_watch_projects_original_nested_decisions_after_source_forget() {
-        with_test_compiler_owner(compiled_observed_watch_projects_original_nested_decisions_after_source_forget_with_compiler_owner()).await;
+        with_test_compiler_owner(compiled_named_watch_fixture_with_compiler_owner(
+            "nestedNamed",
+            2,
+            2,
+        ))
+        .await;
     }
 
-    async fn compiled_observed_watch_projects_original_nested_decisions_after_source_forget_with_compiler_owner(
+    #[tokio::test]
+    async fn compiled_poll_watch_retains_an_inflight_read_after_root_forget() {
+        with_test_compiler_owner(compiled_named_watch_fixture_with_compiler_owner(
+            "pollNamed",
+            1,
+            1,
+        ))
+        .await;
+    }
+
+    async fn compiled_named_watch_fixture_with_compiler_owner(
+        entry: &str,
+        source_count: usize,
+        projection_count: usize,
     ) {
         use crate::request::{ReadinessDependency, RequestRegistry};
         use crate::request_effect::{ReplyResult, WatchSubject};
@@ -17994,10 +18018,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         let mut include = surface.include_path_refs();
         include.push(root.path());
+        let statement = format!("projected <- AwaitRuntime.{entry}");
         let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
             exact_context: None,
             session_id: None,
-            turn_text: "projected <- AwaitRuntime.nestedNamed",
+            turn_text: &statement,
             templates: &templates,
             include: &include,
             session_root: root.path(),
@@ -18083,6 +18108,27 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                             .unwrap()
                     }
                 }
+                ResidentActorBoundary::WatchPoll(poll) => runner
+                    .resume_watch_observation(
+                        context.clone(),
+                        poll.continuation,
+                        registry.observe_watch(owner, poll.watch),
+                    )
+                    .await
+                    .unwrap(),
+                ResidentActorBoundary::WatchRelease(release) => {
+                    registry
+                        .release_transient_watch(owner, release.watch)
+                        .unwrap();
+                    runner
+                        .resume_value(
+                            context.clone(),
+                            release.continuation,
+                            ReplyResult(Ok::<(), crate::ReplyError>(())),
+                        )
+                        .await
+                        .unwrap()
+                }
                 ResidentActorBoundary::WatchAwait(poll) => runner
                     .resume_watch_observation(
                         context.clone(),
@@ -18114,8 +18160,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     .await
                     .unwrap(),
                 ResidentActorBoundary::Completed => {
-                    assert_eq!(sources.len(), 2);
-                    assert_eq!(projections, 2);
+                    assert_eq!(sources.len(), source_count);
+                    assert_eq!(projections, projection_count);
                     return;
                 }
                 other => panic!(

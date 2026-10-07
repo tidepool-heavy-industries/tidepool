@@ -3706,6 +3706,97 @@ mod tests {
     }
 
     #[test]
+    fn private_read_subscription_retains_projection_after_public_root_forget() {
+        use readiness::{Node, Plan};
+        use tidepool_bridge_effects::{
+            CommandCleanup, CommandOutcome, CommandReport, CommandResult,
+        };
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let request = registry.reserve_command_settlement(owner, "read-job".into(), false);
+        let source = registry.register_watch(owner, vec![request]).unwrap().0;
+        let report = CommandReport {
+            command: vec!["true".into()],
+            source: None,
+            result: CommandResult {
+                outcome: CommandOutcome::CommandExited(0),
+                cleanup: CommandCleanup::CommandClean,
+            },
+            output_complete: true,
+            tail: "stable projection".into(),
+        };
+        registry.settle_command(request, "exit 0".into(), None, Some(report.clone()));
+        let read = registry
+            .register_transient_watch(
+                owner,
+                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
+            )
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let reader = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let readiness = registry.observe_watch(owner, read).unwrap();
+                barrier.wait();
+                barrier.wait();
+                (
+                    readiness,
+                    registry
+                        .observe_watch_snapshot_command(read, &[0], "read-job")
+                        .unwrap(),
+                )
+            })
+        };
+        barrier.wait();
+        registry.forget_watch(owner, source).unwrap();
+        registry.forget_response(owner, request).unwrap();
+        assert_eq!(
+            registry.observe_watch(owner, source),
+            Err(ReplyError::Stale)
+        );
+        barrier.wait();
+        let (readiness, projected) = reader.join().unwrap();
+        assert!(matches!(readiness, WatchObservation::Ready(_)));
+        assert_eq!(projected, Some(report));
+        registry.release_transient_watch(owner, read).unwrap();
+        assert_eq!(
+            registry.observe_watch_snapshot_command(read, &[0], "read-job"),
+            Err(ReplyError::Stale)
+        );
+    }
+
+    #[test]
+    fn releasing_a_pending_private_read_does_not_cancel_its_public_source() {
+        use readiness::{Node, Plan};
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let source = registry.register_watch(owner, vec![request]).unwrap().0;
+        let read = registry
+            .register_transient_watch(
+                owner,
+                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
+            )
+            .unwrap();
+        assert!(registry
+            .release_transient_watch(owner, read)
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            registry.observe_watch(owner, source),
+            Ok(WatchObservation::Pending(_))
+        ));
+        assert!(matches!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Pending(_))
+        ));
+    }
+
+    #[test]
     fn command_projection_racing_source_release_keeps_the_selected_report() {
         use tidepool_bridge_effects::{
             CommandCleanup, CommandOutcome, CommandReport, CommandResult,

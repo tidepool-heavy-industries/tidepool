@@ -153,6 +153,7 @@ pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, AwaitPlan),
     RegisterAwaitWith(AwaitPlan),
+    ReleaseAwaitWith(i64),
     RegisterRouteWith(String, tidepool_bridge::HaskellValue, AwaitPlan),
     ObserveRouteWith(i64),
     ListRoutesWith,

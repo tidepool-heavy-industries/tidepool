@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module AwaitRuntime (nestedNamed) where
+module AwaitRuntime (nestedNamed, pollNamed) where
 
 import Control.Monad.Freer (Eff)
 import Tidepool.Agent.Watch
@@ -13,3 +13,11 @@ nestedNamed = do
   case outcome of
     Right (Left (Left 11), 33) -> pure True
     _ -> error "named watch projection changed the original nested choices"
+
+pollNamed :: Eff '[Watches] Bool
+pollNamed = do
+  source <- watch (Just "inspected") (pure (11 :: Int))
+  outcome <- pollWatch source
+  case outcome of
+    WatchReady 11 -> pure True
+    _ -> error "forgetting a public watch revoked its admitted inspection"

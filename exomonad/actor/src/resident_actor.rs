@@ -6302,6 +6302,31 @@ where
                     .resume_value(context.clone(), continuation, report)
                     .await
             }),
+            ResidentActorBoundary::WatchRelease(release) => Box::pin(async move {
+                let released = environment
+                    .requests
+                    .release_transient_watch(context.actor, release.watch);
+                let outcome = match released {
+                    Ok(notifications) => {
+                        publish_request_notifications(
+                            &environment.requests,
+                            &environment.deployments,
+                            notifications,
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        release.continuation,
+                        crate::request_effect::ReplyResult(outcome),
+                    )
+                    .await
+            }),
             ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
                 let outcome = environment
                     .requests

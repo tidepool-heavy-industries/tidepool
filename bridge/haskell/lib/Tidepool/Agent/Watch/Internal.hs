@@ -115,6 +115,7 @@ data RawWatchObservation
 data Watches a where
   RegisterWatchWith :: Text -> AwaitPlan -> Watches Int
   RegisterAwaitWith :: AwaitPlan -> Watches (Either ReplyError Int)
+  ReleaseAwaitWith :: Int -> Watches (Either ReplyError ())
   RegisterRouteWith :: Text -> (Int -> Eff effects ()) -> AwaitPlan -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
@@ -170,10 +171,19 @@ watch label awaiting@(Await plan _) = do
   identity <- send (RegisterWatchWith (maybe "" id label) plan)
   pure (Watch (WatchId identity) awaiting)
 
+-- | Acquire a private subscription before observing. It owns projection
+-- custody through the read, even if the public source watch is forgotten.
 pollWatch :: Member Watches effects => Watch a -> Eff effects (WatchState a)
-pollWatch (Watch (WatchId identity) (Await _ observe)) = do
-  observation <- send (ObserveWatchWith identity)
-  project (Observation identity []) observe observation
+pollWatch source = do
+  let Await plan observe = observed source
+  registered <- send (RegisterAwaitWith plan)
+  case registered of
+    Left failure -> pure (WatchUnavailable (AwaitRejected failure))
+    Right identity -> do
+      observation <- send (ObserveWatchWith identity)
+      projected <- project (Observation identity []) observe observation
+      _ <- send (ReleaseAwaitWith identity)
+      pure projected
 
 -- | The sole readiness evaluator. Its transient subscription is runtime-owned
 -- and cancellation releases that subscription without cancelling requests.
