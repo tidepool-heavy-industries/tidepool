@@ -1782,6 +1782,7 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
         ReplyError::ProgressTypeMismatch => {
             "a request this watch names has an incompatible progress type"
         }
+        ReplyError::InvalidReadiness => "this watch's readiness expression is invalid",
     };
     format!("watch registration was rejected: {detail}")
 }
@@ -1817,6 +1818,9 @@ fn settlement_refusal(
         }
         ReplyError::ProgressTypeMismatch => {
             format!("request {request} expects a different progress type")
+        }
+        ReplyError::InvalidReadiness => {
+            format!("request {request} has an invalid readiness expression")
         }
         ReplyError::AlreadySettled => format!("request {request} is already settled"),
         ReplyError::Stale => format!("request {request} is not active for this actor"),

@@ -2004,7 +2004,6 @@ where
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
         let invocation = owned.state.effects.invocation_work.clone();
         let model = owned.state.effects.model.clone();
-        let boundary = owned.state.effects.publication.boundary().cloned();
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -2018,7 +2017,6 @@ where
                     commands_permitted,
                     invocation,
                     model,
-                    boundary,
                 ))
             },
             move |behavior, _kernel, mut owned, mut result| {
@@ -2593,7 +2591,6 @@ async fn await_effect<H, O>(
     commands_permitted: bool,
     invocation: Arc<InvocationWork>,
     model: Option<Arc<dyn crate::CellModelBinding>>,
-    boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
 ) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2660,7 +2657,7 @@ where
                 .await
         }
         OwnedWorkbenchWait::Watch(poll) => {
-            request_wait::await_watch(environment, kernel, context, control, poll, boundary).await
+            request_wait::await_watch(environment, kernel, context, control, poll).await
         }
         OwnedWorkbenchWait::Sleep {
             continuation,
