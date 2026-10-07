@@ -63,6 +63,9 @@ pub struct NativeGroupKey {
 pub(crate) enum NativeArtifactDemand<'a> {
     AllGroups,
     VerifiedGroupRoot(&'a crate::checked_cell::CheckedTypedEntry),
+    /// Existing target certification issued these imports against authenticated
+    /// original membership. Only new products receive whole-module demand.
+    CertifiedTargetImports(&'a [crate::certified_products::PendingImportOwner]),
 }
 
 /// Copying a retained closure preserves its issuing view's root intent. Full
@@ -1127,6 +1130,45 @@ impl ArtifactInventory {
                 .collect(),
             NativeArtifactDemand::VerifiedGroupRoot(root) => {
                 BTreeSet::from([root.native_group_key()])
+            }
+            NativeArtifactDemand::CertifiedTargetImports(imports) => {
+                let inherited = parent.artifact_ids().into_iter().collect::<BTreeSet<_>>();
+                let mut groups = entries
+                    .iter()
+                    .filter(|entry| !inherited.contains(&entry.descriptor.id))
+                    .flat_map(|entry| {
+                        entry
+                            .native_group_ordinals
+                            .iter()
+                            .map(move |ordinal| NativeGroupKey {
+                                artifact: entry.descriptor.id,
+                                original_ordinal: *ordinal,
+                            })
+                    })
+                    .collect::<BTreeSet<_>>();
+                for import in imports {
+                    let crate::certified_products::PendingImportOwner::Source {
+                        owner,
+                        original_ordinal,
+                        binder,
+                    } = import
+                    else {
+                        continue;
+                    };
+                    let originals = entries.iter().filter(|entry| {
+                        matches!(&entry.payload, ArtifactPayload::Original(product)
+                            if product.owner() == owner
+                                && crate::certified_products::authenticates_original_native_entry(product, *original_ordinal, binder))
+                    }).collect::<Vec<_>>();
+                    if originals.len() != 1 {
+                        return Err(failure("certified target native membership"));
+                    }
+                    groups.insert(NativeGroupKey {
+                        artifact: originals[0].descriptor.id,
+                        original_ordinal: *original_ordinal,
+                    });
+                }
+                groups
             }
         };
         self.admit_selected(
