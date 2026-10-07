@@ -4816,10 +4816,16 @@ where
         let spawn_reply = child.spawn.is_some();
         let placement_custody =
             child_launch::ChildPlacementCustody::new(child.descriptor.placement());
+        let placement_startup = placement_custody.startup_guard();
+        let placement_registration = effect_owner
+            .ephemeral_work()
+            .expect("actor effects retain their construction cleanup owner")
+            .retain_launch_placement(context, placement_custody.clone());
         let resolved_owner = self.resolve_resource_owner(context, &effect_owner, child.lifetime);
         let invocation_work = resolved_owner.as_ref().ok().cloned().flatten();
         let mut retained_spawn_admission = None;
         let admission = (|| {
+            placement_registration.map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             let invocation_work = resolved_owner?;
             let crate::start::CapturedChildLaunch {
                 lifetime,
@@ -4986,6 +4992,7 @@ where
                 spawn_reply,
                 spawn_admission,
                 placement_custody,
+                placement_startup,
             },
             admission,
         }

@@ -14,13 +14,57 @@ enum ChildPlacementPhase {
 /// Exactly one owner may reclaim a launch placement. Startup transfers it
 /// before native actor initialization; terminal observation cannot take it back.
 #[derive(Clone)]
-pub(super) struct ChildPlacementCustody(Arc<Mutex<ChildPlacementPhase>>);
+pub(super) struct ChildPlacementCustody(
+    Arc<Mutex<ChildPlacementPhase>>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 impl ChildPlacementCustody {
     pub(super) fn new(placement: crate::ActorPlacement) -> Self {
-        Self(Arc::new(Mutex::new(ChildPlacementPhase::Prepared(
-            placement,
-        ))))
+        Self(
+            Arc::new(Mutex::new(ChildPlacementPhase::Prepared(placement))),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+    }
+
+    pub(super) fn startup_guard(&self) -> crate::WorkbenchAbandonGuard {
+        let active = self.1.clone();
+        crate::WorkbenchAbandonGuard::new(move || {
+            active.store(false, std::sync::atomic::Ordering::Release);
+        })
+    }
+
+    pub(super) async fn cleanup<H, O>(
+        &self,
+        runner: &ResidentActorRunner<H, O>,
+        parent_session: tidepool_repr::SessionId,
+    ) -> Result<(), ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        if matches!(
+            *self.0.lock(),
+            ChildPlacementPhase::ActorOwned(_) | ChildPlacementPhase::Released
+        ) {
+            return Ok(());
+        }
+        if self.1.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "launch placement remains with startup in flight".into(),
+            ));
+        }
+        release_failed_launch_placement(runner, parent_session, self).await?;
+        if matches!(
+            *self.0.lock(),
+            ChildPlacementPhase::ActorOwned(_) | ChildPlacementPhase::Released
+        ) {
+            Ok(())
+        } else {
+            Err(ResidentActorWorkbenchError::ActorProtocol(
+                "launch placement reclamation remains in flight".into(),
+            ))
+        }
     }
 
     fn update(&self, placement: crate::ActorPlacement) {
@@ -125,6 +169,7 @@ pub(super) struct ChildLaunchContinuation {
     pub spawn_reply: bool,
     pub spawn_admission: Option<crate::SpawnAdmission>,
     pub placement_custody: ChildPlacementCustody,
+    pub placement_startup: crate::WorkbenchAbandonGuard,
 }
 
 pub(super) struct ChildLaunchAdmission {
@@ -159,6 +204,7 @@ pub(super) struct ChildLaunchResume {
     spawn_admission: Option<crate::SpawnAdmission>,
     invocation_work: Option<Arc<InvocationWork>>,
     placement_custody: ChildPlacementCustody,
+    placement_startup: crate::WorkbenchAbandonGuard,
     failed_child: Option<LocalActorRef>,
     result: Result<
         (
@@ -586,6 +632,7 @@ pub(super) fn apply_launch(
         spawn_admission: continuation.spawn_admission,
         invocation_work: continuation.invocation_work,
         placement_custody: continuation.placement_custody,
+        placement_startup: continuation.placement_startup,
         failed_child: result.as_ref().err().and(failed_child),
         result,
     }
@@ -607,6 +654,7 @@ where
         spawn_admission,
         invocation_work,
         placement_custody,
+        placement_startup: _placement_startup,
         failed_child,
         result,
     } = resume;
@@ -808,6 +856,121 @@ mod tests {
             .unwrap();
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn dropped_owned_launch_completion_is_reclaimed_by_retained_journal() {
+        let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+        let (runner, machines, placement, captured, _root) = shared_fixture();
+        fixture.environment.runner = runner;
+        let actor = fixture.actor.identity();
+        let descriptor = ActorDescriptor::new("abandoned launch", placement);
+        let context = descriptor.session_context(actor);
+        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let custody = ChildPlacementCustody::new(placement);
+        let startup = custody.startup_guard();
+        work.retain_launch_placement(&context, custody.clone())
+            .unwrap();
+        let completed = await_launch(
+            fixture.environment.clone(),
+            fixture.kernel.clone(),
+            PreparedChildLaunch {
+                continuation: ChildLaunchContinuation {
+                    context,
+                    parent_descriptor: descriptor,
+                    control: None,
+                    invocation_work: None,
+                    parent_hole: ResidentHole::plain("abandoned-launch-parent"),
+                    spawn_reply: false,
+                    spawn_admission: None,
+                    placement_custody: custody,
+                    placement_startup: startup,
+                },
+                admission: Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "startup refused before actor admission".into(),
+                )),
+            },
+        )
+        .await;
+        let completion = crate::OwnedWorkbenchCompletion::<
+            ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        >::advance(move |behavior, kernel| {
+            let _resume = behavior.apply_child_launch(kernel, completed);
+            unreachable!("forced-stop completion must never be applied")
+        });
+        // Closing while a completed launch still awaits mailbox delivery
+        // cannot reclaim custody that its continuation might still transfer.
+        let first = work.cleanup(&fixture.environment, &fixture.kernel).await;
+        assert!(first.uncertainty().is_some());
+        assert!(capture_is_live(&machines, placement, &captured));
+        drop(completion);
+        let settled = work.cleanup(&fixture.environment, &fixture.kernel).await;
+        assert_eq!(settled.uncertainty(), None);
+        assert!(!capture_is_live(&machines, placement, &captured));
+        assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn construction_journal_leaves_transferred_actor_placement_live() {
+        let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+        let (runner, machines, placement, captured, _root) = shared_fixture();
+        fixture.environment.runner = runner;
+        let actor = fixture.actor.identity();
+        let context = ActorDescriptor::new("transferred launch", placement).session_context(actor);
+        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let custody = ChildPlacementCustody::new(placement);
+        let startup = custody.startup_guard();
+        work.retain_launch_placement(&context, custody.clone())
+            .unwrap();
+        custody
+            .transfer_to_actor(ActorRef::first(crate::ActorId(978)), placement)
+            .unwrap();
+        drop(startup);
+        let settled = work.cleanup(&fixture.environment, &fixture.kernel).await;
+        assert_eq!(settled.uncertainty(), None);
+        assert!(capture_is_live(&machines, placement, &captured));
+        fixture
+            .environment
+            .runner
+            .retire_root_placement(placement)
+            .await
+            .unwrap();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn abandoned_launch_journal_retains_failed_cleanup_until_machine_returns() {
+        let mut fixture = super::super::invocation_work_tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        let id = SessionId(979);
+        let root = tempfile::tempdir().unwrap();
+        let mut machine = session(id, root.path());
+        let scope = machine.mint_isolated_scope();
+        let captured = machine.retain_lexical_scope(scope).unwrap();
+        machine.retire_scope(scope);
+        let placement = crate::ActorPlacement {
+            session: id,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: captured.scope(),
+        };
+        let machines = Arc::new(Machines::new());
+        fixture.environment.runner =
+            Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+        let context = ActorDescriptor::new("retained launch", placement).session_context(actor);
+        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let custody = ChildPlacementCustody::new(placement);
+        let startup = custody.startup_guard();
+        work.retain_launch_placement(&context, custody).unwrap();
+        drop(startup);
+        let first = work.cleanup(&fixture.environment, &fixture.kernel).await;
+        assert!(first.uncertainty().is_some());
+        machines.insert_idle(id, Box::new(machine));
+        assert!(capture_is_live(&machines, placement, &captured));
+        let settled = work.cleanup(&fixture.environment, &fixture.kernel).await;
+        assert_eq!(settled.uncertainty(), None);
+        assert!(!capture_is_live(&machines, placement, &captured));
+        fixture.finish().await;
     }
 
     #[tokio::test]

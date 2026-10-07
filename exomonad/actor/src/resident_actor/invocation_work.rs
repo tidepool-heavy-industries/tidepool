@@ -31,6 +31,10 @@ struct InvocationWorkState {
     phase: InvocationWorkPhase,
     scopes: Vec<Arc<InvocationWork>>,
     compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    launch_placements: Vec<(
+        tidepool_repr::SessionId,
+        child_launch::ChildPlacementCustody,
+    )>,
     commands: Vec<String>,
     detached_commands: std::collections::HashSet<String>,
     workers: Vec<LocalActorRef>,
@@ -721,6 +725,36 @@ impl InvocationWork {
         })?
     }
 
+    /// Construction custody belongs to the invoking journal until startup
+    /// transfers the placement, independently of the selected child lifetime.
+    pub(super) fn retain_launch_placement(
+        &self,
+        context: &ActorSessionContext,
+        placement: child_launch::ChildPlacementCustody,
+    ) -> Result<(), String> {
+        if context.actor != self.owner {
+            return Err("launch placement owner is unauthorized".into());
+        }
+        // The placement was already minted by the checked-out effect. Even
+        // late refusal must retain it, invalidating an earlier cleanup proof.
+        let mut placement = Some(placement);
+        let admitted = self.with_admission_state(|state| {
+            state.launch_placements.push((
+                context.placement.session,
+                placement.take().expect("one launch placement registration"),
+            ));
+            state.cleanup = None;
+        });
+        if let Some(placement) = placement {
+            let mut state = self.state.lock();
+            state
+                .launch_placements
+                .push((context.placement.session, placement));
+            state.cleanup = None;
+        }
+        admitted
+    }
+
     pub(super) fn register_scope_realm(
         &self,
         context: ActorSessionContext,
@@ -1183,6 +1217,21 @@ impl InvocationWork {
                     .request_cleanup_state(self.owner, request),
             })
             .collect();
+        let launch_placements = self.state.lock().launch_placements.clone();
+        let launch_count = launch_placements.len();
+        for (parent_session, placement) in launch_placements {
+            match tokio::time::timeout(
+                RELEASE_WAIT,
+                placement.cleanup(&environment.runner, parent_session),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                outcome => cleanup.failures.push(format!(
+                    "launch placement cleanup remains unconfirmed: {outcome:?}"
+                )),
+            }
+        }
         let realms = self.state.lock().realms.clone();
         for (context, realm) in realms {
             match tokio::time::timeout(
@@ -1204,7 +1253,13 @@ impl InvocationWork {
                 )),
             }
         }
-        self.state.lock().cleanup = Some(cleanup.clone());
+        let mut state = self.state.lock();
+        if state.launch_placements.len() != launch_count {
+            cleanup
+                .failures
+                .push("late launch placement remains for cleanup retry".into());
+        }
+        state.cleanup = Some(cleanup.clone());
         cleanup
     }
 }
