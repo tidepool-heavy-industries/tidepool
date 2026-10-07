@@ -25,7 +25,9 @@ pub(crate) mod green;
 mod green_notebook;
 #[cfg(test)]
 mod green_runtime_tests;
+mod green_tool;
 mod inspection_wait;
+mod invocation_effects;
 pub(crate) mod invocation_work;
 mod owned_workbench;
 #[cfg(test)]
@@ -3274,6 +3276,11 @@ enum CurrentEffectOwner<'a> {
         scope: Arc<InvocationWork>,
         wait_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     },
+    Tool {
+        work: Arc<InvocationWork>,
+        publication: CheckpointPublication,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    },
     Actor {
         ephemeral_work: Arc<InvocationWork>,
         publication: CheckpointPublication,
@@ -3298,7 +3305,7 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.model(),
 
             Self::Workbench(execution) => execution.model.clone(),
-            Self::Actor { .. } => None,
+            Self::Actor { .. } | Self::Tool { .. } => None,
         }
     }
 
@@ -3312,6 +3319,7 @@ impl CurrentEffectOwner<'_> {
                     .matches(execution.context.actor, &execution.reservation_owner));
                 Some(execution.invocation_work.clone())
             }
+            Self::Tool { work, .. } => Some(work.clone()),
             Self::Actor { .. } => None,
         }
     }
@@ -3320,6 +3328,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { scope, .. } => Some(scope.clone()),
             Self::Actor { ephemeral_work, .. } => Some(ephemeral_work.clone()),
+            Self::Tool { work, .. } => Some(work.clone()),
             _ => self.invocation_work(),
         }
     }
@@ -3329,7 +3338,7 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.publication(),
 
             Self::Workbench(execution) => &execution.publication,
-            Self::Actor { publication, .. } => publication,
+            Self::Actor { publication, .. } | Self::Tool { publication, .. } => publication,
         }
     }
 
@@ -3338,6 +3347,7 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.interaction_control(),
             Self::Workbench(execution) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
+            Self::Tool { control, .. } => Some(control.clone()),
         }
     }
 
@@ -3349,6 +3359,7 @@ impl CurrentEffectOwner<'_> {
 
             Self::Workbench(execution) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
+            Self::Tool { control, .. } => Some(control.clone()),
         }
     }
 
@@ -3357,7 +3368,7 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.admitted_source(),
 
             Self::Workbench(execution) => Some(&execution.admitted_source),
-            Self::Actor { .. } => None,
+            Self::Actor { .. } | Self::Tool { .. } => None,
         }
     }
 
@@ -3369,6 +3380,7 @@ impl CurrentEffectOwner<'_> {
             Self::Actor {
                 reservation_owner, ..
             } => reservation_owner.clone(),
+            Self::Tool { work, .. } => Some(work.reservation_owner()),
         }
     }
 
@@ -3376,7 +3388,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.after_tool_active(),
             Self::Workbench(execution) => execution.after_tool_active,
-            Self::Actor { .. } => false,
+            Self::Actor { .. } | Self::Tool { .. } => false,
         }
     }
 }
@@ -8752,43 +8764,12 @@ where
                             ResidentActorBoundary::Start(start) => Ok(OwnedWorkbenchWait::Launch(
                                 self.prepare_child_launch(context, effect_owner.clone(), start),
                             )),
-                            ResidentActorBoundary::Drain {
-                                continuation,
-                                target,
-                            } => Ok(OwnedWorkbenchWait::Drain {
-                                continuation,
-                                target: self.capture_drain_target(kernel, context, target)?,
-                            }),
-                            ResidentActorBoundary::Wait(wait) => {
-                                let terminal =
-                                    self.capture_exit_target(kernel, &effect_owner, wait.target)?;
-                                self.record_child_observation(wait.target);
-                                Ok(OwnedWorkbenchWait::Exit {
-                                    continuation: wait.continuation,
-                                    terminal,
-                                })
-                            }
-                            ResidentActorBoundary::Poll(poll) => {
-                                let terminal = kernel
-                                    .resolve(poll.target)
-                                    .and_then(|target| target.terminal().get());
-                                Ok(OwnedWorkbenchWait::PollExit {
-                                    continuation: poll.continuation,
-                                    target: poll.target,
-                                    terminal,
-                                })
-                            }
-                            boundary => {
-                                match self.prepare_independent_effect(
-                                    kernel,
-                                    context,
-                                    &effect_owner,
-                                    boundary,
-                                ) {
-                                    Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),
-                                    Err(boundary) => OwnedWorkbenchWait::capture(boundary),
-                                }
-                            }
+                            boundary => self.prepare_invocation_wait(
+                                kernel,
+                                context,
+                                &effect_owner,
+                                boundary,
+                            )?,
                         };
                         match captured {
                             Ok(wait) => {
@@ -11275,13 +11256,75 @@ where
                 .lock()
                 .begin(execution, request.clone(), key.as_ref());
         }
+        let work = InvocationWork::new(
+            actor,
+            control
+                .reservation_owner(actor)
+                .expect("admitted tool reservation"),
+        );
+        self.workbench_executions.lock().retain_invocation_work(
+            work.clone(),
+            execution.as_ref(),
+            key.as_ref(),
+        );
         crate::OwnedActorTask::serial(move |mut behavior: Self, kernel| {
             Box::pin(async move {
-                let result = crate::resident_workbench::with_execution_control(
-                    control.clone(),
-                    behavior.tool(&kernel, invocation, capture),
-                )
-                .await;
+                let context = behavior.context(actor);
+                let runner = behavior.environment.runner.clone();
+                let workbench = runner.application_workbench();
+                let guard = workbench.actor_invocation_cleanup(
+                    context.clone(),
+                    "tool invocation abandoned before standing custody".into(),
+                );
+                let registration = guard.registration();
+                let mut result = registration
+                    .scope(crate::resident_workbench::with_execution_control(
+                        control.clone(),
+                        behavior.tool(&kernel, invocation, capture),
+                    ))
+                    .await;
+                work.close();
+                let cleanup = registration
+                    .scope(work.cleanup(&behavior.environment, &kernel))
+                    .await;
+                if let Some(detail) = cleanup.uncertainty() {
+                    result = Err(KernelInvocationFailure::CleanupUnconfirmed {
+                        actor, publication: None, receipts: Vec::new(),
+                        detail: format!("tool resource cleanup unconfirmed: {detail}; original outcome: {result:?}"),
+                    });
+                }
+                let standing_can_transfer = !control.cancellation_requested()
+                    && cleanup.uncertainty().is_none()
+                    && matches!(
+                        &behavior.standing,
+                        ResidentStanding::Tools(_) | ResidentStanding::Terminal
+                    )
+                    && matches!(
+                        &result,
+                        Ok(_) | Err(KernelInvocationFailure::Rejected { .. })
+                    );
+                let custody = if standing_can_transfer {
+                    workbench
+                        .settle_actor_invocation_custody(context.clone(), registration.clone())
+                        .await
+                } else {
+                    runner
+                        .abort_owned_continuations(
+                            context.clone(),
+                            registration.clone(),
+                            "tool invocation did not settle successfully".into(),
+                        )
+                        .await
+                };
+                match custody {
+                    Ok(()) => guard.disarm(),
+                    Err(error) => {
+                        result = Err(KernelInvocationFailure::CleanupUnconfirmed {
+                            actor, publication: None, receipts: Vec::new(),
+                            detail: format!("tool continuation cleanup unconfirmed: {error}; original outcome: {result:?}"),
+                        });
+                    }
+                }
                 if result.is_err() {
                     if let Some(owner) = control.reservation_owner(actor) {
                         let (_, notifications) = behavior
@@ -11395,6 +11438,27 @@ where
                 }),
                 capture: hosted_checkpoint_capture,
             };
+            let control = crate::resident_workbench::execution_control().ok_or_else(|| {
+                Self::invocation_failure(
+                    context.actor,
+                    "tool execution has no original admission control",
+                )
+            })?;
+            let work = self
+                .workbench_executions
+                .lock()
+                .admitted_invocation_work(
+                    &control.execution_id(context.actor),
+                    control.invocation.as_ref(),
+                )
+                .ok_or_else(|| {
+                    Self::invocation_failure(
+                        context.actor,
+                        "tool execution lost its original resource owner",
+                    )
+                })?;
+            let mut cursor =
+                green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone());
             let mut outcome = self
                 .environment
                 .runner
@@ -11408,12 +11472,32 @@ where
                 .map_err(|error| Self::invocation_failure(context.actor, error))?;
             let mut result = None;
             loop {
+                cursor
+                    .check_admission(kernel)
+                    .map_err(|error| Self::invocation_failure(context.actor, error))?;
                 let boundary = self
                     .environment
                     .runner
-                    .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+                    .capture_boundary(
+                        context.clone(),
+                        outcome,
+                        cursor.realm(context.placement.resource_scope),
+                    )
                     .await
                     .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                if !cursor.is_main_terminal()
+                    && matches!(
+                        &boundary,
+                        ResidentActorBoundary::ToolReply(_)
+                            | ResidentActorBoundary::ToolAwait(_)
+                            | ResidentActorBoundary::Completed
+                    )
+                {
+                    return Err(Self::invocation_failure(
+                        context.actor,
+                        "async tool child completed outside its result delimiter",
+                    ));
+                }
                 match boundary {
                     ResidentActorBoundary::ToolReply(reply) => {
                         if result.replace(reply.result).is_some() {
@@ -11474,13 +11558,7 @@ where
                     }
                     boundary => {
                         outcome = self
-                            .resolve_effect(
-                                kernel,
-                                &context,
-                                self.actor_effect_owner(context.actor),
-                                &crate::CallAncestry::begin(context.actor),
-                                boundary,
-                            )
+                            .advance_tool_frontier(kernel, &context, &mut cursor, boundary)
                             .await
                             .map_err(|error| Self::invocation_failure(context.actor, error))?;
                     }

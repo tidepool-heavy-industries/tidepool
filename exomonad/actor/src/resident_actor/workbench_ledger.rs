@@ -132,6 +132,17 @@ impl WorkbenchExecutions {
         });
         observed
     }
+    pub(super) fn admitted_invocation_work(
+        &self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> Option<Arc<InvocationWork>> {
+        self.0
+            .get(&WorkbenchReplayKey::new(execution, invocation))?
+            .invocation_work
+            .clone()
+    }
+
     pub(super) fn retain_invocation_work(
         &mut self,
         work: Arc<InvocationWork>,

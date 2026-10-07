@@ -123,3 +123,27 @@ fn join_validates_all_handles_and_observes_terminal_input_order() {
     assert!(green.winner(&[1, 99]).is_err());
     assert!(green.winner(&[]).is_err());
 }
+
+#[tokio::test]
+async fn opaque_adapter_attachment_preserves_infrastructure_failure() {
+    let mut green = GreenInvocation::<u64>::default();
+    green.enqueue_frontier(
+        Vec::new(),
+        Box::pin(async {
+            (
+                Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "controlled infrastructure failure".into(),
+                )),
+                73,
+            )
+        }),
+    );
+    let completion = green.next().await.unwrap();
+    assert_eq!(completion.attachment, Some(73));
+    assert!(matches!(
+        completion.result,
+        Some(Err(ResidentActorWorkbenchError::ActorProtocol(_)))
+    ));
+    assert!(completion.terminal.is_empty());
+    assert!(green.threads.is_empty());
+}

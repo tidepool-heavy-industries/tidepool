@@ -2681,7 +2681,7 @@ fn terminal_task<B: 'static>(
     })))
 }
 
-async fn await_effect<H, O>(
+pub(super) async fn await_effect<H, O>(
     environment: ResidentEnvironment<H, O>,
     kernel: KernelContext,
     context: ActorSessionContext,
