@@ -213,7 +213,8 @@ import Tidepool.Timing
   , newTimingRequestIdentity
   , ReuseContext(..), ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
   , ReuseVersionKind(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
-  , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
+  , readMemoTraceEnabled, MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
+  , emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
   , PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
 import Tidepool.FatIface
@@ -1557,6 +1558,23 @@ data MemoSelectionKey = MemoSelectionKey Fingerprint (Set.Set SymbolIdentity)
   (Map.Map (String,String) HomeDependencyDigest)
   deriving (Eq, Ord)
 
+data MemoSelectionRefusal
+  = MemoSelectionOwner | MemoSelectionUnsealedClosure | MemoSelectionUnsealedUsage
+  | MemoSelectionSourceHash | MemoSelectionRetained | MemoSelectionHomeDependencies
+  | MemoSelectionExactEnvironmentAndUsages | MemoSelectionIncarnation
+  deriving (Eq, Show)
+
+memoSelectionRefusalName :: MemoSelectionRefusal -> String
+memoSelectionRefusalName reason = case reason of
+  MemoSelectionOwner -> "owner"
+  MemoSelectionUnsealedClosure -> "unsealed_closure"
+  MemoSelectionUnsealedUsage -> "unsealed_usage"
+  MemoSelectionSourceHash -> "source_hash"
+  MemoSelectionRetained -> "retained"
+  MemoSelectionHomeDependencies -> "home_dependencies"
+  MemoSelectionExactEnvironmentAndUsages -> "exact_environment_and_usages"
+  MemoSelectionIncarnation -> "incarnation"
+
 memoSelectionKey :: MemoValidity -> MemoSelectionKey
 memoSelectionKey validity = MemoSelectionKey (memoSourceHash validity)
   (memoRetained validity) (memoHomeDependencies validity) (memoIncarnation validity)
@@ -2204,18 +2222,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       "tidepool-dependency-witness nodes=" ++ show (Map.size dependencyGraph)
         ++ " direct_edges=" ++ show dependencyEdgeCount
         ++ " digest_computations=" ++ show digestComputations
-    -- The selected module graph, once per cycle (never per lookup).
-    -- Graph capture holds paths and fingerprints only.
-    when memoTrace $ liftIO $
-      forM_ (Map.toList summaryByDependency) $ \(dependency@(HomeDependency name kind), summary) -> do
-        let HomeDependencyWitness selectedPath fingerprint = summaryFingerprints Map.! dependency
-            resolvedPath = normalise <$> ml_hs_file (ms_location summary)
-            directDeps = [ moduleNameString d | d <- Set.toList (directHomeDeps summary) ]
-            digestHex = case Map.lookup dependency dependencyDigests of
-              Just (HomeDependencyDigest bytes) -> hexBytes bytes
-              Nothing -> "<none>"
-        emitMemoCycleGraph memoTrace requestIdentity (moduleNameString name) (show kind)
-          selectedPath resolvedPath fingerprint directDeps digestHex
     validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
     executableValidRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
     dropMemoInterface <- liftIO (lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
@@ -2259,27 +2265,34 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       StandaloneCycle -> liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
       TransactionCycle _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
     selectedVersionsRef <- liftIO (newIORef Map.empty)
+    executableObservationsRef <- liftIO $ if memoTrace
+      then Just <$> newIORef Map.empty else pure Nothing
+    -- 'null' forces only through the first refusal, preserving the selection
+    -- predicate's short circuit. Rendering/full refusal enumeration is opt-in.
+    let selectionRefusals :: ModSummary -> CompletedModuleVersion -> [MemoSelectionRefusal]
+        selectionRefusals summary node =
+          let entry = completedModuleEntry node
+              validity = gmeValidity entry
+          in [reason | (valid, reason) <-
+               [(payloadOwner (gmePayload entry) == ms_mod summary, MemoSelectionOwner)
+               ,(ms_mod summary `Set.notMember` unsealedClosure, MemoSelectionUnsealedClosure)
+               ,(not (usesUnsealedSourceInputs unsealedInputs previous entry), MemoSelectionUnsealedUsage)
+               ,(memoSourceHash validity == ms_hs_hash summary, MemoSelectionSourceHash)
+               ,(memoRetained validity == retainedFor summary, MemoSelectionRetained)
+               ,(memoHomeDependencies validity == homeDependencyWitnesses summary, MemoSelectionHomeDependencies)
+               ,(sameExactEnvironment summary validity, MemoSelectionExactEnvironmentAndUsages)
+               ,(not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
+                   || (isJust incarnation && memoIncarnation validity == incarnation), MemoSelectionIncarnation)]
+             , not valid]
     case cycleState of
       TransactionCycle _ memo _ versions _ _ _ _ -> liftIO $ do
-        let matching summary node =
-              let entry = completedModuleEntry node
-                  validity = gmeValidity entry
-              in payloadOwner (gmePayload entry) == ms_mod summary
-                && ms_mod summary `Set.notMember` unsealedClosure
-                && not (usesUnsealedSourceInputs unsealedInputs previous entry)
-                && memoSourceHash validity == ms_hs_hash summary
-                && memoRetained validity == retainedFor summary
-                && memoHomeDependencies validity == homeDependencyWitnesses summary
-                && sameExactEnvironment summary validity
-                && (not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
-                  || (isJust incarnation && memoIncarnation validity == incarnation))
-            select summary = do
+        let select summary = do
               byIngress <- Map.lookup (ms_mod summary) versions
               let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
                     (homeDependencyWitnesses summary) (incarnationFor summary)
                     (exactImportEnvironment summary)
               narrowed <- Map.lookup ingress byIngress
-              find (matching summary) (Map.elems narrowed)
+              find (null . selectionRefusals summary) (Map.elems narrowed)
             selected = Map.fromList [(ms_mod summary,node)
               | summary <- Map.elems summaryByDependency, ms_mod summary /= targetOwner
               , Just node <- [select summary]]
@@ -2456,7 +2469,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
              , iface <- scopeValueInterfaces scope])
     normalCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates (forkExactContextWithPackageFacts packageFinder)
+      Just manifest -> certifyModuleCandidates requestIdentity (forkExactContextWithPackageFacts packageFinder)
         compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw path
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
@@ -2565,6 +2578,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 || isJust (homeMod_object (hm_linkable home))
               needsBytecode = backendGeneratesCode (backend (ms_hspp_opts summary))
                 && (not sameEpoch || not hasCode)
+          -- Observe the actual capacity branch separately from source validity.
+          forM_ executableObservationsRef $ \observations -> liftIO $
+            modifyIORef' observations (Map.insert (ms_mod summary)
+              (MemoExecutableTrace nodeEpoch epoch hasCode needsBytecode))
           refreshed <- if needsBytecode
             then do
               -- Executable demand can follow metadata-only preparation in the
@@ -2583,6 +2600,52 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           -- selected complete owner retains the exact current executable
           -- capacity, including across code-to-metadata-to-code transitions.
           liftIO (addHmiToCache cache refreshed)
+    -- Observe the original ingress, not the already-pruned working memo.
+    -- Failed checks inspect only versions under this exact immutable key.
+    when memoTrace $ liftIO $ do
+      observedSelections <- readIORef selectedVersionsRef
+      observedExecutables <- maybe (pure Map.empty) readIORef executableObservationsRef
+      forM_ (Map.toList summaryByDependency) $ \(dependency@(HomeDependency name kind), summary) -> do
+        let HomeDependencyWitness selectedPath fingerprint = summaryFingerprints Map.! dependency
+            resolvedPath = normalise <$> ml_hs_file (ms_location summary)
+            directDeps = [moduleNameString d | d <- Set.toList (directHomeDeps summary)]
+            digestHex = case Map.lookup dependency dependencyDigests of
+              Just (HomeDependencyDigest bytes) -> hexBytes bytes
+              Nothing -> "<none>"
+            keyFacts = show (ms_hs_hash summary, retainedFor summary,
+              [(moduleNameString child, show sourceKind, hexBytes bytes)
+                | (HomeDependency child sourceKind, HomeDependencyDigest bytes) <-
+                    Map.toAscList (homeDependencyWitnesses summary)],
+              incarnationFor summary,
+              [(owner, hexBytes bytes) | (owner, HomeDependencyDigest bytes) <-
+                  Map.toAscList (exactImportEnvironment summary)])
+            keySha = hexBytes (SHA256.hash (TextEncoding.encodeUtf8 (Text.pack keyFacts)))
+            observation state narrowed originating failures omitted = MemoSelectionTrace
+              state (unitString (moduleUnit (ms_mod summary))) keySha narrowed originating failures omitted
+                (Map.lookup (ms_mod summary) observedExecutables)
+            selection = case cycleState of
+              StandaloneCycle -> observation MemoStandalone 0 Nothing [] 0
+              TransactionCycle _ _ _ versions _ _ _ _
+                | ms_mod summary == targetOwner -> observation MemoTargetExcluded 0 Nothing [] 0
+                | otherwise -> case Map.lookup (ms_mod summary) versions of
+                    Nothing -> observation MemoOwnerAbsent 0 Nothing [] 0
+                    Just byIngress ->
+                      let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
+                            (homeDependencyWitnesses summary) (incarnationFor summary)
+                            (exactImportEnvironment summary)
+                      in case Map.lookup ingress byIngress of
+                        Nothing -> observation MemoIngressAbsent 0 Nothing [] 0
+                        Just narrowed ->
+                          let checked = [(node, map memoSelectionRefusalName (selectionRefusals summary node))
+                                | node <- Map.elems narrowed]
+                              selected = Map.lookup (ms_mod summary) observedSelections
+                              rejected = [(gmeCycle (completedModuleEntry node), checks)
+                                | (node, checks) <- checked, not (null checks)]
+                          in observation (if isJust selected then MemoSelected else MemoMatchingRejected)
+                            (Map.size narrowed) (gmeCycle . completedModuleEntry <$> selected)
+                            (take 16 rejected) (max 0 (length rejected - 16))
+        emitMemoCycleGraph memoTrace requestIdentity (moduleNameString name) (show kind)
+          selectedPath resolvedPath fingerprint directDeps digestHex selection
     let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -3915,13 +3978,16 @@ data CandidateExecutionProofFailure
   deriving (Eq, Show)
 
 certifyModuleCandidates
-  :: (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> FilePath
+  :: Word64 -> (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> FilePath
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetPath = do
+certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetPath = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
-  let record owner reason detail = when timing $ liftIO $
-        modifyIORef' observations (Map.insert owner (reason, fmap (take 192) detail))
+  let boundedDetail detail = case splitAt 192 detail of
+        (prefix, []) -> prefix
+        (prefix, _) -> take 176 prefix ++ "...[truncated]"
+      record owner reason detail = when timing $ liftIO $
+        modifyIORef' observations (Map.insert owner (reason, fmap boundedDetail detail))
       recordCandidate candidate = record (candidateUnit candidate, candidateModule candidate)
   decoded <- liftIO $ case captured of
     Nothing -> readModuleCandidatesWithGraphs (maybe [] scopeExecutionGraphs exactScope) manifest
@@ -4053,6 +4119,40 @@ certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exact
             either (const False) (const True) (candidateExecutionProof candidate)
           admissionDetail candidate CandidateExecutionProof =
             either (Just . show) (const Nothing) (candidateExecutionProof candidate)
+          admissionDetail candidate CandidateImportTuple =
+            case Map.lookup (candidateModule candidate) currentModules of
+              Nothing -> Nothing
+              Just node ->
+                let historical = mapM (\imported -> normalizeImport candidate
+                      (candidateDependencyQualifier (candidateImportQualifier imported))
+                      (candidateImportModule imported) (candidateImportBoot imported)
+                      (candidateImportSelected imported)) (candidateImports candidate)
+                    currentImports = mapM (\imported -> normalizeImport candidate
+                      (dependencyImportQualifier imported) (dependencyImportName imported)
+                      (dependencyImportBoot imported) (dependencyImportSelected imported))
+                      (dependencyModuleImports node)
+                    limited label rows = label ++ "=" ++ show (take 2 rows)
+                      ++ ";omitted=" ++ show (max 0 (length rows - 2))
+                in Just $ case (historical, currentImports) of
+                  (Just expected, Just actual) ->
+                    let expectedCounts = Map.fromListWith (+) [(row, 1 :: Int) | row <- expected]
+                        actualCounts = Map.fromListWith (+) [(row, 1 :: Int) | row <- actual]
+                        changed = [(row, oldCount, newCount)
+                          | row <- Set.toAscList (Map.keysSet expectedCounts `Set.union` Map.keysSet actualCounts)
+                          , let oldCount = Map.findWithDefault 0 row expectedCounts
+                          , let newCount = Map.findWithDefault 0 row actualCounts
+                          , oldCount /= newCount]
+                        actualOriginals = Set.toAscList (Set.fromList
+                          [(candidateUnit candidate, name) | (qualifier, name, _, _) <- actual
+                            , isJust (exactImportKey candidate qualifier name)])
+                    in limited "normalized_changed_counts" changed
+                      ++ ";" ++ limited "expected_originals" (Map.keys (provenOriginals candidate))
+                      ++ ";" ++ limited "actual_originals" actualOriginals
+                  _ -> "normalization_failed;" ++ limited "historical_raw" (candidateImports candidate)
+                    ++ ";" ++ limited "current_raw"
+                      [(dependencyImportQualifier imported, dependencyImportName imported,
+                        dependencyImportBoot imported, dependencyImportSelected imported)
+                        | imported <- dependencyModuleImports node]
           admissionDetail _ _ = Nothing
           candidateDependencyQualifier CandidateUnqualified = DependencyUnqualified
           candidateDependencyQualifier (CandidateThisUnit unit) = DependencyThisUnit unit
@@ -4078,7 +4178,9 @@ certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exact
                 source <- liftIO $ traverse canonicalizePath
                   (ml_hs_file (ms_location summary))
                 if source /= Just (candidateSource candidate)
-                  then recordCandidate candidate CandidateSourcePath Nothing >> pure Nothing
+                  then recordCandidate candidate CandidateSourcePath
+                    (Just ("historical=" ++ show (candidateSource candidate) ++ ";current=" ++ show source))
+                    >> pure Nothing
                   else do
                     inspected <- liftIO (try (sourceEvidenceWithFingerprint
                       (candidateSource candidate))
@@ -4257,7 +4359,8 @@ certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exact
       emitCount timing ("candidate_admission." ++ show reason) count
     forM_ (take 128 (Map.toAscList observed)) $ \((unit, name), (reason, detail)) ->
       hPutStrLn stderr ("tidepool-candidate-admission owner=" ++ show (take 192 (unit ++ ":" ++ name))
-        ++ " reason=" ++ show reason ++ maybe "" ((" detail=" ++) . show) detail)
+        ++ " reason=" ++ show reason ++ " cycle=" ++ show requestIdentity
+        ++ maybe "" ((" detail=" ++) . show) detail)
     emitCount timing "candidate_admission_rows_omitted" (toInteger (max 0 (Map.size observed - 128)))
   pure result
 
