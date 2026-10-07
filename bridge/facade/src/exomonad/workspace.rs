@@ -166,9 +166,7 @@ pub(crate) struct PreparedToolsetCoverage {
     pub(crate) original: uuid::Uuid,
 }
 
-fn coverage_entries(
-    coverage: &[PreparedToolsetCoverage],
-) -> Result<BTreeMap<String, uuid::Uuid>> {
+fn coverage_entries(coverage: &[PreparedToolsetCoverage]) -> Result<BTreeMap<String, uuid::Uuid>> {
     if coverage.is_empty() {
         return Err("completed workspace has no prepared toolset coverage".into());
     }
@@ -193,7 +191,10 @@ fn coverage_entries(
             if previous.original != entry.original
                 || previous.effective_effects != entry.effective_effects
             {
-                return Err("prepared profiles sharing a recipe select different originals or effect rows".into());
+                return Err(
+                    "prepared profiles sharing a recipe select different originals or effect rows"
+                        .into(),
+                );
             }
         }
         selected.insert(entry.recipe.clone(), entry.original);
@@ -423,13 +424,8 @@ impl FrozenWorkspace {
             {
                 return Err("frozen workspace orchestration differs from this build".into());
             }
-            if let Some(WorkspacePreparation::Completed {
-                revision, ..
-            }) = &frozen.preparation
-            {
-                if revision.len() != 64
-                    || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
+            if let Some(WorkspacePreparation::Completed { revision, .. }) = &frozen.preparation {
+                if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                     return Err(
                         "completed workspace preparation lacks its original revision or entries"
                             .into(),
@@ -703,9 +699,7 @@ impl FrozenWorkspace {
         let Some(WorkspacePreparation::Preparing { original }) = &self.preparation else {
             return Err("only an admitted workspace preparation can complete".into());
         };
-        if revision.len() != 64
-            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(
                 "workspace preparation must settle original native entries and revision".into(),
             );
@@ -765,7 +759,10 @@ impl FrozenWorkspace {
                 .find(|entry| entry.profile == profile.profile)
                 .ok_or("prepared workspace is missing a configured toolset profile")?;
             if entry.requested_effects != profile.requested_effects {
-                return Err("prepared toolset profile differs from this build's requested effect row".into());
+                return Err(
+                    "prepared toolset profile differs from this build's requested effect row"
+                        .into(),
+                );
             }
         }
         Ok(())
@@ -787,13 +784,17 @@ impl FrozenWorkspace {
         supported_effects: &[exomonad_tool::ToolEffectKey],
     ) -> Result<()> {
         self.validate_prepared_toolset_promises()?;
-        for entry in self.prepared_toolset_coverage().expect("promises validated") {
+        for entry in self
+            .prepared_toolset_coverage()
+            .expect("promises validated")
+        {
             let actual = workbench.source_toolset_recipe(
                 source,
                 &entry.requested_effects,
                 supported_effects,
             )?;
-            if actual.effective_effects != entry.effective_effects || actual.recipe != entry.recipe {
+            if actual.effective_effects != entry.effective_effects || actual.recipe != entry.recipe
+            {
                 return Err("prepared toolset recipe differs from actual host source or interpreter support; prepare a new deployment".into());
             }
         }
@@ -1625,7 +1626,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(coverage.len(), 2);
         let admitted = serde_json::to_vec(&coverage).unwrap();
-        let expected = [(recipe.clone(), original)].into_iter().collect::<BTreeMap<_, _>>();
+        let expected = [(recipe.clone(), original)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         frozen.validate_toolset_coverage(&coverage).unwrap();
         assert_eq!(coverage_entries(&coverage).unwrap(), expected);
 
@@ -1638,19 +1641,28 @@ mod tests {
         for mutation in 0..8 {
             let mut changed = coverage.clone();
             match mutation {
-                0 => { changed.pop(); }
+                0 => {
+                    changed.pop();
+                }
                 1 => changed[1].profile = super::super::PreparationProfile::Root,
-                2 => changed[1].profile = super::super::PreparationProfile::Public(
-                    exomonad_tool::PublicActorProfile::Integration,
-                ),
+                2 => {
+                    changed[1].profile = super::super::PreparationProfile::Public(
+                        exomonad_tool::PublicActorProfile::Integration,
+                    )
+                }
                 3 => changed[1].requested_effects.reverse(),
                 4 => changed[1].original = uuid::Uuid::new_v4(),
-                5 => changed[1].effective_effects.push(exomonad_actor::ActorEffectKey::Watches),
+                5 => changed[1]
+                    .effective_effects
+                    .push(exomonad_actor::ActorEffectKey::Watches),
                 6 => changed[1].recipe = "invalid".into(),
                 7 => changed[1].original = uuid::Uuid::nil(),
                 _ => unreachable!(),
             }
-            assert!(frozen.validate_toolset_coverage(&changed).is_err(), "mutation {mutation}");
+            assert!(
+                frozen.validate_toolset_coverage(&changed).is_err(),
+                "mutation {mutation}"
+            );
             // Refusal leaves the primary records available for the next
             // observation; it cannot repair them or infer another original.
             assert_eq!(serde_json::to_vec(&coverage).unwrap(), admitted);
@@ -1692,7 +1704,10 @@ mod tests {
                 let actual = workbench
                     .source_toolset_recipe(&source, &profile.requested_effects, &support)
                     .unwrap();
-                assert_eq!(actual.effective_effects, vec![ActorEffectKey::Replies, ActorEffectKey::Watches]);
+                assert_eq!(
+                    actual.effective_effects,
+                    vec![ActorEffectKey::Replies, ActorEffectKey::Watches]
+                );
                 PreparedToolsetCoverage {
                     profile: profile.profile,
                     requested_effects: profile.requested_effects,
@@ -1708,17 +1723,25 @@ mod tests {
             coverage,
         });
         let admitted = serde_json::to_vec(&frozen.preparation).unwrap();
-        frozen.validate_prepared_toolset_recipes(&workbench, &source, &support).unwrap();
+        frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &support)
+            .unwrap();
         let mut changed_support = support.clone();
         changed_support.pop();
-        assert!(frozen.validate_prepared_toolset_recipes(&workbench, &source, &changed_support).is_err());
+        assert!(frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
+            .is_err());
         // Context support selects a different builtin installer even when its
         // support-filtered actor row remains unchanged.
         let mut changed_installer = support.clone();
         changed_installer.push(ToolEffectKey::ContextReadWrite);
-        assert!(frozen.validate_prepared_toolset_recipes(&workbench, &source, &changed_installer).is_err());
+        assert!(frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
+            .is_err());
         assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
-        frozen.validate_prepared_toolset_recipes(&workbench, &source, &support).unwrap();
+        frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &support)
+            .unwrap();
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
     }
 
