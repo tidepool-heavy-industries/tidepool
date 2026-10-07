@@ -29,12 +29,11 @@ pub struct ActorDescriptor {
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
     persistence_policy: ActorPersistencePolicy,
-    fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
     model: Option<crate::Model>,
     instructions: Option<String>,
     fork_budget: Option<(i64, i64)>,
-    fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     checkpoint_token: Option<String>,
     source_layer: std::sync::Arc<[std::path::PathBuf]>,
 }
@@ -55,12 +54,11 @@ impl ActorDescriptor {
             context_parent: None,
             actor_path: None,
             persistence_policy: ActorPersistencePolicy::Ephemeral,
-            fork_group: None,
             fork_effort: None,
             model: None,
             instructions: None,
             fork_budget: None,
-            fork_boundary: None,
+            checkpoint_boundary: None,
             checkpoint_token: None,
             source_layer: std::sync::Arc::from([]),
         }
@@ -125,8 +123,10 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn fork_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
-        self.fork_boundary.as_ref()
+    pub fn checkpoint_boundary(
+        &self,
+    ) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
+        self.checkpoint_boundary.as_ref()
     }
 
     pub fn checkpoint_token(&self) -> Option<&str> {
@@ -139,11 +139,11 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub(crate) fn with_fork_boundary(
+    pub(crate) fn with_checkpoint_boundary(
         mut self,
-        boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+        boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     ) -> Self {
-        self.fork_boundary = boundary;
+        self.checkpoint_boundary = boundary;
         self
     }
 
@@ -224,17 +224,6 @@ impl ActorDescriptor {
     pub fn with_actor_path(mut self, path: tidepool_repr::ActorPath) -> Self {
         self.label = path.to_string();
         self.actor_path = Some(path);
-        self
-    }
-
-    #[must_use]
-    pub fn fork_group(&self) -> Option<crate::ForkGroupId> {
-        self.fork_group
-    }
-
-    #[must_use]
-    pub fn with_fork_group(mut self, group: crate::ForkGroupId) -> Self {
-        self.fork_group = Some(group);
         self
     }
 

@@ -720,7 +720,7 @@ pub trait HostedCheckpointCapture: Send + Sync {
     fn capture(
         &self,
         name: &str,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError>;
 }
 
@@ -810,7 +810,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
     fn reconcile_workbench_boxed(
         &self,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<WorkbenchBoundaryReconciliation, ResidentToolError>>
@@ -828,14 +828,14 @@ pub trait ResidentToolEndpoint: Send + Sync {
     /// Discard an exact call's deferred publication after failed Store settlement.
     fn abort_boxed(
         &self,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         Box::pin(async { Err(ResidentToolError::CancellationUnsupported) })
     }
     /// Acknowledge the real, durable result of an enclosing model-visible call.
     fn complete_boxed(
         &self,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         Box::pin(async { Ok(serde_json::Value::Null) })
     }
@@ -878,7 +878,7 @@ impl WorkbenchCallKey {
 
     pub(crate) fn matches_boundary(
         &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> bool {
         self.0
             .model_operation()
@@ -1107,7 +1107,7 @@ impl ResidentToolClient {
 
     pub(crate) async fn reconcile_workbench(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<WorkbenchBoundaryReconciliation, ResidentToolError> {
         if self
             .actor
@@ -1138,7 +1138,7 @@ impl ResidentToolClient {
 
     pub(crate) async fn abort(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let (reply, receive) = oneshot::channel();
         self.actor
@@ -1158,7 +1158,7 @@ impl ResidentToolClient {
 
     pub(crate) async fn complete(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let (reply, receive) = oneshot::channel();
         self.actor
@@ -1219,8 +1219,8 @@ impl ResidentToolClient {
                 .await;
         };
         if let Some(operation) = invocation.model_operation() {
-            request = request.with_fork_boundary(
-                tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation.clone()),
+            request = request.with_checkpoint_boundary(
+                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation.clone()),
             );
         }
         let operation = WorkbenchCallKey::from(invocation);
@@ -1520,7 +1520,7 @@ mod tests {
         fn capture(
             &self,
             _name: &str,
-            _boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+            _boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
         ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
             Ok(HostedCheckpointAttachment::new(Arc::new(())))
         }
@@ -1609,7 +1609,7 @@ mod tests {
     #[test]
     fn local_invocations_share_only_the_exact_original_operation_boundary() {
         use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
-        use tidepool_runtime::session::WorkbenchForkBoundary;
+        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let original = OriginalOperation {
             origin: ConversationOrigin::Embedded {
@@ -1629,7 +1629,7 @@ mod tests {
             call_id: "nested-2".into(),
             ..first.0.clone()
         });
-        let boundary = WorkbenchForkBoundary::Hosted(original.clone());
+        let boundary = ContextCheckpointBoundary::Hosted(original.clone());
         let owner = WorkbenchCallKey::original(&original);
         assert!(owner.is_original_invocation());
         assert!(owner.matches_boundary(&boundary));
@@ -1644,13 +1644,13 @@ mod tests {
 
         let mut reused = original.clone();
         reused.request_id = "request-2".into();
-        assert!(!first.matches_boundary(&WorkbenchForkBoundary::Hosted(reused)));
+        assert!(!first.matches_boundary(&ContextCheckpointBoundary::Hosted(reused)));
         let mut successor = original;
         let ConversationOrigin::Embedded { incarnation, .. } = &mut successor.origin else {
             unreachable!();
         };
         *incarnation = "second".into();
-        assert!(!first.matches_boundary(&WorkbenchForkBoundary::Hosted(successor)));
+        assert!(!first.matches_boundary(&ContextCheckpointBoundary::Hosted(successor)));
     }
 
     fn terminal_reply() -> crate::KernelWorkbenchReply {

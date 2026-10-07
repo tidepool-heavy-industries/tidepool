@@ -428,15 +428,15 @@ pub enum KernelMessage {
         reply: RpcReplyPort<crate::WorkbenchCancellationOutcome>,
     },
     ReconcileWorkbenchBoundary {
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         reply: RpcReplyPort<crate::WorkbenchBoundaryReconciliation>,
     },
     ToolCompleted {
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     ToolAborted {
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     /// Drain one mailbox request retained while the resident behavior was

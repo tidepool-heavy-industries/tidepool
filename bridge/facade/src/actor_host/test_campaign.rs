@@ -11,7 +11,7 @@ pub(super) fn original_tool_call(
     operation: OriginalOperation,
 ) -> (
     ToolInvocationContext,
-    tidepool_runtime::session::WorkbenchForkBoundary,
+    tidepool_runtime::session::ContextCheckpointBoundary,
 ) {
     let invocation = ToolInvocationContext {
         call_id: operation.call_id.clone(),
@@ -20,7 +20,7 @@ pub(super) fn original_tool_call(
     };
     (
         invocation,
-        tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation),
+        tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation),
     )
 }
 

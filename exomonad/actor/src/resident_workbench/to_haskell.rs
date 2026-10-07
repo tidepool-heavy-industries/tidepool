@@ -477,11 +477,6 @@ impl ToHaskell for AgentRosterProjection {
                 .collect::<Result<Vec<_>, _>>()?
                 .visit(table, visitor)?;
             self.bound_worktree.visit(table, visitor)?;
-            self.descriptor
-                .fork_group()
-                .map(|x| actor_haskell_int(x.0, "fork group id"))
-                .transpose()?
-                .visit(table, visitor)?;
             actor_haskell_int(self.descriptor.placement().lexical_scope.0, "lexical scope")?
                 .visit(table, visitor)?;
             self.runtime.provider_thread.visit(table, visitor)?;
@@ -622,11 +617,6 @@ impl ToHaskell for ActorContextProjection {
                 .haskell_effects_type()
                 .visit(table, v)?;
             self.bound_worktree.visit(table, v)?;
-            self.descriptor
-                .fork_group()
-                .map(|x| actor_haskell_int(x.0, "fork group id"))
-                .transpose()?
-                .visit(table, v)?;
             actor_haskell_int(self.context.placement.lexical_scope.0, "lexical scope")?
                 .visit(table, v)?;
             match &self.runtime.activation_kind {

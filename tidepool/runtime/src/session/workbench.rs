@@ -54,9 +54,9 @@ pub fn escape_workbench_haskell_string(value: &str) -> String {
     output
 }
 
-/// A model operation or an internal route owns exactly one release boundary.
+/// Exact invocation identity used to settle captured context checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum WorkbenchForkBoundary {
+pub enum ContextCheckpointBoundary {
     Hosted(exomonad_tool::OriginalOperation),
     Route {
         actor_id: u64,
@@ -70,7 +70,7 @@ pub enum WorkbenchForkBoundary {
     },
 }
 
-impl WorkbenchForkBoundary {
+impl ContextCheckpointBoundary {
     #[must_use]
     pub fn external(thread_id: String, request_id: String, call_id: String) -> Self {
         Self::Hosted(exomonad_tool::OriginalOperation {
@@ -116,7 +116,7 @@ pub struct WorkbenchRequest {
     /// actor to return a committed receipt when that exact call is retried.
     execution_id: Option<WorkbenchExecutionId>,
     /// Trusted transport coordinates; never accepted from authored JSON.
-    fork_boundary: Option<WorkbenchForkBoundary>,
+    checkpoint_boundary: Option<ContextCheckpointBoundary>,
     /// Trusted named-handler selection; arguments are data, never Haskell source.
     tool_call: Option<WorkbenchToolCall>,
     /// Raw notebook cell awaiting GHC split/classify/preflight in the owning
@@ -137,7 +137,7 @@ impl WorkbenchRequest {
             input: None,
             verbose: None,
             execution_id: None,
-            fork_boundary: None,
+            checkpoint_boundary: None,
             tool_call: Some(WorkbenchToolCall { name, arguments }),
             cell_source: None,
         }
@@ -154,7 +154,7 @@ impl WorkbenchRequest {
             input: None,
             verbose: None,
             execution_id: None,
-            fork_boundary: None,
+            checkpoint_boundary: None,
             tool_call: None,
             cell_source: Some(source.to_owned()),
         }
@@ -182,14 +182,14 @@ impl WorkbenchRequest {
     }
 
     #[must_use]
-    pub fn with_fork_boundary(mut self, boundary: WorkbenchForkBoundary) -> Self {
-        self.fork_boundary = Some(boundary);
+    pub fn with_checkpoint_boundary(mut self, boundary: ContextCheckpointBoundary) -> Self {
+        self.checkpoint_boundary = Some(boundary);
         self
     }
 
     #[must_use]
-    pub fn fork_boundary(&self) -> Option<&WorkbenchForkBoundary> {
-        self.fork_boundary.as_ref()
+    pub fn checkpoint_boundary(&self) -> Option<&ContextCheckpointBoundary> {
+        self.checkpoint_boundary.as_ref()
     }
 }
 
@@ -1618,7 +1618,7 @@ mod tests {
         assert_eq!(cell.cell_source(), Some("pure ()"));
         assert!(cell.tool_call().is_none());
         assert!(cell.execution_id().is_none());
-        assert!(cell.fork_boundary().is_none());
+        assert!(cell.checkpoint_boundary().is_none());
         assert_ne!(cell, WorkbenchRequest::from_cell_input("pure 1"));
         assert_ne!(
             cell,

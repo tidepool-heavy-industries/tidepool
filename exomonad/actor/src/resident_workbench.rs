@@ -8064,7 +8064,7 @@ where
             .await
     }
 
-    pub(crate) async fn retire_fork_scopes(
+    pub(crate) async fn retire_context_scopes(
         &self,
         context: crate::ActorSessionContext,
         scopes: Vec<tidepool_codegen::scope::ScopeId>,
@@ -20953,7 +20953,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("capture independently owned parent Haskell environment");
         let retained_scope = retained.scope();
         let admissions = crate::ActorAdmissionRegistry::new();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "unfinished-parent".into(),
             "unfinished-parent".into(),
@@ -21065,7 +21065,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .decision
                 .terminate());
             runner
-                .retire_fork_scopes(
+                .retire_context_scopes(
                     failing_context.clone(),
                     vec![failing_context.placement.lexical_scope],
                 )
@@ -21211,7 +21211,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             crate::CheckpointSourceLayer::default(),
             context.placement.session,
             scope,
-            tidepool_runtime::session::WorkbenchForkBoundary::external(
+            tidepool_runtime::session::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "call".into(),
                 "call".into(),

@@ -249,42 +249,23 @@ impl EmbeddedHarnessRuntime {
                 "embedded checkpoint child belongs to another admitted run/actor".into(),
             ));
         }
-        let publication = if installation.spawn_admission.is_some() {
-            exomonad_actor::ForkGroupPublication::Captured
-        } else {
-            installation
-                .fork_gate
-                .as_ref()
-                .ok_or_else(|| {
-                    EmbeddedError::Binding("checkpoint child has no admitted authority".into())
-                })?
-                .publication()
-                .map_err(|error| EmbeddedError::Binding(error.to_string()))?
-        };
-        if let Some(lease) = &installation.checkpoint {
-            if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer)
-            {
-                return Err(EmbeddedError::Binding(
-                    "embedded checkpoint issuer mismatch".into(),
-                ));
-            }
-        } else {
-            if publication != exomonad_actor::ForkGroupPublication::Deferred {
-                return Err(EmbeddedError::Binding(
-                    "inherited hosted context requires deferred publication".into(),
-                ));
-            }
-            captured.validate_inherited_origin(
-                &self.run,
-                installation.creator,
-                installation.context_parent,
-                installation.fork_boundary.as_ref(),
-            )?;
+        installation
+            .spawn_admission
+            .as_ref()
+            .ok_or_else(|| {
+                EmbeddedError::Binding("checkpoint child has no independent spawn authority".into())
+            })?
+            .validate_child(installation.actor.identity())
+            .map_err(EmbeddedError::Binding)?;
+        let lease = installation.checkpoint.as_ref().ok_or_else(|| {
+            EmbeddedError::Binding("checkpoint child has no captured context lease".into())
+        })?;
+        if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer) {
+            return Err(EmbeddedError::Binding(
+                "embedded checkpoint issuer mismatch".into(),
+            ));
         }
-        let checkpoint = match publication {
-            exomonad_actor::ForkGroupPublication::Deferred => captured.cuts.deferred(),
-            exomonad_actor::ForkGroupPublication::Captured => captured.cuts.before_call(),
-        };
+        let checkpoint = captured.cuts.before_call();
         let actor = installation.actor.clone();
         let parent = checkpoint.origin().clone();
         let actor_identity = actor.identity();
@@ -637,9 +618,7 @@ impl HostActor for EmbeddedHostActor {
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
         self.installation
-            .complete(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
-                original,
-            ))
+            .complete(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -648,9 +627,7 @@ impl HostActor for EmbeddedHostActor {
     async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
         self.installation
-            .abort(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
-                original,
-            ))
+            .abort(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -776,27 +753,6 @@ pub(super) struct EmbeddedHostedCheckpoint {
 }
 
 impl EmbeddedHostedCheckpoint {
-    fn validate_inherited_origin(
-        &self,
-        run: &str,
-        creator: Option<ActorRef>,
-        context_parent: Option<ActorRef>,
-        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-    ) -> Result<(), EmbeddedError> {
-        let operation = self.cuts.deferred().operation().ok_or_else(|| {
-            EmbeddedError::Binding("inherited hosted context has no captured operation".into())
-        })?;
-        validate_inherited_operation(
-            self.issuer,
-            self.cuts.deferred().origin(),
-            operation,
-            run,
-            creator,
-            context_parent,
-            boundary,
-        )
-    }
-
     pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
         AgentPath(format!(
             "{}/a{}_i{}",
@@ -814,7 +770,7 @@ fn validate_inherited_operation(
     run: &str,
     creator: Option<ActorRef>,
     context_parent: Option<ActorRef>,
-    boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+    boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
 ) -> Result<(), EmbeddedError> {
     let refused = || {
         EmbeddedError::Binding(
@@ -825,7 +781,7 @@ fn validate_inherited_operation(
         return Err(refused());
     }
     let original = boundary
-        .and_then(tidepool_runtime::session::WorkbenchForkBoundary::hosted)
+        .and_then(tidepool_runtime::session::ContextCheckpointBoundary::hosted)
         .filter(|operation| operation.is_complete())
         .ok_or_else(refused)?;
     match (&operation.origin, &original.origin) {
@@ -867,7 +823,7 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
     fn capture(
         &self,
         name: &str,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
         let original = original_operation(&self.identity, &self.operation)
             .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
@@ -1734,12 +1690,13 @@ mod tests {
             request_id: "request".into(),
             call_id: "call".into(),
         };
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(original.clone());
+        let boundary =
+            tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone());
         let check =
             |run: &str,
              creator,
              context_parent,
-             boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>| {
+             boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>| {
                 validate_inherited_operation(
                     issuer,
                     &parent,
@@ -1788,10 +1745,10 @@ mod tests {
                 ..original
             },
         ] {
-            let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(foreign);
+            let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Hosted(foreign);
             assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
         }
-        let route = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+        let route = tidepool_runtime::session::ContextCheckpointBoundary::Route {
             actor_id: 1,
             incarnation: 1,
             watch_id: 1,

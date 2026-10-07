@@ -213,7 +213,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn reconcile_workbench_boxed(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -231,7 +231,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn complete_boxed(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         let client = self.client.clone();
         Box::pin(async move { client.complete(boundary).await })
@@ -239,7 +239,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn abort_boxed(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         let client = self.client.clone();
         Box::pin(async move { client.abort(boundary).await })

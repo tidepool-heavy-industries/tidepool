@@ -300,7 +300,7 @@ impl Driver {
         // Complete the actual admitting tool boundary before another actor is driven.
         let completion = self
             .pump(endpoint.complete_boxed(
-                tidepool_runtime::session::WorkbenchForkBoundary::external(
+                tidepool_runtime::session::ContextCheckpointBoundary::external(
                     "recipe-check".into(),
                     call_id.clone(),
                     call_id,

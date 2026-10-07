@@ -29,7 +29,7 @@ pub(super) struct RetainedHandler {
 
 pub(super) struct ReplacementCustody {
     sources: Option<crate::request::sources::ActorSourceConnections>,
-    worktree: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+    worktree: Option<Arc<dyn crate::WorkspaceCustody>>,
     retained: Vec<RetainedHandler>,
     _admissions: Vec<tokio::sync::OwnedRwLockReadGuard<bool>>,
 }
@@ -289,7 +289,7 @@ where
             spawn: _,
             entry,
             launch_worktrees,
-            fork_workspace,
+            record_workspace,
             seed,
         } = definition.child;
         let session_startup = (descriptor.placement().session
@@ -300,11 +300,12 @@ where
                 .runner
                 .child_session_startup_lease(descriptor.placement().session)
         });
-        if launch_worktrees != self.launch_worktrees || fork_workspace.is_some() {
+        if !launch_worktrees.is_empty() || record_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",
             ));
         }
+        let launch_worktrees = self.launch_worktrees.clone();
         // See `resident_actor.rs::try_start_child`'s matching resolution: a
         // replacement that names the predecessor's own session needs
         // nothing further. One that names a freshly minted session instead

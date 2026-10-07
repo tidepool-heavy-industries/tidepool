@@ -1,15 +1,11 @@
-//! Narrow workspace reservation used only by atomic context-fork admission.
-//!
-//! The actor kernel owns the admission transaction, while the injected
-//! service delegates Git and ownership mechanics to the existing Worktree
-//! owner. This capability is intentionally not the general model-facing
-//! allocation effect.
+//! Workspace attachment admitted for the executing actor principal.
+//! The injected service delegates backing and grants to the workspace owner.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tidepool_bridge_effects::{WtDirtyPolicy, WtWorktreeHandle, WtWorktreeSpec};
+use tidepool_bridge_effects::WtWorktreeHandle;
 
 use crate::ActorRef;
 
@@ -27,19 +23,6 @@ pub enum SpawnWorkspaceWire {
 }
 
 pub type WorkspaceSelection = SpawnWorkspaceWire;
-
-#[derive(Debug, Clone)]
-pub enum ForkWorkspaceSeed {
-    Explicit(WtWorktreeSpec),
-    CurrentCheckout(WtDirtyPolicy),
-}
-
-/// Already-attenuated filesystem and native-tool policy for early preparation.
-#[derive(Debug, Clone, Copy)]
-pub struct ForkWorkspacePolicy {
-    pub native_tools: crate::NativeToolClass,
-    pub workspace: crate::WorkspaceAccess,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{detail}")]
@@ -128,29 +111,6 @@ pub trait WorkspaceAdmission: Send + Sync + 'static {
             })
         })
     }
-
-    /// Install owned resources before executing the child entry. This is separate from
-    /// provider readiness; implementations must fail closed on stale ownership.
-    /// `role` is the actor's resolved role: an actor that holds a worktree
-    /// without a native application (a record actor started with a worktree)
-    /// never sees a policy installation, so the worktree grant that goes with
-    /// its role is installed here, alongside the owned resources.
-    fn install_custody(
-        &self,
-        actor: ActorRef,
-        worktree: &str,
-        access: crate::WorkspaceAccess,
-    ) -> Result<Arc<dyn WorkspaceCustody>, WorkspaceAdmissionError>;
-
-    /// Prepare the workspace before child bootstrap. Async native admission
-    /// stays on the runtime; implementations isolate blocking Git work themselves.
-    fn admit(
-        &self,
-        owner: ActorRef,
-        actor_path: String,
-        seed: ForkWorkspaceSeed,
-        policy: ForkWorkspacePolicy,
-    ) -> WorkspaceAdmissionFuture<'_>;
 }
 
 pub(crate) type SharedWorkspaceAdmission = Arc<dyn WorkspaceAdmission>;

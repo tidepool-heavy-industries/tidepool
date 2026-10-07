@@ -284,8 +284,6 @@ async fn interrupt_during_preview(
                     checkpoint_attachment: None,
                     supervisor_parent: None,
                     context_parent: None,
-                    fork_group: None,
-                    fork_gate: None,
                     runtime_observation: behavior.runtime_observation.clone(),
                 },
             })

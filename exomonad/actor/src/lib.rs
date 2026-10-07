@@ -86,9 +86,8 @@ pub use external_application::{
 };
 
 pub use fork_workspace::{
-    ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedWorkspaceAttachment, SpawnWorkspaceWire,
-    WorkspaceAdmission, WorkspaceAdmissionError, WorkspaceAdmissionFuture, WorkspaceCustody,
-    WorkspaceSelection,
+    PreparedWorkspaceAttachment, SpawnWorkspaceWire, WorkspaceAdmission, WorkspaceAdmissionError,
+    WorkspaceAdmissionFuture, WorkspaceCustody, WorkspaceSeedWire, WorkspaceSelection,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
@@ -140,11 +139,11 @@ pub use request::{
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
-    spawn_resident_root_with_fork_admission, ActorDisplayAdmission, ActorGraphNode,
+    spawn_resident_root_with_workspace_admission, ActorDisplayAdmission, ActorGraphNode,
     ActorProviderAdmission, DisplayConversationIdentity, DisplayPublication,
-    DisplayPublicationHostContext, DisplayPublicationOutcome, ForkChildRelease,
-    LocalResidentDeployment, LocalResidentInstallation, ReleaseAwait, ResidentActorRoot,
-    ResidentForest, ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
+    DisplayPublicationHostContext, DisplayPublicationOutcome, LocalResidentDeployment,
+    LocalResidentInstallation, ReleaseAwait, ResidentActorRoot, ResidentForest,
+    ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
@@ -170,10 +169,9 @@ pub use runtime_observation::{
     TrackedMessageState,
 };
 pub use start::{
-    ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
-    ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart, SpawnContextWire,
-    SpawnError, SpawnRetainedResources, WorkerLaunchPreview, WorkerLaunchRequest,
-    WorkerLaunchResolver, WorkerLifetime,
+    ActorEffectKeyWire, ActorEffectProfileWire, ActorReplacementDefinition, ActorStartCaptureError,
+    ForkEffort, Model, ResidentActorStart, SpawnContextWire, SpawnError, SpawnRetainedResources,
+    WorkerLifetime,
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,

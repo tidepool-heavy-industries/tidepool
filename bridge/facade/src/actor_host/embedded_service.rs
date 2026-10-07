@@ -327,29 +327,12 @@ pub(super) async fn attach_checkpoint_actor(
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
-    if let Some(authority) = &installation.spawn_admission {
-        authority.validate_child(actor)?;
-    }
+    installation
+        .spawn_admission
+        .as_ref()
+        .ok_or("embedded child requires independent spawn admission")?
+        .validate_child(actor)?;
 
-    if installation.spawn_admission.is_none() {
-        let gate = installation
-            .fork_gate
-            .as_ref()
-            .ok_or("embedded checkpoint child requires admitted authority")?;
-        gate.wait_committed()
-            .await
-            .map_err(|error| error.to_string())?;
-        if gate.publication().map_err(|error| error.to_string())?
-            == exomonad_actor::ForkGroupPublication::Deferred
-        {
-            if let Some(lease) = &installation.checkpoint {
-                lease
-                    .wait_published()
-                    .await
-                    .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
-            }
-        }
-    }
     let captured = installation
         .checkpoint_attachment
         .as_ref()
@@ -398,19 +381,13 @@ pub(super) async fn attach_selected_actor(
     if installation.checkpoint.is_some() || installation.context_parent.is_some() {
         return Err("selected embedded child requires explicit fresh context".into());
     }
-    if installation.spawn_admission.is_none() {
-        let gate = installation
-            .fork_gate
-            .as_ref()
-            .ok_or("selected embedded child requires admitted authority")?;
-        gate.wait_committed()
-            .await
-            .map_err(|error| error.to_string())?;
-    }
+
     let actor = installation.actor.identity();
-    if let Some(authority) = &installation.spawn_admission {
-        authority.validate_child(actor)?;
-    }
+    installation
+        .spawn_admission
+        .as_ref()
+        .ok_or("embedded child requires independent spawn admission")?
+        .validate_child(actor)?;
 
     let run = super::runtime_namespace(run_root);
     if parent.identity().run != run {
