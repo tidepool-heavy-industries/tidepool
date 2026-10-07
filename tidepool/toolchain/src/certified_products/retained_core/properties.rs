@@ -639,7 +639,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
 
 #[test]
 fn retained_graph_identity_tracks_logical_dependency_facts() {
-    let mut config = property_config();
+    let mut config = proptest::test_runner::contextualize_config(property_config());
     // Match proptest!'s Cargo source/test identity; native Direct persistence
     // still uses the owning package's declared path rather than this source path.
     config.source_file = Some(file!());
