@@ -924,6 +924,223 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
 }
 
 #[test]
+fn warm_target_selects_previously_unselected_original_native_groups() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use tidepool_toolchain::artifact_inventory::{
+        ArtifactKind, NativeGroupKey, NativeRequirementRoot,
+    };
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+
+    let mut session = SemanticSession::new();
+    session
+        .execute(
+            "warm_native_cold_baseline",
+            "baselinePlannedValue <- pure (2 :: Int)",
+            0,
+        )
+        .unwrap();
+    let before = session.resident.compile_view_in(session.public).unwrap();
+    let before = before.exact_declaration_context().unwrap();
+    let originals = before.recovery_products();
+    let original = originals
+        .iter()
+        .find(|product| product.owner().module == "Tidepool.Duration")
+        .expect("the real cold compiler must retain the complete Duration carrier");
+    let descriptor = before
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.kind == ArtifactKind::OriginalModule
+                && descriptor.owner.unit == original.owner().unit
+                && descriptor.owner.module == original.owner().module
+        })
+        .unwrap();
+    assert_eq!(
+        descriptor.product_sha256,
+        Some(sha2::Sha256::digest(original.product_bytes()).into())
+    );
+    let full = tidepool_repr::execution_schema::parse_module_products(
+        original.product_bytes(),
+        &tidepool_toolchain::prepared_artifact::production_requirements().unwrap(),
+        tidepool_repr::execution_schema::InventoryDecodeLimits::default(),
+    )
+    .unwrap();
+    let [full] = full.as_slice() else {
+        panic!("an original native carrier must contain exactly one owner")
+    };
+    let operation_group = |name: &str| {
+        full.groups
+            .iter()
+            .find(|group| {
+                group
+                    .binders()
+                    .iter()
+                    .any(|binder| binder.module == "Tidepool.Duration" && binder.occurrence == name)
+            })
+            .unwrap()
+            .original_ordinal()
+    };
+    let seconds = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("seconds"),
+    };
+    let minutes = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("minutes"),
+    };
+    assert_ne!(seconds, minutes);
+    let mut selected = before.artifact_view().selected_native_groups();
+    assert!(selected.iter().all(|key| key.artifact != descriptor.id));
+    let old_owners = originals
+        .iter()
+        .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
+        .collect::<BTreeSet<_>>();
+    let assert_retained =
+        |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+            let retained = context.recovery_products();
+            let retained = retained
+                .iter()
+                .find(|product| product.owner().module == original.owner().module)
+                .unwrap();
+            assert_eq!(retained.owner(), original.owner());
+            assert_eq!(retained.product_bytes(), original.product_bytes());
+            assert!(context.artifact_view().descriptors().contains(&descriptor));
+        };
+    let mut observed = 0;
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "warm_native_duration_demand",
+        include_str!("fixtures/typed-segment-warm-duration.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::from_specs(["qualified Tidepool.Duration as Duration"]),
+        None,
+        |program| {
+            for item in program.items() {
+                let Some(native) = item.native() else {
+                    continue;
+                };
+                observed += 1;
+                let products = item.native_products().unwrap();
+                assert!(products.recovery_products.iter().all(|product| {
+                    !old_owners.contains(&(
+                        product.owner().unit.clone(),
+                        product.owner().module.clone(),
+                    ))
+                }), "warm compilation must emit no native or retained-Core product for an old owner");
+                let (table, _) = tidepool_repr::serial::read_metadata(
+                    item.native_metadata_bytes().unwrap(),
+                )
+                .unwrap();
+                let turn: ciborium::value::Value =
+                    ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+                let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+                let sites =
+                    tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+                let context = native
+                    .original_execution_context(&native.target_owned(), &table, &sites)
+                    .unwrap();
+                assert_retained(&context);
+                let ids = products
+                    .artifact_view
+                    .descriptors()
+                    .into_iter()
+                    .filter(|descriptor| descriptor.kind == ArtifactKind::OriginalModule)
+                    .map(|descriptor| {
+                        ((descriptor.owner.unit, descriptor.owner.module), descriptor.id)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let source_key = |import: &PendingImportOwner| match import {
+                    PendingImportOwner::Source { owner, original_ordinal, .. } => {
+                        if owner.unit == original.owner().unit
+                            && owner.module == original.owner().module
+                        {
+                            assert_eq!(owner, original.owner());
+                        }
+                        Some(NativeGroupKey {
+                            artifact: ids[&(owner.unit.clone(), owner.module.clone())],
+                            original_ordinal: *original_ordinal,
+                        })
+                    }
+                    _ => None,
+                };
+                // Independent worklist over compiler-certified import rows,
+                // rather than the inventory's production closure traversal.
+                let edges = products
+                    .certified_groups
+                    .iter()
+                    .map(|group| {
+                        (
+                            NativeGroupKey {
+                                artifact: ids[&(
+                                    group.owner().unit.clone(),
+                                    group.owner().module.clone(),
+                                )],
+                                original_ordinal: group.group().original_ordinal(),
+                            },
+                            group.imports().iter().filter_map(source_key).collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(edges.len(), products.certified_groups.len());
+                let NativeRequirementRoot::Group { artifact, original_ordinal } = native
+                    .typed_entry()
+                    .unwrap()
+                    .native_requirement_root()
+                else {
+                    panic!("the authored entry must issue an exact native group root")
+                };
+                let mut pending = selected.iter().copied().collect::<Vec<_>>();
+                pending.push(NativeGroupKey { artifact, original_ordinal });
+                pending.extend(products.pending_imports.iter().filter_map(source_key));
+                let mut expected = BTreeSet::new();
+                while let Some(key) = pending.pop() {
+                    if expected.insert(key) {
+                        pending.extend(edges.get(&key).expect("every demanded group must have its certified original row"));
+                    }
+                }
+                assert_eq!(products.artifact_view.selected_native_groups(), expected);
+                selected = expected;
+            }
+        },
+    )
+    .unwrap();
+    assert!(observed >= 2, "both warm authored actions must be observed");
+    assert!(selected.contains(&seconds));
+    assert!(selected.contains(&minutes));
+    assert!(
+        selected
+            .iter()
+            .filter(|key| key.artifact == descriptor.id)
+            .count()
+            < full.groups.len()
+    );
+    let after = session.resident.compile_view_in(session.public).unwrap();
+    let after = after.exact_declaration_context().unwrap();
+    assert_retained(after);
+    assert_eq!(
+        after
+            .artifact_view()
+            .selected_native_groups()
+            .into_iter()
+            .filter(|key| key.artifact == descriptor.id)
+            .collect::<BTreeSet<_>>(),
+        selected
+            .into_iter()
+            .filter(|key| key.artifact == descriptor.id)
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(session.observed(), [7]);
+    session.assert_no_compiler_since_last_effect();
+}
+
+#[test]
 fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() {
     let mut session = SemanticSession::new();
     session

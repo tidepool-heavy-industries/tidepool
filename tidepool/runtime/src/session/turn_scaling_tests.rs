@@ -1300,6 +1300,41 @@ fn try_execute_cell_with_template_imports_expectation<H>(
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
 {
+    try_execute_cell_with_template_imports_expectation_observed(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        publication_target,
+        authority_checks,
+        template_imports,
+        expected_observation,
+        |_| {},
+    )
+}
+
+fn try_execute_cell_with_template_imports_expectation_observed<H>(
+    resident: &mut ScaleSession<H>,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: CellDeclarationExpectation,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks,
+    template_imports: &SourceImports,
+    expected_observation: Option<i64>,
+    observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -1484,6 +1519,7 @@ where
         |_| compile_cell(),
     )
     .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
+    observe(&program);
     assert!(!checked.items.is_empty());
     if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
         assert!(
