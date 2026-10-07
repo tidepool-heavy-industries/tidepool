@@ -1101,9 +1101,14 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     campaign.hosted.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rich_response_survives_resident_computation() {
-    execute_examples(true, None, 1).await;
+    // The published review recipe computes typed decisions and verifies that
+    // their scope, task and candidate values survive the retained response.
+    let repository = recipe_workspace(Some(&["Project.SkillChecks.reviewProvenance"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
