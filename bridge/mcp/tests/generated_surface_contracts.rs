@@ -94,3 +94,42 @@ fn generated_model_control_codecs_execute_and_preserve_callback_value() {
         String::from_utf8_lossy(&executed.stderr)
     );
 }
+
+#[test]
+fn compiled_public_actor_rows_match_generated_rust_order() {
+    use exomonad_tool::PublicActorEffectRow;
+
+    let surface = Surface::new();
+    let compiled = surface.compile("ActorProfiles.hs", true);
+    assert!(
+        compiled.status.success(),
+        "public actor row compilation: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let executed = Command::new(surface.scratch.path().join("codec"))
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "public actor row reflection: {}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    let reflected: Vec<Vec<String>> = serde_json::from_slice(&executed.stdout)
+        .expect("the compiled fixture must emit every named row as a string array");
+    let expected: Vec<Vec<String>> = PublicActorEffectRow::ALL
+        .into_iter()
+        .map(|row| {
+            std::iter::once(row.haskell_alias().to_owned())
+                .chain(
+                    row.effect_keys()
+                        .iter()
+                        .map(|key| format!("Effect{}", key.haskell_name())),
+                )
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        reflected, expected,
+        "compiled KnownEffects must preserve each public alias's exact effect order"
+    );
+}
