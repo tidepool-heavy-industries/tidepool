@@ -1010,9 +1010,13 @@ mod tests {
             let late_scope = checkout.machine().mint_isolated_scope();
             let late_capture = checkout.machine().retain_lexical_scope(late_scope).unwrap();
             checkout.machine().retire_scope(late_scope);
+            checkout
+                .machine()
+                .validate_lexical_scope_lease(late_capture.scope(), &late_capture)
+                .unwrap();
             let late_placement = crate::ActorPlacement {
                 resource_scope: RealmId::fresh(),
-                lexical_scope: late_scope,
+                lexical_scope: late_capture.scope(),
                 ..placement
             };
             let late_custody = ChildPlacementCustody::new(late_placement);
