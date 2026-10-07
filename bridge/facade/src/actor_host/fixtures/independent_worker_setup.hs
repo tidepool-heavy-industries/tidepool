@@ -1,4 +1,3 @@
-let peersCampaign = "independent" :: CampaignLabel
-let peersWave = "workers" :: ForkGroupLabel
-let firstPeerLabel = [label|worker|]
-peer <- unfold (batch peersCampaign peersWave) (child (withLifetime SwarmOwned (withModel (Literal "gpt-6-sol") (withContext (selected id) (coding @Text projectHead (assignment firstPeerLabel ("First independent worker" :: Text)))))))
+Right peerActor <- spawnSubagent (FreshCtx "First independent worker") (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec) { spawnLifetime = RunOwned, spawnModel = Just (Literal "gpt-6-sol"), spawnLabel = Just "worker" })
+Right peer <- request @Text peerActor ("First independent worker" :: Text) defaultRequestOptions

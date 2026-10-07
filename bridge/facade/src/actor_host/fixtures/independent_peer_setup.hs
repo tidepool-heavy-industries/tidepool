@@ -1,3 +1,3 @@
-let peerObserverWave = "observer" :: ForkGroupLabel
-let secondPeerLabel = [label|observer|]
-peerObserver <- unfold (batch peersCampaign peerObserverWave) (child (withLifetime SwarmOwned (withModel (Literal "gpt-6-sol") (withContext (selected (const "Retain the exact peer handle for a followup")) (coding @Text projectHead (assignment secondPeerLabel (responseActor peer)))))))
+Right observerActor <- spawnSubagent (FreshCtx "Retain the exact peer handle for followup") (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec) { spawnLifetime = RunOwned, spawnModel = Just (Literal "gpt-6-sol"), spawnLabel = Just "observer" })
+Right peerObserver <- request @Text observerActor (responseActor peer) defaultRequestOptions

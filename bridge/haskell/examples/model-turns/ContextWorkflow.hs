@@ -8,10 +8,8 @@
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
 
--- | Seed for synchronous transcript curation followed by inherited-context
--- delegation. The runtime commits the synchronous invocation before deferred
--- children begin, so both children see the curated transcript and this
--- module's persistent bindings.
+-- | Synchronous transcript curation and explicit captured-context delegation.
+-- Actor readiness and typed request admission are independent operations.
 module ContextWorkflow where
 
 import Control.Lens (over, traversed, (^..))
@@ -24,10 +22,8 @@ import Jev.Tidepool ()
 import Tidepool.Actors.Exomonad
 import Tidepool.Agent.Context
 import qualified Tidepool.Agent.Context as C
-import Tidepool.Agent.Assignment (assignment)
-import Tidepool.Agent.Reply (Response)
+import Tidepool.Agent.Contract (AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects)
 import Tidepool.Effects.Core (ContextReadWrite, Jev)
-import Tidepool.Effects.Row (Subset)
 
 sharedFinding :: Text
 sharedFinding = "The cache key must include the selected transcript prefix."
@@ -88,28 +84,39 @@ stageNextModelAndEffort alias = do
   setNextModel alias
   C.setNextEffort C.High
 
--- The caller can persist the returned responses or attach watches. The two
--- child applications are explicitly actor-owned and inherit the parent's
--- committed transcript only after this invocation has settled.
+-- The caller supplies the actual installed tool definition. Each refusal keeps
+-- its concrete spawned actor, when present, available for explicit recovery.
+data ContextDelegation
+  = ContextSpawnRefused SpawnError
+  | ContextRequestRefused AgentRef RequestError
+  | ContextRequested AgentRef (Request Text)
+  deriving (Show)
+
 curateAndDelegate
-  :: ( Member ContextReadWrite effects
-     , Member Forks effects
-     , Member Replies effects
-     , Member AgentInspection effects
-     , Subset CodingEffects effects
+  :: ( Member ContextReadWrite effects, Member AgentLaunch effects, Member Replies effects
+     , KnownEffects childEffects, KnownToolEffects childEffects, AsyncEffects childEffects
+     , HasInstalledAgentApi tools childEffects
      )
-  => Eff effects (Response Text, Response Text)
-curateAndDelegate = do
+  => AgentSpec tools childEffects
+  -> Eff effects (Either CheckpointRefusal [ContextDelegation])
+curateAndDelegate actualSpec = do
   curateChild
-  unfoldDeferred (batch "context-curation" "review") $
-    (,) <$> child @Text @CodingEffects @Text
-      (withLifetime ActorOwned
-        (coding projectHead (assignment [label|review-api|]
-          ("Review the API against: " <> sharedFinding))))
-      <*> child @Text @CodingEffects @Text
-      (withLifetime ActorOwned
-        (coding projectHead (assignment [label|review-tests|]
-          ("Review the tests against: " <> sharedFinding))))
+  captured <- checkpoint "curated context"
+  case captured of
+    Left issue -> pure (Left issue)
+    Right context -> do
+      idle <- mapM (\name -> spawnSubagent (ForkCtx context) SameDir
+        ((defaultSpawnOptions actualSpec) { spawnLabel = Just name }))
+        ["review-api", "review-tests"]
+      admitted <- mapM activate (zip idle
+        ["Review the API against: " <> sharedFinding, "Review the tests against: " <> sharedFinding])
+      _ <- releaseCheckpoint context
+      pure (Right admitted)
+  where
+    activate (Left issue, _) = pure (ContextSpawnRefused issue)
+    activate (Right actor, input) = do
+      admitted <- request @Text actor input defaultRequestOptions
+      pure (either (ContextRequestRefused actor) (ContextRequested actor) admitted)
 
 -- Read the transcript as bounded structural data, trim eligible tool-result
 -- bodies, and convert selected nonopaque completed exchanges to notes with

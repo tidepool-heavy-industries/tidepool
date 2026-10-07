@@ -1,8 +1,10 @@
+import qualified Tidepool.Agent.Contract as A
 let parentOnly = 41 :: Int
-let campaign = "model-context" :: CampaignLabel
-let wave = "workers" :: ForkGroupLabel
-let exactLabel = [label|exact|]
-let selectedLabel = [label|selected|]
-let exactBranch = withModel (Literal "gpt-6-sol") (coding @Text projectHead (assignment exactLabel ("exact" :: Text)))
-let selectedBranch = withContext (selected (\task -> "Focused packet: " <> task)) (withModel (Literal "gpt-6-sol") (withEffort Medium (coding @Text projectHead (assignment selectedLabel ("selected" :: Text)))))
-workers <- unfoldDeferred (batch campaign wave) ((,) <$> child (withLifetime ActorOwned exactBranch) <*> child (withLifetime ActorOwned selectedBranch))
+Right captured <- checkpoint "model context"
+Right exactActor <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnModel = Just (Literal "gpt-6-sol"), spawnLabel = Just "exact" })
+Right selectedActor <- spawnSubagent (FreshCtx "Focused packet: selected") (ForkWorktree projectHead)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnModel = Just (Literal "gpt-6-sol"), spawnEffort = Just Medium, spawnLabel = Just "selected" })
+Right exact <- request @Text exactActor ("exact" :: Text) defaultRequestOptions
+Right selectedWorker <- request @Text selectedActor ("selected" :: Text) defaultRequestOptions
+let workers = (exact, selectedWorker)
