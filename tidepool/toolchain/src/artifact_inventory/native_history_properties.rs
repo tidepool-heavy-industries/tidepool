@@ -366,7 +366,7 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
             4 => (slot, 0..MODULES, prop::sample::select(vec![3u32, 11, 29, 0, 4]), any::<bool>())
                 .prop_map(|(from, node, ordinal, all)| Op::Read { from, node, ordinal, all }),
         ],
-        0..49,
+        8..49,
     )
 }
 
@@ -507,6 +507,35 @@ fn prefix() -> Vec<Op> {
             to: 6,
         },
         Op::Drop(7),
+        // Refill the slots after the reclamation control so generated tails
+        // begin with live views in both inventories, rather than absent handles.
+        Op::Admit {
+            parent: 0,
+            root: 0,
+            future: false,
+            reverse: true,
+            to: 2,
+        },
+        Op::Clone { from: 2, to: 3 },
+        Op::Admit {
+            parent: 0,
+            root: 1,
+            future: true,
+            reverse: false,
+            to: 4,
+        },
+        Op::Admit {
+            parent: 1,
+            root: 2,
+            future: false,
+            reverse: false,
+            to: 5,
+        },
+        Op::Merge {
+            left: 2,
+            right: 5,
+            to: 7,
+        },
     ]
 }
 
