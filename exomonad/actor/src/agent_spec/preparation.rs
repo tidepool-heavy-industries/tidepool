@@ -358,7 +358,7 @@ pub(crate) mod tests {
 
     /// The consumer supplies a genuinely issued entry; this exercises cache
     /// retirement without manufacturing source/native authority for a fixture.
-    pub(crate) fn ready_bound_preserves_installed_lease(ready: Arc<PreparedToolset>) {
+    pub(crate) async fn ready_bound_preserves_installed_lease(ready: Arc<PreparedToolset>) {
         let owner = ToolsetPreparation::default();
         let first_key = recipe("oldest");
         let (first, disposition) = owner.lookup(&first_key);
@@ -393,6 +393,230 @@ pub(crate) mod tests {
             "installed tool leases retain the original entry after cache retirement"
         );
         assert!(ready.entry.compiled().original_compile_input().is_some());
+        run_cache_history(ready).await;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ModelPhase {
+        Pending,
+        Ready,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ModelEntry {
+        task: usize,
+        phase: ModelPhase,
+    }
+
+    /// Independent cache model: only successful settlement enters the LRU;
+    /// failed settlement removes the current task; stale settlement is inert.
+    #[derive(Default)]
+    struct CacheModel {
+        entries: HashMap<InstallerRecipe, ModelEntry>,
+        ready_order: VecDeque<InstallerRecipe>,
+        next_task: usize,
+    }
+
+    struct CacheHistory {
+        owner: ToolsetPreparation,
+        model: CacheModel,
+        handles: HashMap<usize, (InstallerRecipe, Arc<PreparationTask>)>,
+        ready: Arc<PreparedToolset>,
+    }
+
+    impl CacheHistory {
+        fn new(ready: Arc<PreparedToolset>) -> Self {
+            Self {
+                owner: ToolsetPreparation::default(),
+                model: CacheModel::default(),
+                handles: HashMap::new(),
+                ready,
+            }
+        }
+
+        fn lookup(&mut self, key: InstallerRecipe) -> usize {
+            let (expected, expected_task) = match self.model.entries.get(&key).copied() {
+                Some(ModelEntry { task, phase: ModelPhase::Pending }) => {
+                    (PreparationLookupDisposition::JoinedPending, task)
+                }
+                Some(ModelEntry { task, phase: ModelPhase::Ready }) => {
+                    self.model.ready_order.retain(|candidate| candidate != &key);
+                    self.model.ready_order.push_back(key.clone());
+                    (PreparationLookupDisposition::ReadyHit, task)
+                }
+                None => {
+                    let task = self.model.next_task;
+                    self.model.next_task += 1;
+                    self.model.entries.insert(
+                        key.clone(),
+                        ModelEntry { task, phase: ModelPhase::Pending },
+                    );
+                    (PreparationLookupDisposition::New, task)
+                }
+            };
+
+            let (actual, disposition) = self.owner.lookup(&key);
+            assert_eq!(disposition, expected, "lookup disposition for {}", key.entry);
+            if let Some((_, expected_handle)) = self.handles.get(&expected_task) {
+                assert!(Arc::ptr_eq(&actual, expected_handle));
+            } else {
+                self.handles.insert(expected_task, (key.clone(), Arc::clone(&actual)));
+            }
+            self.assert_matches_model();
+            expected_task
+        }
+
+        fn settle_success(&mut self, task: usize) {
+            self.settle(task, true);
+        }
+
+        fn settle_failure(&mut self, task: usize) {
+            self.settle(task, false);
+        }
+
+        fn settle(&mut self, task: usize, success: bool) {
+            let (key, handle) = self.handles.get(&task).expect("history task exists");
+            let key = key.clone();
+            let handle = Arc::clone(handle);
+            let current = self.model.entries.get(&key).copied();
+            let is_current_pending = current.is_some_and(|entry| {
+                entry.task == task && entry.phase == ModelPhase::Pending
+            });
+            let outcome = if success {
+                Ok(Arc::clone(&self.ready))
+            } else {
+                Err(PreparationFailure::Source(format!("history failure {task}")))
+            };
+            self.owner.settle(key.clone(), &handle, outcome);
+
+            if is_current_pending {
+                if success {
+                    self.model.entries.insert(
+                        key.clone(),
+                        ModelEntry { task, phase: ModelPhase::Ready },
+                    );
+                    self.model.ready_order.retain(|candidate| candidate != &key);
+                    self.model.ready_order.push_back(key);
+                    while self.model.ready_order.len() > RETAINED_TOOLSETS {
+                        if let Some(retired) = self.model.ready_order.pop_front() {
+                            self.model.entries.remove(&retired);
+                        }
+                    }
+                } else {
+                    self.model.entries.remove(&key);
+                }
+            }
+            self.assert_matches_model();
+        }
+
+        fn assert_matches_model(&self) {
+            let actual = self.owner.state.lock();
+            assert_eq!(actual.ready_order, self.model.ready_order);
+            assert_eq!(actual.tasks.len(), self.model.entries.len());
+            for (key, expected) in &self.model.entries {
+                let task = actual.tasks.get(key).expect("modeled task is retained");
+                let (_, issued) = self.handles.get(&expected.task).expect("issued task handle");
+                assert!(Arc::ptr_eq(task, issued));
+                assert_eq!(
+                    self.model.ready_order.contains(key),
+                    expected.phase == ModelPhase::Ready
+                );
+            }
+        }
+    }
+
+    async fn run_cache_history(ready: Arc<PreparedToolset>) {
+        let original_acquisition = ready.acquisition.clone();
+        let mut history = CacheHistory::new(Arc::clone(&ready));
+
+        // Populate beyond the real retention bound, then touch an older ready
+        // item to check that successful lookup updates the model's LRU order.
+        let mut issued = Vec::new();
+        for index in 0..(RETAINED_TOOLSETS + 4) {
+            let key = recipe(&format!("history-ready-{index}"));
+            let task = history.lookup(key);
+            assert_eq!(history.lookup(recipe(&format!("history-ready-{index}"))), task);
+            history.settle_success(task);
+            issued.push(task);
+        }
+        let recent = history.lookup(recipe("history-ready-5"));
+        assert_eq!(recent, issued[5]);
+        let next = history.lookup(recipe("history-ready-5"));
+        assert_eq!(next, recent);
+        assert!(
+            !history.model.entries.contains_key(&recipe("history-ready-0")),
+            "successes beyond the bound retire the least recently used entry"
+        );
+
+        // A failed owner retires only its task. A later failed settlement from
+        // that old task must leave the replacement pending and cached.
+        let retry_key = recipe("history-retry");
+        let failed = history.lookup(retry_key.clone());
+        history.settle_failure(failed);
+        let replacement = history.lookup(retry_key.clone());
+        assert_ne!(failed, replacement);
+        history.settle_failure(failed);
+        assert_eq!(
+            history.model.entries.get(&retry_key).map(|entry| entry.task),
+            Some(replacement)
+        );
+        history.settle_success(replacement);
+
+        // Deterministic pseudo-random histories interleave pending joins,
+        // ready hits, failures, successful publication and LRU retirement.
+        let keys = (0..23)
+            .map(|index| recipe(&format!("history-seeded-{index}")))
+            .collect::<Vec<_>>();
+        let mut random = 0x4d59_5df4_d0f3_3173_u64;
+        for _ in 0..192 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let key = keys[(random as usize) % keys.len()].clone();
+            match history.model.entries.get(&key).copied() {
+                None => {
+                    history.lookup(key);
+                }
+                Some(ModelEntry { task, phase: ModelPhase::Pending }) => {
+                    if random & 1 == 0 {
+                        history.lookup(key);
+                    } else if random & 2 == 0 {
+                        history.settle_success(task);
+                    } else {
+                        history.settle_failure(task);
+                    }
+                }
+                Some(ModelEntry { phase: ModelPhase::Ready, .. }) => {
+                    history.lookup(key);
+                }
+            }
+        }
+
+        // Retain one waiter while cancelling another. Settlement still reaches
+        // the live waiter, and the model observes the failed key's retirement.
+        let waiter_key = recipe("history-waiter");
+        let waiter_task = history.lookup(waiter_key.clone());
+        let task = Arc::clone(&history.handles[&waiter_task].1);
+        let cancelled = tokio::spawn({
+            let task = Arc::clone(&task);
+            async move { task.wait().await }
+        });
+        let retained = tokio::spawn({
+            let task = Arc::clone(&task);
+            async move { task.wait().await }
+        });
+        tokio::task::yield_now().await;
+        cancelled.abort();
+        history.settle_failure(waiter_task);
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            retained.await.unwrap(),
+            Err(PreparationFailure::Source(detail)) if detail == format!("history failure {waiter_task}")
+        ));
+        assert!(!history.model.entries.contains_key(&waiter_key));
+        assert_eq!(ready.acquisition, original_acquisition);
+        assert!(Arc::ptr_eq(&ready, &history.ready));
+        history.assert_matches_model();
     }
 
     #[test]

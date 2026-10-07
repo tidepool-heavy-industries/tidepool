@@ -16413,7 +16413,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(first.declarations, second.declarations);
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
             &first._prepared,
-        ));
+        ))
+        .await;
         let original_identity = proof.original_input_identity().to_owned();
         let original_source = proof.original_source().to_owned();
         let original_owner = tidepool_toolchain::extract_module_name(&original_source)
