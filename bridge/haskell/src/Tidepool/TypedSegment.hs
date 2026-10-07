@@ -22,7 +22,7 @@ import Control.Exception (throwIO)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Data (Data, Typeable, cast, gmapQ)
-import Data.List (nub)
+import Data.List (foldl', nub, partition)
 import GHC (GhcTc, GhcRn, HsExpr(..), HsBind, HsBindLR(..), Pat(..), FixitySig(..), unLoc)
 import GHC.Hs (HsLocalBinds, HsLocalBindsLR(..), LHsExpr, LPat, ABExport(..), AbsBinds(..), XXExprGhcTc(..), MatchGroup(..), Match(..), GRHSs(..), GRHS(..))
 import GHC.Hs.Utils (collectHsBindBinders, collectPatBinders, CollectFlag(..))
@@ -37,7 +37,7 @@ import GHC.Core.Lint (lintExpr)
 import GHC.Data.Bag (bagToList)
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Core.Make (mkCoreLets, mkCoreTup, mkCoreConApps)
-import GHC.Core.FVs (exprFreeVars)
+import GHC.Core.FVs (bindFreeVars, exprFreeVars)
 import GHC.Core.Subst (mkEmptySubst, extendSubst, substExpr)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Types.Var.Set (unionVarSet)
@@ -52,7 +52,7 @@ import GHC.Builtin.Types (zonkAnyTyCon, unitTy, unitDataCon, manyDataConTy, intD
 import GHC.Builtin.Types.Prim (intPrimTy)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
-import GHC.Core (Expr(..), Bind(..), Alt(..), AltCon(..), CoreExpr, CoreBind, mkApps, mkLams, collectArgs)
+import GHC.Core (Expr(..), Bind(..), Alt(..), AltCon(..), CoreExpr, CoreBind, bindersOf, mkApps, mkLams, collectArgs)
 import GHC.Core.Type
   ( Type, splitTyConApp_maybe, splitFunTy_maybe, getTyVar_maybe, tyConsOfType, tyCoVarsOfType, mkVisFunTyMany, mkTyVarTy )
 import GHC.Core.TyCo.Rep (Scaled(..))
@@ -269,7 +269,7 @@ captureTypedSegment plan environment admitted checked = do
     (_, lowered) <- initDs environment checked $
       dsEvBinds (tcg_ev_binds checked) $ \topEvidence ->
         dsTcEvBinds_s (abs_ev_binds abstraction) $ \evidence ->
-          pure (mkCoreLets (topEvidence ++ evidence) (mkLams inputs settled))
+          pure (keepRequiredEvidence (topEvidence ++ evidence) (mkLams inputs settled))
     core <- maybe (throwIO (ItemDesugaringFailed ordinal)) pure lowered
     mapM_ (checkClosedType ordinal . idType) inputs
     checkClosedType ordinal (exprType core)
@@ -299,6 +299,20 @@ captureTypedSegment plan environment admitted checked = do
   pure (TypedSegment original items auxiliary)
   where
     isObservation item = case plannedItemBody item of ObservationItem{} -> True; _ -> False
+
+-- Only GHC evidence groups enter this closure; authored local bindings remain
+-- in the item body. Keep every demanded dictionary/coercion dependency and
+-- complete recursive group, in its original lexical order.
+keepRequiredEvidence :: [CoreBind] -> CoreExpr -> CoreExpr
+keepRequiredEvidence bindings body = mkCoreLets (filter (demanded required) bindings) body
+  where
+    groups = [(binding, bindFreeVars binding) | binding <- bindings]
+    required = close (exprFreeVars body) groups
+    demanded names binding = any (`elementOfUniqSet` names) (bindersOf binding)
+    close names remaining = case partition (demanded names . fst) remaining of
+      ([], _) -> names
+      (selected, pending) -> close
+        (foldl' unionVarSet names (map snd selected)) pending
 
 -- These generic entries preserve the existing resume/apply runtime ABI. Their
 -- telescope is the actual shipped operation telescope, independent of any item.
