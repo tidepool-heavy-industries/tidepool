@@ -253,7 +253,7 @@ mod tests {
         slash_outputs: usize,
         unicode_inputs: usize,
         capped_outputs: usize,
-        lock_components: usize,
+        lock_mentions: usize,
         long_inputs: usize,
     }
 
@@ -264,7 +264,7 @@ mod tests {
             self.slash_outputs += usize::from(label.contains('/'));
             self.unicode_inputs += usize::from(!raw.is_ascii());
             self.capped_outputs += usize::from(label.len() == 200);
-            self.lock_components += usize::from(raw.contains(".lock"));
+            self.lock_mentions += usize::from(raw.contains(".lock"));
             self.long_inputs += usize::from(raw.len() > 200);
         }
     }
@@ -313,10 +313,12 @@ mod tests {
             prop_assert!(!label.is_empty(), "fallback must keep the label nonempty");
             prop_assert!(label.len() <= 200, "label exceeded its byte cap: {}", label.len());
 
-            // A fixed valid ID-shaped suffix exercises the consumer's branch
-            // component budget; minting and retained identity are covered by
-            // the real WorktreeManager creation test in worktree_core.
-            let branch = format!("{EXOMONAD_BRANCH_PREFIX}/{label}-generated-id");
+            // The UUID-shaped suffix matches the real consumer's branch form;
+            // this ref-format check does not impose filesystem component byte
+            // limits, which the label-length assertion above covers.
+            let branch = format!(
+                "{EXOMONAD_BRANCH_PREFIX}/{label}-wt-00000000-0000-0000-0000-000000000000"
+            );
             let full_ref = format!("refs/heads/{branch}");
             let checked = git.read(repository.path(), &["check-ref-format", &full_ref]);
             prop_assert!(
