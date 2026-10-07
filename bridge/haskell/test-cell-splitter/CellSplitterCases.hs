@@ -22,6 +22,10 @@ import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
 import GHC.Builtin.Types (intTy, intDataCon)
+import GHC.Builtin.Names (genClassKey)
+import GHC.Core.Class (className)
+import GHC.Core.InstEnv (is_cls, is_tys)
+import GHC.Core.TyCon (tyConName)
 import GHC.Core qualified as Core
 import GHC.Core.DataCon (dataConWorkId, dataConRepArgTys, dataConTheta)
 import GHC.Core.Coercion (mkPrimEqPred)
@@ -38,7 +42,7 @@ import GHC.Types.Var (isId, isCoVar, varType, varName)
 import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString)
-import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env)
+import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env, tcg_insts)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
@@ -1910,6 +1914,107 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       removeFile path
       createDirectory path
       pure path
+
+-- The first case is the retained public notebook input whose consumer
+-- derives demand Generic before GHC reports duplicate declarations. The
+-- variants distinguish actual class identities from their source spelling.
+explicitGenericDerivationRecovery :: IO ()
+explicitGenericDerivationRecovery = genericDerivationRecovery
+  "Notebook.cell.hs" ["ScopePing", "ScopeTools"] []
+
+qualifiedAndStandaloneGenericRecovery :: IO ()
+qualifiedAndStandaloneGenericRecovery = genericDerivationRecovery
+  "ResolvedVariants.cell.hs" ["Qualified", "Standalone", "Reexported"]
+  ["Automatic", "ForeignIdentity"]
+
+genericDerivationRecovery :: FilePath -> [String] -> [String] -> IO ()
+genericDerivationRecovery fixture explicit automatic =
+  withGenericCompiler fixture $ \compile plan -> do
+    -- The exact authored derives are valid without their generated duplicates.
+    -- Retain the automatic-only companions while checking this prerequisite.
+    baseline <- compile (omitCellGenericDeclarations explicit plan)
+    assertGenericInstances (explicit ++ automatic) baseline
+    assertEqual "parser retains candidates until GHC resolves their class" True
+      (all (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations plan)) (explicit ++ automatic))
+    (accepted, result) <- checkCellInstances compile plan
+    assertEqual "authored Generic keeps its unique native instance" False
+      (any (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted)) explicit)
+    assertEqual "missing Generic and unrelated same-spelling classes retain companions" True
+      (all (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted)) automatic)
+    assertGenericInstances (explicit ++ automatic) result
+    -- The accepted source also succeeds without the retry loop, so its
+    -- validity cannot depend on swallowing a failed compiler operation.
+    ordinary <- compile accepted
+    assertGenericInstances (explicit ++ automatic) ordinary
+
+authoredGenericConflictsRemainErrors :: IO ()
+authoredGenericConflictsRemainErrors =
+  withGenericCompiler "AuthoredConflict.cell.hs" $ \compile plan -> do
+    let requireRefusal :: Either SomeException result -> IO ()
+        requireRefusal outcome = case outcome of
+          Right _ -> fail "conflicting authored Generic instances were accepted"
+          Left failure -> case fromException failure of
+            Just sourceError -> requireSourceDiagnostics (diagsFromSourceError sourceError)
+            Nothing -> case fromException failure of
+              Just (DependencySourceFailure diagnostics) -> requireSourceDiagnostics diagnostics
+              _ -> fail ("authored Generic conflict lost its source failure: " ++ show failure)
+        requireSourceDiagnostics diagnostics = unless
+          (any ((== DiagError) . dSeverity) diagnostics)
+          (fail "authored Generic refusal has no native error diagnostic")
+    -- Removing the generated candidate leaves the real authored conflict.
+    -- Recovery must preserve that refusal rather than authorizing either one.
+    authored <- try (compile (omitCellGenericDeclarations ["Conflicting"] plan))
+      :: IO (Either SomeException CheckedEnvironmentResult)
+    requireRefusal authored
+    recovered <- try (checkCellInstances compile plan)
+      :: IO (Either SomeException (CellSourcePlan, CheckedEnvironmentResult))
+    requireRefusal recovered
+
+withGenericCompiler
+  :: FilePath
+  -> ((CellSourcePlan -> IO CheckedEnvironmentResult) -> CellSourcePlan -> IO result)
+  -> IO result
+withGenericCompiler fixture use = bracket structuralDisplayDirectory removeDirectoryRecursive $ \root -> do
+  effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
+  source <- readFile ("test-cell-splitter/fixtures/explicit-generic" </> fixture)
+  plan <- analyzeOrderedCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
+  let includes = [root, "test-cell-splitter", effects, prelude]
+      path = root </> "GenericDerivation.hs"
+  withResidentPipelineSelectedRequests includes $ \runRequest ->
+    runRequest (pure ()) $ \compiler -> do
+      let compile current = do
+            rendered <- either fail pure (renderCellCheckSource genericDerivationTemplate current)
+            writeFile path rendered
+            compiler CheckedEnvironment mempty
+              (GeneratedInstanceCheck (cellGeneratedInstanceRecipe current) OriginalDeclarationCompile)
+              Nothing path includes Nothing
+      use compile plan
+
+assertGenericInstances :: [String] -> CheckedEnvironmentResult -> IO ()
+assertGenericInstances targets result = do
+  let environment = crTargetTcGblEnv result
+      owned = [occNameString (nameOccName (tyConName constructor))
+        | instance' <- tcg_insts environment
+        , nameUnique (className (is_cls instance')) == genClassKey
+        , ty <- is_tys instance'
+        , Just (constructor, _) <- [splitTyConApp_maybe ty]
+        , nameModule_maybe (tyConName constructor) == Just (tcg_mod environment)]
+  unless (not (null targets)) (fail "Generic native control selected no targets")
+  forM_ targets $ \target -> assertEqual ("unique native Generic instance for " ++ target)
+    1 (length (filter (== target) owned))
+
+genericDerivationTemplate :: String
+genericDerivationTemplate = unlines
+  [ "{-# LANGUAGE DeriveGeneric, StandaloneDeriving, FlexibleInstances, FlexibleContexts, UndecidableInstances #-}"
+  , "{{CELL_PRAGMAS}}"
+  , "module GenericDerivation where"
+  , "{{CELL_IMPORTS}}"
+  , "{{CELL_DECLS}}"
+  , "__tidepoolCellExpression :: value -> Maybe ()"
+  , "__tidepoolCellExpression _ = pure ()"
+  , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
+  ]
 
 data DisplayTestScope = OrdinaryDisplayTest | LegacyDisplayScopeTest
 

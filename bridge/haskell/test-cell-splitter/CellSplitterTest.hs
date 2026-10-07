@@ -67,6 +67,9 @@ tests = testGroup "cell-splitter"
   , testCase "ambiguousOccurrenceHintCompilation" ambiguousOccurrenceHintCompilation
   , testCase "ordinary structural display" $
       requiredInput "TIDEPOOL_TEST_EFFECTS_DIR" >>= structuralDisplayCompilation OrdinaryDisplayTest
+  , testCase "explicit Generic derivation recovery" explicitGenericDerivationRecovery
+  , testCase "qualified and standalone Generic recovery" qualifiedAndStandaloneGenericRecovery
+  , testCase "authored Generic conflicts remain errors" authoredGenericConflictsRemainErrors
   , testCase "legacy display scope refusal" $
       requiredInput "TIDEPOOL_TEST_EFFECTS_DIR" >>= structuralDisplayCompilation LegacyDisplayScopeTest
   , testGroup "parser" [testCase "lexical islands" $ withParserFlags $ \_flags lexicalFlags -> lexicalIslands lexicalFlags
