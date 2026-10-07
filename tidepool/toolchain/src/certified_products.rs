@@ -392,6 +392,22 @@ impl OriginalNativeWitness {
     }
 }
 
+/// Authenticate local entry membership without admitting executable dependencies.
+/// Checked-entry issuers use this census before the inventory selects closure.
+pub(crate) fn authenticates_original_native_entry(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    original_ordinal: u32,
+    binder: &SymbolIdentity,
+) -> bool {
+    product.original_native().is_some_and(|witness| {
+        witness.matches_original(product)
+            && witness.groups.iter().any(|group| {
+                group.group.original_ordinal() == original_ordinal
+                    && group.group.binders().contains(binder)
+            })
+    })
+}
+
 fn retain_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     groups: Vec<PendingCertifiedGroup>,
