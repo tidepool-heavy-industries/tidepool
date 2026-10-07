@@ -3865,6 +3865,16 @@ impl ExactDeclarationContext {
         }
     }
 
+    /// Read-only lifetime requirements for full original authored bodies.
+    /// This preserves future entry support without selecting executable groups.
+    pub fn authored_native_binding_custody_requirements(
+        &self,
+        owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<crate::artifact_inventory::NativeBindingRequirement>, CompileError> {
+        self.inventory
+            .authored_native_binding_custody_requirements(owners)
+    }
+
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.inventory
             .entries()

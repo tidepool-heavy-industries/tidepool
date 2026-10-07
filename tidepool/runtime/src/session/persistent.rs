@@ -4673,7 +4673,7 @@ mod checkpoint_scope_tests {
         for invalid in [
             foreign_requirement,
             NativeBindingRequirement {
-                generation: 827,
+                generation: 9999,
                 ..requirement.clone()
             },
             NativeBindingRequirement {
@@ -4758,13 +4758,17 @@ mod checkpoint_scope_tests {
         session.retire_scope(public);
         assert!(session.bindings.get(old_id).is_none());
         assert!(session.bindings.get(shadow_id).is_none());
-        assert_eq!(session.persistent_roots_count(), 0);
-        session
-            .prepared_mut()
-            .unwrap()
-            .quiesce_and_collect_now()
-            .unwrap();
-        assert_eq!(session.residency().unwrap().programs, 0);
+        assert_eq!(
+            session
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(old_handle.raw()),
+            None
+        );
+        assert!(session
+            .bindings
+            .source_instances_in(&session.scopes, public)
+            .is_empty());
     }
 
     #[test]

@@ -446,10 +446,14 @@ pub(super) fn validate_recovery_native_markers(
     node: &recovery::RecoveryNode,
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
 ) -> Result<(), String> {
-    let artifacts = match node.kind {
-        recovery::RecoveryNodeKind::Authored => BTreeSet::from([context
-            .authored_native_root(node.id.0)
-            .map_err(|error| error.to_string())?]),
+    let expected = match node.kind {
+        recovery::RecoveryNodeKind::Authored => {
+            let artifacts = BTreeSet::from([context
+                .authored_native_root(node.id.0)
+                .map_err(|error| error.to_string())?]);
+            let roots = selected_native_roots(context.artifact_view(), &artifacts);
+            certified_native_dependencies(context, &roots).map_err(|error| error.to_string())?
+        }
         recovery::RecoveryNodeKind::Join => {
             let owners = node
                 .exports
@@ -461,23 +465,14 @@ pub(super) fn validate_recovery_native_markers(
                         module: identity.module.clone(),
                     },
                 )
-                .collect::<BTreeSet<_>>();
-            context
-                .artifact_view()
-                .descriptors()
-                .into_iter()
-                .filter(|descriptor| {
-                    descriptor.kind
-                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
-                        && owners.contains(&descriptor.owner)
-                })
-                .map(|descriptor| descriptor.id)
-                .collect::<BTreeSet<_>>()
+                .collect();
+            native_binding_dependencies(
+                context
+                    .authored_native_binding_custody_requirements(&owners)
+                    .map_err(|error| error.to_string())?,
+            )
         }
     };
-    let roots = selected_native_roots(context.artifact_view(), &artifacts);
-    let expected =
-        certified_native_dependencies(context, &roots).map_err(|error| error.to_string())?;
     let expected = expected.into_iter().collect::<BTreeSet<_>>();
     let actual = node
         .live_dependencies

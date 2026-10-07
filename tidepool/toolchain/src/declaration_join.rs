@@ -913,7 +913,6 @@ impl AcceptedJoin {
             })
             .collect();
         self.context
-            .artifact_view()
             .authored_native_binding_custody_requirements(&owners)
     }
     pub fn instances(&self) -> &InstanceInventory {
