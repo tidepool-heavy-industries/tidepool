@@ -798,7 +798,10 @@ impl SelectedOwners {
         entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         groups: &BTreeSet<NativeGroupKey>,
     ) -> Result<
-        BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>,
+        (
+            BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>,
+            BTreeSet<NativeGroupKey>,
+        ),
         CompileError,
     > {
         let mut planned = BTreeMap::new();
@@ -885,6 +888,13 @@ impl SelectedOwners {
             }
             planned.insert(node, edges);
         }
+        let closed_groups = planned
+            .keys()
+            .filter_map(|key| match key {
+                InventoryNodeKey::Group(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
         let mut additions = BTreeMap::new();
         for (key, expected) in planned {
             if let Some(index) = state.indices.get(&key) {
@@ -904,7 +914,7 @@ impl SelectedOwners {
                 additions.insert(key, expected);
             }
         }
-        Ok(additions)
+        Ok((additions, closed_groups))
     }
     fn dependencies(
         &self,
@@ -1190,23 +1200,11 @@ impl ArtifactInventory {
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
         let mut selected_groups = native_groups(&parent_nodes);
         selected_groups.extend(groups.iter().copied());
-        let edges = owners.planned_edges(&state, &selected, &selected_groups)?;
-        if exact {
-            let mut computed = native_groups(&parent_nodes);
-            computed.extend(edges.keys().filter_map(|key| match key {
-                InventoryNodeKey::Group(key) => Some(*key),
-                _ => None,
-            }));
-            // Existing selected vertices have immutable edges too; traverse them.
-            computed.extend(native_groups(&closure(
-                &state,
-                groups.iter().copied().map(InventoryNodeKey::Group),
-            )));
-            if computed != selected_groups {
-                return Err(failure(
-                    "recovered native group closure differs from certified demand",
-                ));
-            }
+        let (edges, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
+        if exact && closed_groups != selected_groups {
+            return Err(failure(
+                "recovered native group closure differs from certified demand",
+            ));
         }
         for key in edges.keys() {
             let index = state.graph.add_node(*key);
