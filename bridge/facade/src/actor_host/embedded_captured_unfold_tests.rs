@@ -256,7 +256,7 @@ impl CapturedHostTransport {
                         },
                         match self.scenario {
                             HostedScenario::LocalActorStartup => {
-                                "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)"
+                                "seed <- R.call (readSeed (R.client seedStore)) ()\nagents <- R.call (readAgents (R.client groupStore)) ()\ndisplay (case seed of Nothing -> null agents; _ -> False)"
                             }
                             HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
                                 include_str!("embedded_captured_unfold_and_await.hs")
@@ -963,7 +963,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     3,
                     "setup owns one root and two record services"
                 );
-                for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-agents"] {
                     let record = graph.iter().find(|node| node.label == label).unwrap();
                     assert!(!record.model_actor);
                     assert!(record.terminal.is_none());
@@ -1021,7 +1021,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     assert_committed_haskell_value(&result, "True");
                     received_output(&transport, &operation).await;
                     let graph = campaign.forest.inspect_host_graph();
-                    for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                    for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-agents"] {
                         let local = graph
                             .iter()
                             .find(|node| node.label == label)
@@ -1296,7 +1296,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     assert!(node.active_requests.is_empty(), "{node:?}");
                     assert!(node.queued_requests.is_empty(), "{node:?}");
                 }
-                for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-agents"] {
                     assert!(graph
                         .iter()
                         .find(|node| node.label == label)
@@ -1360,7 +1360,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 let cleaned = root_tool_call(
                     &campaign,
                     &transport,
-                    "captured-interrupted-group-cleanup",
+                    "captured-interrupted-child-cleanup",
                     include_str!("embedded_captured_group_cleanup.hs"),
                 )
                 .await
@@ -1613,15 +1613,6 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         transport.operation(origin, &format!("captured-child-{}", origin.actor().0));
                     received_output(&transport, &operation).await;
                 }
-                let refusal = root_tool_call(
-                    &campaign,
-                    &transport,
-                    "captured-active-cleanup-refusal",
-                    include_str!("embedded_captured_group_cleanup.hs"),
-                )
-                .await
-                .unwrap();
-                assert_committed_haskell_value(&refusal, "False");
                 let actors = campaign
                     .observer
                     .installations()
@@ -1631,11 +1622,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     })
                     .map(|installation| installation.actor.identity())
                     .collect::<Vec<_>>();
-                assert_eq!(
-                    actors.len(),
-                    2,
-                    "refused cleanup must retain both actor-owned children"
-                );
+                assert_eq!(actors.len(), 2, "both actor-owned children survive their requests");
                 for actor in &actors {
                     let node = campaign
                         .forest
@@ -1649,17 +1636,24 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
                     assert!(node.terminal.is_none());
                 }
-                transport.finish_children.send_replace(true);
-                successful_rounds(&campaign, &actors).await;
+                let stopped = root_tool_call(
+                    &campaign,
+                    &transport,
+                    "captured-active-child-cleanup",
+                    include_str!("embedded_captured_group_cleanup.hs"),
+                )
+                .await
+                .expect("explicit child retirement cancels active model turns");
+                assert_committed_haskell_value(&stopped, "True");
             }
             let cleaned = root_tool_call(
                 &campaign,
                 &transport,
-                "captured-group-cleanup",
+                "captured-child-cleanup",
                 include_str!("embedded_captured_group_cleanup.hs"),
             )
             .await
-            .expect("known original group cleanup settles");
+            .expect("known children retire independently and repeated retirement is idempotent");
             assert_committed_haskell_value(&cleaned, "True");
             let known_children = campaign
                 .observer
@@ -1673,7 +1667,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 let terminal = child.terminal();
                 tokio::time::timeout(Duration::from_secs(30), terminal.wait())
                     .await
-                    .expect("known captured child retires after group cleanup");
+                    .expect("known captured child retires after explicit stop");
                 let cleanup = terminal
                     .cleanup()
                     .expect("child retirement retains cleanup evidence");
