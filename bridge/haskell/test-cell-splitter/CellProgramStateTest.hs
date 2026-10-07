@@ -22,7 +22,7 @@ cellProgramStateChecks = do
         NoCheckedPurpose Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
-        (StmtBinders kind [] []) [] False
+        (StmtBinders kind [] []) [] False Nothing
       plan items = CellSourcePlan prologue items [] "" "" [] ""
       firstPlan = plan [item 1 KBind,item 2 KExpr]
       declaration = plan [item 3 KDecl,item 4 KDecl]
