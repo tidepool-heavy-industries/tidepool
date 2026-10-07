@@ -62,7 +62,6 @@ pub struct NativeGroupKey {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NativeArtifactDemand<'a> {
     AllGroups,
-    VerifiedGroupRoot(&'a crate::checked_cell::CheckedTypedEntry),
     /// A checked authored entry and its same compiled executable wrapper have
     /// distinct native dependencies. Neither implies whole-carrier demand.
     VerifiedTarget {
@@ -1171,9 +1170,6 @@ impl ArtifactInventory {
                         })
                 })
                 .collect(),
-            NativeArtifactDemand::VerifiedGroupRoot(root) => {
-                BTreeSet::from([root.native_group_key()])
-            }
             NativeArtifactDemand::VerifiedTarget { entry, imports } => {
                 let mut groups = certified_target_source_groups(&entries, imports)?;
                 groups.insert(entry.native_group_key());

@@ -4381,7 +4381,10 @@ mod tests {
             .admit_shared_with_demand(
                 &baseline,
                 entries.clone(),
-                NativeArtifactDemand::VerifiedGroupRoot(&entry),
+                NativeArtifactDemand::VerifiedTarget {
+                    entry: &entry,
+                    imports: &[],
+                },
             )
             .unwrap();
         let authored_groups =

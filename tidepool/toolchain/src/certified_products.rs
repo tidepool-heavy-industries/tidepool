@@ -5944,8 +5944,9 @@ pub(crate) fn certify_target_owners_with_validation(
     certify_target_owners_from_sources(prepared, accepted, &sources, packages, validation)
 }
 
-/// Authenticate ordinary target demand from full immutable source membership.
-/// Executable admission still belongs to the inventory and selected certifier.
+/// Authenticate ordinary and checked-wrapper target imports from full immutable
+/// source membership. Executable admission belongs to the inventory and selected
+/// certifier; a checked target also supplies its independently issued entry root.
 pub(crate) fn certify_target_available_owners_with_validation(
     prepared: &PreparedProgram,
     accepted: &[AcceptedGlobal],
