@@ -272,10 +272,10 @@ fn agent_launch_decl_matches_the_schema_exactly() {
 }
 
 #[test]
-fn forks_decl_matches_the_schema_exactly() {
+fn resource_scopes_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(
-        &tidepool_mcp::forks_decl(),
-        &tidepool_protocol::effects::forks::forks(),
+        &tidepool_mcp::resource_scopes_decl(),
+        &tidepool_protocol::effects::resource_scopes::resource_scopes(),
     );
 }
 
