@@ -4447,17 +4447,31 @@ where
         &self,
         context: crate::ActorSessionContext,
     ) -> ParkedHoleAbortGuard {
-        // Inline actor admission must never borrow the creating cell's observer.
-        ParkedHoleAbortGuard::with_retained_latest(
-            &self.access,
+        self.actor_invocation_cleanup(
             context,
-            None,
             "actor initialization abandoned before standing custody".into(),
-            None,
         )
     }
 
+    pub(crate) fn actor_invocation_cleanup(
+        &self,
+        context: crate::ActorSessionContext,
+        reason: String,
+    ) -> ParkedHoleAbortGuard {
+        // Actor invocation custody never borrows the calling cell's observer.
+        ParkedHoleAbortGuard::with_retained_latest(&self.access, context, None, reason, None)
+    }
+
     pub(crate) async fn settle_initialization_custody(
+        &self,
+        context: crate::ActorSessionContext,
+        registration: ParkedHoleAbortRegistration,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.settle_actor_invocation_custody(context, registration)
+            .await
+    }
+
+    pub(crate) async fn settle_actor_invocation_custody(
         &self,
         context: crate::ActorSessionContext,
         registration: ParkedHoleAbortRegistration,
@@ -4466,20 +4480,20 @@ where
             .with_machine(context, move |session, context, _| {
                 if registration.0.owner != Some((context.actor, context.placement)) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "initialization custody differs from its original actor placement".into(),
+                        "invocation custody differs from its original actor placement".into(),
                     ));
                 }
                 let mut state = registration.0.state.lock();
                 let ParkedHoleState::Owned(current) = &*state else {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor initialization lost its continuation custody".into(),
+                        "actor invocation lost its continuation custody".into(),
                     ));
                 };
                 for cont_id in current {
                     if session.parked_realm_named(cont_id) != Some(context.placement.resource_scope)
                     {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "actor initialization frame {cont_id} differs from owning realm {:?}",
+                            "actor invocation frame {cont_id} differs from owning realm {:?}",
                             context.placement.resource_scope,
                         )));
                     }
