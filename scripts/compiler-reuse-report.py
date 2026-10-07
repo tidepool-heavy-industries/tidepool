@@ -319,42 +319,20 @@ def analyze(events):
         request['admission_queue_ms'] = admissions.get((key[0], key[2]), [])
         cycles = sorted({(event['cycle'], event['purpose']) for event in request['events']})
         request['cycles'] = [{'cycle': cycle, 'purpose': purpose} for cycle, purpose in cycles]
+        request['cycle_stages'] = []
+        for cycle in cycles:
+            cycle_events = [event for event in request['events']
+                            if (event['cycle'], event['purpose']) == cycle]
+            request['cycle_stages'].append({
+                'cycle': cycle[0], 'purpose': cycle[1],
+                'stages': {stage: stage_observation(
+                    [event for event in cycle_events if event['stage'] == stage], [cycle])[0]
+                    for stage in STAGES}})
         for stage in STAGES:
             selected = [event for event in request['events'] if event['stage'] == stage]
-            complete = {(event['cycle'], event['purpose']) for event in selected if event['decision'] == 'complete'}
-            not_applicable = {(event['cycle'], event['purpose']) for event in selected
-                              if event['decision'] == 'not_applicable'}
-            touched = {(event['cycle'], event['purpose']) for event in selected}
-            final = True
-            for cycle in touched:
-                ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
-                closures = [event for event in ordered if event['decision'] in ('complete', 'not_applicable')]
-                if (len(closures) != 1 or ordered[-1]['decision'] not in ('complete', 'not_applicable')
-                        or (closures[0]['decision'] == 'not_applicable' and len(ordered) != 1)):
-                    final = False
-                    request_problems.append(f'{stage} cycle {cycle[0]}: expected exactly one final stage completion '
-                                            'or applicability observation without decisions')
-            covered = complete | not_applicable
-            if selected and covered != set(cycles):
-                final = False
-                request_problems.append(f'{stage}: missing stage completion or applicability for request cycles')
-            status = 'UNKNOWN'
-            if final and covered and covered == touched and covered == set(cycles):
-                status = 'observed' if complete else 'not_applicable'
-            counts, byte_counts, reasons, accounted = Counter(), Counter(), Counter(), 0
-            for event in selected:
-                if event['decision'] in ('complete', 'not_applicable'):
-                    continue
-                counts[event['decision']] += event['items']
-                reasons[event['reason']] += event['items']
-                if event['bytes'] is not None:
-                    accounted += 1
-                    byte_counts[event['decision']] += event['bytes']
-            request['stages'][stage] = {'status': status, 'counts': dict(counts) if status == 'observed' else None,
-                                        'bytes': dict(byte_counts) if status == 'observed' and accounted else None,
-                                        'byte_accounted_events': accounted,
-                                        'reasons': dict(reasons), 'completion_cycles': len(complete),
-                                        'not_applicable_cycles': len(not_applicable)}
+            observation, stage_problems = stage_observation(selected, cycles)
+            request['stages'][stage] = observation
+            request_problems.extend(f'{stage}{problem}' for problem in stage_problems)
         request['problems'] = sorted(set(request_problems))
         request['task_overlap'] = task_overlap(request['timing_details'])
         problems.extend(f'{key}: {problem}' for problem in request['problems'])
@@ -366,6 +344,41 @@ def analyze(events):
             'phase_meanings': {'lowering': 'GHC hscDesugar and hscSimplify; excludes prepared STG',
                                'prepared_stg': 'GHC CorePrep, coreToStg and stg2stg'},
             'interpretation': 'Hits name one stage only. Each request cycle requires stage completion or explicit applicability evidence; missing evidence is UNKNOWN. A not_applicable cycle supplies no work count. Admission queue times are shared by the transaction, not additive per request. Phase totals without interval boundaries remain nonexclusive; do not sum overlapping timers. task_overlap uses only qualified postload task-service intervals; UNKNOWN is not zero.'}
+
+
+def stage_observation(selected, cycles):
+    """One validator for both request aggregates and separately retained cycles."""
+    complete = {(event['cycle'], event['purpose']) for event in selected if event['decision'] == 'complete'}
+    not_applicable = {(event['cycle'], event['purpose']) for event in selected
+                      if event['decision'] == 'not_applicable'}
+    touched = {(event['cycle'], event['purpose']) for event in selected}
+    problems = []
+    for cycle in touched:
+        ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
+        closures = [event for event in ordered if event['decision'] in ('complete', 'not_applicable')]
+        if (len(closures) != 1 or ordered[-1]['decision'] not in ('complete', 'not_applicable')
+                or (closures[0]['decision'] == 'not_applicable' and len(ordered) != 1)):
+            problems.append(f' cycle {cycle[0]}: expected exactly one final stage completion '
+                            'or applicability observation without decisions')
+    covered = complete | not_applicable
+    if selected and covered != set(cycles):
+        problems.append(': missing stage completion or applicability for request cycles')
+    status = 'UNKNOWN'
+    if not problems and covered and covered == touched and covered == set(cycles):
+        status = 'observed' if complete else 'not_applicable'
+    counts, byte_counts, reasons, accounted = Counter(), Counter(), Counter(), 0
+    for event in selected:
+        if event['decision'] in ('complete', 'not_applicable'):
+            continue
+        counts[event['decision']] += event['items']
+        reasons[event['reason']] += event['items']
+        if event['bytes'] is not None:
+            accounted += 1
+            byte_counts[event['decision']] += event['bytes']
+    return ({'status': status, 'counts': dict(counts) if status == 'observed' else None,
+             'bytes': dict(byte_counts) if status == 'observed' and accounted else None,
+             'byte_accounted_events': accounted, 'reasons': dict(reasons),
+             'completion_cycles': len(complete), 'not_applicable_cycles': len(not_applicable)}, problems)
 
 
 def compare_control(normal, disabled, stage):

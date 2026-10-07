@@ -119,6 +119,41 @@ For stage-specific reuse decisions and cache-disable controls, use the
 [reuse evidence report](compiler-reuse-evidence.md). Latency alone does not
 establish compile reuse; absent stage completion remains unknown.
 
+The profiling capture also consumes that same schema-1 reuse validator in
+`summary.json` under `compile_reuse`, with a readable `request-report.txt`.
+It preserves physical requests (epoch, PID, admission and ordinal), including
+repeated executions of the same input digest. Worker cycles retain separate
+stage decisions and rebuild reasons; request stage aggregates remain separate
+from those cycle views. Missing, duplicate or nonfinal stage completion is
+`UNKNOWN`, with null counts. A cancelled, failed or unterminated request cannot
+qualify a frontend work total, even if an earlier cycle completed. Successful
+output alone supplies no reuse evidence. Capture truncation and recovery errors
+remain report errors alongside any individually completed requests.
+
+`source_frontend_work_items` counts actual completed stage work items, not a
+whole-request cache status. `activation_preview_frontends` is a separate
+observed counter when its producer emits it. Executable selection counters
+(`candidate_executable_required` and `exact_execution_original_load_owners`)
+describe selected requirements/owners. Completed `retained_source_bytecode`
+and `retained_finalized_bytecode` timers describe reconstruction operations;
+they neither count all bytecode modules nor prove linkage. `actually_linked`
+is null/`UNKNOWN`: the current diagnostic grammar has no owning linkage event.
+Missing reconstruction observations are likewise unknown, not zero. Reports
+never equate selected executable owners with linked or demanded bytecode.
+
+Each request lists completed resource spans with their parent, monotonic
+boundaries and available process CPU, RTS allocation and GC counters. It does
+not add child counters to parent counters or manufacture request resource
+totals. Missing RTS fields are unknown; allocation counters can lag until a GC
+accounting boundary. Request RSS observations select worker samples inside the
+union of its completed resource spans, count each sample once and explicitly
+describe that scope. Their sampled peak is not the full request peak, retained
+heap size, or memory allocated by that request. Missing samples leave the peak
+unknown. Capture-wide RSS and shared ancestor-cgroup context stay separate.
+Raw log and RSS artifacts retain the underlying evidence. The JSON report binds
+its retained timing input by path and SHA-256. Detail overflow reports omissions
+instead of returning a complete accounting claim.
+
 `capture.json` records the exact command, process identity, worker hash, request
 linkage, clock anchors, exit status and errors. Optional `--worker-build-identity` binds
 source provenance to the sampled worker hash; the current checkout OID is

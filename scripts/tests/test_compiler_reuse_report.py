@@ -95,6 +95,16 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(request['stages']['source_frontend']['counts'], {})
         self.assertEqual(request['stages']['source_frontend']['status'], 'observed')
 
+    def test_cycle_views_do_not_hide_an_incomplete_later_cycle(self):
+        first = completed([packet('hit')])
+        later = packet('work')
+        later['cycle'] = 8
+        request = REPORT.analyze(trace(first + [later]))['requests'][0]
+        self.assertEqual(request['stages']['source_frontend']['status'], 'UNKNOWN')
+        self.assertEqual(request['cycle_stages'][0]['stages']['source_frontend']['counts'], {'hit': 1})
+        self.assertEqual(request['cycle_stages'][1]['stages']['source_frontend']['status'], 'UNKNOWN')
+        self.assertIsNone(request['cycle_stages'][1]['stages']['source_frontend']['counts'])
+
     def test_checked_then_native_cycle_preserves_actual_work(self):
         stages = ('prepared_body', 'site_witness', 'original_recovery', 'raw_projection')
         checked = [packet('complete', items=0)]
