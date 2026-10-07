@@ -9604,6 +9604,40 @@ pub(crate) mod tests {
         bytes
     }
 
+    fn nonempty_sidecar(body_tag: u8) -> Vec<u8> {
+        let groups = [7, 11]
+            .into_iter()
+            .map(|ordinal| {
+                let mut wire = testing::wire_program();
+                let tidepool_repr::execution_schema::Group::NonRecursive(top) =
+                    &mut wire.bindings[0]
+                else {
+                    unreachable!()
+                };
+                top.identity = SymbolIdentity {
+                    unit: "main".into(),
+                    module: "Fresh".into(),
+                    namespace: "value".into(),
+                    occurrence: format!("entry_{ordinal}"),
+                    record_parent: None,
+                };
+                top.binding.rhs =
+                    tidepool_repr::execution_schema::HeapRhs::Bytes(vec![ordinal as u8, body_tag]);
+                let top = top.clone();
+                wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
+                wire.expressions.nodes.clear();
+                wire.globals.clear();
+                testing::projected_group(wire, ordinal).unwrap()
+            })
+            .collect();
+        tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+            unit: "main".into(),
+            module: "Fresh".into(),
+            interface: vec![0x42],
+            groups,
+        }])
+    }
+
     fn empty_package_bundle() -> Vec<u8> {
         let roots = Value::Array(vec![
             Value::Text("TPPKGROOTS".into()),
@@ -10937,12 +10971,40 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_source_recipe_selects_current_owner_with_two_retained_versions() {
+        exact_current_original_history(false);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nonempty_exact_source_recipe_preserves_original_versions_and_selected_subsets() {
+        exact_current_original_history(true);
+    }
+
+    fn exact_current_original_history(nonempty: bool) {
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
         use crate::execution_source::{
             CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
         };
         let root = tempfile::tempdir().unwrap();
+        struct RestoreCache(Option<std::ffi::OsString>);
+        impl Drop for RestoreCache {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(value) => std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", value),
+                        None => std::env::remove_var("TIDEPOOL_COMPILE_CACHE_DIR"),
+                    }
+                }
+            }
+        }
+        let _cache = nonempty.then(|| {
+            let previous = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR");
+            unsafe {
+                std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
+            }
+            RestoreCache(previous)
+        });
         let source = "module Target where";
         let support_source = "module Fresh where";
         let support = root.path().join("Fresh.hs");
@@ -10957,7 +11019,11 @@ pub(crate) mod tests {
         let producer = [3; 32];
         let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(&producer).sha256();
         let include = [root.path().to_path_buf()];
-        let bytes = sidecar();
+        let bytes = if nonempty {
+            nonempty_sidecar(0)
+        } else {
+            sidecar()
+        };
         let parsed = ParsedModuleProducts::decode(&bytes, &empty_package_bundle()).unwrap();
         let normalized =
             CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap();
@@ -10967,6 +11033,23 @@ pub(crate) mod tests {
         worker.sources[1].path = initial_input.clone();
         let initial_evidence = serde_json::to_vec(&worker).unwrap();
         let mut accepted = receipt(&bytes, &admitted, support_source);
+        if nonempty {
+            accepted.groups = [7, 11]
+                .into_iter()
+                .map(|original_ordinal| AcceptedGroup {
+                    original_ordinal,
+                    globals: vec![],
+                })
+                .collect();
+            assert_eq!(
+                parsed.products()[0]
+                    .groups
+                    .iter()
+                    .map(|group| group.binders().len())
+                    .sum::<usize>(),
+                2,
+            );
+        }
         accepted.dependency_witness_sha256 = sha(&initial_evidence);
         let mut packet = CertifiedReceipt {
             source_recipe: WorkerExecutionSource::Ordinary,
@@ -11123,12 +11206,133 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>(),
                 vec![&owner]
             );
+            if nonempty {
+                let expected_owners = prior
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .chain(std::iter::once(owner.clone()))
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(expected_owners.len(), index + 2);
+                assert_eq!(certified.groups.len(), 2);
+                for group in &certified.groups {
+                    assert_eq!(group.owner(), &owner);
+                    let raw = parsed.products()[0]
+                        .groups
+                        .iter()
+                        .find(|raw| raw.original_ordinal() == group.group().original_ordinal())
+                        .unwrap();
+                    assert_eq!(group.group(), raw);
+                    assert!(group.imports().is_empty());
+                }
+                let expected_keys = expected_owners
+                    .iter()
+                    .flat_map(|owner| {
+                        [7, 11].map(|ordinal| {
+                            (
+                                owner.clone(),
+                                ordinal,
+                                SymbolIdentity {
+                                    unit: "main".into(),
+                                    module: "Fresh".into(),
+                                    namespace: "value".into(),
+                                    occurrence: format!("entry_{ordinal}"),
+                                    record_parent: None,
+                                },
+                            )
+                        })
+                    })
+                    .collect::<BTreeSet<_>>();
+                for selected_count in 0..=2 {
+                    let sources = available_original_source_map(
+                        &certified.recovery_products,
+                        &certified.groups[..selected_count],
+                        &InventoryOperation::new(Default::default()),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        sources.groups.keys().cloned().collect::<BTreeSet<_>>(),
+                        expected_keys
+                    );
+                    let binder = SymbolIdentity {
+                        unit: "main".into(),
+                        module: "Fresh".into(),
+                        namespace: "value".into(),
+                        occurrence: "entry_11".into(),
+                        record_parent: None,
+                    };
+                    let import = ReceiptImportOwner::Source {
+                        unit: "main".into(),
+                        module: "Fresh".into(),
+                        module_version: None,
+                        original_ordinal: 11,
+                        binder: binder.clone(),
+                    };
+                    assert_eq!(
+                        resolve_receipt_owner_with_validation(
+                            import.clone(),
+                            &sources,
+                            Some(&certified.source_selection),
+                            &BTreeMap::new(),
+                            &mut PackageInterfaceValidation::default(),
+                        )
+                        .unwrap(),
+                        PendingImportOwner::Source {
+                            owner: owner.clone(),
+                            original_ordinal: 11,
+                            binder: binder.clone(),
+                        }
+                    );
+                    let mut old_import = import;
+                    let ReceiptImportOwner::Source { module_version, .. } = &mut old_import else {
+                        unreachable!()
+                    };
+                    *module_version = Some(prior[0].owner().module_version.clone());
+                    assert!(resolve_receipt_owner_with_validation(
+                        old_import.clone(),
+                        &sources,
+                        Some(&certified.source_selection),
+                        &BTreeMap::new(),
+                        &mut PackageInterfaceValidation::default(),
+                    )
+                    .is_err());
+                    assert_eq!(
+                        resolve_receipt_owner(old_import, &sources, &BTreeMap::new()).unwrap(),
+                        PendingImportOwner::Source {
+                            owner: prior[0].owner().clone(),
+                            original_ordinal: 11,
+                            binder,
+                        }
+                    );
+                }
+                let substituted =
+                    ParsedModuleProducts::decode(&nonempty_sidecar(1), &empty_package_bundle())
+                        .unwrap();
+                let mut wrong = certified.groups[0].clone();
+                wrong.group = Arc::new(substituted.products()[0].groups[0].clone());
+                assert!(matches!(
+                    available_original_source_map(
+                        &certified.recovery_products,
+                        &[wrong],
+                        &InventoryOperation::new(Default::default()),
+                    ),
+                    Err(CertificationError::Mismatch("shared original home groups"))
+                ));
+            }
             for old in &prior {
                 let retained = certified
                     .recovery_products
                     .iter()
                     .find(|product| product.owner() == old.owner())
                     .unwrap();
+                if nonempty {
+                    let native = retained.original_native().unwrap();
+                    assert_eq!(native.groups.len(), 2);
+                    for (original, raw) in native.groups.iter().zip(&parsed.products()[0].groups) {
+                        assert_eq!(original.owner, *old.owner());
+                        assert_eq!(original.group.as_ref(), raw);
+                        assert!(original.imports.is_empty());
+                    }
+                }
                 assert!(old
                     .original_byte_anchors()
                     .iter()
@@ -11146,6 +11350,150 @@ pub(crate) mod tests {
                 .extend_checked_original_products(canonical_producer, std::slice::from_ref(current))
                 .unwrap();
             prior.push(current.clone());
+            if nonempty {
+                use crate::module_candidates::{
+                    prepare_publication, publish_prepared, select, CandidateVersionOrigin,
+                };
+                unsafe {
+                    std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", directory.join("cache"));
+                }
+                let (_, publication) = prepare_publication(
+                    &producer,
+                    &include,
+                    &admitted,
+                    parsed.copy_for_publication().unwrap(),
+                    source,
+                    CandidateVersionOrigin::Exact {
+                        semantic_sha256: request.semantic_sha256,
+                    },
+                    &certified.recovery_products,
+                );
+                publish_prepared(publication);
+                let candidate =
+                    select(&producer, &include, &directory.join("cached-offer")).unwrap();
+                let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
+                assert_eq!(bundle.owner, owner);
+                let cached_request = Arc::new(context.clone())
+                    .prepare_compilation(&directory.join("cached-inputs"), &producer)
+                    .unwrap();
+                assert_eq!(cached_request.groups.len(), 2);
+                let mut cached_complete = admitted.clone();
+                cached_complete.sources[0].path = bundle.source.clone();
+                cached_complete.modules[0].source = bundle.source.clone();
+                let mut cached_worker = cached_complete.clone();
+                cached_worker.sources[1].path = input.clone();
+                let mut cached_exact = exact_receipt.clone();
+                let fields = cached_exact.as_array_mut().unwrap();
+                fields[2] = value_text(&cached_request.request_sha256);
+                fields[3] = value_text(hex(&cached_request.semantic_sha256));
+                fields[7] = value_text(serde_json::to_string(&cached_worker).unwrap());
+                std::fs::write(
+                    receipt_root.join("receipt.cbor"),
+                    receipt_bytes(&cached_exact),
+                )
+                .unwrap();
+                cached_worker.cache_safe = false;
+                cached_worker.selection_complete = false;
+                let cached_evidence = serde_json::to_vec(&cached_worker).unwrap();
+                let cached_source = cached_request
+                    .admit_source(&input, source, &cached_evidence)
+                    .unwrap();
+                let cached_exact = ExactProductAdmission {
+                    request: &cached_request,
+                    source: &cached_source,
+                };
+                let mut cached_packet = packet.clone();
+                cached_packet.modules[0].origin = ProductOrigin::Cached;
+                cached_packet.modules[0].module_version = Some(owner.module_version.clone());
+                cached_packet.modules[0].product_sha256 = owner.product_sha256;
+                cached_packet.modules[0].dependency_witness_sha256 =
+                    sha(&serde_json::to_vec(&bundle.evidence).unwrap());
+                cached_packet.source_recipe = WorkerExecutionSource::ExactUnavailable(
+                    SourceRecipeUnavailable::NoFreshOriginals,
+                );
+                cached_packet.finalization =
+                    fixture_finalization(Some(root.path()), &cached_packet.modules);
+                let empty = ParsedModuleProducts::decode(
+                    &receipt_bytes(&value_array([
+                        value_text("TPMOD"),
+                        Value::Integer(1.into()),
+                        value_array([]),
+                    ])),
+                    &receipt_bytes(&value_array([
+                        value_text("TPPKGBUNDLES"),
+                        Value::Integer(1.into()),
+                        value_array([]),
+                    ])),
+                )
+                .unwrap();
+                let complete =
+                    CompletedSourceEvidence::from_normalized(cached_complete, source).unwrap();
+                let certify_cached = |packet: &CertifiedReceipt| {
+                    certify_products(
+                        Some(&candidate),
+                        packet,
+                        &empty,
+                        &cached_evidence,
+                        &input,
+                        root.path(),
+                        &complete,
+                        source,
+                        &producer,
+                        &include,
+                        Some(&cached_exact),
+                        None,
+                    )
+                };
+                let cached = certify_cached(&cached_packet).unwrap();
+                assert_eq!(
+                    cached
+                        .source_selection
+                        .selected_original_owners()
+                        .collect::<Vec<_>>(),
+                    vec![&owner]
+                );
+                assert_eq!(cached.groups.len(), 2);
+                for (group, raw) in cached.groups.iter().zip(&parsed.products()[0].groups) {
+                    assert_eq!(group.owner(), &owner);
+                    assert_eq!(group.group(), raw);
+                    assert!(group.imports().is_empty());
+                }
+                assert_eq!(
+                    cached
+                        .recovery_products
+                        .iter()
+                        .map(|product| product.owner().clone())
+                        .collect::<BTreeSet<_>>(),
+                    prior
+                        .iter()
+                        .map(|product| product.owner().clone())
+                        .collect::<BTreeSet<_>>()
+                );
+                for old in &prior {
+                    let retained = cached
+                        .recovery_products
+                        .iter()
+                        .find(|product| product.owner() == old.owner())
+                        .unwrap();
+                    assert!(old
+                        .original_byte_anchors()
+                        .iter()
+                        .zip(retained.original_byte_anchors())
+                        .all(|(old, new)| Arc::ptr_eq(old, new)));
+                    assert!(Arc::ptr_eq(
+                        old.execution_source().unwrap(),
+                        retained.execution_source().unwrap()
+                    ));
+                }
+                let mut wrong_owner = cached_packet.clone();
+                wrong_owner.modules[0].module_version =
+                    Some(prior[0].owner().module_version.clone());
+                assert!(certify_cached(&wrong_owner).is_err());
+                assert_eq!(
+                    cached_request.compiler_original_products().unwrap()[0].owner(),
+                    &owner
+                );
+            }
         }
         assert_eq!(prior.len(), 3);
     }
