@@ -1,6 +1,37 @@
 //! Schema validation and narrow rendering pins; generated consumers are build outputs.
 
 #[test]
+fn authored_projection_hides_capability_constructors_and_record_selectors() {
+    use tidepool_protocol::gen::decl_rs;
+    use tidepool_protocol::schema::{SumVariant, TypeShape, VariantFields};
+    use tidepool_protocol::types::RecordField;
+    use tidepool_protocol::HsType;
+
+    let workspace = tidepool_protocol::effects::worktree::worktree();
+    let mut scopes = tidepool_protocol::effects::resource_scope::resource_scopes();
+    // Exercise a private record-shaped constructor too: its selector must not
+    // remain an independent authored accessor after hiding the data type.
+    scopes.type_defs[0].shape = TypeShape::Sum {
+        variants: vec![SumVariant {
+            ctor: "PrivateScopeToken",
+            fields: VariantFields::Named(vec![RecordField {
+                hs_name: "privateScopeIdentity",
+                rust_name: "identity",
+                ty: HsType::Int,
+                doc: &[],
+            }]),
+            doc: &[],
+        }],
+    };
+    let generated = decl_rs::module_index(&[workspace, scopes]).contents;
+    assert!(generated.contains("\"WorkspaceHandle(..)\""));
+    assert!(generated.contains("\"Scope(..)\""));
+    assert!(generated.contains("\"PrivateScopeToken\""));
+    assert!(generated.contains("\"privateScopeIdentity\""));
+    assert!(generated.contains("AUTHORED_ABSTRACT_TYPES: &[&str] = &[\"WorkspaceHandle\"]"));
+}
+
+#[test]
 fn lexical_scope_delimiter_keeps_body_and_cleanup_outcomes_separate() {
     use tidepool_protocol::schema::{HandlingClass, RustBinding};
 

@@ -69,6 +69,10 @@ fn authored_private_constructor_and_forged_request_site_are_refused_after_valid_
         "ForgedRequestSite.hs",
         "ForgedWorkspaceHandle.hs",
         "ForgedContextCheckpoint.hs",
+        "ForgedAuthoredWorkspaceHandle.hs",
+        "ForgedAuthoredScope.hs",
+        "ForgedScope.hs",
+        "ForgedAgentRef.hs",
     ] {
         let refused = surface.compile(fixture, false);
         assert!(

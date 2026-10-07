@@ -36,7 +36,7 @@ import Tidepool.Agent.Contract
   ( AgentSpec, HasInstalledAgentApi, KnownToolEffects, AsyncEffects, installSpec )
 import Tidepool.Agent.Launch hiding (workspaceWire)
 import qualified Tidepool.Agent.Launch as Launch
-import Tidepool.Agent.Ref (AgentRef (..), agentIdentity)
+import Tidepool.Agent.Ref.Internal (AgentRef (..), agentIdentity)
 import Tidepool.Effects.Row (KnownEffects (knownEffects), effectKeys)
 import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort

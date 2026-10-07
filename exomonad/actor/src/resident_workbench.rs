@@ -262,7 +262,7 @@ impl ActorWorkbenchSource {
 
 fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> String {
     let preamble =
-        insert_preamble_imports(preamble, "qualified Tidepool.Agent.Ref as TidepoolAgentRef");
+        insert_preamble_imports(preamble, "qualified Tidepool.Agent.Ref.Internal as TidepoolAgentRef");
     format!(
         "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
         context.actor.id.0, context.actor.incarnation.0
@@ -20191,8 +20191,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         for import in [
             "Tidepool.Agent.Reply (Replies)",
             "Tidepool.Agent.Watch (Watches)",
-            "Tidepool.Agent.Ref (AgentProtocol(..))",
-            "qualified Tidepool.Agent.Ref as Ref",
+            "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
+            "qualified Tidepool.Agent.Ref.Internal as Ref",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
             "qualified Tidepool.Effects.Core as Core",
         ] {

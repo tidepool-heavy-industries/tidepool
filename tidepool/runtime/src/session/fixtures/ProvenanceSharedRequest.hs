@@ -4,7 +4,7 @@ module ProvenanceSharedRequest where
 import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import Tidepool.Agent.Reply (Replies)
-import qualified Tidepool.Agent.Ref as Ref
+import qualified Tidepool.Agent.Ref.Internal as Ref
 import qualified Tidepool.Actors.Internal.Agent as Agents
 
 {-# OPAQUE emit #-}

@@ -736,6 +736,7 @@ test-suite model-turn-test
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.ToolEffects
@@ -874,6 +875,7 @@ test-suite automation-helper-contract
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.Session
@@ -935,6 +937,7 @@ test-suite browser-scenario-contract
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.Watch
@@ -990,6 +993,7 @@ test-suite command-tools-contract
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.ToolEffects
@@ -1045,6 +1049,7 @@ test-suite tool-profiles-contract
     Tidepool.Agent.Launch
     Tidepool.Scope
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.ToolEffects

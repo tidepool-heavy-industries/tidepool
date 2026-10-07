@@ -60,6 +60,28 @@ pub struct TypeDef {
 }
 
 impl TypeDef {
+    /// Every authored name introduced by this declaration, including sum
+    /// constructors and record selectors whose names differ from the type.
+    #[must_use]
+    pub fn surface_names(&self) -> Vec<&'static str> {
+        let mut names = vec![self.name];
+        match &self.shape {
+            TypeShape::Identity { .. } => {}
+            TypeShape::Record { fields } => {
+                names.extend(fields.iter().map(|field| field.hs_name));
+            }
+            TypeShape::Sum { variants } => {
+                for variant in variants {
+                    names.push(variant.ctor);
+                    if let VariantFields::Named(fields) = &variant.fields {
+                        names.extend(fields.iter().map(|field| field.hs_name));
+                    }
+                }
+            }
+        }
+        names
+    }
+
     /// The Rust wire type's name.
     #[must_use]
     pub fn wire_name(&self) -> &'static str {

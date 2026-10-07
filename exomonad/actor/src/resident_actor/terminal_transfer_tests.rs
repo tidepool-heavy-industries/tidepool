@@ -56,9 +56,9 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         "qualified Tidepool.Actor as Mailbox",
         "Tidepool.Agent.Reply (Replies, retainRequest)",
         "Tidepool.Agent.Watch (Watches)",
-        "Tidepool.Agent.Ref (AgentProtocol(..))",
+        "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
         "Tidepool.Effects.Core (WorkerLifetime(..))",
-        "qualified Tidepool.Agent.Ref as AgentRef",
+        "qualified Tidepool.Agent.Ref.Internal as AgentRef",
         "qualified Tidepool.Actors.Internal.Agent as Agents",
     ] {
         preamble = insert_preamble_imports(&preamble, import);

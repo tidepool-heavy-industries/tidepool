@@ -44,7 +44,7 @@ import Tidepool.Agent.Reply.Internal
   , replyRequestId, submitRequest, abandonResponse
   , ResponseResult (..), ExecutionReceipt (..), WorktreeEvidence (..)
   )
-import Tidepool.Agent.Ref
+import Tidepool.Agent.Ref.Internal
   ( AgentRef (..), AgentProtocol (..), agentIdentity, agentBoundWorktree, internalAgentRef )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Agent.Session (requestSessionSited)

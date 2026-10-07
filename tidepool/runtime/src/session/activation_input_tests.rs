@@ -95,8 +95,8 @@ impl InputFixture {
         let mut preamble = effects.preamble().to_owned();
         for import in [
             "Tidepool.Agent.Reply (Replies)",
-            "Tidepool.Agent.Ref (AgentProtocol(..))",
-            "qualified Tidepool.Agent.Ref as Ref",
+            "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
+            "qualified Tidepool.Agent.Ref.Internal as Ref",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
             "qualified Tidepool.Effects.Core as Core",
         ] {

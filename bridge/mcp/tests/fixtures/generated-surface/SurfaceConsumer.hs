@@ -58,3 +58,11 @@ progressRequest agent = Agent.requestWithProgress @Int @Text agent ("question" :
 
 sharedWorkspace :: Spawn.WorkspaceHandle -> Spawn.Workspace
 sharedWorkspace = Spawn.ExistingWorkspace
+
+-- The ordinary authored vocabulary keeps the runtime-issued workspace type
+-- nameable while the safe issuer supplies its only public construction path.
+issuedWorkspace :: Member Core.BoundWorktree effects => Eff effects (Either Authored.WorktreeError Spawn.Workspace)
+issuedWorkspace = fmap (fmap Spawn.ExistingWorkspace) Spawn.currentWorkspace
+
+abstractWorkspace :: Authored.WorkspaceHandle -> Spawn.Workspace
+abstractWorkspace = Spawn.ExistingWorkspace

@@ -82,7 +82,9 @@ fn identity(
 pub fn worktree() -> Effect {
     Effect {
         name: "Worktree",
-        authored_surface: crate::schema::AuthoredSurface::All,
+        authored_surface: crate::schema::AuthoredSurface::AllWithOpaqueTypes {
+            type_defs: &["WorkspaceHandle"],
+        },
         handler: "WorktreeHandler",
         handler_module: "worktree",
         req_enum: "WorktreeReq",
