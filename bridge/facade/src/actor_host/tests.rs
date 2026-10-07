@@ -1373,11 +1373,11 @@ fn the_root_may_build_in_its_own_worktrees_but_not_in_a_child_s() {
     );
 }
 
-/// A selected-context child inherits no model context, but it still has a
+/// A fresh-context child inherits no model context, but it still has a
 /// supervisor: `parentAgent` names it, and `sendMessage` to that handle lands
 /// in the supervisor's tracked inbox.
 #[tokio::test]
-async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
+async fn fresh_context_child_reaches_its_supervisor_through_parent_agent() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
@@ -1386,7 +1386,7 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
-            "selected-context child policy",
+            "fresh-context child policy",
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
@@ -1394,11 +1394,11 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
             },
         )
         .await;
-    assert_eq!(child.context_parent, None, "startAgent selects its context");
+    assert_eq!(child.context_parent, None, "FreshCtx selects its context");
     assert_eq!(child.supervisor_parent, Some(root_id));
     campaign
         .next_deployment(
-            "selected-context child activation",
+            "fresh-context child activation",
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::SessionReady { .. } => Ok(()),
@@ -1717,7 +1717,7 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     );
     let idle_setup = dispatch_haskell_script(
         root.as_ref(),
-        "idle <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"idle-notification-recipient\"))",
+        "import qualified Tidepool.Agent.Contract as A\nRight idle <- spawnSubagent (FreshCtx \"idle notification recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
     )
     .await;
     assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
@@ -1962,9 +1962,10 @@ async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-whole-recipient\"))\n\
-         let requestName = [label|reply-whole|]\n\
-         answer <- do { issued <- request @[Text] worker (assignment requestName [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]]); Right () <- detachRequest issued; pure issued }",
+        "import qualified Tidepool.Agent.Contract as A\n\
+         Right worker <- spawnSubagent (FreshCtx \"reply-whole-recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n\
+         let requestName = \"reply-whole\" :: Text\n\
+         Right answer <- request @[Text] worker [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]] (defaultRequestOptions { requestLabel = Just requestName })",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -2842,9 +2843,10 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-preview-recipient\"))\n\
-         let requestName = [label|reply-preview|]\n\
-         answer <- do { issued <- request @String worker (assignment requestName (\"a readable reply\" :: String)); Right () <- detachRequest issued; pure issued }",
+        "import qualified Tidepool.Agent.Contract as A\n\
+         Right worker <- spawnSubagent (FreshCtx \"reply-preview-recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n\
+         let requestName = \"reply-preview\" :: Text\n\
+         Right answer <- request @String worker (\"a readable reply\" :: String) (defaultRequestOptions { requestLabel = Just requestName })",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -2907,9 +2909,10 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-preview-text-recipient\"))\n\
-         let requestName = [label|reply-preview-text|]\n\
-         answer <- do { issued <- request @Text worker (assignment requestName (\"a readable reply\" :: Text)); Right () <- detachRequest issued; pure issued }",
+        "import qualified Tidepool.Agent.Contract as A\n\
+         Right worker <- spawnSubagent (FreshCtx \"reply-preview-text-recipient\") SameDir (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n\
+         let requestName = \"reply-preview-text\" :: Text\n\
+         Right answer <- request @Text worker (\"a readable reply\" :: Text) (defaultRequestOptions { requestLabel = Just requestName })",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");

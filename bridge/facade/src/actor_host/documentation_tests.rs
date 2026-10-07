@@ -605,7 +605,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::SessionReady { activation }
-                    if activation.message.contains("notebook-reply") =>
+                    if activation.id.actor() == child.actor.identity() =>
                 {
                     Ok(())
                 }
@@ -1037,7 +1037,9 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
                         Err(LocalResidentDeployment::PolicyInstalled(installation))
                     }
                     LocalResidentDeployment::SessionReady { activation }
-                        if activation.message.contains(label) =>
+                        if child.as_ref().is_some_and(|child| {
+                            activation.id.actor() == child.actor.identity()
+                        }) =>
                     {
                         Ok(activation)
                     }
