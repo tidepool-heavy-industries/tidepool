@@ -129,10 +129,10 @@ instance Display ResponseFailure where
     application precedence "ResponseRejected" [displayTreePrec 11 error]
   displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
 
-instance Display WatchFailure where
+instance Display AwaitError where
   displayTree = displayTreePrec 0
-  displayTreePrec precedence (WatchRejected error) =
-    application precedence "WatchRejected" [displayTreePrec 11 error]
+  displayTreePrec precedence (AwaitRejected error) =
+    application precedence "AwaitRejected" [displayTreePrec 11 error]
   displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree

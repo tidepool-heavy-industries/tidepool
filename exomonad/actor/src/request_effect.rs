@@ -151,15 +151,9 @@ impl ToHaskell for RequestScopeRefusal {
 )]
 pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
-    RegisterWatchWith(String, Vec<AwaitDependency>),
-    RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
-    RegisterAwaitWith(Vec<Vec<AwaitDependency>>),
-    RegisterRouteWith(String, tidepool_bridge::HaskellValue, Vec<AwaitDependency>),
-    RegisterRouteGroupsWith(
-        String,
-        tidepool_bridge::HaskellValue,
-        Vec<Vec<AwaitDependency>>,
-    ),
+    RegisterWatchWith(String, AwaitPlan),
+    RegisterAwaitWith(AwaitPlan),
+    RegisterRouteWith(String, tidepool_bridge::HaskellValue, AwaitPlan),
     ObserveRouteWith(i64),
     ListRoutesWith,
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
@@ -168,7 +162,7 @@ pub(crate) enum WatchesReq {
     AwaitWatchWith(i64),
     ForgetWatchWith(i64),
     ObserveWatchProgressWith(i64, i64, i64, i64),
-    ObserveCommandWith(String),
+    ObserveWatchCommandWith(i64, String),
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -181,6 +175,52 @@ pub(crate) enum AwaitDependency {
     AwaitDependency(i64, bool),
     AwaitProgress(i64, i64),
     AwaitCommand(String),
+}
+
+#[derive(tidepool_bridge_derive::FromHaskell)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum AwaitPlan {
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
+    AwaitPlan(Vec<AwaitNode>, i64),
+}
+
+#[derive(tidepool_bridge_derive::FromHaskell)]
+pub(crate) enum AwaitNode {
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
+    ReadyNode,
+    LeafNode(AwaitDependency),
+    AllNode(i64, i64),
+    EitherNode(i64, i64),
+}
+
+impl AwaitPlan {
+    pub(crate) fn checked(
+        self,
+    ) -> Result<
+        crate::request::readiness::Plan<(WatchSubject, crate::request::WatchRequirement)>,
+        BridgeError,
+    > {
+        use crate::request::readiness::{Node, Plan};
+        let Self::AwaitPlan(nodes, root) = self;
+        let index = |value: i64| {
+            usize::try_from(value).map_err(|_| {
+                BridgeError::UnsupportedType("negative readiness node reference".into())
+            })
+        };
+        let nodes = nodes
+            .into_iter()
+            .map(|node| {
+                Ok(match node {
+                    AwaitNode::ReadyNode => Node::Ready,
+                    AwaitNode::LeafNode(dependency) => Node::Leaf(dependency.checked()?),
+                    AwaitNode::AllNode(left, right) => Node::All(index(left)?, index(right)?),
+                    AwaitNode::EitherNode(left, right) => Node::Either(index(left)?, index(right)?),
+                })
+            })
+            .collect::<Result<Vec<_>, BridgeError>>()?;
+        Plan::checked(nodes, index(root)?)
+            .map_err(|_| BridgeError::UnsupportedType("invalid readiness graph".into()))
+    }
 }
 
 /// What one watch dependency names before registration. A command job is
@@ -285,7 +325,8 @@ pub(crate) struct CancellationAcknowledgement {
 pub(crate) struct WatchRegistration {
     pub transient: bool,
     pub continuation: ResidentHole,
-    pub dependencies: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
+    pub dependencies:
+        crate::request::readiness::Plan<(WatchSubject, crate::request::WatchRequirement)>,
     pub label: String,
 }
 
@@ -318,6 +359,7 @@ fn reply_error_name(error: ReplyError) -> &'static str {
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
+        ReplyError::InvalidReadiness => "ReplyInvalidReadiness",
         ReplyError::ProgressTypeMismatch => "ReplyProgressTypeMismatch",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
     }
@@ -453,7 +495,7 @@ impl ToHaskell for RequestAnswer {
             Self::Watch(Ok(WatchObservation::Pending(progress))) => {
                 emit!("RawWatchPending", progress)
             }
-            Self::Watch(Ok(WatchObservation::Ready(failures))) => emit!("RawWatchReady", failures),
+            Self::Watch(Ok(WatchObservation::Ready(decision))) => emit!("RawWatchReady", decision),
             Self::Watch(Ok(WatchObservation::Unavailable { request, failure })) => {
                 emit!("RawWatchUnavailable", request, failure)
             }
@@ -587,5 +629,32 @@ mod tests {
                 .unwrap(),
             900_000
         );
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for crate::request::readiness::Decision {}
+impl ToHaskell for crate::request::readiness::Decision {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let leaves = self
+            .leaves
+            .iter()
+            .map(|(node, failure)| (*node as i64, failure.clone()))
+            .collect::<Vec<_>>();
+        let choices = self
+            .choices
+            .iter()
+            .map(|(node, left)| (*node as i64, *left))
+            .collect::<Vec<_>>();
+        visit_constructor(
+            table,
+            visitor,
+            "Tidepool.Agent.Watch.Internal",
+            "AwaitDecision",
+            &[&leaves, &choices],
+        )
     }
 }

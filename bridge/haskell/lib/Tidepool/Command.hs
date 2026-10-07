@@ -93,7 +93,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
-import Tidepool.Agent.Watch.Internal (Await (..), AwaitDependency (..), Watches (..))
+import Tidepool.Agent.Watch.Internal (Await (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), Watches (..), requireObserved)
 import Tidepool.Command.Types
 import Tidepool.Effects.Core
   ( CommandCleanup (..),
@@ -262,11 +262,11 @@ tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
 
 -- | Ready when the job has finished, with its outcome, cleanup, output
 -- completeness, a diagnostic tail, and the source it started at. Compose it
--- with 'awaitSettled' and use it with 'waitFor', 'watch' or 'route'. A report is evidence about the commit the command
+-- with request readiness and use it with 'await', 'watch' or 'route'. A report is evidence about the commit the command
 -- started at; it says nothing about a later revision.
 awaitFinished :: Job -> Await CommandReport
 awaitFinished (Job key) =
-  Await [[AwaitCommand key]] (\_ _ -> send (ObserveCommandWith key))
+  Await (AwaitPlan [LeafNode (AwaitCommand key)] 0) (\watchId _ _ -> requireObserved <$> send (ObserveWatchCommandWith watchId key))
 
 -- | Run once and suspend until terminal completion, preserving the continuation.
 run :: (Member Commands effects) => Command -> Eff effects RunResult

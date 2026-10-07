@@ -6260,16 +6260,24 @@ where
                     .resume_progress_observation(context.clone(), continuation, observation)
                     .await
             }),
-            ResidentActorBoundary::CommandReportPoll { continuation, job } => {
-                Box::pin(async move {
-                    let report =
-                        command_settlement::CommandSettlements::new(&environment).report(&job);
-                    environment
-                        .runner
-                        .resume_value(context.clone(), continuation, report)
-                        .await
-                })
-            }
+            ResidentActorBoundary::CommandReportPoll {
+                continuation,
+                watch,
+                job,
+            } => Box::pin(async move {
+                let report = environment
+                    .requests
+                    .observe_watch_command(watch, &job)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "watch command snapshot unavailable: {error:?}"
+                        ))
+                    })?;
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, report)
+                    .await
+            }),
             ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
                 let outcome = environment
                     .requests
@@ -7714,7 +7722,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_groups_with_route(
+                    .register_watch_plan_with_route(
                         context.actor,
                         registration.label,
                         dependencies.clone(),
@@ -7770,11 +7778,6 @@ where
                         )
                         .await;
                 }
-                crate::ActorPathSegment::new(&registration.label).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "invalid watch label: {error}"
-                    ))
-                })?;
                 let dependencies =
                     settlements
                         .resolve(registration.dependencies)
@@ -7786,11 +7789,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_requirement_groups(
-                        context.actor,
-                        registration.label,
-                        dependencies.clone(),
-                    )
+                    .register_watch_plan(context.actor, registration.label, dependencies.clone())
                     .map_err(|error| {
                         settlements.release(&dependencies);
                         ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(

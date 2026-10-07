@@ -286,9 +286,12 @@ impl CommandSettlements {
         let request = self.jobs.replace_settlement(job, |owner| {
             requests.reserve_command_settlement(owner, job.to_owned(), notify_owner)
         })?;
-        let notifications =
-            self.requests
-                .settle_command(request, render_report(job, &report), revision);
+        let notifications = self.requests.settle_command(
+            request,
+            render_report(job, &report),
+            revision,
+            Some(report),
+        );
         if notify_owner {
             let settlements = self.clone();
             tokio::spawn(async move {
@@ -309,48 +312,43 @@ impl CommandSettlements {
     /// them to [`Self::release`].
     pub(super) fn resolve(
         &self,
-        groups: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
-    ) -> Result<Vec<Vec<(RequestId, crate::request::WatchRequirement)>>, crate::request::ReplyError>
-    {
-        let mut resolved = Vec::with_capacity(groups.len());
-        for group in groups {
-            let mut dependencies = Vec::with_capacity(group.len());
-            for (subject, requirement) in group {
-                let request = match subject {
-                    WatchSubject::Request(request) => request,
-                    WatchSubject::Command(job) => match self.arm(&job, false, None) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            resolved.push(dependencies);
-                            self.release(&resolved);
-                            return Err(match error {
-                                CommandError::CommandUnauthorized => {
-                                    crate::request::ReplyError::Unauthorized
-                                }
-                                _ => crate::request::ReplyError::Stale,
-                            });
+        plan: crate::request::readiness::Plan<(WatchSubject, crate::request::WatchRequirement)>,
+    ) -> Result<
+        crate::request::readiness::Plan<(RequestId, crate::request::WatchRequirement)>,
+        crate::request::ReplyError,
+    > {
+        let mut held = Vec::new();
+        let resolved = plan.try_map(|(subject, requirement)| {
+            let request = match subject {
+                WatchSubject::Request(request) => request,
+                WatchSubject::Command(job) => {
+                    self.arm(&job, false, None).map_err(|error| match error {
+                        CommandError::CommandUnauthorized => {
+                            crate::request::ReplyError::Unauthorized
                         }
-                    },
-                };
-                dependencies.push((request, requirement));
-            }
-            resolved.push(dependencies);
+                        _ => crate::request::ReplyError::Stale,
+                    })?
+                }
+            };
+            held.push(request);
+            Ok((request, requirement))
+        });
+        if resolved.is_err() {
+            self.requests.release_command_holds(&held);
         }
-        Ok(resolved)
+        resolved
     }
 
-    /// Drop the watch holds on command records a refused registration armed.
-    pub(super) fn release(&self, groups: &[Vec<(RequestId, crate::request::WatchRequirement)>]) {
-        let requests = groups
-            .iter()
-            .flatten()
-            .map(|(request, _)| *request)
-            .collect::<Vec<_>>();
-        self.requests.release_command_holds(&requests);
-    }
-
-    pub(super) fn report(&self, job: &str) -> Option<CommandReport> {
-        self.jobs.report(job).ok().flatten()
+    pub(super) fn release(
+        &self,
+        plan: &crate::request::readiness::Plan<(RequestId, crate::request::WatchRequirement)>,
+    ) {
+        self.requests.release_command_holds(
+            &plan
+                .leaves()
+                .map(|(_, (request, _))| *request)
+                .collect::<Vec<_>>(),
+        );
     }
 
     async fn settle(self, job: String, request: RequestId, start: Option<CommandStart>) {
@@ -384,10 +382,12 @@ impl CommandSettlements {
             .source
             .as_ref()
             .and_then(|source| source.commit.clone());
-        if let Err(error) = self.jobs.record_report(&job, report) {
+        if let Err(error) = self.jobs.record_report(&job, report.clone()) {
             tracing::warn!(?error, %job, "command report not retained");
         }
-        let notifications = self.requests.settle_command(request, text, revision);
+        let notifications = self
+            .requests
+            .settle_command(request, text, revision, Some(report));
         publish_request_notifications(&self.requests, &self.deployments, notifications).await;
     }
 

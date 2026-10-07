@@ -2736,6 +2736,7 @@ pub(crate) enum ResidentActorBoundary {
     },
     CommandReportPoll {
         continuation: ResidentHole,
+        watch: crate::WatchId,
         job: String,
     },
     RequestRetention {
@@ -3380,16 +3381,14 @@ impl ResidentRequest {
             }
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
-            Self::Watches(WatchesReq::RegisterWatchGroupsWith(..)) => "watch",
-            Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "waitFor",
+            Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "await",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
-            Self::Watches(WatchesReq::RegisterRouteGroupsWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
             Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
             Self::Watches(WatchesReq::AwaitWatchWith(..)) => "awaitWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
-            Self::Watches(WatchesReq::ObserveCommandWith(..)) => "pollWatch command",
+            Self::Watches(WatchesReq::ObserveWatchCommandWith(..)) => "pollWatch command",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
         }
     }
@@ -9083,65 +9082,22 @@ where
                             recoverable: false,
                         },
                     )),
-                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, dependencies)) => {
-                        drop(callback); // Custody is claimed from the suspension, not the decoded value.
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)?
-                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
-                        let dependencies = dependencies.into_iter().map(|dependency| {
-                            Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
-                        }).collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
+                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, plan)) => {
+                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no live callback".into()))?;
+                        let _ = callback;
                         Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
+                            registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
+                            entry,
                         })
                     }
-                    ResidentRequest::Watches(WatchesReq::RegisterRouteGroupsWith(label, callback, groups)) => {
-                        drop(callback); // Custody is claimed from the suspension, not the decoded value.
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)?
-                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
-                        let dependencies = groups.into_iter().map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect()).collect::<Result<Vec<Vec<_>>, _>>()?;
-                        Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ListRoutesWith) => Ok(ResidentActorBoundary::RouteList(hole)),
-                    ResidentRequest::Watches(WatchesReq::ObserveRouteWith(id)) => Ok(ResidentActorBoundary::RoutePoll(WatchPoll {
-                        continuation: hole, watch: crate::request_effect::watch_id(id)?,
-                    })),
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(
-                        label,
-                        dependencies,
-                    )) => {
-                        let dependencies = dependencies
-                            .into_iter()
-                            .map(|dependency| {
-                                Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
-                            })
-                            .collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
+                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(label, plan)) => {
                         Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration {
-                                transient: false,
-                                continuation: hole,
-                                dependencies,
-                                label,
-                            },
+                            WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
                         ))
                     }
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchGroupsWith(label, groups)) => {
-                        let dependencies = groups
-                            .into_iter()
-                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
-                            .collect::<Result<Vec<Vec<_>>, _>>()?;
+                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(plan)) => {
                         Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: false, continuation: hole, dependencies, label },
-                        ))
-                    }
-                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(groups)) => {
-                        let dependencies = groups
-                            .into_iter()
-                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
-                            .collect::<Result<Vec<Vec<_>>, _>>()?;
-                        Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: true, continuation: hole, dependencies, label: "wait-for".into() },
+                            WatchRegistration { transient: true, continuation: hole, dependencies: plan.checked()?, label: "await".into() },
                         ))
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
@@ -9164,8 +9120,8 @@ where
                             after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
                         })
                     }
-                    ResidentRequest::Watches(WatchesReq::ObserveCommandWith(job)) => {
-                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, job })
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, job)) => {
+                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, job })
                     }
                     ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchForget(WatchForget {
@@ -18443,6 +18399,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         assert!(source_events.try_recv().is_err());
 
+        let correct_observer = Arc::new(correct_observer);
+        let retained_observer = correct_observer.clone();
         let correct_hole = runner
             .access
             .with_host_machine(
@@ -18557,6 +18515,31 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             verify_message(closed_message).await.unwrap(),
             ResidentOutcome::Completed { .. }
         ));
+        registry.forget_response(owner, request).unwrap();
+        for (identity, cursor, revision) in [(watch, 0, 1), (later_watch, 1, 2)] {
+            let captured = registry
+                .observe_watch_progress(owner, identity, request, cursor)
+                .unwrap();
+            assert_eq!(captured.0.as_ref().unwrap().revision, revision);
+            let observed = runner
+                .access
+                .with_host_machine(
+                    "project-released-watch-snapshot",
+                    observer_id,
+                    None,
+                    |session, _| {
+                        session
+                            .run_with_sites("captured-note", retained_observer.code())
+                            .map_err(Into::into)
+                    },
+                )
+                .await
+                .unwrap();
+            runner
+                .resume_progress_observation(context.clone(), suspend(observed), Ok(captured))
+                .await
+                .unwrap();
+        }
         drop(sources);
         assert!(registry.finish_reply(request, None).is_empty());
         assert_eq!(
@@ -18566,10 +18549,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(
             registry.forget_watch(owner, later_watch).unwrap(),
             crate::request::ForgetWatchOutcome::Forgotten
-        );
-        assert_eq!(
-            registry.forget_response(owner, request).unwrap().0,
-            crate::request::ForgetResponseOutcome::Forgotten
         );
         assert!(matches!(
             registry.observe_progress(owner, request),

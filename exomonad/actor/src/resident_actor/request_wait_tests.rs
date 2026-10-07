@@ -32,12 +32,16 @@ impl Fixture {
             registry
                 .register_transient_watch(
                     owner,
-                    vec![vec![(
-                        request,
-                        crate::request::WatchRequirement::Response {
-                            allow_failure: false,
-                        },
-                    )]],
+                    crate::request::readiness::Plan::checked(
+                        vec![crate::request::readiness::Node::Leaf((
+                            request,
+                            crate::request::WatchRequirement::Response {
+                                allow_failure: false,
+                            },
+                        ))],
+                        0,
+                    )
+                    .unwrap(),
                 )
                 .unwrap()
         } else {
@@ -84,179 +88,8 @@ impl Fixture {
     }
 }
 
-fn deferred_child(
-    groups: &crate::ForkGroupRegistry,
-    owner: ActorRef,
-    target: ActorRef,
-    boundary: tidepool_runtime::session::WorkbenchForkBoundary,
-) -> crate::ForkGroupId {
-    let (group, paths) = groups
-        .begin_at_boundary(
-            owner,
-            crate::ActorPath::parse("root/deferred").unwrap(),
-            vec![crate::ActorPathSegment::new("child").unwrap()],
-            None,
-            boundary,
-        )
-        .unwrap();
-    groups.claim(group, owner, &paths[0].allocated).unwrap();
-    groups.attach_child(group, owner, target).unwrap();
-    group
-}
-
 #[tokio::test]
-async fn own_deferred_readiness_is_refused_without_waiting_or_cancelling_work() {
-    let fixture = Fixture::with_watch(true, true);
-    let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
-    let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
-        "thread".into(),
-        "request".into(),
-        "call".into(),
-    );
-    deferred_child(
-        &fixture.groups,
-        fixture.owner,
-        fixture.target,
-        boundary.clone(),
-    );
-    assert_eq!(
-        guard_deferred_target(
-            &fixture.groups,
-            fixture.owner,
-            Some(&boundary),
-            fixture.target
-        ),
-        Err(DeferredWaitRefusal {
-            target: fixture.target
-        })
-    );
-    assert!(matches!(wait_watch_event(
-        &fixture.registry, fixture.owner, fixture.watch, &fixture.control,
-        &fixture.retirement, &fixture.groups, Some(&boundary),
-    ).await, WatchWaitEvent::Refused(DeferredWaitRefusal { target }) if target == fixture.target));
-    assert!(!fixture.control.cancellation_requested());
-    assert!(matches!(
-        fixture.registry.observe_watch(fixture.owner, fixture.watch),
-        Ok(WatchObservation::Pending(_))
-    ));
-    drop(lease);
-    assert!(!fixture.registry.retains_watch(fixture.owner, fixture.watch));
-    assert!(matches!(
-        fixture
-            .registry
-            .observe_response(fixture.owner, fixture.request),
-        Ok(crate::request::ResponseObservation::Pending(_))
-    ));
-}
-
-#[tokio::test]
-async fn deferred_refusal_preserves_cancellation_and_retirement_priority() {
-    for retired in [false, true] {
-        let fixture = Fixture::new();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "thread".into(),
-            "request".into(),
-            "call".into(),
-        );
-        deferred_child(
-            &fixture.groups,
-            fixture.owner,
-            fixture.target,
-            boundary.clone(),
-        );
-        fixture.control.request_cancellation();
-        if retired {
-            fixture.retirement.request_shutdown(ActorTerminal {
-                kind: ActorExitKind::Cancelled,
-                summary: "retirement before deferred refusal".into(),
-                diagnostic: None,
-            });
-        }
-        let event = wait_watch_event(
-            &fixture.registry,
-            fixture.owner,
-            fixture.watch,
-            &fixture.control,
-            &fixture.retirement,
-            &fixture.groups,
-            Some(&boundary),
-        )
-        .await;
-        assert!(if retired {
-            matches!(event, WatchWaitEvent::Retired(_))
-        } else {
-            matches!(event, WatchWaitEvent::Cancelled)
-        });
-        assert!(fixture.control.cancellation_requested());
-    }
-}
-
-#[tokio::test]
-async fn unrelated_publication_and_committed_children_remain_awaitable() {
-    for committed in [false, true] {
-        let fixture = Fixture::new();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "thread".into(),
-            "request".into(),
-            "call".into(),
-        );
-        let child_boundary = if committed {
-            boundary.clone()
-        } else {
-            tidepool_runtime::session::WorkbenchForkBoundary::external(
-                "thread".into(),
-                "request".into(),
-                "other-call".into(),
-            )
-        };
-        let group = deferred_child(
-            &fixture.groups,
-            fixture.owner,
-            fixture.target,
-            child_boundary,
-        );
-        if committed {
-            fixture.groups.request_commit(group, fixture.owner).unwrap();
-            fixture
-                .groups
-                .gate(group, fixture.target)
-                .unwrap()
-                .mark_ready()
-                .unwrap();
-            fixture
-                .groups
-                .publish_groups(&[group], fixture.owner)
-                .unwrap();
-        }
-        assert_eq!(
-            guard_deferred_target(
-                &fixture.groups,
-                fixture.owner,
-                Some(&boundary),
-                fixture.target
-            ),
-            Ok(())
-        );
-        let mut waiting = Box::pin(wait_watch_event(
-            &fixture.registry,
-            fixture.owner,
-            fixture.watch,
-            &fixture.control,
-            &fixture.retirement,
-            &fixture.groups,
-            Some(&boundary),
-        ));
-        assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
-        fixture.complete();
-        assert!(matches!(
-            waiting.await,
-            WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
-        ));
-    }
-}
-
-#[tokio::test]
-async fn any_of_can_complete_elsewhere_but_all_of_retains_own_publication_dependency() {
+async fn either_finishes_with_one_request_and_all_waits_for_both() {
     for any_of in [false, true] {
         let fixture = Fixture::new();
         let unrelated = ActorRef::first(ActorId(43));
@@ -269,29 +102,24 @@ async fn any_of_can_complete_elsewhere_but_all_of_retains_own_publication_depend
         let requirement = crate::request::WatchRequirement::Response {
             allow_failure: false,
         };
-        let dependencies = if any_of {
-            vec![vec![(fixture.request, requirement), (request, requirement)]]
-        } else {
+        use crate::request::readiness::{Node, Plan};
+        let dependencies = Plan::checked(
             vec![
-                vec![(fixture.request, requirement)],
-                vec![(request, requirement)],
-            ]
-        };
+                Node::Leaf((fixture.request, requirement)),
+                Node::Leaf((request, requirement)),
+                if any_of {
+                    Node::Either(0, 1)
+                } else {
+                    Node::All(0, 1)
+                },
+            ],
+            2,
+        )
+        .unwrap();
         let watch = fixture
             .registry
             .register_transient_watch(fixture.owner, dependencies)
             .unwrap();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "thread".into(),
-            "request".into(),
-            "call".into(),
-        );
-        deferred_child(
-            &fixture.groups,
-            fixture.owner,
-            fixture.target,
-            boundary.clone(),
-        );
         let mut waiting = Box::pin(wait_watch_event(
             &fixture.registry,
             fixture.owner,
@@ -299,7 +127,7 @@ async fn any_of_can_complete_elsewhere_but_all_of_retains_own_publication_depend
             &fixture.control,
             &fixture.retirement,
             &fixture.groups,
-            Some(&boundary),
+            None,
         ));
         if any_of {
             assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
@@ -310,7 +138,15 @@ async fn any_of_can_complete_elsewhere_but_all_of_retains_own_publication_depend
                 WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
             ));
         } else {
-            assert!(matches!(waiting.await, WatchWaitEvent::Refused(_)));
+            assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
+            fixture.registry.begin_reply(unrelated, request).unwrap();
+            fixture.registry.finish_reply(request, None);
+            assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
+            fixture.complete();
+            assert!(matches!(
+                waiting.await,
+                WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
+            ));
         }
     }
 }
@@ -329,7 +165,7 @@ async fn settlement_before_or_after_subscription_claims_the_original_control() {
         }
         assert!(matches!(
             wait.await,
-            WatchWaitEvent::Resume(Ok(WatchObservation::Ready(values))) if values.is_empty()
+            WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
         ));
         assert!(
             !fixture.control.claim_expiry(),
@@ -375,10 +211,10 @@ async fn cancellation_does_not_acknowledge_cleanup_or_cancel_the_target_request(
         Ok(WatchObservation::Pending(_))
     ));
     fixture.complete();
-    assert_eq!(
+    assert!(matches!(
         fixture.registry.observe_watch(fixture.owner, fixture.watch),
-        Ok(WatchObservation::Ready(Vec::new()))
-    );
+        Ok(WatchObservation::Ready(_))
+    ));
 }
 
 #[tokio::test]
@@ -388,10 +224,10 @@ async fn cancellation_before_ready_never_resumes_even_when_both_wakes_are_ready(
     fixture.complete();
     assert!(matches!(fixture.wait().await, WatchWaitEvent::Cancelled));
     assert!(fixture.control.cancellation_requested());
-    assert_eq!(
+    assert!(matches!(
         fixture.registry.observe_watch(fixture.owner, fixture.watch),
-        Ok(WatchObservation::Ready(Vec::new()))
-    );
+        Ok(WatchObservation::Ready(_))
+    ));
 }
 
 #[tokio::test]
@@ -508,12 +344,12 @@ async fn dropping_a_direct_wait_releases_only_its_subscription() {
         .registry
         .register_transient_watch(
             fixture.owner,
-            vec![vec![(
+            crate::request::test_readiness_groups(vec![vec![(
                 fixture.request,
                 crate::request::WatchRequirement::Response {
                     allow_failure: false,
                 },
-            )]],
+            )]]),
         )
         .unwrap();
     let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, transient);
@@ -541,12 +377,12 @@ async fn direct_readiness_wakes_without_a_named_watch_notice_and_preserves_typed
     let watch = registry
         .register_transient_watch(
             owner,
-            vec![vec![(
+            crate::request::test_readiness_groups(vec![vec![(
                 request,
                 crate::request::WatchRequirement::Response {
                     allow_failure: false,
                 },
-            )]],
+            )]]),
         )
         .unwrap();
     let control = crate::WorkbenchExecutionControl::untracked();
@@ -581,7 +417,7 @@ fn transient_release_checks_exact_owner_and_never_removes_named_watch() {
     let fixture = Fixture::new();
     let transient = fixture
         .registry
-        .register_transient_watch(fixture.owner, vec![])
+        .register_transient_watch(fixture.owner, crate::request::test_readiness_groups(vec![]))
         .unwrap();
     let replacement = ActorRef {
         id: fixture.owner.id,
@@ -651,12 +487,12 @@ async fn overlapping_direct_waits_restore_the_notice_only_after_the_last_cancell
         .registry
         .register_transient_watch(
             fixture.owner,
-            vec![vec![(
+            crate::request::test_readiness_groups(vec![vec![(
                 fixture.request,
                 crate::request::WatchRequirement::Response {
                     allow_failure: false,
                 },
-            )]],
+            )]]),
         )
         .unwrap();
     fixture.complete();
@@ -679,12 +515,12 @@ async fn named_watch_and_silent_reporting_keep_their_policy_after_direct_wait_ca
         .registry
         .register_transient_watch(
             fixture.owner,
-            vec![vec![(
+            crate::request::test_readiness_groups(vec![vec![(
                 fixture.request,
                 crate::request::WatchRequirement::Response {
                     allow_failure: false,
                 },
-            )]],
+            )]]),
         )
         .unwrap();
     fixture.complete();
@@ -736,16 +572,16 @@ fn direct_command_wait_cancellation_restores_notice_but_capture_consumes_it() {
         let watch = registry
             .register_transient_watch(
                 owner,
-                vec![vec![(
+                crate::request::test_readiness_groups(vec![vec![(
                     request,
                     crate::request::WatchRequirement::Response {
                         allow_failure: false,
                     },
-                )]],
+                )]]),
             )
             .unwrap();
         assert!(registry
-            .settle_command(request, "exit 0".into(), Some("revision".into()))
+            .settle_command(request, "exit 0".into(), Some("revision".into()), None)
             .is_empty());
         assert!(registry.take_settlement_notifications().is_empty());
         if captured {
@@ -771,17 +607,22 @@ fn restore_command_notice(
     let watch = registry
         .register_transient_watch(
             owner,
-            vec![vec![(
+            crate::request::test_readiness_groups(vec![vec![(
                 request,
                 crate::request::WatchRequirement::Response {
                     allow_failure: false,
                 },
-            )]],
+            )]]),
         )
         .unwrap();
     let lease = TransientWatchLease::new(registry, owner, watch);
     assert!(registry
-        .settle_command(request, format!("{job}: exit 0"), Some("revision".into()))
+        .settle_command(
+            request,
+            format!("{job}: exit 0"),
+            Some("revision".into()),
+            None
+        )
         .is_empty());
     // Cancellation releases the observation without consuming its wake.
     drop(lease);

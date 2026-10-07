@@ -857,12 +857,12 @@ async fn invocation_cleanup_releases_transient_watch_without_cancelling_target()
     let watch = requests
         .register_transient_watch(
             owner,
-            vec![vec![(
+            crate::request::test_readiness_groups(vec![vec![(
                 request,
                 WatchRequirement::Response {
                     allow_failure: false,
                 },
-            )]],
+            )]]),
         )
         .unwrap();
     let subscription = requests.subscribe_watch(owner, watch).unwrap();
@@ -1070,7 +1070,7 @@ async fn blocked_settlement_notice_does_not_prevent_invocation_cancellation() {
     fixture
         .environment
         .requests
-        .settle_command(notice, "completed".into(), None);
+        .settle_command(notice, "completed".into(), None, None);
     assert!(fixture.environment.requests.has_settlement_notifications());
 
     for index in 0..DEPLOYMENT_CHANNEL_CAPACITY {

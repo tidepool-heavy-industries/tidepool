@@ -3,366 +3,216 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Engine-private typed readiness subscriptions.
+-- | Typed readiness expressions and their retained runtime decisions.
 module Tidepool.Agent.Watch.Internal
-  ( Await (..)
-  , AwaitDependency (..)
-  , Watch
-  , WatchId (..)
-  , WatchLabel (..)
-  , WatchLabelError (..)
-  , watchLabel
-  , Watches (..)
-  , WatchFailure (..)
-  , WatchState (..)
-  , Settlement (..)
-  , settledValue
-  , RawWatchObservation (..)
-  , awaitResponse
-  , awaitValue
-  , awaitSettled
-  , awaitProgressAfter
-  , awaitProgressAfterSited
-  , awaitAnyProgress
-  , awaitAnyProgressSited
-  , awaitAnySettled
-  , watch
-  , Route
-  , RouteState (..)
-  , route
-  , pollRoute
-  , listRoutes
-  , forgetRoute
-  , pollWatch
-  , awaitWatch
-  , waitFor
-  , ForgetWatchOutcome (..)
-  , forgetWatch
+  ( Await (..), AwaitPlan (..), AwaitNode (..), AwaitDecision (..)
+  , AwaitDependency (..), AwaitError (..)
+  , Watch, WatchId (..), Watches (..), WatchState (..)
+  , RawWatchObservation (..), ForgetWatchOutcome (..)
+  , result, settlement, eitherOf, after, afterSited, await
+  , watch, pollWatch, forgetWatch
+  , Route, RouteState (..), route, pollRoute, listRoutes, forgetRoute
+  , requireObserved
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
-import Data.Char (isAsciiLower, isDigit)
-import Data.String (IsString (fromString))
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Tidepool.Internal.RequestSite (RequestSite)
 import Prelude
 
-import Tidepool.Agent.Assignment.Internal (IsWatchLabel (..))
 import Tidepool.Effects.Core (CommandReport)
 import Tidepool.Agent.Reply.Internal
-  ( ReplyError (..)
-  , Progress (..)
-  , ProgressCursor (..)
-  , ProgressState (..)
-  , PendingProgress (..)
-  , RequestId (..)
-  , Response
-  , ResponseFailure
-  , ResponseResult (responseValue)
-  , readResponse
-  , responseRequestId
+  ( ReplyError (..), Progress (..), ProgressCursor (..), ProgressState (..)
+  , PendingProgress (..), RequestId (..), Request, ResponseFailure
+  , ResponseResult (responseValue), readResponse, responseRequestId
   )
 
--- | 'AwaitCommand' names a command job; the runtime resolves it to the
--- request its completion settles when the watch is registered.
 data AwaitDependency
   = AwaitDependency RequestId Bool
   | AwaitProgress RequestId ProgressCursor
   | AwaitCommand Text
   deriving (Eq)
 
--- Each inner list is an any-of group; every group must become ready.
--- Ordinary awaits use singleton groups, retaining Applicative all-of behavior.
-data Await result = Await [[AwaitDependency]]
-  (forall effs. Member Watches effs => Int -> [(RequestId, ResponseFailure)] -> Eff effs (Maybe result))
+-- | Topological node references are local to this immutable expression.
+data AwaitNode
+  = ReadyNode
+  | LeafNode AwaitDependency
+  | AllNode Int Int
+  | EitherNode Int Int
+  deriving (Eq)
+
+data AwaitPlan = AwaitPlan [AwaitNode] Int
+  deriving (Eq)
+
+-- | Only selected leaves and choices occur in a successful decision. A leaf's
+-- failure is a value only when its settlement projection requested that.
+data AwaitDecision = AwaitDecision [(Int, Maybe ResponseFailure)] [(Int, Bool)]
+
+data Await a = Await AwaitPlan
+  (forall effects. Member Watches effects => Int -> Int -> AwaitDecision -> Eff effects a)
 
 instance Functor Await where
-  fmap f (Await dependencies observe) =
-    Await dependencies (\watchId failures -> fmap (fmap f) (observe watchId failures))
+  fmap f (Await plan observe) = Await plan (\watchId offset decision -> f <$> observe watchId offset decision)
 
 instance Applicative Await where
-  pure value = Await [] (\_ _ -> pure (Just value))
-  Await leftDependencies observeFunction <*> Await rightDependencies observeArgument =
-    Await
-      (deduplicate (leftDependencies <> rightDependencies))
-      (\watchId failures -> do
-        function <- observeFunction watchId failures
-        argument <- observeArgument watchId failures
-        pure (function <*> argument))
+  pure value = Await (AwaitPlan [ReadyNode] 0) (\_ _ _ -> pure value)
+  Await left observeFunction <*> Await right observeArgument =
+    let (plan, rightOffset, _) = combine AllNode left right
+    in Await plan $ \watchId offset decision ->
+      observeFunction watchId offset decision <*> observeArgument watchId (offset + rightOffset) decision
 
-newtype WatchId = WatchId Int
-  deriving (Show, Eq, Ord)
+-- | Select the first terminal branch, including failure. Already terminal
+-- ties prefer the left. A nested choice remains fixed while its parent waits.
+eitherOf :: Await a -> Await b -> Await (Either a b)
+eitherOf (Await left observeLeft) (Await right observeRight) =
+  let (plan, rightOffset, choiceNode) = combine EitherNode left right
+  in Await plan $ \watchId offset decision@(AwaitDecision _ choices) ->
+    case lookup (offset + choiceNode) choices of
+      Just True -> Left <$> observeLeft watchId offset decision
+      Just False -> Right <$> observeRight watchId (offset + rightOffset) decision
+      Nothing -> error "await: terminal decision omitted its selected branch"
 
--- Data ensures registration's constructor match forces an IsString validator
--- before the watch effect is sent across the bridge.
-data WatchLabel = WatchLabel Text
-  deriving (Show, Eq, Ord)
+combine :: (Int -> Int -> AwaitNode) -> AwaitPlan -> AwaitPlan -> (AwaitPlan, Int, Int)
+combine constructor (AwaitPlan left leftRoot) (AwaitPlan right rightRoot) =
+  let rightOffset = length left
+      nodes = left <> map (shiftNode rightOffset) right
+      root = length nodes
+  in (AwaitPlan (nodes <> [constructor leftRoot (rightOffset + rightRoot)]) root, rightOffset, root)
 
-data WatchLabelError
-  = EmptyWatchLabel
-  | InvalidWatchLabel Text
-  | WatchLabelTooLong Text
+shiftNode :: Int -> AwaitNode -> AwaitNode
+shiftNode offset (AllNode left right) = AllNode (offset + left) (offset + right)
+shiftNode offset (EitherNode left right) = EitherNode (offset + left) (offset + right)
+shiftNode _ node = node
+
+newtype WatchId = WatchId Int deriving (Show, Eq, Ord)
+data Watch a = Watch WatchId (Await a)
+instance Show (Watch a) where
+  show (Watch identity _) = "Watch " <> show identity
+
+data AwaitError
+  = AwaitDependencyUnavailable RequestId ResponseFailure
+  | AwaitRejected ReplyError
   deriving (Show, Eq)
 
-instance IsString WatchLabel where
-  fromString = either (error . show) id . watchLabel . Text.pack
-
--- | Lets '[label|...|]' resolve to a 'WatchLabel' at a 'watch'/'spawnWatched'
--- call site with the same kebab-case validation 'watchLabel' already runs;
--- see 'Tidepool.Agent.Assignment.Internal.IsWatchLabel'.
-instance IsWatchLabel WatchLabel where
-  fromValidatedLabelText = WatchLabel
-
-watchLabel :: Text -> Either WatchLabelError WatchLabel
-watchLabel value
-  | Text.null value = Left EmptyWatchLabel
-  | Text.length value > 48 = Left (WatchLabelTooLong value)
-  | Text.head value == '-' || Text.last value == '-' = Left (InvalidWatchLabel value)
-  | "--" `Text.isInfixOf` value = Left (InvalidWatchLabel value)
-  | Text.all valid value = Right (WatchLabel value)
-  | otherwise = Left (InvalidWatchLabel value)
-  where
-    valid character = isAsciiLower character || isDigit character || character == '-'
-
-data Watch result = Watch WatchId (Await result)
-
-instance Show (Watch result) where
-  show (Watch watchId _) = "Watch " <> show watchId
-
-data WatchFailure
-  = WatchDependencyUnavailable RequestId ResponseFailure
-  | WatchRejected ReplyError
-  deriving (Show, Eq)
-
-data WatchState result
-  = -- | Carries the still-pending dependency's producing-actor progress, so
-    -- a re-poll after 'WatchPending' has nothing to add: the registered
-    -- watch already wakes the caller when it settles.
-    WatchPending PendingProgress
-  | WatchReady result
-  | WatchUnavailable WatchFailure
+data WatchState a
+  = WatchPending PendingProgress
+  | WatchReady a
+  | WatchUnavailable AwaitError
   deriving (Show, Eq, Functor)
 
 data RawWatchObservation
   = RawWatchPending PendingProgress
-  | RawWatchReady [(Int, ResponseFailure)]
+  | RawWatchReady AwaitDecision
   | RawWatchUnavailable RequestId ResponseFailure
   | RawWatchRejected ReplyError
 
 data Watches a where
-  RegisterWatchWith :: Text -> [AwaitDependency] -> Watches Int
-  RegisterWatchGroupsWith :: Text -> [[AwaitDependency]] -> Watches Int
-  RegisterAwaitWith :: [[AwaitDependency]] -> Watches (Either ReplyError Int)
-  RegisterRouteWith :: Text -> (Int -> Eff effs ()) -> [AwaitDependency] -> Watches Int
-  RegisterRouteGroupsWith :: Text -> (Int -> Eff effs ()) -> [[AwaitDependency]] -> Watches Int
+  RegisterWatchWith :: Text -> AwaitPlan -> Watches Int
+  RegisterAwaitWith :: AwaitPlan -> Watches (Either ReplyError Int)
+  RegisterRouteWith :: Text -> (Int -> Eff effects ()) -> AwaitPlan -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
   ObserveWatchProgressWith :: RequestSite '[progress] (ProgressState progress) -> Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   AwaitWatchWith :: Int -> Watches RawWatchObservation
-  -- | The completion report of a finished command job, once its settlement
-  -- is made.
-  ObserveCommandWith :: Text -> Watches (Maybe CommandReport)
+  ObserveWatchCommandWith :: Int -> Text -> Watches (Maybe CommandReport)
   ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
 
-data ForgetWatchOutcome
-  = WatchForgotten
-  | WatchForgetPending
-  | WatchForgetRejected ReplyError
+data ForgetWatchOutcome = WatchForgotten | WatchForgetPending | WatchForgetRejected ReplyError
   deriving (Show, Eq)
 
-data Settlement result
-  = ReplyAvailable (ResponseResult result)
-  | ReplyUnavailable ResponseFailure
-  deriving (Show, Eq)
+-- | Project a successful value. Dependency failures are returned by 'await'.
+result :: Request a -> Await a
+result request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) False)] 0)
+  (\_ _ _ -> pure (responseValue (requireObserved (readResponse request))))
 
-settledValue :: Settlement result -> Either ResponseFailure result
-settledValue (ReplyAvailable result) = Right (responseValue result)
-settledValue (ReplyUnavailable failure) = Left failure
+-- | Capture settlement failure as an ordinary value, allowing all outcomes
+-- to be collected with traverse through the same evaluator.
+settlement :: Request a -> Await (Either ResponseFailure a)
+settlement request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) True)] 0)
+  (\_ node (AwaitDecision leaves _) -> pure $ case lookup node leaves of
+    Just (Just failure) -> Left failure
+    Just Nothing -> Right (responseValue (requireObserved (readResponse request)))
+    Nothing -> error "await: terminal decision omitted its selected settlement")
 
-awaitResponse :: Response result -> Await (ResponseResult result)
-awaitResponse response =
-  Await [[AwaitDependency (responseRequestId response) False]] (\_ _ -> pure (readResponse response))
+requireObserved :: Maybe a -> a
+requireObserved (Just value) = value
+requireObserved Nothing = error "await: retained successful value is unavailable"
 
-awaitValue :: Response result -> Await result
-awaitValue = fmap responseValue . awaitResponse
+{-# OPAQUE after #-}
+after :: forall progress. Progress progress -> ProgressCursor -> Await (ProgressState progress)
+after = afterSited (error "after: extractor must assign a typed site")
 
-awaitSettled :: Response result -> Await (Settlement result)
-awaitSettled response =
-  Await [[AwaitDependency request True]] $ \_ failures ->
-    pure $ case readResponse response of
-      Just result -> Just (ReplyAvailable result)
-      Nothing -> ReplyUnavailable <$> lookup request failures
-  where
-    request = responseRequestId response
+{-# OPAQUE afterSited #-}
+afterSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
+afterSited site (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
+  Await (AwaitPlan [LeafNode (AwaitProgress request cursor)] 0) $ \watchId _ _ ->
+    send (ObserveWatchProgressWith site watchId requestId revision)
 
-{-# OPAQUE awaitProgressAfter #-}
-awaitProgressAfter :: forall progress. Progress progress -> ProgressCursor -> Await (ProgressState progress)
-awaitProgressAfter = awaitProgressAfterSited (error "awaitProgressAfter: extractor must assign a typed site")
+watch :: Member Watches effects => Maybe Text -> Await a -> Eff effects (Watch a)
+watch label awaiting@(Await plan _) = do
+  identity <- send (RegisterWatchWith (maybe "" id label) plan)
+  pure (Watch (WatchId identity) awaiting)
 
-{-# OPAQUE awaitProgressAfterSited #-}
-awaitProgressAfterSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
-awaitProgressAfterSited site (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
-  Await [[AwaitProgress request cursor]] $ \watchId _ ->
-    observedProgress <$> send (ObserveWatchProgressWith site watchId requestId revision)
+pollWatch :: Member Watches effects => Watch a -> Eff effects (WatchState a)
+pollWatch (Watch (WatchId identity) (Await _ observe)) = do
+  observation <- send (ObserveWatchWith identity)
+  project identity observe observation
 
--- | Wait until any supplied progress stream advances or closes. Results retain
--- input order and are captured at the wake; unchanged sources are
--- 'ProgressPending'.
-{-# OPAQUE awaitAnyProgress #-}
-awaitAnyProgress :: forall progress. [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
-awaitAnyProgress = awaitAnyProgressSited (error "awaitAnyProgress: extractor must assign a typed site")
+-- | The sole readiness evaluator. Its transient subscription is runtime-owned
+-- and cancellation releases that subscription without cancelling requests.
+await :: Member Watches effects => Await a -> Eff effects (Either AwaitError a)
+await awaiting@(Await plan _) = do
+  registered <- send (RegisterAwaitWith plan)
+  case registered of
+    Left failure -> pure (Left (AwaitRejected failure))
+    Right identity -> do
+      let subscription = Watch (WatchId identity) awaiting
+      outcome <- waitSubscription subscription
+      _ <- forgetWatch subscription
+      pure outcome
 
-{-# OPAQUE awaitAnyProgressSited #-}
-awaitAnyProgressSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
-awaitAnyProgressSited _ [] = pure []
-awaitAnyProgressSited site sources =
-  Await [map dependency sources] $ \watchId _ ->
-    traverseObservedProgress <$> mapM
-      (\(Progress (RequestId requestId), ProgressCursor revision) ->
-        send (ObserveWatchProgressWith site watchId requestId revision)) sources
-  where
-    dependency (Progress request, cursor) = AwaitProgress request cursor
-
-observedProgress :: ProgressState progress -> Maybe (ProgressState progress)
-observedProgress (ProgressRejected ReplyStale) = Nothing
-observedProgress state = Just state
-
-traverseObservedProgress :: [ProgressState progress] -> Maybe [ProgressState progress]
-traverseObservedProgress = traverse observedProgress
-
--- | Wait until any supplied response settles. Results retain input order;
--- a response still pending at the wake is 'Nothing'.
-awaitAnySettled :: [Response result] -> Await [Maybe (Settlement result)]
-awaitAnySettled [] = pure []
-awaitAnySettled responses =
-  Await [[AwaitDependency (responseRequestId response) True | response <- responses]]
-    $ \_ failures -> pure (Just (map (settled failures) responses))
-  where
-    settled failures response = case readResponse response of
-      Just result -> Just (ReplyAvailable result)
-      Nothing -> ReplyUnavailable <$> lookup (responseRequestId response) failures
-
-watch :: Member Watches effs => WatchLabel -> Await result -> Eff effs (Watch result)
-watch (WatchLabel label) awaiting@(Await groups _) = do
-  watchId <- case flattenSingletons groups of
-    Just dependencies -> send (RegisterWatchWith label dependencies)
-    Nothing -> send (RegisterWatchGroupsWith label groups)
-  pure (Watch (WatchId watchId) awaiting)
-
-pollWatch
-  :: Member Watches effs
-  => Watch result
-  -> Eff effs (WatchState result)
-pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
-  observation <- send (ObserveWatchWith watchId)
-  captureWatchObservation watchId observe observation
-
--- | Suspend this actor's turn until its registered watch becomes terminal,
--- then capture the same typed response values 'pollWatch' would observe.
-awaitWatch
-  :: Member Watches effs
-  => Watch result
-  -> Eff effs (Either WatchFailure result)
-awaitWatch (Watch (WatchId watchId) (Await _ observe)) = loop
+waitSubscription :: Member Watches effects => Watch a -> Eff effects (Either AwaitError a)
+waitSubscription (Watch (WatchId identity) (Await _ observe)) = loop
   where
     loop = do
-      observation <- send (AwaitWatchWith watchId)
-      captured <- captureWatchObservation watchId observe observation
-      case captured of
+      observation <- send (AwaitWatchWith identity)
+      projected <- project identity observe observation
+      case projected of
         WatchPending _ -> loop
-        WatchReady result -> pure (Right result)
+        WatchReady value -> pure (Right value)
         WatchUnavailable failure -> pure (Left failure)
 
--- | Suspend directly on typed readiness. The runtime owns this transient
--- subscription until it is captured or the invocation exits; named watches
--- remain useful for inspection and independent notifications.
-waitFor
-  :: Member Watches effs
-  => Await result
-  -> Eff effs (Either WatchFailure result)
-waitFor awaiting@(Await groups _) = do
-  registered <- send (RegisterAwaitWith groups)
-  case registered of
-    Left failure -> pure (Left (WatchRejected failure))
-    Right watchId -> do
-      let subscription = Watch (WatchId watchId) awaiting
-      result <- awaitWatch subscription
-      _ <- forgetWatch subscription
-      pure result
+project :: Member Watches effects => Int -> (Int -> Int -> AwaitDecision -> Eff effects a) -> RawWatchObservation -> Eff effects (WatchState a)
+project identity observe observation = case observation of
+  RawWatchPending progress -> pure (WatchPending progress)
+  RawWatchReady decision -> WatchReady <$> observe identity 0 decision
+  RawWatchUnavailable request failure -> pure (WatchUnavailable (AwaitDependencyUnavailable request failure))
+  RawWatchRejected failure -> pure (WatchUnavailable (AwaitRejected failure))
 
-captureWatchObservation
-  :: Member Watches effs
-  => Int
-  -> (Int -> [(RequestId, ResponseFailure)] -> Eff effs (Maybe result))
-  -> RawWatchObservation
-  -> Eff effs (WatchState result)
-captureWatchObservation watchId observe observation =
-  case observation of
-    RawWatchPending progress -> pure (WatchPending progress)
-    RawWatchReady rawFailures -> do
-      captured <- observe watchId (map (\(request, failure) -> (RequestId request, failure)) rawFailures)
-      case captured of
-        Just result -> pure (WatchReady result)
-        Nothing -> do
-          -- A progress effect can run after this Ready poll while the owner
-          -- releases its response. Recheck the watch's typed state.
-          latest <- send (ObserveWatchWith watchId)
-          pure $ case latest of
-            RawWatchUnavailable request failure ->
-              WatchUnavailable (WatchDependencyUnavailable request failure)
-            RawWatchRejected failure -> WatchUnavailable (WatchRejected failure)
-            _ -> error "Tidepool watch became ready before every response cell was filled"
-    RawWatchUnavailable request failure ->
-      pure (WatchUnavailable (WatchDependencyUnavailable request failure))
-    RawWatchRejected failure -> pure (WatchUnavailable (WatchRejected failure))
+forgetWatch :: Member Watches effects => Watch a -> Eff effects ForgetWatchOutcome
+forgetWatch (Watch (WatchId identity) _) = send (ForgetWatchWith identity)
 
-forgetWatch :: Member Watches effs => Watch result -> Eff effs ForgetWatchOutcome
-forgetWatch (Watch (WatchId watchId) _) = send (ForgetWatchWith watchId)
-
-deduplicate :: [[AwaitDependency]] -> [[AwaitDependency]]
-deduplicate = foldr add []
-  where
-    add dependency rest
-      | dependency `elem` rest = rest
-      | otherwise = dependency : rest
-
--- | One watch-owned continuation, executed by the owning actor without inference.
 newtype Route = Route Int deriving (Show, Eq)
 data RouteState = RouteWaiting | RouteRunning | RouteCompleted | RouteFailed Text | RouteRejected ReplyError
   deriving (Show, Eq)
 
-route
-  :: Member Watches effs
-  => Await result
-  -> (result -> Eff effs ())
-  -> Eff effs Route
-route awaiting@(Await groups _) callback = do
-  let entry watchId = do
-        observed <- pollWatch (Watch (WatchId watchId) awaiting)
+route :: Member Watches effects => Await a -> (a -> Eff effects ()) -> Eff effects Route
+route awaiting@(Await plan _) callback = do
+  let entry identity = do
+        observed <- pollWatch (Watch (WatchId identity) awaiting)
         case observed of
-          WatchReady result -> callback result
+          WatchReady value -> callback value
           WatchUnavailable failure -> error (show failure)
-          WatchPending _ -> error "route ran before its dependency was ready"
-  Route <$> case flattenSingletons groups of
-    Just dependencies -> send (RegisterRouteWith "route" entry dependencies)
-    Nothing -> send (RegisterRouteGroupsWith "route" entry groups)
+          WatchPending _ -> error "route ran before its expression was terminal"
+  Route <$> send (RegisterRouteWith "" entry plan)
 
-flattenSingletons :: [[dependency]] -> Maybe [dependency]
-flattenSingletons = mapM singleton
-  where
-    singleton [dependency] = Just dependency
-    singleton _ = Nothing
-
-pollRoute :: Member Watches effs => Route -> Eff effs RouteState
-pollRoute (Route watchId) = send (ObserveRouteWith watchId)
-
-forgetRoute :: Member Watches effs => Route -> Eff effs ForgetWatchOutcome
-forgetRoute (Route watchId) = send (ForgetWatchWith watchId)
-
--- | Recover this actor's retained routes, including routes installed by callbacks.
-listRoutes :: Member Watches effs => Eff effs [Route]
+pollRoute :: Member Watches effects => Route -> Eff effects RouteState
+pollRoute (Route identity) = send (ObserveRouteWith identity)
+forgetRoute :: Member Watches effects => Route -> Eff effects ForgetWatchOutcome
+forgetRoute (Route identity) = send (ForgetWatchWith identity)
+listRoutes :: Member Watches effects => Eff effects [Route]
 listRoutes = map Route <$> send ListRoutesWith

@@ -48,7 +48,6 @@ enum WatchWaitEvent {
     Resume(Result<WatchObservation, ReplyError>),
     Cancelled,
     Retired(crate::ActorTerminal),
-    Refused(DeferredWaitRefusal),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -74,31 +73,6 @@ pub(super) fn guard_deferred_target(
     }
 }
 
-fn blocked_watch_target(
-    requests: &RequestRegistry,
-    groups: &crate::ForkGroupRegistry,
-    actor: ActorRef,
-    watch: WatchId,
-    boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-) -> Result<Option<DeferredWaitRefusal>, ReplyError> {
-    let Some(boundary) = boundary else {
-        return Ok(None);
-    };
-    let blocked = groups.pending_children_at_boundary(actor, boundary);
-    if blocked.is_empty() {
-        return Ok(None);
-    }
-    Ok(requests
-        .pending_watch_target_groups(actor, watch)?
-        .into_iter()
-        .find(|alternatives| {
-            !alternatives.is_empty() && alternatives.iter().all(|target| blocked.contains(target))
-        })
-        .map(|alternatives| DeferredWaitRefusal {
-            target: alternatives[0],
-        }))
-}
-
 /// The request registry owns subscription and exact-incarnation validation.
 /// Selecting cancellation never acknowledges native continuation cleanup.
 async fn wait_watch_event(
@@ -107,19 +81,9 @@ async fn wait_watch_event(
     watch: WatchId,
     control: &Arc<crate::WorkbenchExecutionControl>,
     retirement: &crate::RetainedActorExit,
-    groups: &crate::ForkGroupRegistry,
-    boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+    _groups: &crate::ForkGroupRegistry,
+    _boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> WatchWaitEvent {
-    match blocked_watch_target(requests, groups, actor, watch, boundary) {
-        Ok(Some(refusal)) => {
-            return match retirement.claim_before_shutdown(|| control.claim_expiry()) {
-                Ok(true) => WatchWaitEvent::Refused(refusal),
-                Ok(false) => WatchWaitEvent::Cancelled,
-                Err(terminal) => WatchWaitEvent::Retired(terminal),
-            };
-        }
-        Err(_) | Ok(None) => {}
-    }
     let waiting = requests.await_watch(actor, watch);
     tokio::pin!(waiting);
     tokio::select! {
@@ -171,17 +135,6 @@ where
     )
     .await
     {
-        WatchWaitEvent::Refused(refusal) => {
-            let (outcome, _) = environment
-                .runner
-                .abort_live(context, poll.continuation, refusal.to_string())
-                .await;
-            control.finish_sleep();
-            outcome?;
-            Err(ResidentActorWorkbenchError::ActorProtocol(
-                refusal.to_string(),
-            ))
-        }
         WatchWaitEvent::Resume(observation) => {
             transient.armed = false;
             let observation = observation.map(|observation| {
