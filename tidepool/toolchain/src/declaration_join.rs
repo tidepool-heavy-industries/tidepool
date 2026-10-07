@@ -2292,12 +2292,16 @@ mod authored_tests {
         assert_eq!(accepted.expected_public_version(), "paired-public-version");
         assert_eq!(accepted.toolchain_identity_sha256(), expected_producer);
         assert!(!accepted.package_imports_bytes().is_empty());
-        let descriptors = context
+        let joined_context = context
             .clone()
             .extend(&[], &[Arc::new(accepted.clone())], Vec::new())
-            .unwrap()
+            .unwrap();
+        let descriptors = joined_context.artifact_view().descriptors();
+        let native_groups = joined_context
             .artifact_view()
-            .descriptors();
+            .selected_native_groups()
+            .into_iter()
+            .collect::<Vec<_>>();
         drop(worker_root);
         drop(source_root);
         let durable = tempfile::tempdir().unwrap();
@@ -2323,6 +2327,7 @@ mod authored_tests {
             &stored.value_interfaces,
             &descriptors,
             &stored.artifact_dependencies,
+            &native_groups,
             lexical.clone(),
         )
         .unwrap();

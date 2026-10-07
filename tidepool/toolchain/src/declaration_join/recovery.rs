@@ -128,6 +128,7 @@ pub fn certify_recovered_declaration_tip_with_inventory(
         crate::artifact_inventory::ArtifactId,
         crate::artifact_inventory::ArtifactDependency,
     )],
+    native_groups: &[crate::artifact_inventory::NativeGroupKey],
     mut selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
 ) -> Result<RecoveredDeclarationTip, CompileError> {
@@ -139,6 +140,7 @@ pub fn certify_recovered_declaration_tip_with_inventory(
         values,
         descriptors,
         dependencies,
+        native_groups,
         std::mem::take(&mut selection.lexical),
     )?);
     certify_recovered_declaration_tip_in_context(context, selection, includes)
