@@ -11,6 +11,7 @@ rust_filegroup(
     name = "tidepool_protocol_sources",
     mapped_srcs = {
         "Cargo.toml": "bridge/protocol/Cargo.toml",
+        "src/actor_profiles.rs": "bridge/protocol/src/actor_profiles.rs",
         "src/effects/actor.rs": "bridge/protocol/src/effects/actor.rs",
         "src/effects/actor_context.rs": "bridge/protocol/src/effects/actor_context.rs",
         "src/effects/actor_kernel.rs": "bridge/protocol/src/effects/actor_kernel.rs",
@@ -73,6 +74,7 @@ rust_filegroup(
     name = "tidepool_protocol_gen_sources",
     mapped_srcs = {
         "Cargo.toml": "bridge/protocol/Cargo.toml",
+        "src/actor_profiles.rs": "bridge/protocol/src/actor_profiles.rs",
         "src/bin/tidepool-protocol-gen.rs": "bridge/protocol/src/bin/tidepool-protocol-gen.rs",
         "src/effects/actor.rs": "bridge/protocol/src/effects/actor.rs",
         "src/effects/actor_context.rs": "bridge/protocol/src/effects/actor_context.rs",
@@ -139,6 +141,7 @@ rust_filegroup(
     name = "tidepool_protocol_gen_unit_tests_sources",
     mapped_srcs = {
         "Cargo.toml": "bridge/protocol/Cargo.toml",
+        "src/actor_profiles.rs": "bridge/protocol/src/actor_profiles.rs",
         "src/bin/tidepool-protocol-gen.rs": "bridge/protocol/src/bin/tidepool-protocol-gen.rs",
         "src/effects/actor.rs": "bridge/protocol/src/effects/actor.rs",
         "src/effects/actor_context.rs": "bridge/protocol/src/effects/actor_context.rs",
@@ -266,6 +269,8 @@ protocol_generated(
         "tidepool/bridge-effects/src/generated/mod.rs",
         "tidepool/bridge-effects/src/generated/model_control.rs",
         "bridge/haskell/lib/Tidepool/Internal/ModelControl.hs",
+        "exomonad/tool/src/generated/public_profiles.rs",
+        "bridge/haskell/lib/Tidepool/Internal/ActorProfiles.hs",
         "tidepool/runtime/src/generated/ask.rs",
         "tidepool/runtime/src/generated/mod.rs",
         "exomonad/actor/src/generated/actor.rs",
@@ -299,6 +304,7 @@ rust_filegroup(
     name = "tidepool_protocol_unit_tests_sources",
     mapped_srcs = {
         "Cargo.toml": "bridge/protocol/Cargo.toml",
+        "src/actor_profiles.rs": "bridge/protocol/src/actor_profiles.rs",
         "src/effects/actor.rs": "bridge/protocol/src/effects/actor.rs",
         "src/effects/actor_context.rs": "bridge/protocol/src/effects/actor_context.rs",
         "src/effects/actor_kernel.rs": "bridge/protocol/src/effects/actor_kernel.rs",
@@ -411,6 +417,7 @@ filegroup(
     srcs = {
         "bridge/protocol/BUCK": "BUCK",
         "bridge/protocol/Cargo.toml": "Cargo.toml",
+        "bridge/protocol/src/actor_profiles.rs": "src/actor_profiles.rs",
         "bridge/protocol/src/bin/tidepool-protocol-gen.rs": "src/bin/tidepool-protocol-gen.rs",
         "bridge/protocol/src/effects/actor.rs": "src/effects/actor.rs",
         "bridge/protocol/src/effects/actor_context.rs": "src/effects/actor_context.rs",

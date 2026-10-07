@@ -10,6 +10,7 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "exomonad/tool/Cargo.toml",
         "src/effects.rs": "exomonad/tool/src/effects.rs",
+        "//bridge/protocol:generated[exomonad_tool_src_generated_public_profiles_rs]": "exomonad/tool/src/generated/public_profiles.rs",
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
     },
@@ -37,6 +38,7 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "exomonad/tool/Cargo.toml",
         "src/effects.rs": "exomonad/tool/src/effects.rs",
+        "//bridge/protocol:generated[exomonad_tool_src_generated_public_profiles_rs]": "exomonad/tool/src/generated/public_profiles.rs",
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
     },
