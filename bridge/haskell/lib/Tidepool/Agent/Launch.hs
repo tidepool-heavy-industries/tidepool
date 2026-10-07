@@ -17,7 +17,7 @@ import Control.Monad.Freer (Eff, Member, send)
 import Prelude
 import Tidepool.Effects.Core
   ( BoundWorktree (..), GitRef, WorktreeId, WorktreeSource (..)
-  , WorktreeError, WorkspaceHandle, SpawnWorkspaceWire (..)
+  , WorktreeError, WorkspaceHandle, SpawnWorkspaceWire (..), WorkspaceSeedWire (..)
   )
 
 -- | A directory choice does not change the child's installed tools or source.
@@ -28,20 +28,20 @@ data Workspace
   deriving (Show, Eq)
 
 -- | A committed source selected once by the runtime at fork admission.
-newtype WorktreeSeed = WorktreeSeed WorktreeSource
+data WorktreeSeed = CurrentCheckoutSeed | CommittedSeed WorktreeSource
   deriving (Show, Eq)
 
 projectHead :: WorktreeSeed
-projectHead = WorktreeSeed CurrentRepository
+projectHead = CommittedSeed SourceCurrentRepository
 
 currentCheckout :: WorktreeSeed
-currentCheckout = WorktreeSeed CurrentRepository
+currentCheckout = CurrentCheckoutSeed
 
 atRef :: GitRef -> WorktreeSeed
-atRef = WorktreeSeed . Ref
+atRef = CommittedSeed . SourceRef
 
 existingWorktree :: WorktreeId -> WorktreeSeed
-existingWorktree = WorktreeSeed . Worktree
+existingWorktree = CommittedSeed . SourceWorktree
 
 -- | Issue a run-local grant for the caller's actual registered directory.
 currentWorkspace :: Member BoundWorktree effects => Eff effects (Either WorktreeError WorkspaceHandle)
@@ -50,4 +50,5 @@ currentWorkspace = send BoundWorkspaceGet
 workspaceWire :: Workspace -> SpawnWorkspaceWire
 workspaceWire SameDir = SameDirectory
 workspaceWire (ExistingWorkspace handle) = ExistingDirectory handle
-workspaceWire (ForkWorktree (WorktreeSeed source)) = ForkDirectory source
+workspaceWire (ForkWorktree CurrentCheckoutSeed) = ForkDirectory CurrentCheckout
+workspaceWire (ForkWorktree (CommittedSeed source)) = ForkDirectory (CommittedSource source)

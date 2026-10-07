@@ -74,7 +74,6 @@ actorEffectName key = case key of
   EffectResourceScopes -> "ResourceScopes"
   EffectReplies -> "Replies"
   EffectWatches -> "Watches"
-  EffectForks -> "Forks"
   EffectActorContext -> "ActorContext"
   EffectAgentLaunch -> "AgentLaunch"
   EffectAgentInspection -> "AgentInspection"

@@ -45,7 +45,6 @@ module Tidepool.Actors.Exomonad
   , Journal
   , record
   , trace
-  , Forks
   , Reflect
   , reflect
   , ConversationTurn (..)
@@ -207,16 +206,18 @@ module Tidepool.Actors.Exomonad
   , SpawnOptions (..)
   , defaultSpawnOptions
   , SpawnError (..)
+  , SpawnRetainedResources (..)
+  , SpawnCleanup (..)
   , spawnSubagent
   , SpecReplacementError (..)
   , replaceSpec
-  , observed
   , ResourceScopes
   , Scope
   , ScopeFailure (..)
   , CleanupError (..)
   , ScopeOutcome (..)
   , withScope
+  , observed
   , AwaitError (..)
   , result
   , settlement

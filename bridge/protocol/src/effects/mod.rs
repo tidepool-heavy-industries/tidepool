@@ -32,7 +32,6 @@ pub mod console;
 pub mod context_read_write;
 pub mod event;
 pub mod exec;
-pub mod forks;
 pub mod green;
 pub mod introspection;
 pub mod jev;
@@ -89,7 +88,6 @@ pub fn all() -> Vec<Effect> {
         jev::jev(),
         agent_inspection::agent_inspection(),
         agent_launch::agent_launch(),
-        forks::forks(),
         agent_tools::agent_tools(),
         agent_session::agent_session(),
         reflect::reflect(),

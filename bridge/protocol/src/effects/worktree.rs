@@ -125,7 +125,12 @@ fn type_defs() -> Vec<TypeDef> {
             name: "WorkspaceHandle",
             wire_rust: Some("WtWorkspaceHandle"),
             haskell_module: None,
-            shape: TypeShape::Identity { payload: IdentityPayload::Text, hs_binder: "token", rust_field: "raw", validation: Validation::None },
+            shape: TypeShape::Identity {
+                payload: IdentityPayload::Text,
+                hs_binder: "token",
+                rust_field: "raw",
+                validation: Validation::None,
+            },
             json: JsonInstance::None,
             derives: WIRE,
             domain: None,
@@ -741,19 +746,25 @@ fn type_defs() -> Vec<TypeDef> {
                         hs_name: "mergeSourceHead",
                         rust_name: "source_head",
                         ty: HsType::Named("GitOid"),
-                        doc: &["The exact observed source commit; this, not the branch label, is merged."],
+                        doc: &[
+                            "The exact observed source commit; this, not the branch label, is merged.",
+                        ],
                     },
                     RecordField {
                         hs_name: "mergeSourceWorktree",
                         rust_name: "source_worktree",
                         ty: HsType::Named("WorktreeId"),
-                        doc: &["The registered source checkout that supplied this commit and its initialized kit objects."],
+                        doc: &[
+                            "The registered source checkout that supplied this commit and its initialized kit objects.",
+                        ],
                     },
                     RecordField {
                         hs_name: "mergeSourceBranch",
                         rust_name: "source_branch",
                         ty: HsType::maybe(HsType::Named("BranchName")),
-                        doc: &["Optional readable provenance. If present, it must still resolve to sourceHead."],
+                        doc: &[
+                            "Optional readable provenance. If present, it must still resolve to sourceHead.",
+                        ],
                     },
                     RecordField {
                         hs_name: "mergeTargetWorktree",
@@ -797,23 +808,43 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "AlreadyContained",
-                        fields: positional_fields![HsType::Named("GitOid"), HsType::Named("GitOid")],
-                        doc: &["The source was already reachable from the target; no mutation occurred."],
+                        fields: positional_fields![
+                            HsType::Named("GitOid"),
+                            HsType::Named("GitOid")
+                        ],
+                        doc: &[
+                            "The source was already reachable from the target; no mutation occurred.",
+                        ],
                     },
                     SumVariant {
                         ctor: "FastForwarded",
-                        fields: positional_fields![HsType::Named("GitOid"), HsType::Named("GitOid"), HsType::Named("GitOid")],
+                        fields: positional_fields![
+                            HsType::Named("GitOid"),
+                            HsType::Named("GitOid"),
+                            HsType::Named("GitOid")
+                        ],
                         doc: &["The target moved directly from before to the source commit."],
                     },
                     SumVariant {
                         ctor: "CreatedMergeCommit",
-                        fields: positional_fields![HsType::Named("GitOid"), HsType::Named("GitOid"), HsType::Named("GitOid")],
+                        fields: positional_fields![
+                            HsType::Named("GitOid"),
+                            HsType::Named("GitOid"),
+                            HsType::Named("GitOid")
+                        ],
                         doc: &["Divergent histories produced a new merge commit."],
                     },
                     SumVariant {
                         ctor: "ManualGitRequired",
-                        fields: positional_fields![HsType::Named("GitOid"), HsType::Named("GitOid"), HsType::Text, HsType::list(HsType::Text)],
-                        doc: &["Automatic integration stopped cleanly. The target is restored; use ordinary Git."],
+                        fields: positional_fields![
+                            HsType::Named("GitOid"),
+                            HsType::Named("GitOid"),
+                            HsType::Text,
+                            HsType::list(HsType::Text)
+                        ],
+                        doc: &[
+                            "Automatic integration stopped cleanly. The target is restored; use ordinary Git.",
+                        ],
                     },
                 ],
             },

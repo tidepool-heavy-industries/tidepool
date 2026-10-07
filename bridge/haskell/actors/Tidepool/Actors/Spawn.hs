@@ -22,6 +22,8 @@ module Tidepool.Actors.Spawn
   , SpawnOptions (..)
   , defaultSpawnOptions
   , SpawnError (..)
+  , SpawnRetainedResources (..)
+  , SpawnCleanup (..)
   , spawnSubagent
   , SpecReplacementError (..)
   , replaceSpec
@@ -37,8 +39,9 @@ import qualified Tidepool.Agent.Launch as Launch
 import Tidepool.Agent.Ref (AgentRef (..), agentIdentity)
 import Tidepool.Effects.Row (KnownEffects (knownEffects), effectKeys)
 import Tidepool.Effects.Core
-  ( AgentLaunch (..), Forks (..), CheckpointRefusal, Model, ForkEffort
+  ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort
   , WorkerLifetime (..), SpawnContextWire (..), SpawnError (..)
+  , SpawnRetainedResources (..), SpawnCleanup (..)
   , SpecReplacementError (..)
   )
 import Tidepool.Internal.ActorRef (ActorRef (..))
@@ -51,11 +54,11 @@ newtype ContextCheckpoint = ContextCheckpoint Text
 data SpawnContext = ForkCtx ContextCheckpoint | FreshCtx Text
   deriving (Show, Eq)
 
-checkpoint :: Member Forks effects => Text -> Eff effects (Either CheckpointRefusal ContextCheckpoint)
-checkpoint name = fmap ContextCheckpoint <$> send (ForksCheckpointWith name)
+checkpoint :: Member AgentLaunch effects => Text -> Eff effects (Either CheckpointRefusal ContextCheckpoint)
+checkpoint name = fmap ContextCheckpoint <$> send (AgentLaunchCheckpointWith name)
 
-releaseCheckpoint :: Member Forks effects => ContextCheckpoint -> Eff effects (Either CheckpointRefusal ())
-releaseCheckpoint (ContextCheckpoint token) = send (ForksReleaseCheckpointWith token)
+releaseCheckpoint :: Member AgentLaunch effects => ContextCheckpoint -> Eff effects (Either CheckpointRefusal ())
+releaseCheckpoint (ContextCheckpoint token) = send (AgentLaunchReleaseCheckpointWith token)
 
 -- | The real typed spec is retained with all its compiled closure dependencies.
 data SpawnOptions tools childEffects = SpawnOptions

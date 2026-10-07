@@ -6,7 +6,6 @@ const EFFECTS: &[&str] = &[
     "Replies",
     "Watches",
     "ResourceScopes",
-    "Forks",
     "ActorContext",
     "AgentLaunch",
     "AgentInspection",
@@ -30,7 +29,7 @@ const EFFECTS: &[&str] = &[
 ];
 
 fn validate(effects: &[&str]) -> Result<(), String> {
-    let schema = crate::effects::forks::forks();
+    let schema = crate::effects::agent_launch::agent_launch();
     let definition = schema
         .type_defs
         .iter()

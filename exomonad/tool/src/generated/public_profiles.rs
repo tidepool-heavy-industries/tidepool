@@ -6,7 +6,6 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::Replies,
     ActorEffectKey::Watches,
     ActorEffectKey::ResourceScopes,
-    ActorEffectKey::Forks,
     ActorEffectKey::ActorContext,
     ActorEffectKey::AgentLaunch,
     ActorEffectKey::AgentInspection,

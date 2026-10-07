@@ -29,7 +29,6 @@ bridge/mcp/src/generated/notifications.rs
 bridge/mcp/src/generated/jev.rs
 bridge/mcp/src/generated/agent_inspection.rs
 bridge/mcp/src/generated/agent_launch.rs
-bridge/mcp/src/generated/forks.rs
 bridge/mcp/src/generated/agent_tools.rs
 bridge/mcp/src/generated/agent_session.rs
 bridge/mcp/src/generated/reflect.rs
@@ -74,7 +73,6 @@ exomonad/actor/src/generated/jev.rs
 exomonad/actor/src/generated/model_call.rs
 exomonad/actor/src/generated/agent_inspection.rs
 exomonad/actor/src/generated/agent_launch.rs
-exomonad/actor/src/generated/forks.rs
 exomonad/actor/src/generated/agent_tools.rs
 exomonad/actor/src/generated/agent_session.rs
 exomonad/actor/src/generated/reflect.rs

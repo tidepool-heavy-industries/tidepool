@@ -6,7 +6,6 @@ import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
 import Tidepool.Effects.Core
   ( ResourceScopes
-  , Forks
   , ActorContext
   , AgentLaunch
   , AgentInspection
@@ -30,4 +29,4 @@ import Tidepool.Effects.Core
   )
 
 type ActorEffects =
-  '[Replies, Watches, ResourceScopes, Forks, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, ModelCall, Commands, Console, Actor, Reflect, Lookup, Source, Journal, RepoEvent]
+  '[Replies, Watches, ResourceScopes, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, ModelCall, Commands, Console, Actor, Reflect, Lookup, Source, Journal, RepoEvent]

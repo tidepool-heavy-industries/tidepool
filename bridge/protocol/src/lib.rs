@@ -117,7 +117,6 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::model::model(),
         effects::agent_inspection::agent_inspection(),
         effects::agent_launch::agent_launch(),
-        effects::forks::forks(),
         effects::agent_tools::agent_tools(),
         effects::agent_session::agent_session(),
         effects::reflect::reflect(),

@@ -41,12 +41,16 @@ pub fn agent_control() -> Effect {
                     "AgentStoppedReleasing: stopped; release had not settled and a notice follows.",
                 ],
             ),
-            sum("AgentRetentionError", vec![
-                variant("AgentRetainUnavailable", vec![]),
-                variant("AgentRetainUnauthorized", vec![]),
-                variant("AgentRetainOwnerUnavailable", vec![]),
-                variant("AgentRetainOwnerClosed", vec![]),
-            ], &["Refusal to transfer an actor's cleanup ownership."]),
+            sum(
+                "AgentRetentionError",
+                vec![
+                    variant("AgentRetainUnavailable", vec![]),
+                    variant("AgentRetainUnauthorized", vec![]),
+                    variant("AgentRetainOwnerUnavailable", vec![]),
+                    variant("AgentRetainOwnerClosed", vec![]),
+                ],
+                &["Refusal to transfer an actor's cleanup ownership."],
+            ),
         ],
         external_types: &[crate::schema::ExternalType {
             haskell_name: "WorkerLifetime",
@@ -71,8 +75,16 @@ pub fn agent_control() -> Effect {
                 ctor: "AgentControlRetainWith",
                 method: "agent_control_retain_with",
                 args: vec![
-                    Arg { name: "actor", ty: HsType::Tuple(vec![HsType::Int, HsType::Int]), rust: RustBinding::Derived },
-                    Arg { name: "lifetime", ty: HsType::Named("WorkerLifetime"), rust: RustBinding::External },
+                    Arg {
+                        name: "actor",
+                        ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                        rust: RustBinding::Path("(i64, i64)"),
+                    },
+                    Arg {
+                        name: "lifetime",
+                        ty: HsType::Named("WorkerLifetime"),
+                        rust: RustBinding::External,
+                    },
                 ],
                 ret: HsType::either(HsType::Named("AgentRetentionError"), HsType::Unit),
                 errors: None,

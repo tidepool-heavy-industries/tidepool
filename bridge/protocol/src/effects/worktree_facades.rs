@@ -78,7 +78,12 @@ pub fn bound_worktree() -> Effect {
         "BoundWorktreeReq",
         "bound_worktree_decl",
         vec![
-            plain("BoundWorkspaceGet", "bound_workspace_get", vec![], result("WorkspaceHandle")),
+            plain(
+                "BoundWorkspaceGet",
+                "bound_workspace_get",
+                vec![],
+                result("WorkspaceHandle"),
+            ),
             plain(
                 "BoundWorktreeGet",
                 "bound_worktree_get",
@@ -172,14 +177,12 @@ pub fn worktree_allocation() -> Effect {
         "ActorWorktreeAllocationHandler",
         "WorktreeAllocationReq",
         "worktree_allocation_decl",
-        vec![
-            plain(
-                "WorktreeAllocationCreate",
-                "worktree_allocation_create",
-                vec![arg("spec", "WorktreeSpec")],
-                result("WorktreeHandle"),
-            ),
-        ],
+        vec![plain(
+            "WorktreeAllocationCreate",
+            "worktree_allocation_create",
+            vec![arg("spec", "WorktreeSpec")],
+            result("WorktreeHandle"),
+        )],
     )
 }
 
