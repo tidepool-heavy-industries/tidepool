@@ -16358,7 +16358,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             }).unwrap();
             let TurnResult::Bind { bound, compiled, .. } = turn else { panic!("installer bind") };
             assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], tidepool_repr::Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
-            let installer = Arc::new(session.retain_binding_custody("installer").unwrap().unwrap());
+            let installer = Arc::new(session.retain_binding_custody_in(
+                context.placement.lexical_scope,
+                &bound[0].name,
+                tidepool_repr::SessionVarId::from_extract(bound[0].var_id),
+            ).unwrap().unwrap());
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
             let workbench = ResidentActorWorkbench::new(machines, source, None);
@@ -16447,19 +16451,49 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             ));
             let installer = Arc::new(
                 session
-                    .retain_binding_custody("installer")
+                    .retain_binding_custody_in(
+                        context.placement.lexical_scope,
+                        "installer",
+                        tidepool_repr::SessionVarId::from_extract(
+                            bound
+                                .iter()
+                                .find(|binder| binder.name == "installer")
+                                .expect("compiler-issued installer binder")
+                                .var_id,
+                        ),
+                    )
                     .unwrap()
                     .unwrap(),
             );
             let application_installer = Arc::new(
                 session
-                    .retain_binding_custody("applicationInstaller")
+                    .retain_binding_custody_in(
+                        context.placement.lexical_scope,
+                        "applicationInstaller",
+                        tidepool_repr::SessionVarId::from_extract(
+                            bound
+                                .iter()
+                                .find(|binder| binder.name == "applicationInstaller")
+                                .expect("compiler-issued applicationInstaller binder")
+                                .var_id,
+                        ),
+                    )
                     .unwrap()
                     .unwrap(),
             );
             let duplicate_installer = Arc::new(
                 session
-                    .retain_binding_custody("duplicateReceiverInstaller")
+                    .retain_binding_custody_in(
+                        context.placement.lexical_scope,
+                        "duplicateReceiverInstaller",
+                        tidepool_repr::SessionVarId::from_extract(
+                            bound
+                                .iter()
+                                .find(|binder| binder.name == "duplicateReceiverInstaller")
+                                .expect("compiler-issued duplicateReceiverInstaller binder")
+                                .var_id,
+                        ),
+                    )
                     .unwrap()
                     .unwrap(),
             );
