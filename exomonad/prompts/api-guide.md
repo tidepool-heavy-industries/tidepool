@@ -30,23 +30,32 @@ import qualified Tidepool.View as V
 
 let evidence = [True, False]
 F.note "I will ask two related questions."
-display (V.column [V.markdown "Review the current evidence.", V.inspect evidence])
-first <- F.askUser $
+_ <- display (V.column [V.markdown "Review the current evidence.", V.inspect evidence])
+scopeAnswer <- F.askUser $
   (\() scope -> scope) <$> F.present (V.markdown "Which part should I check?")
     <*> F.textInput "Scope" Nothing
-case first of
+case scopeAnswer of
   F.Submitted scope -> do
-    second <- F.askUser $
+    reasonAnswer <- F.askUser $
       (\() reason -> (scope, reason))
         <$> F.present (V.column [V.markdown "Why this part?", V.text scope])
         <*> F.textInput "Reason" Nothing
-    case second of
-      F.Submitted (chosenScope, reason) ->
-        display (V.column [V.markdown "Recorded", V.text chosenScope, V.text reason])
-      F.Dismissed -> display (V.text "The second form was dismissed.")
-      F.FormUnavailable _ -> display (V.text "The second form is unavailable.")
-  F.Dismissed -> display (V.text "The first form was dismissed.")
-  F.FormUnavailable _ -> display (V.text "The first form is unavailable.")
+    case reasonAnswer of
+      F.Submitted (chosenScope, reason) -> do
+        _ <- display (V.column [V.markdown "Recorded", V.text chosenScope, V.text reason])
+        pure ()
+      F.Dismissed -> do
+        _ <- display (V.text "The second form was dismissed.")
+        pure ()
+      F.FormUnavailable _ -> do
+        _ <- display (V.text "The second form is unavailable.")
+        pure ()
+  F.Dismissed -> do
+    _ <- display (V.text "The first form was dismissed.")
+    pure ()
+  F.FormUnavailable _ -> do
+    _ <- display (V.text "The first form is unavailable.")
+    pure ()
 ```
 
 The form builders are pure, so independent fields use ordinary Applicative
