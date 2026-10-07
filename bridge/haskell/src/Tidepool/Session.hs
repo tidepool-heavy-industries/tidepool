@@ -425,7 +425,7 @@ injectSessionIfaceWithBindings root sm hsc0 = do
 
 -- Register a source-less owner after its exact interface has been installed.
 -- This changes only the finder location; it never reads or grants interface
--- contents. Both ordinary injection and captured-byte hydration use it.
+-- contents. Live scope injection uses it; private batch hydration does not.
 registerSessionInterfaceLocation :: FilePath -> SessionModule -> HscEnv -> IO ()
 registerSessionInterfaceLocation path owner env = do
   _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
