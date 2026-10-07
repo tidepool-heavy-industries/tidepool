@@ -106,10 +106,8 @@ pub use kernel::{
     NativeProviderStartError, NativeProviderTurnLease, WorkbenchStepKey,
 };
 pub use lineage::{
-    ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
-    ForkGroupCleanupOutcome, ForkGroupError, ForkGroupGate, ForkGroupId, ForkGroupPhase,
-    ForkGroupPublication, ForkGroupRegistry, SpawnAdmission, SpawnAdmissionOutcome,
-    SpawnCleanupOutcome,
+    ActorAdmissionRegistry, ActorLineageRegistry, ActorPathReservation, CheckpointLease,
+    CheckpointRefusal, SpawnAdmission, SpawnAdmissionOutcome, SpawnCleanupOutcome,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,

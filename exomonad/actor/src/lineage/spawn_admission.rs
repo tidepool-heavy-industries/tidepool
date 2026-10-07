@@ -36,7 +36,7 @@ pub(super) struct SpawnAdmissionRecord {
 #[derive(Clone)]
 pub struct SpawnAdmission {
     id: uuid::Uuid,
-    registry: ForkGroupRegistry,
+    registry: ActorAdmissionRegistry,
 }
 
 pub(crate) struct ClaimedSpawn {
@@ -49,13 +49,11 @@ pub(crate) struct ClaimedSpawn {
 pub(crate) enum SpawnClaimError {
     #[error("checkpoint refusal: {0:?}")]
     Checkpoint(CheckpointRefusal),
-    #[error("actor {0:?} admission is closed")]
-    Closing(ActorRef),
     #[error("actor {sponsor:?} descendant limit {maximum} is exhausted")]
     DescendantLimit { sponsor: ActorRef, maximum: usize },
 }
 
-impl ForkGroupRegistry {
+impl ActorAdmissionRegistry {
     pub(crate) fn claim_spawn(
         &self,
         owner: ActorRef,
@@ -64,9 +62,6 @@ impl ForkGroupRegistry {
         maximum_descendants: Option<usize>,
     ) -> Result<ClaimedSpawn, SpawnClaimError> {
         let mut state = self.state.lock();
-        if state.cleaning.contains(&owner) {
-            return Err(SpawnClaimError::Closing(owner));
-        }
         // Release and admission linearize on this same lock. The admitted
         // share remains usable even if the public checkpoint is released.
         let checkpoint = checkpoint
@@ -92,9 +87,6 @@ impl ForkGroupRegistry {
             ancestor = state.parents.get(&actor).copied();
         }
         for sponsor in &sponsors {
-            if state.cleaning.contains(sponsor) {
-                return Err(SpawnClaimError::Closing(*sponsor));
-            }
             if let Some(maximum) = state.descendant_limits.get(sponsor).copied() {
                 let charged = state
                     .spawns
@@ -310,7 +302,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn independent_admissions_keep_exact_terminal_replay_and_ignore_labels() {
-        let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
         let owner = ActorRef::first(crate::ActorId(1));
         let first = registry
             .claim_spawn(owner, SessionId(1), None, None)
@@ -337,7 +329,7 @@ mod tests {
             .bind(owner, ActorRef::first(crate::ActorId(3)))
             .is_err());
     }
-    fn checkpoint(registry: &ForkGroupRegistry, issuer: ActorRef) -> String {
+    fn checkpoint(registry: &ActorAdmissionRegistry, issuer: ActorRef) -> String {
         registry.capture_checkpoint(
             "exact cut".into(),
             issuer,
@@ -350,7 +342,7 @@ mod tests {
             crate::CheckpointSourceLayer::default(),
             SessionId(1),
             ScopeId(1),
-            WorkbenchForkBoundary::Route {
+            ContextCheckpointBoundary::Route {
                 actor_id: issuer.id.0,
                 incarnation: issuer.incarnation.0,
                 watch_id: 1,
@@ -361,7 +353,7 @@ mod tests {
     #[test]
     fn checkpoint_spawn_claim_linearizes_release_and_preserves_admitted_share() {
         for _ in 0..64 {
-            let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
             let owner = ActorRef::first(crate::ActorId(1));
             let token = checkpoint(&registry, owner);
             let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -398,7 +390,7 @@ mod tests {
 
     #[test]
     fn checkpoint_issuer_and_creator_ceilings_charge_pending_and_live_children() {
-        let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(crate::ActorId(1));
         let creator = ActorRef::first(crate::ActorId(2));
         let token = checkpoint(&registry, issuer);
@@ -435,7 +427,7 @@ mod tests {
 
     #[test]
     fn failed_unbound_child_releases_only_its_own_reserved_capacity() {
-        let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
         let owner = ActorRef::first(crate::ActorId(1));
         let first = registry
             .claim_spawn(owner, SessionId(1), None, Some(2))
@@ -458,7 +450,7 @@ mod tests {
     }
     #[test]
     fn pre_start_identity_failure_retains_identity_and_releases_reserved_capacity() {
-        let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
         let owner = ActorRef::first(crate::ActorId(1));
         let failed = registry
             .claim_spawn(owner, SessionId(1), None, Some(1))
@@ -500,7 +492,7 @@ mod tests {
             "custody transfer",
             "kernel admission",
         ] {
-            let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
             let owner = ActorRef::first(crate::ActorId(1));
             let claim = registry
                 .claim_spawn(owner, SessionId(1), None, None)
