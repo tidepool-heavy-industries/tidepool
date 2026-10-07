@@ -46,6 +46,7 @@ struct SemanticSession {
     public: ScopeId,
     trace: Arc<CaptureMutex<Vec<i64>>>,
     compiler_counts: Arc<CaptureMutex<Vec<u64>>>,
+    history_compiler_census: Option<(u64, Vec<CompilerModeObservation>)>,
     cancel_after_record: Arc<CaptureMutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
     effects: TestEffectSurface,
     images: Arc<ImageRegistry>,
@@ -97,6 +98,7 @@ impl SemanticSession {
             public,
             trace,
             compiler_counts,
+            history_compiler_census: None,
             cancel_after_record,
             effects,
             images,
@@ -133,21 +135,30 @@ impl SemanticSession {
         label: &str,
         history: &RenderedHistory,
     ) -> Result<Duration, ResidentError> {
-        try_execute_cell_with_template_imports_expectation(
-            &mut self.resident,
-            self.public,
-            &self.effects,
-            &self.images,
-            (0, 0),
-            label,
-            &history.cell,
-            CellDeclarationExpectation::CapturedAt(history.declaration_line),
-            &ScalePublication::Ephemeral,
-            AuthorityChecks::Configured,
-            &SourceImports::new(),
-            None,
-        )
-        .map(|(elapsed, _)| elapsed)
+        let submissions_before = tidepool_extract_cmd::extract_spawn_count();
+        let (result, requests) = with_compiler_mode_capture(|| {
+            try_execute_cell_with_template_imports_expectation(
+                &mut self.resident,
+                self.public,
+                &self.effects,
+                &self.images,
+                (0, 0),
+                label,
+                &history.cell,
+                CellDeclarationExpectation::CapturedAt(history.declaration_line),
+                &ScalePublication::Ephemeral,
+                AuthorityChecks::Configured,
+                &SourceImports::new(),
+                None,
+            )
+        });
+        assert_eq!(
+            requests.len() as u64,
+            tidepool_extract_cmd::extract_spawn_count() - submissions_before,
+            "every physical compiler submission must have a typed request observation"
+        );
+        self.history_compiler_census = Some((submissions_before, requests));
+        result.map(|(elapsed, _)| elapsed)
     }
 
     fn assert_no_compiler_since_last_effect(&self) {
@@ -155,6 +166,36 @@ impl SemanticSession {
             self.compiler_counts.lock().last().copied(),
             Some(tidepool_extract_cmd::extract_spawn_count()),
             "execution after an effect must consume the complete admitted program"
+        );
+    }
+
+    fn assert_only_publication_join_since_last_effect(&self) {
+        let (submissions_before, requests) = self
+            .history_compiler_census
+            .as_ref()
+            .expect("history retains its complete typed request census");
+        assert_eq!(
+            requests.len() as u64,
+            tidepool_extract_cmd::extract_spawn_count() - *submissions_before,
+            "no unobserved compiler request may follow history completion"
+        );
+        let effect_submission = self
+            .compiler_counts
+            .lock()
+            .last()
+            .copied()
+            .expect("history executes its fixed final observation");
+        let index = usize::try_from(effect_submission - *submissions_before).unwrap();
+        let [join] = &requests[index..] else {
+            panic!("only the accepted public declaration join may follow the last effect");
+        };
+        let published = self
+            .resident
+            .public_visibility_snapshot_in(self.public)
+            .unwrap();
+        assert!(
+            join.is_publication_join(published.declaration_tip.0),
+            "post-effect work must certify the exact published interface: {join:?}"
         );
     }
 }
@@ -694,8 +735,10 @@ proptest::proptest! {
             && history.coverage.shadows > 0 && history.coverage.captured_uses > 0);
         let mut session = SemanticSession::new();
         session.execute_history("generated_cold", &history).unwrap();
+        session.assert_only_publication_join_since_last_effect();
         proptest::prop_assert_eq!(session.observed(), history.expected.clone());
         session.execute_history("generated_warm", &history).unwrap();
+        session.assert_only_publication_join_since_last_effect();
         let mut expected = history.expected.repeat(2);
         proptest::prop_assert_eq!(session.observed(), expected.clone());
         let before = session.resident.public_visibility_snapshot_in(session.public).unwrap();
@@ -779,7 +822,7 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
         .execute_history("produced_types_across_declaration", &history)
         .unwrap();
     assert_eq!(session.observed(), [23]);
-    session.assert_no_compiler_since_last_effect();
+    session.assert_only_publication_join_since_last_effect();
     assert!(session
         .resident
         .current_binding_in(session.public, "historyCaptured")

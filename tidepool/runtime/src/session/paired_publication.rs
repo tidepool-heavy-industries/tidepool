@@ -1042,7 +1042,7 @@ impl AcceptedDeclarationPublication {
                     module: identity.module.clone(),
                 })
                 .collect::<std::collections::BTreeSet<_>>();
-            let native_roots = context
+            let native_artifacts = context
                 .artifact_view()
                 .descriptors()
                 .into_iter()
@@ -1051,12 +1051,10 @@ impl AcceptedDeclarationPublication {
                         == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
                         && native_owners.contains(&descriptor.owner)
                 })
-                .map(|descriptor| {
-                    tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
-                        descriptor.id,
-                    )
-                })
-                .collect::<Vec<_>>();
+                .map(|descriptor| descriptor.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let native_roots =
+                super::selected_native_roots(context.artifact_view(), &native_artifacts);
             let live_dependencies = super::certified_native_dependencies(&context, &native_roots)?;
             let mut workbench_imports = base
                 .current_public
@@ -1073,6 +1071,11 @@ impl AcceptedDeclarationPublication {
                     kind: recovery::RecoveryNodeKind::Join,
                     implementation_refs,
                     artifact_refs,
+                    native_groups: context
+                        .artifact_view()
+                        .selected_native_groups()
+                        .into_iter()
+                        .collect(),
                     exports,
                     lexical_roots: vec![ExactModuleIdentity {
                         unit: receipt.reserved().unit.clone(),

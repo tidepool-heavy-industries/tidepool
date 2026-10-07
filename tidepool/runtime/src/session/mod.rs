@@ -690,6 +690,24 @@ impl PublicManifestBase {
     }
 }
 
+/// Query only compiler-admitted groups of these owned implementation carriers.
+/// Carrier custody does not imply demand for every group in its full product.
+fn selected_native_roots(
+    view: &tidepool_toolchain::artifact_inventory::ArtifactView,
+    artifacts: &std::collections::BTreeSet<tidepool_toolchain::artifact_inventory::ArtifactId>,
+) -> Vec<tidepool_toolchain::artifact_inventory::NativeRequirementRoot> {
+    view.selected_native_groups()
+        .into_iter()
+        .filter(|key| artifacts.contains(&key.artifact))
+        .map(
+            |key| tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group {
+                artifact: key.artifact,
+                original_ordinal: key.original_ordinal,
+            },
+        )
+        .collect()
+}
+
 fn certified_native_dependencies(
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
     roots: &[tidepool_toolchain::artifact_inventory::NativeRequirementRoot],
@@ -2391,11 +2409,10 @@ impl SessionLib {
         }
         let live_dependencies = certified_native_dependencies(
             context,
-            &[
-                tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
-                    certified_root,
-                ),
-            ],
+            &selected_native_roots(
+                context.artifact_view(),
+                &std::collections::BTreeSet::from([certified_root]),
+            ),
         )?;
         graph
             .insert_node(recovery::RecoveryNode {
@@ -2404,6 +2421,11 @@ impl SessionLib {
                 kind: recovery::RecoveryNodeKind::Authored,
                 implementation_refs: Vec::new(),
                 artifact_refs,
+                native_groups: context
+                    .artifact_view()
+                    .selected_native_groups()
+                    .into_iter()
+                    .collect(),
                 lexical_roots: vec![tidepool_toolchain::declaration_join::ExactModuleIdentity {
                     unit: prepared.projection.receipt().reserved().unit.clone(),
                     module: prepared.projection.module_name().to_owned(),
