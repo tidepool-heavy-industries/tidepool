@@ -13,7 +13,7 @@ impl PromptId {
     /// matching `CATALOG_VERSION` bump.
     #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
-        "98738e1e4046cc8dae34dcf3a7f7526b9ca4e2dcae0e53e6d715273b4ce88093";
+        "716679fe980bcecb6b481e7efd9b26c7c81bd6ec6095a45ff14d149b9cd8b7a8";
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 2] = [Self::ExomonadBase, Self::Agent];
