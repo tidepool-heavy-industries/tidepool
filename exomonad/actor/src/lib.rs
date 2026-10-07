@@ -11,7 +11,7 @@
 //!
 //! Cache-preserving context unfold is admitted here as one atomic sibling
 //! group. The caller's active provider thread and immutable Haskell snapshot
-//! are shared as information, while [`EffectiveRole`], exact
+//! are shared as information, while [`ActorCapabilities`], exact
 //! [`ActorEffectKey`] membership, opaque grants, workspace placement, and
 //! descendant limits independently define each child's authority. Children
 //! are admitted dormant and released after the enclosing hosted tool block's
@@ -79,7 +79,7 @@ pub use workbench_display::bounded_output as bound_workbench_display;
 pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
 // A `ConversationReader` resolves to `Vec<ConversationTurn>`, so anyone who
 // installs one has to be able to name what it yields. `ActorRole` and
-// `EffectiveRole` are this crate's own; a conversation's speaker is the
+// `ActorCapabilities` are this crate's own; a conversation's speaker is the
 // provider's, hence the alias.
 pub use agent_spec::preparation::ToolsetAcquisition;
 pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
@@ -162,8 +162,7 @@ pub use resident_workbench::{
     SourceToolsetRecipe, ToolDispatchError, ToolDispatchReply,
 };
 pub use role::{
-    render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,
-    NativeToolClass, ResearchPolicy, WorkspaceAccess,
+    render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget,
 };
 pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,

@@ -96,34 +96,6 @@ fn type_defs() -> Vec<TypeDef> {
             json: JsonInstance::None, derives: NO_WIRE, domain: None,
             doc: &["Totals from unique durable responses. UsageComplete covers the observed scope through a provider turn-completion boundary, not future thread work. Nothing means totals are unavailable."],
         },
-        closed_sum(
-            "ActorContextRole",
-            &[
-                "ContextRoot",
-                "ContextResearch",
-                "ContextCoding",
-                "ContextScaffolding",
-                "ContextIntegration",
-                "ContextInherited",
-            ],
-        ),
-        closed_sum(
-            "ActorNativeTools",
-            &[
-                "NativeInspectionOnly",
-                "NativeCoding",
-                "NativeIntegration",
-                "NativeInherited",
-            ],
-        ),
-        closed_sum(
-            "ActorWorkspaceAccess",
-            &[
-                "WorkspaceNone",
-                "WorkspaceInspectOnly",
-                "WorkspaceWritableBound",
-            ],
-        ),
         TypeDef {
             name: "ActivationKind",
             wire_rust: None,
@@ -165,13 +137,7 @@ fn type_defs() -> Vec<TypeDef> {
                     field("contextSupervisorId", HsType::maybe(HsType::Int)),
                     field("contextSupervisorIncarnation", HsType::maybe(HsType::Int)),
                     field("contextActorPath", HsType::Text),
-                    field("contextRole", HsType::Named("ActorContextRole")),
                     field("contextEffectRow", HsType::Text),
-                    field("contextNativeTools", HsType::Named("ActorNativeTools")),
-                    field(
-                        "contextWorkspaceAccess",
-                        HsType::Named("ActorWorkspaceAccess"),
-                    ),
                     field("contextBoundWorktree", HsType::maybe(HsType::Text)),
                     field("contextForkGroup", HsType::maybe(HsType::Int)),
                     field("contextHaskellScope", HsType::Int),
@@ -185,7 +151,6 @@ fn type_defs() -> Vec<TypeDef> {
                     field("contextLatestTurnUsage", HsType::maybe(HsType::Named("ProviderUsageSummary"))),
                     field("contextMaximumDepth", HsType::Int),
                     field("contextMaximumActiveChildren", HsType::maybe(HsType::Int)),
-                    field("contextPromptProfile", HsType::Text),
                 ],
             },
             json: JsonInstance::None,

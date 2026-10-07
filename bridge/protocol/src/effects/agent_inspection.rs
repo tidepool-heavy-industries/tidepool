@@ -154,7 +154,6 @@ pub fn agent_inspection() -> Effect {
                         field("rosterDisposition", HsType::maybe(HsType::Named("AgentDisposition"))),
                         field("rosterCurrentRequests", HsType::list(HsType::Int)),
                         field("rosterQueuedRequests", HsType::list(HsType::Int)),
-                        field("rosterRole", HsType::Named("ActorContextRole")),
                         field("rosterBoundWorktree", HsType::maybe(HsType::Text)),
                         field("rosterForkGroup", HsType::maybe(HsType::Int)),
                         field("rosterHaskellScope", HsType::Int),
@@ -219,7 +218,6 @@ pub fn agent_inspection() -> Effect {
             },
         ],
         external_types: &[
-            crate::schema::ExternalType { haskell_name: "ActorContextRole", rust_wire: "crate::ActorContextRoleWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "ProviderUsageObservation", rust_wire: "crate::ProviderUsageObservationWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "ProviderUsageSummary", rust_wire: "crate::ProviderUsageSummaryWire", core_module: None },
         ],

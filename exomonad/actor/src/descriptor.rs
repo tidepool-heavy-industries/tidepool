@@ -2,7 +2,7 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use crate::{
     ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports,
-    EffectiveRole,
+    ActorCapabilities,
 };
 
 /// The host or lineage owner chooses persistence independently of actor names
@@ -23,7 +23,7 @@ pub struct ActorDescriptor {
     live_payload: LivePayloadPolicy,
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
-    role: EffectiveRole,
+    capabilities: ActorCapabilities,
     creator: Option<ActorRef>,
     supervisor_parent: Option<ActorRef>,
     context_parent: Option<ActorRef>,
@@ -49,7 +49,7 @@ impl ActorDescriptor {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
             source_imports: ActorSourceImports::default(),
-            role: EffectiveRole::coding(),
+            capabilities: ActorCapabilities::default(),
             creator: None,
             supervisor_parent: None,
             context_parent: None,
@@ -159,13 +159,13 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn effective_role(&self) -> &EffectiveRole {
-        &self.role
+    pub fn capabilities(&self) -> &ActorCapabilities {
+        &self.capabilities
     }
 
     #[must_use]
-    pub fn with_effective_role(mut self, role: EffectiveRole) -> Self {
-        self.role = role;
+    pub fn with_capabilities(mut self, capabilities: ActorCapabilities) -> Self {
+        self.capabilities = capabilities;
         self
     }
 
