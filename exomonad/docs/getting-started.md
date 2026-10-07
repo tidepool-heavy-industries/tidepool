@@ -128,11 +128,12 @@ worker may reach 10 GiB, and the enclosing systemd slice remains the aggregate
 memory limit. The compiler trace records daemon epoch, daemon/worker PIDs,
 queue wait, service time and worker RSS so rotation is visible in measurements.
 
-An `AgentSpec` declares the typed input, reply, tools, and effects for an agent.
-Spawning supplies that actual spec and creates an idle `AgentRef`; a typed
-request starts work. Choose `SameDir` when the agent should share the actual
-writable files, index, and HEAD. Choose a forked worktree when the task depends
-on a selected committed source. Project delivery may use the optional Git
+An `AgentSpec` declares an agent's hosted tool record and child effect row. Each
+typed request supplies raw input and selects its reply type at the compiled
+request site. Spawning supplies that actual spec and creates an idle `AgentRef`;
+a typed request starts work. Choose `SameDir` when the agent should share the
+actual writable files, index, and HEAD. Choose a forked worktree when the task
+depends on a selected committed source. Project delivery may use the optional Git
 workflow in the workspace skills; general exploration does not require a
 project role or delegation hierarchy.
 
