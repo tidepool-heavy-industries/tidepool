@@ -10,4 +10,4 @@ preparedReplies <- forM [1..{prepared-child-count} :: Int] $ \ordinal -> do
         (assignment childLabel ("execute the prepared probe" :: Text.Text))))))
   Right value <- waitFor (awaitValue answer)
   pure value
-display preparedReplies
+display (preparedReplies == replicate {prepared-child-count} (41 :: Int))

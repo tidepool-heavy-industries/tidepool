@@ -402,7 +402,7 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             rows.push(row);
         }
         let completed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-        completed.assert_value("prepared-children", &format!("[{}]", vec!["41"; children.len()].join(",")));
+        completed.assert_value("prepared-children", "True");
         progress.parent_result_verified = true;
         completed.finish();
         assert_eq!(children.len(), expected_children);
