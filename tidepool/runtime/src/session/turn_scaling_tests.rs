@@ -1241,6 +1241,86 @@ where
     )
     .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
     assert!(!checked.items.is_empty());
+    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+        assert!(
+            checked.pins.is_empty(),
+            "PROGRAM4 must not issue legacy pins"
+        );
+        assert!(
+            !checked.expression_plans.is_empty(),
+            "the native control must include an actual observation"
+        );
+        assert!(
+            !checked.items[0].verdict.binders.is_empty(),
+            "the native control must start with a captured binding"
+        );
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let visibility = resident.public_visibility_snapshot_in(public).unwrap();
+        let refuse = |edited: CellCheck| {
+            for index in 0..checked.items.len() {
+                checked.checked_item(index).unwrap();
+            }
+            assert!(matches!(
+                edited.checked_item(0),
+                Err(CompileError::ExtractFailed(message))
+                    if message == "checked cell: checked item body, verdict, pins or expression plan was edited"
+            ));
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+            assert_eq!(
+                resident.public_visibility_snapshot_in(public).unwrap(),
+                visibility
+            );
+        };
+        let mut edited = checked.clone();
+        edited.expression_plans.clear();
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited
+            .expression_plans
+            .push(edited.expression_plans[0].clone());
+        refuse(edited);
+        let mut edited = checked.clone();
+        let mut extra = edited.expression_plans[0].clone();
+        extra.key.push_str("_extra");
+        edited.expression_plans.push(extra);
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.expression_plans[0].key.push_str("_edited");
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.expression_plans[0].type_display.push_str(" edited");
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.expression_plans[0].lift = match edited.expression_plans[0].lift {
+            ExpressionLift::Pure => ExpressionLift::Effectful,
+            ExpressionLift::Effectful => ExpressionLift::Pure,
+        };
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.expression_plans[0].heads.push(NominalHead {
+            unit: "foreign-unit".into(),
+            module: "Foreign.Module".into(),
+            name: "ForeignType".into(),
+        });
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.pins.push(CheckedBinderPin {
+            key: "__tidepool_cell_pin_0_firstPlannedValue".into(),
+            ty: "Int".into(),
+            heads: Vec::new(),
+        });
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.items[0].source.push_str(" edited");
+        refuse(edited);
+        let mut edited = checked.clone();
+        edited.items[0].verdict.binders.clear();
+        refuse(edited);
+        for index in 0..checked.items.len() {
+            checked.checked_item(index).unwrap();
+        }
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+    }
     eprintln!(
         "protected-scale {}",
         serde_json::json!({

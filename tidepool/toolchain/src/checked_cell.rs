@@ -3084,20 +3084,58 @@ impl ExactCheckedItem {
             declaration_projection: PrefixDeclarationProjection::Initial,
         })
     }
+    /// Compare editable presentation with the admitted source/verdict and the
+    /// complete sealed cell inventories. Keys come from the compiler receipt;
+    /// planned capture signatures do not imply legacy checking pins.
     pub fn validate_observations(
         &self,
         source: &str,
         kind: CheckedItemKind,
         binders: &[String],
         pins: &[Value],
-        expression: Option<&Value>,
+        expressions: &[Value],
     ) -> Result<(), CompileError> {
+        fn matches_inventory(
+            observed: &[Value],
+            expected: &[&Value],
+            width: usize,
+        ) -> Result<bool, CompileError> {
+            if observed.len() != expected.len() {
+                return Ok(false);
+            }
+            let mut by_key = BTreeMap::new();
+            for value in observed {
+                let key = string(&row(value, width)?[0])?;
+                if by_key.insert(key, value).is_some() {
+                    return Ok(false);
+                }
+            }
+            for value in expected {
+                let key = string(&row(value, width)?[0])?;
+                if by_key.get(key).copied() != Some(*value) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
         let expected = &self.cell.items[self.index];
+        let expected_pins = self
+            .cell
+            .items
+            .iter()
+            .flat_map(|item| &item.pins)
+            .collect::<Vec<_>>();
+        let expected_expressions = self
+            .cell
+            .items
+            .iter()
+            .filter_map(|item| item.expression.as_ref())
+            .collect::<Vec<_>>();
         if source != expected.source
             || kind != expected.kind
             || binders != expected.binders
-            || pins != expected.pins
-            || expression != expected.expression.as_ref()
+            || !matches_inventory(pins, &expected_pins, 3)?
+            || !matches_inventory(expressions, &expected_expressions, 4)?
         {
             return Err(failure(
                 "checked item body, verdict, pins or expression plan was edited",
