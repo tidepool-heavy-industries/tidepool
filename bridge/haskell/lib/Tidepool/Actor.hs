@@ -35,15 +35,10 @@ module Tidepool.Actor
   , withSources
   , stateful
   , EffectProfile (..)
-  , LaunchRole (..)
   , ReadOnlyEffects
   , ReadWriteEffects
   , ShutdownReason (..)
   , startActor
-  , beginActorForkGroup
-  , startActorFork
-  , commitActorForkGroup
-  , abortActorForkGroup
   , runActor
   , call
   , cast
@@ -91,7 +86,6 @@ import Tidepool.Actor.Internal
   )
 import Tidepool.Effects.Core
   ( Actor (..)
-  , ActorLaunchRole (..)
   , ActorKernel (..)
   , ActorLocal (..)
   , ActorTerminalStatus (..)
@@ -101,15 +95,6 @@ import Tidepool.Internal.ExitCell
   , newExitCell
   , readExitCell
   )
-
-data LaunchRole
-  = RootRole
-  | ResearchRole
-  | CodingRole
-  | ScaffoldingRole
-  | IntegrationRole
-  | InheritedRole
-  deriving (Show, Eq)
 
 -- | Failure reported for a terminated actor.
 newtype ActorFailure = ActorFailure { actorFailureSummary :: Text }
@@ -192,63 +177,6 @@ replaceActor previous@(ActorRef previousId previousIncarnation _) definition@Act
       (actorId, incarnation) <- send (ActorReplaceWith
         (previousId, previousIncarnation) entry actorLabel (profileCode profile))
       pure (ActorRef actorId incarnation cell)
-
--- | Trusted context-fork launch. The runtime snapshots the caller's lexical
--- environment and the host forks its provider conversation at the active
--- tool call. Normal authored Exomonad code reaches this through `unfold`.
-{-# NOINLINE startActorFork #-}
-beginActorForkGroup
-  :: Member Actor effs
-  => Bool
-  -> Text
-  -> [Text]
-  -> Eff effs (Int, Text, [Text])
-beginActorForkGroup relative group branches =
-  send (ActorBeginForkGroupWith relative group branches)
-
-startActorFork
-  :: forall effs startup api exit
-  . Member Actor effs
-  => LaunchRole
-  -> Int
-  -> ActorDefinition startup api exit
-  -> startup
-  -> Eff effs (ActorRef api exit, Text)
-startActorFork launchRole forkGroup definition@ActorDefinition
-  { label = actorLabel
-  , effectProfile = profile
-  , initialization = startupAction
-  , behavior = install
-  , onShutdown = shutdownAction
-  } startup = do
-  let cell = newExitCell startup
-      shutdownEntry reasonCode =
-        raiseKernel (shutdownAction (decodeShutdownReason reasonCode))
-      entry _ = do
-        send (ActorInstallShutdownWith 0 shutdownEntry)
-        initial <- raiseKernel (startupAction startup)
-        mapM_ installSource (actorSources definition)
-        send ActorReadyWith
-        result <- raiseKernel (install startup initial)
-        case fillExitCell cell result of
-          () -> pure ()
-  (actorId, incarnation, allocatedPath) <- send
-    (ActorForkWith actorLabel entry forkGroup (roleCode launchRole) (profileCode profile) [])
-  pure (ActorRef actorId incarnation cell, allocatedPath)
-
-commitActorForkGroup :: Member Actor effs => Int -> Eff effs ()
-commitActorForkGroup = send . ActorCommitForkGroupWith
-
-abortActorForkGroup :: Member Actor effs => Int -> Eff effs ()
-abortActorForkGroup = send . ActorAbortForkGroupWith
-
-roleCode :: LaunchRole -> ActorLaunchRole
-roleCode RootRole = ActorRootRole
-roleCode ResearchRole = ActorResearchRole
-roleCode CodingRole = ActorCodingRole
-roleCode ScaffoldingRole = ActorScaffoldingRole
-roleCode IntegrationRole = ActorIntegrationRole
-roleCode InheritedRole = ActorInheritedRole
 
 decodeShutdownReason :: Int -> ShutdownReason
 decodeShutdownReason 0 = ShutdownCompleted

@@ -2732,6 +2732,7 @@ pub struct ResidentKernelBehavior<H, O> {
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+    child_placement_custody: Option<child_launch::ChildPlacementCustody>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
@@ -3572,6 +3573,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             checkpoint: None,
             admitted_checkpoint: None,
             child_session_startup: None,
+            child_placement_custody: None,
             pending_checkpoint: None,
             active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
@@ -4806,7 +4808,8 @@ where
         tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = start.child.descriptor.label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
         let spawn_reply = child.spawn.is_some();
-        let original_placement = child.descriptor.placement();
+        let placement_custody =
+            child_launch::ChildPlacementCustody::new(child.descriptor.placement());
         let resolved_owner = self.resolve_resource_owner(context, &effect_owner, child.lifetime);
         let invocation_work = resolved_owner.as_ref().ok().cloned().flatten();
         let mut retained_spawn_admission = None;
@@ -4976,7 +4979,7 @@ where
                 parent_hole,
                 spawn_reply,
                 spawn_admission,
-                original_placement,
+                placement_custody,
             },
             admission,
         }
@@ -5310,7 +5313,6 @@ where
         let workbench = self
             .active_workbench()
             .unwrap_or_else(|| environment.runner.application_workbench());
-        let publication = effect_owner.publication().clone();
         let control = effect_owner.control();
         let invocation_work = effect_owner.invocation_work();
         let ephemeral_work = effect_owner.ephemeral_work();
@@ -9628,14 +9630,6 @@ where
                     let started = match started {
                         Ok(step) => step,
                         Err(source) => {
-                            self.abort_incomplete_groups(
-                                kernel,
-                                context.actor,
-                                effects.publication.boundary(),
-                                "Haskell workbench failed during unfold admission",
-                                Some(effects.invocation_work.as_ref()),
-                            )
-                            .await;
                             return Err(workbench_failure(
                                 &cursor.receipts,
                                 cursor.index,
@@ -9686,14 +9680,6 @@ where
                                 return Ok(WorkbenchRunAdvance::ParkNative);
                             }
                             Err(source) => {
-                                self.abort_incomplete_groups(
-                                    kernel,
-                                    context.actor,
-                                    effects.publication.boundary(),
-                                    "Haskell workbench failed during unfold admission",
-                                    Some(effects.invocation_work.as_ref()),
-                                )
-                                .await;
                                 let mut failure = workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
@@ -9862,14 +9848,7 @@ where
                             &mut cursor.unit.operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
-                        self.abort_incomplete_groups(
-                            kernel,
-                            context.actor,
-                            effects.publication.boundary(),
-                            "Haskell input rejected during unfold admission",
-                            Some(effects.invocation_work.as_ref()),
-                        )
-                        .await;
+
                         let mut failure_receipt = WorkbenchItemReceipt {
                             diagnostics,
                             index: cursor.index,
@@ -10637,12 +10616,20 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        // LocalActor inserted the exact identity and admitted scope custody
-        // before entering this initializer. Retirement now owns the session.
-        if let Some(lease) = self.child_session_startup.take() {
-            lease.admitted();
+        let placement_transfer = self
+            .child_placement_custody
+            .as_ref()
+            .map(|custody| {
+                custody.transfer_to_actor(kernel.identity(), self.descriptor.placement())
+            })
+            .transpose();
+        if placement_transfer.is_ok() {
+            if let Some(lease) = self.child_session_startup.take() {
+                lease.admitted();
+            }
         }
         Box::pin(async move {
+            placement_transfer.map_err(Self::failure)?;
             let context = self.context(kernel.identity());
             let public_owner = match self.descriptor.persistence_policy() {
                 crate::ActorPersistencePolicy::Ephemeral => ActorPublicOwnerPlane::Ephemeral(
@@ -14238,7 +14225,7 @@ mod tests {
         assert!(checkpoint_capture_delivered(&after_delivery));
         assert!(!checkpoint_capture_delivered(&before_delivery));
     }
-    use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
+    use crate::resident_workbench::AgentStopProjection;
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
@@ -14409,87 +14396,6 @@ mod tests {
         };
         let (outcome, ()) = tokio::join!(observation, host);
         assert!(matches!(outcome, AgentStopProjection::StoppedReleasing));
-    }
-
-    #[tokio::test]
-    async fn cleanup_release_waits_are_concurrent_and_keep_stop_order() {
-        let actors = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
-        let waits = actors.into_iter().map(|actor| (actor, None)).collect();
-        let outcomes = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            super::await_cleanup_releases(waits, |actor| {
-                let barrier = barrier.clone();
-                async move {
-                    barrier.wait().await;
-                    if actor == actors[1] {
-                        AgentStopProjection::StoppedRetaining("workspace retained".into())
-                    } else {
-                        AgentStopProjection::StoppedReleasing
-                    }
-                }
-            }),
-        )
-        .await
-        .expect("all release waits must be polled together");
-        assert_eq!(outcomes.len(), 3);
-        for (index, step) in outcomes.into_iter().enumerate() {
-            let CleanupStepProjection::StoppedActor(actor, outcome) = step else {
-                panic!("unexpected cleanup step");
-            };
-            assert_eq!(actor, actors[index]);
-            assert!(matches!(
-                outcome,
-                AgentStopProjection::StoppedReleasing | AgentStopProjection::StoppedRetaining(_)
-            ));
-            if index == 1 {
-                assert!(
-                    matches!(outcome, AgentStopProjection::StoppedRetaining(detail) if detail == "workspace retained")
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cleanup_failed_stops_do_not_request_release() {
-        let actor = ActorRef::first(ActorId(2));
-        let outcomes = super::await_cleanup_releases(
-            vec![(
-                actor,
-                Some(AgentStopProjection::Failed("stop failed".into())),
-            )],
-            |_| async { panic!("failed stop cannot request release") },
-        )
-        .await;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [CleanupStepProjection::StoppedActor(_, AgentStopProjection::Failed(detail))]
-                if detail == "stop failed"
-        ));
-    }
-
-    #[tokio::test]
-    async fn cleanup_release_wait_experiment() {
-        let actors = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
-        let delay = std::time::Duration::from_millis(40);
-        let serial_start = std::time::Instant::now();
-        for _ in actors {
-            tokio::time::sleep(delay).await;
-        }
-        let serial = serial_start.elapsed();
-
-        let batch_start = std::time::Instant::now();
-        let outcomes = super::await_cleanup_releases(
-            actors.into_iter().map(|actor| (actor, None)).collect(),
-            |_| async move {
-                tokio::time::sleep(delay).await;
-                AgentStopProjection::StoppedNow
-            },
-        )
-        .await;
-        let batch = batch_start.elapsed();
-        assert_eq!(outcomes.len(), 3);
-        eprintln!("cleanup release wait experiment: serial={serial:?}, batched={batch:?}");
     }
 
     /// A reply fenced by an update still in delivery tells the model which
@@ -15635,7 +15541,7 @@ mod tests {
                     input_unit_index: 0,
                     effect_ordinal: 0,
                 },
-                effect: "commit context-fork group".into(),
+                effect: "spawn child".into(),
                 disposition: WorkbenchOperationDisposition::Prepared,
             }],
         );
