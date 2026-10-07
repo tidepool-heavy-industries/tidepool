@@ -1276,6 +1276,49 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   originalFixture <- capturePreparedFixture work original
   hiddenPath <- writeGenuineCandidateNativeScope [] (originalOwners original) work originalFixture
   hidden <- readExactScope hiddenPath >>= either fail pure
+  let supportModule = mkModule (stringToUnit (fst supportOwner)) (mkModuleName (snd supportOwner))
+      answerIdentity = SymbolIdentity "main" "GeneratedScaffoldHomeSupport" "value" "answer" Nothing
+      ownedBindings owner occurrence prepared =
+        [(identifier,body) | (identifier,body) <- Core.flattenBinds (prBinds (pprPipelineResult prepared))
+          , nameModule_maybe (idName identifier) == Just owner
+          , nameOccName (idName identifier) == mkVarOcc occurrence]
+      uniqueBinding label owner occurrence prepared = case ownedBindings owner occurrence prepared of
+        [binding] -> pure binding
+        _ -> fail (label ++ ": expected one binding for " ++ occurrence)
+      boxedInt expected = \case
+        Core.App (Core.Var constructor) (Core.Lit (LitNumber LitNumInt value)) ->
+          idName constructor == idName (dataConWorkId intDataCon) && value == expected
+        _ -> False
+      resultBinding label prepared = uniqueBinding label
+        (tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))) "__result" prepared
+      bodyFailure label body = fail (label ++ ": " ++ take 2048 (showSDocUnsafe (ppr body)))
+      -- This fixture proves selected compiler dependencies and exact captured
+      -- bodies. Runtime settle/resume execution is qualified separately.
+      requireRetainedAnswer label prepared = do
+        (_,body) <- resultBinding label prepared
+        case body of
+          Core.Var answer
+            | nameModule_maybe (idName answer) == Just supportModule
+            , nameOccName (idName answer) == mkVarOcc "answer"
+            , Map.lookup (idName answer) (pprOriginalBindings prepared) == Just answerIdentity -> pure ()
+          _ -> bodyFailure (label ++ ": result did not reference the selected original answer") body
+      requireFreshAnswer label expected prepared = do
+        (answer,answerBody) <- uniqueBinding label supportModule "answer" prepared
+        unless (boxedInt expected answerBody) $
+          bodyFailure (label ++ ": fresh support body was not the expected boxed Int") answerBody
+        (_,body) <- resultBinding label prepared
+        unless (case body of
+            Core.Var selected -> idName selected == idName answer
+              && Map.notMember (idName selected) (pprOriginalBindings prepared)
+            _ -> boxedInt expected body) $
+          bodyFailure (label ++ ": result did not select its fresh support body") body
+  (_,originalAnswerBody) <- uniqueBinding "original scaffold capture" supportModule "answer" original
+  unless (boxedInt 42 originalAnswerBody) $
+    fail "original scaffold capture did not contain exactly boxed Int 42"
+  case [product | product <- scopeProducts hidden
+      , (originalUnit product,originalModule product) == supportOwner] of
+    [product] | answerIdentity `elem` concatMap originalBinders (originalGroups product) -> pure ()
+    _ -> fail "original scaffold answer was absent from the selected native group inventory"
   supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces hidden
       , exactUnit artifact == fst supportOwner, exactModule artifact == snd supportOwner] of
     [artifact] -> pure artifact
@@ -1292,6 +1335,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   writeFile target protectedSource
   recipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource protectedSource target "Expr"
     >>= either fail pure
+  freshRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] [])
+    protectedSource protectedSource target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
       hiddenSession = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
       protectedImport = "import GeneratedScaffoldHomeSupport hiding (irrelevant)"
@@ -1301,26 +1346,14 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   writeFile shadowPath "module Tidepool.Internal.Resume where\nshadow = error \"home source shadow selected\"\n"
   withResidentPipelineSelected includes $ \compile -> do
     admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $ do
-      let resultBindings = [(identifier,body)
-            | (identifier,body) <- Core.flattenBinds (prBinds (pprPipelineResult admitted))
-            , getOccString identifier == "__result"]
-          supportBindings = [(identifier,body)
-            | (identifier,body) <- Core.flattenBinds (prBinds (pprPipelineResult original))
-            , getOccString identifier == "answer"]
-          originalNames = [(showSDocUnsafe (ppr name),identity)
-            | (name,identity) <- Map.toList (pprOriginalBindings admitted)]
-      hPutStrLn stderr ("scaffold result Core: " ++ take 8192 (showSDocUnsafe (ppr resultBindings)))
-      hPutStrLn stderr ("scaffold original support Core: " ++ take 8192 (showSDocUnsafe (ppr supportBindings)))
-      hPutStrLn stderr ("scaffold retained bindings: " ++ show (take 32 originalNames))
-      hPutStrLn stderr ("scaffold package roots: " ++ show
-        (concatMap packageInterfaces (Map.elems (pprPackageImports admitted))))
-      fail "pinned Resume package did not settle the generated result"
+    requireRetainedAnswer "admitted scaffold compiler provenance" admitted
     supportText <- T.unpack . TE.decodeUtf8 <$> BS.readFile supportPath
     writeFile supportPath (T.unpack (T.replace "answer = 42" "answer = 43" (T.pack supportText)))
     drifted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult drifted))) $
-      fail "generated scaffold followed changed current HomeSupport source instead of its sealed interface"
+    requireRetainedAnswer "source drift preserves original scaffold compiler provenance" drifted
+    freshDrifted <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile freshRecipe GeneralCompile) Nothing target [] Nothing
+    requireFreshAnswer "fresh source drift discriminator" 43 freshDrifted
     writeFile supportPath supportText
     let packageRoots = concatMap packageInterfaces (Map.elems (pprPackageImports admitted))
     selectedResumeUnit <- maybe (fail "pinned tidepool-resume package unit is unavailable") pure
@@ -1341,8 +1374,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       [prepared] -> pure prepared
       _ -> fail "generated scaffold did not prepare its Resume expression module"
     resumeTops <- either (fail . show) pure (preparedTopIdentities [resumeModule])
-    unless (any ((== "__resume") . symbolOccurrence) resumeTops) $
-      fail "generated scaffold did not retain its resume recovery entry"
+    unless (all (\entry -> any ((== entry) . symbolOccurrence) resumeTops) ["__prepared","__resume"]) $
+      fail "generated scaffold did not retain its settle and resume preparation entries"
     requireHiddenSource "ordinary source import has no generated-template authority" $
       compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just hiddenSession) target [] Nothing
     duplicateSource <- either fail pure $ replaceTemplateMarker preambleImportMarker
@@ -1387,8 +1420,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     duplicateResult <- compile (PreparedProducts Nothing) Set.empty
       (GeneratedScaffoldCompile duplicateRecipeWithProtected (CheckedItemCompile [] Nothing []))
       (Just hiddenSession) target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult duplicateResult))) $
-      fail "duplicate protected template imports changed the settled result"
+    requireRetainedAnswer "duplicate protected imports preserve original compiler provenance" duplicateResult
     missingProtected <- either fail pure
       (replaceTemplateMarker (protectedImport ++ "\n" ++ preambleImportMarker)
         preambleImportMarker duplicateProtected)
@@ -1412,8 +1444,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     qualifiedResult <- compile (PreparedProducts Nothing) Set.empty
       (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing []))
       (Just hiddenSession) target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult qualifiedResult))) $
-      fail "qualified protected template import changed the settled result"
+    requireRetainedAnswer "qualified protected import preserves original compiler provenance" qualifiedResult
     let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedSource))
     aliasRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedSource changedAlias target "Expr"
     unless (case aliasRecipe of Left _ -> True; Right _ -> False) $
@@ -1436,8 +1467,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       checked <- compile (PreparedProducts Nothing) Set.empty
         (ExactScopeCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) hidden)
         (Just hiddenSession) generatedPath [] Nothing
-      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $
-        fail ("generated " ++ name ++ " lost the settled result or exact template authority")
+      requireRetainedAnswer ("generated " ++ name ++ " preserves original compiler provenance") checked
     let metadataPath = work </> "CellCheck.hs"
     copyFile "test-source-boot/fixtures/GeneratedScaffoldMetadata.hs" metadataPath
     metadata <- sourceFailureDiagnostics $
@@ -1448,13 +1478,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       Left diagnostics -> fail ("authored metadata had another source failure: " ++ show diagnostics)
       Right _ -> fail "authored metadata acquired generated scaffold package authority"
     writeFile target protectedSource
-    coldRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] [])
-      protectedSource protectedSource target "Expr" >>= either fail pure
     cold <- compile (PreparedProducts Nothing) Set.empty
-      (GeneratedScaffoldCompile coldRecipe GeneralCompile) Nothing target [] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult cold))) $
-      fail "cold generated scaffold failed with current package and template sources"
-  putStrLn "generated scaffold package import: exact tidepool-resume owner and settled/resume entries; generic hidden template, duplicate, alias, helper, source-drift, and interface-seal controls passed"
+      (GeneratedScaffoldCompile freshRecipe GeneralCompile) Nothing target [] Nothing
+    requireFreshAnswer "cold scaffold fresh compiler body" 42 cold
+  putStrLn "generated scaffold compiler provenance: captured boxed Int 42, selected original binding and fresh boxed Int 43 drift discriminator; exact tidepool-resume owner and prepared/resume entries; hidden template, duplicate, alias, helper, and interface-seal controls passed"
 
 -- Native and lexical roots share one immutable compiler capture. The witness
 -- is retained only as canonical interface/Core custody in the emitted scope.
