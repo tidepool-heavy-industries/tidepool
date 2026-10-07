@@ -45,7 +45,7 @@ import Tidepool.Binders
   , classifyWithFlags, exportItemName, templateParserFlags
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset, CellSourceSpan(..)
-  , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
+  , CellSourcePlan(..), CellAnalysisItem(..), CellBindingForm(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
@@ -1167,7 +1167,7 @@ runCellPlanMode parserFlags args cellPath = do
     plan <- analyzeOrderedCellWithFlags parserFlags template source >>= either throwCellSplitError pure
     let text = encodeString . T.pack
         observation = encodeCellOut plan [] [] ""
-        receipt = encodeListLen 7 <> text "TPCELLPLAN2"
+        receipt = encodeListLen 8 <> text "TPCELLPLAN3"
           <> text (shaHex (TE.encodeUtf8 (T.pack source)))
           <> text (shaHex (TE.encodeUtf8 (T.pack template)))
           <> encodeListLen (fromIntegral (length templates))
@@ -1177,6 +1177,13 @@ runCellPlanMode parserFlags args cellPath = do
           <> encodeListLen (fromIntegral (length (requestInjectVals args)))
           <> foldMap text (requestInjectVals args)
           <> encodeBytes observation
+          <> encodeListLen (fromIntegral (length (cellPlanItems plan)))
+          <> foldMap (text . bindingForm) (cellPlanItems plan)
+        bindingForm item = case cellAnalysisBindingForm item of
+          Just ActionBinding -> "action"
+          Just LetBinding -> "let"
+          Just RecursiveBinding -> "recursive"
+          Nothing -> "none"
     out <- requireArg "--cell-out" (requestCellOut args)
     BS.writeFile out (toStrictByteString receipt)
   reportDiags result

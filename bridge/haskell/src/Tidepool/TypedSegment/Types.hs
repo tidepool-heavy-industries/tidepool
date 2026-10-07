@@ -60,7 +60,7 @@ typedSegmentPlan reservation root items = do
       ObservationItem probe observation -> [probe, observation]
     validBody item = case plannedItemBody item of
       ActionItem _ _ _ names -> all (not . null) names && unique names
-      LetItem _ names -> not (null names) && all (not . null) names && unique names
+      LetItem _ names -> all (not . null) names && unique names
       ObservationItem _ _ -> True
     fields item = [show (plannedItemOrdinal item), plannedItemEntry item,
         show (plannedItemGeneration item)] ++ case plannedItemBody item of
