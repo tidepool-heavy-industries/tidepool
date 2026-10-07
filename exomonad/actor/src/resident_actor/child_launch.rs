@@ -816,6 +816,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_preactor_cleanup_keeps_exact_placement_for_confirmed_retry() {
+        let id = SessionId(976);
+        let root = tempfile::tempdir().unwrap();
+        let mut machine = session(id, root.path());
+        let scope = machine.mint_isolated_scope();
+        let captured = machine.retain_lexical_scope(scope).unwrap();
+        machine.retire_scope(scope);
+        let placement = crate::ActorPlacement {
+            session: id,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: captured.scope(),
+        };
+        let machines = Arc::new(Machines::new());
+        let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+        let custody = ChildPlacementCustody::new(placement);
+        assert!(release_failed_launch_placement(&runner, id, &custody)
+            .await
+            .is_err());
+        assert_eq!(
+            *custody.0.lock(),
+            ChildPlacementPhase::CleanupRetained(placement)
+        );
+        assert!(custody
+            .transfer_to_actor(ActorRef::first(crate::ActorId(977)), placement)
+            .is_err());
+        machines.insert_idle(id, Box::new(machine));
+        assert!(capture_is_live(&machines, placement, &captured));
+        release_failed_launch_placement(&runner, id, &custody)
+            .await
+            .unwrap();
+        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+        assert!(!capture_is_live(&machines, placement, &captured));
+        assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+    }
+
+    #[tokio::test]
     async fn preactor_refusal_retires_shared_capture_and_refuses_late_transfer() {
         let (runner, machines, placement, captured, _root) = shared_fixture();
         let custody = ChildPlacementCustody::new(placement);
