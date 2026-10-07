@@ -55,6 +55,7 @@ mod embedded_recovery;
 mod embedded_recovery_tests;
 mod embedded_reflect;
 mod embedded_service;
+mod form_output;
 #[cfg(test)]
 mod scaffold_admission_tests;
 
@@ -271,7 +272,13 @@ fn with_host_interpreters(
         recovery,
     ));
     forest.set_jev_backend(jev_backend(config));
-    Ok(forest.with_cell_model_factory(models))
+    Ok(forest
+        .with_cell_model_factory(models)
+        .with_form_host(form_output::host(
+            runtime.store(),
+            runtime.run_identity().to_owned(),
+            runtime.output_control_handle(),
+        )))
 }
 
 #[derive(Clone)]

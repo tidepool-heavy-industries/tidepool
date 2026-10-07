@@ -52,9 +52,17 @@ pub fn agent_launch() -> Effect {
                 ctor: "AgentLaunchSpawnWith",
                 method: "agent_launch_spawn_with",
                 args: vec![
-                    Arg { name: "context", ty: HsType::Named("SpawnContextWire"), rust: RustBinding::Path("crate::start::SpawnContextWire") },
+                    Arg {
+                        name: "context",
+                        ty: HsType::Named("SpawnContextWire"),
+                        rust: RustBinding::Path("crate::start::SpawnContextWire"),
+                    },
                     installer_arg(),
-                    Arg { name: "workspace", ty: HsType::Named("SpawnWorkspaceWire"), rust: RustBinding::Path("crate::fork_workspace::SpawnWorkspaceWire") },
+                    Arg {
+                        name: "workspace",
+                        ty: HsType::Named("SpawnWorkspaceWire"),
+                        rust: RustBinding::Path("crate::fork_workspace::SpawnWorkspaceWire"),
+                    },
                     Arg {
                         name: "effects",
                         ty: HsType::list(HsType::Named("ActorEffectKey")),
@@ -406,6 +414,8 @@ fn context_types() -> Vec<TypeDef> {
                     "EffectSleep",
                     "EffectCommands",
                     "EffectConsole",
+                    "EffectAskUser",
+                    "EffectGreen",
                     "EffectNotifications",
                     "EffectJev",
                     "EffectModelCall",

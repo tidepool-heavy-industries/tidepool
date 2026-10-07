@@ -55,7 +55,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     run: String,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
-    output_observer: OnceLock<harness::server::ServerControl>,
+    output_observer: Arc<OnceLock<harness::server::ServerControl>>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
     context_models: Arc<OnceLock<ModelResolver>>,
     #[cfg(test)]
@@ -68,7 +68,7 @@ impl EmbeddedHarnessRuntime {
             super::display_output::open_run_store(run_root).map_err(EmbeddedError::Binding)?;
         Ok(Self {
             run: super::runtime_namespace(run_root),
-            output_observer: OnceLock::new(),
+            output_observer: Arc::new(OnceLock::new()),
             recovery: OnceLock::new(),
             context_models: Arc::new(OnceLock::new()),
             #[cfg(test)]
@@ -315,6 +315,14 @@ impl EmbeddedHarnessRuntime {
 
     pub(super) fn scheduler(&self) -> Arc<JobScheduler> {
         self.scheduler.clone()
+    }
+
+    pub(super) fn output_control_handle(&self) -> Arc<OnceLock<harness::server::ServerControl>> {
+        self.output_observer.clone()
+    }
+
+    pub(super) fn run_identity(&self) -> &str {
+        &self.run
     }
 
     pub(super) fn store(&self) -> Arc<Store> {
@@ -1011,7 +1019,7 @@ impl Provider for EmbeddedDispatcher {
                     Err(error) => {
                         return unavailable_context_completion(JobOutput::Completed(Err(
                             error.into_tool_failure()
-                        )))
+                        )));
                     }
                 };
                 let resolver = self.context_models.get().cloned().unwrap_or_else(|| {

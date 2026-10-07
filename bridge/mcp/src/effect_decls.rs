@@ -277,7 +277,7 @@ impl<H: InstalledEffectSupport> InstalledEffectSupport for parking_lot::Mutex<H>
 // Standard effect declarations
 // ---------------------------------------------------------------------------
 
-crate::console_effect_def!(crate::effect_defs::effect_decl_projection);
+// Console is generated from the protocol owner.
 crate::kv_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::fs_read_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::fs_write_effect_def!(crate::effect_defs::effect_decl_projection);

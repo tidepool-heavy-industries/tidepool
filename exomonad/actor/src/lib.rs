@@ -27,6 +27,8 @@ mod conversation;
 mod descriptor;
 mod external_application;
 mod fork_workspace;
+mod forms;
+pub use forms::{FormHost, FormPublication};
 mod generated;
 mod hosted_lifecycle;
 mod identity;

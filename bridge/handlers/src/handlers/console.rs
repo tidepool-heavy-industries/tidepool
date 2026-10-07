@@ -6,18 +6,23 @@ use tidepool_mcp::CapturedOutput;
 // Tag 0: Console
 // ============================================================================
 
-// `ConsoleReq` + `DescribeEffect` + the `EffectHandler` dispatch match are
-// generated from the single-source definition in
-// `bridge/mcp/src/effect_defs.rs` — the same table that generates
-// `console_decl()`. Only the handler struct and the per-verb method bodies
-// below are hand-written.
-tidepool_mcp::console_effect_def!(crate::effect_glue::effect_rust_projection);
+// Codecs and dispatch are generated from the protocol schema.
+pub use crate::generated::console::ConsoleReq;
 
 #[derive(Clone)]
 pub struct ConsoleHandler;
 
 impl ConsoleHandler {
-    fn display_with(
+    pub(crate) fn display_view_with(
+        &mut self,
+        _cx: &EffectContext<'_, CapturedOutput>,
+        _view: crate::effect_glue::JsonArg,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        Err(EffectError::Handler(
+            "rich display requires an actor resource owner".into(),
+        ))
+    }
+    pub(crate) fn display_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,
         _view: ((i64, i64, i64), String, Vec<(i64, String)>, bool),
@@ -28,7 +33,7 @@ impl ConsoleHandler {
         ))
     }
 
-    fn display_expand_with(
+    pub(crate) fn display_expand_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,
         _selection: ((i64, i64, i64), i64),
@@ -38,7 +43,7 @@ impl ConsoleHandler {
         ))
     }
 
-    fn display_allowance_with(
+    pub(crate) fn display_allowance_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
@@ -47,7 +52,7 @@ impl ConsoleHandler {
         ))
     }
 
-    fn display_expansion_input_with(
+    pub(crate) fn display_expansion_input_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
@@ -56,7 +61,7 @@ impl ConsoleHandler {
         ))
     }
 
-    fn print(
+    pub(crate) fn print(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
         msg: String,
@@ -75,7 +80,7 @@ mod tests {
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 
     #[test]
-    fn test_console_dispatch_roundtrip() {
+    pub(crate) fn test_console_dispatch_roundtrip() {
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);

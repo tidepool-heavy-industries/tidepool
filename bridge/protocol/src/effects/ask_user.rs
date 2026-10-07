@@ -1,133 +1,183 @@
-//! The `AskUser` suspension.
-//!
-//! Two constructors ride this one GADT: `AskUserWith spec` (a typed form,
-//! routed to the human operator) and `NoteWith text` (a non-blocking display
-//! line on the same GADT, sibling constructor). `spec`'s `Value` is a JSON
-//! payload deserialized into a `FormShape` by the operator — this schema only
-//! recognizes the constructor and hands back the raw payload, same as every other
-//! suspending effect.
-//!
-//! No real `tidepool-handlers` handler — harness-serviced only (same
-//! convention as `Ask`/`RunLlmTurn`/`Finalize`/`Fork`'s own module docs); only
-//! `decl_rs`/`suspension_req_rs` consume this definition. Both `askUserRaw` and
-//! `noteRaw` are thin, single-verb `send` wrappers, so — unlike
-//! `Ask`/`RunLlmTurn`/`Finalize`/`Fork`/`Green` — this effect's WHOLE surface
-//! is representable by [`crate::schema::HelperBody`]'s existing reviewed
-//! shapes, and it is fully migrated: in [`crate::effects::all`], its hand
-//! copy deleted from `bridge/mcp/src/effect_defs.rs`.
-//!
-//! The typed surface a caller writes is `askUser @T` (`Tidepool.Form`, which
-//! derives the form from `T`'s own `Generic` representation) and `note ::
-//! Member AskUser effs => Text -> Eff effs ()`; `askUserRaw`/`noteRaw` here are the raw escape hatches
-//! those build on.
-
+//! Mounted human forms. Haskell retains decoding and original payloads.
 use crate::hs::HsType;
 use crate::schema::{
-    Arg, Effect, HandlingClass, Helper, HelperBody, Polymorphism, RustBinding, Verb,
+    Arg, Effect, HandlingClass, Helper, HelperBody, JsonInstance, Polymorphism, RustBinding,
+    SumVariant, TypeDef, TypeShape, VariantFields, Verb, WireDerive, WireDerives,
 };
-
-/// The `AskUser` suspension (both its constructors).
+fn sum(name: &'static str, variants: Vec<SumVariant>) -> TypeDef {
+    TypeDef {
+        name,
+        wire_rust: Some(name),
+        haskell_module: Some("Tidepool.Effects.Core"),
+        shape: TypeShape::Sum { variants },
+        json: JsonInstance::None,
+        derives: WireDerives(&[
+            WireDerive::ToHaskell,
+            WireDerive::FromHaskell,
+            WireDerive::Clone,
+            WireDerive::Debug,
+            WireDerive::PartialEq,
+        ]),
+        domain: None,
+        doc: &[],
+    }
+}
+fn variant(ctor: &'static str, fields: Vec<HsType>) -> SumVariant {
+    SumVariant {
+        ctor,
+        fields: VariantFields::Positional(fields),
+        doc: &[],
+    }
+}
+fn arg(name: &'static str, ty: HsType) -> Arg {
+    let rust = match ty {
+        HsType::Named("FormLease") => RustBinding::Path("tidepool_bridge_effects::FormLease"),
+        HsType::Named("FormAttemptId") => {
+            RustBinding::Path("tidepool_bridge_effects::FormAttemptId")
+        }
+        _ => RustBinding::Derived,
+    };
+    Arg { name, ty, rust }
+}
+fn json(name: &'static str) -> Arg {
+    Arg {
+        name,
+        ty: HsType::Value,
+        rust: RustBinding::JsonValue,
+    }
+}
 #[must_use]
 pub fn ask_user() -> Effect {
+    let mut defs = vec![
+        sum(
+            "FormLease",
+            vec![variant("FormLeaseToken", vec![HsType::Text])],
+        ),
+        sum(
+            "FormAttemptId",
+            vec![variant("FormAttemptToken", vec![HsType::Text])],
+        ),
+        sum(
+            "FormCause",
+            vec![
+                variant("FormNotInstalled", vec![]),
+                variant("FormInterrupted", vec![]),
+                variant("FormTransportFailed", vec![HsType::Text]),
+                variant("FormMalformed", vec![HsType::Text]),
+                variant("FormUnauthorized", vec![]),
+                variant("FormClosed", vec![]),
+                variant("FormCleanupUnconfirmed", vec![HsType::Text]),
+            ],
+        ),
+        sum(
+            "FormAttempt",
+            vec![
+                variant(
+                    "FormSubmitted",
+                    vec![HsType::Named("FormAttemptId"), HsType::Value],
+                ),
+                variant("FormDismissed", vec![]),
+            ],
+        ),
+        sum(
+            "FormTransition",
+            vec![variant("FormApplied", vec![]), variant("FormStale", vec![])],
+        ),
+    ];
+    defs[3].derives = WireDerives(&[
+        WireDerive::ToHaskell,
+        WireDerive::Clone,
+        WireDerive::Debug,
+        WireDerive::PartialEq,
+    ]);
+    let operations = vec![
+        (
+            "FormOpenWith",
+            "form_open_with",
+            "formOpenRaw",
+            vec![json("descriptor")],
+            HsType::Named("FormLease"),
+            &["descriptor"][..],
+        ),
+        (
+            "FormAwaitWith",
+            "form_await_with",
+            "formAwaitRaw",
+            vec![arg("lease", HsType::Named("FormLease"))],
+            HsType::Named("FormAttempt"),
+            &["lease"][..],
+        ),
+        (
+            "FormRejectWith",
+            "form_reject_with",
+            "formRejectRaw",
+            vec![
+                arg("lease", HsType::Named("FormLease")),
+                arg("attempt", HsType::Named("FormAttemptId")),
+                json("errors"),
+            ],
+            HsType::Named("FormTransition"),
+            &["lease", "attempt", "errors"][..],
+        ),
+        (
+            "FormCommitWith",
+            "form_commit_with",
+            "formCommitRaw",
+            vec![
+                arg("lease", HsType::Named("FormLease")),
+                arg("attempt", HsType::Named("FormAttemptId")),
+                json("presentation"),
+            ],
+            HsType::Named("FormTransition"),
+            &["lease", "attempt", "presentation"][..],
+        ),
+        (
+            "FormCloseWith",
+            "form_close_with",
+            "formCloseRaw",
+            vec![arg("lease", HsType::Named("FormLease"))],
+            HsType::Unit,
+            &["lease"][..],
+        ),
+    ];
     Effect {
         name: "AskUser",
-        authored_surface: crate::schema::AuthoredSurface::All,
+        authored_surface: crate::schema::AuthoredSurface::OPAQUE,
         handler: "AskUserHandler",
         handler_module: "ask_user",
         req_enum: "AskUserReq",
-        // NOT snake_case("AskUser") ("ask_user_decl") — this is the existing
-        // public function name every caller already uses
-        // (`tidepool_mcp::askuser_decl`); the flip must not move it.
         decl_fn: "askuser_decl",
-        prompt_card: Some(&[
-            "`choose :: Member AskUser effs => [(Text, a)] -> Eff effs a` — labeled decision from (label, value) pairs; ",
-            "ALWAYS prefer it for a decision, the label is the only text the operator sees. ",
-            "`chooseMany :: Member AskUser effs => [(Text, a)] -> Eff effs [a]` — pick a subset.\n",
-            "`askUser @T :: Eff effs T` — form derived from `T`'s own shape: a record's fields ",
-            "become named inputs, a SUM's constructors become the choices (nullary ",
-            "constructors are direct options; a payload constructor is a selectable branch ",
-            "with its fields), or a primitive (`Text`/`Int`/`Bool`); a bad submission ",
-            "re-prompts internally, no `Either` to unwrap: `d <- askUser @Deploy`, ",
-            "`k <- askUser @NextStep` then `case k of ...` to sequence follow-ups. A type ",
-            "you define for this needs `deriving (Generic, FromJSON)`. Prefer RECORD syntax ",
-            "for a sum's payload constructors — `Other { detail :: Text }` shows the ",
-            "operator a real label, where `Other Text` only shows a generic `Contents` ",
-            "field; a constructor with SEVERAL positional fields is rejected outright (no ",
-            "names to key each input by), so record syntax is required once there is more ",
-            "than one field.\n",
-            "`note \"...\" :: Eff effs ()` — non-blocking narration to the operator's feed; call it ",
-            "BEFORE presenting a form to explain what you're about to ask and why (it never ",
-            "costs a turn).",
-        ]),
+        prompt_card: None,
         description: &[
-            "Present a typed form to a HUMAN OPERATOR and block until they submit. ",
-            "`askUser @T` presents a human form and returns `T`. Define `T` using ordinary ",
-            "records and constructors, derive `Generic` and `FromJSON` for it and any ",
-            "nested custom types, and end fields in `Text`, `Int`, `Double`, or `Bool`. ",
-            "Constructors are choices, record fields are named inputs, and `Maybe a` is ",
-            "optional; a bad submission re-prompts internally, so there is no `Either` to ",
-            "unwrap. The type IS the form — there is no second description of the shape to ",
-            "drift from the answer type, and the submission is ordinary JSON read back by ",
-            "that same generic `FromJSON`:\n",
-            "  data Env = Development | Staging | Production deriving (Generic, FromJSON)\n",
-            "  data Deploy = Deploy { service :: Text, env :: Env, replicas :: Int, note :: Maybe Text } deriving (Generic, FromJSON)\n",
-            "  d <- askUser @Deploy   -- then read fields with record-dot: d.service, d.env\n",
-            "For alternatives that ",
-            "exist only as runtime values, `choose :: Member AskUser effs => [(Text, a)] -> Eff effs a` and ",
-            "`chooseMany :: Member AskUser effs => [(Text, a)] -> Eff effs [a]` take (label, value) pairs. ",
-            "`askUserRaw :: Member AskUser effs => Value -> Eff effs Value` is the raw escape hatch these are ",
-            "built on, carrying the form spec as JSON directly. `note :: Member AskUser effs => Text -> Eff effs ()` ",
-            "posts markdown-ish text to the operator's feed WITHOUT blocking — use it to ",
-            "explain what you are about to ask and why, before presenting a form.",
+            "Present an applicative Tidepool.Form to the human operator. One continuation owns one mounted form through validation retries; final answer publication precedes returning Submitted. Dismissal and infrastructure closure remain typed outcomes.",
         ],
         type_params: &[],
         default_row_args: &[],
         extra_imports: &["import Tidepool.Form"],
-        type_defs: Vec::new(),
+        type_defs: defs,
         external_types: &[],
         errors: None,
-        verbs: vec![
-            Verb {
-                ctor: "AskUserWith",
-                method: "ask_user_with",
-                args: vec![Arg {
-                    name: "spec",
-                    ty: HsType::Value,
-                    rust: RustBinding::HaskellValue,
-                }],
-                ret: HsType::Value,
+        verbs: operations
+            .iter()
+            .map(|(ctor, method, _, args, ret, _)| Verb {
+                ctor,
+                method,
+                args: args.clone(),
+                ret: HsType::either(HsType::Named("FormCause"), ret.clone()),
                 errors: None,
                 handling: HandlingClass::AskUserForm,
-            },
-            Verb {
-                ctor: "NoteWith",
-                method: "note_with",
-                args: vec![Arg {
-                    name: "text",
-                    ty: HsType::Text,
-                    rust: RustBinding::Derived,
-                }],
-                ret: HsType::Unit,
-                errors: None,
-                handling: HandlingClass::Note,
-            },
-        ],
-        helpers: vec![
-            Helper {
-                name: "askUserRaw",
-                ctor: Some("AskUserWith"),
-                substrate: false,
+            })
+            .collect(),
+        helpers: operations
+            .into_iter()
+            .map(|(ctor, _, name, _, _, arguments)| Helper {
+                name,
+                ctor: Some(ctor),
+                substrate: true,
                 doc: &[],
-                body: HelperBody::Applied(&["spec"]),
-            },
-            Helper {
-                name: "noteRaw",
-                ctor: Some("NoteWith"),
-                substrate: false,
-                doc: &[],
-                body: HelperBody::Applied(&["text"]),
-            },
-        ],
+                body: HelperBody::Applied(arguments),
+            })
+            .collect(),
         polymorphism: Polymorphism::None,
         generated_handler: false,
         handler_execution: crate::schema::HandlerExecution::Immediate,

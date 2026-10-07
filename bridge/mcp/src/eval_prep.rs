@@ -1054,11 +1054,11 @@ mod tests {
         );
         assert!(!facade.contains("import Tidepool.Effects.Core"), "{facade}");
         assert!(!facade.contains("DeliberateWith"), "{facade}");
-        assert!(!facade.contains("AskUserWith"), "{facade}");
+        assert!(!facade.contains("FormOpenWith"), "{facade}");
         assert!(crate::authored_name_is_hidden("Actor", "ActorStartWith"));
         assert!(crate::authored_name_is_hidden("Actor", "ActorCallWith"));
         assert!(crate::authored_name_is_hidden("Actor", "ActorCastWith"));
-        assert!(!crate::authored_name_is_hidden("AskUser", "AskUserWith"));
+        assert!(crate::authored_name_is_hidden("AskUser", "FormOpenWith"));
         assert!(authored.contains("WorkspaceHandle(..)"), "{authored}");
         assert!(authored.contains("Scope(..)"), "{authored}");
         assert!(

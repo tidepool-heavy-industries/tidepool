@@ -3308,6 +3308,31 @@ where
         }
     }
 
+    /// Attach a host lease to the exact already parked frame. Resume carries
+    /// it forward; abort, realm closure and machine loss release that owner.
+    pub fn retain_continuation_resource_owner(
+        &mut self,
+        hole: &ResidentHole,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), ResidentError> {
+        let frame = self
+            .parked
+            .iter_mut()
+            .find(|frame| frame.name == hole.cont_id())
+            .ok_or_else(|| ResidentError::WrongContinuation {
+                attempted: hole.cont_id().to_owned(),
+                pending: vec![],
+            })?;
+        if !frame
+            .resource_owners
+            .iter()
+            .any(|old| Arc::ptr_eq(old, &owner))
+        {
+            frame.resource_owners.push(owner);
+        }
+        Ok(())
+    }
+
     /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's
     /// `Session::define_scoped`): a declaration turn appends to the gen-versioned
     /// `Lib.G<g>` module a later turn imports. Requires a persistent declaration environment (`Some(lib)`

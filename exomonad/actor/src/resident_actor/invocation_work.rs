@@ -46,6 +46,7 @@ struct InvocationWorkState {
     pending_cancellations: Vec<crate::RequestCancellationNotification>,
     pending_watch_notifications: Vec<crate::request::WatchNotification>,
     watches: Vec<crate::WatchId>,
+    forms: Vec<Arc<crate::forms::FormCleanup>>,
     cleanup: Option<InvocationCleanup>,
 }
 
@@ -885,6 +886,19 @@ impl InvocationWork {
         self.state.lock().phase == InvocationWorkPhase::Closing
     }
 
+    pub(super) fn admit_form(
+        &self,
+        form: Arc<crate::forms::FormCleanup>,
+        open: impl FnOnce() -> Result<(), tidepool_bridge_effects::FormCause>,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        self.with_admission_state(|state| {
+            open()?;
+            state.forms.push(form);
+            Ok(())
+        })
+        .map_err(|_| tidepool_bridge_effects::FormCause::FormClosed)?
+    }
+
     pub(super) fn close(&self) {
         let scopes = {
             let mut state = self.state.lock();
@@ -929,6 +943,13 @@ impl InvocationWork {
             compilers: self.state.lock().compilers.clone(),
             ..InvocationCleanup::default()
         };
+        for form in self.state.lock().forms.clone() {
+            if let Err(cause) = form.close() {
+                cleanup
+                    .failures
+                    .push(format!("form {} cleanup: {cause:?}", form.mount));
+            }
+        }
         for scope in self.scopes() {
             let child_cleanup = Box::pin(scope.cleanup(environment, kernel)).await;
             if let Some(token) = scope.scope_token() {

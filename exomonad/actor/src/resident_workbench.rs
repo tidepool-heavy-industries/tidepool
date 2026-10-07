@@ -2584,6 +2584,17 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         text: String,
     },
+    Green(crate::resident_actor::green::GreenBoundary),
+    Form {
+        continuation: ResidentHole,
+        operation: crate::resident_actor::forms::FormOperation,
+        publication: crate::FormPublication,
+    },
+    RichView {
+        continuation: ResidentHole,
+        view: serde_json::Value,
+        publication: crate::FormPublication,
+    },
     DisplayAllowance {
         continuation: ResidentHole,
     },
@@ -2834,6 +2845,9 @@ impl ResidentActorBoundary {
             Self::Context { .. } => "context transformation",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
+            Self::Form { .. } => "human form",
+            Self::Green(boundary) => boundary.operation(),
+            Self::RichView { .. } => "rich display",
             Self::DisplayPublish { .. } | Self::DisplayPublished { .. } => "display",
             Self::DisplayExpand { .. } | Self::DisplayExpanded { .. } => "expand",
             Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
@@ -2986,6 +3000,8 @@ macro_rules! resident_request_roster {
 
 resident_request_roster! {
     ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ResourceScopes)),
+    Green(crate::generated::green::GreenReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Green)),
+    AskUser(crate::generated::ask_user::AskUserReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AskUser)),
     Console(crate::generated::console::ConsoleReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Console)),
     Sleep(crate::generated::sleep::SleepReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Sleep)),
     Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
@@ -3043,6 +3059,8 @@ impl ResidentRequest {
         try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
+        try_member!(Self::AskUser, crate::generated::ask_user::AskUserReq);
+        try_member!(Self::Green, crate::generated::green::GreenReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
         try_member!(
             Self::ActorContext,
@@ -3103,6 +3121,8 @@ impl ResidentRequest {
             Self::Context(_) => "context transformation",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
+            Self::AskUser(_) => "human form",
+            Self::Green(_) => "green thread",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
                 ..,
             )) => "notify",
@@ -8463,6 +8483,31 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::Green(request) => {
+                        use crate::generated::green::GreenReq::*;
+                        use crate::resident_actor::green::GreenBoundary;
+                        let boundary = match request {
+                            AsyncSpawnWith(_, _) => {
+                                let realm = session.parked_realm(&hole).ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("green spawn continuation is no longer parked".into()))?;
+                                if realm != actor_realm { return Err(ResidentActorWorkbenchError::ActorProtocol("green spawn differs from executing continuation scope".into())); }
+                                let callback = session.live_payload_handle_owned_by(hole.cont_id(), realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("green spawn has no retained callback".into()))?;
+                                GreenBoundary::Spawn { continuation: hole, callback }
+                            }
+                            AsyncDoneWith(token) => GreenBoundary::Done { continuation: hole, token },
+                            AsyncJoinAnyWith(threads) => GreenBoundary::JoinAny { continuation: hole, threads },
+                            AsyncStatusWith(thread) => GreenBoundary::Status { continuation: hole, thread },
+                            AsyncCancelWith(thread) => GreenBoundary::Cancel { continuation: hole, thread },
+                        };
+                        Ok(ResidentActorBoundary::Green(boundary))
+                    }
+                    ResidentRequest::AskUser(request) => {
+                        let operation = crate::resident_actor::forms::FormOperation::decode(request, session.data_con_table());
+                        Ok(ResidentActorBoundary::Form { continuation: hole, operation, publication: crate::FormPublication { actor: context.actor, operation: None } })
+                    }
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayViewWith(view)) => {
+                        let view = tidepool_runtime::value_to_json(&view, session.data_con_table(), 0);
+                        Ok(ResidentActorBoundary::RichView { continuation: hole, view, publication: crate::FormPublication { actor: context.actor, operation: None } })
+                    }
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::Print(text)) => Ok(ResidentActorBoundary::Console { continuation: hole, text }),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((identity, text, expansions, unavailable), _)) => {
                         let callback = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
@@ -9612,6 +9657,42 @@ where
             guard.disarm();
         }
         settled
+    }
+
+    pub(crate) async fn form_continuation_realm(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+    ) -> Result<RealmId, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session.parked_realm(&hole).ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "form continuation is no longer parked".into(),
+                    )
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn retain_form_lease(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        lease: Arc<crate::forms::MountedForm>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                if session.parked_realm(&hole) != Some(lease.realm) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "form lease differs from native continuation scope".into(),
+                    ));
+                }
+                session
+                    .retain_continuation_resource_owner(&hole, lease)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
     }
 
     pub(crate) async fn resume_value<T: ToHaskell + Send + 'static>(

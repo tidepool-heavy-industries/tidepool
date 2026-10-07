@@ -20,6 +20,8 @@ const EFFECTS: &[&str] = &[
     "ModelCall",
     "Commands",
     "Console",
+    "AskUser",
+    "Green",
     "Actor",
     "Reflect",
     "Lookup",

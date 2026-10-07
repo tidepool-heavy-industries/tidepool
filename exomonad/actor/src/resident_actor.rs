@@ -20,6 +20,7 @@ mod command_settlement;
 mod commands;
 mod display_settlement;
 mod drain_wait;
+pub(crate) mod forms;
 mod inspection_wait;
 pub(crate) mod invocation_work;
 mod owned_workbench;
@@ -468,6 +469,9 @@ struct ResidentEnvironment<H, O> {
     source_layers: Option<crate::ActorSourceLayerResolver>,
     jev: crate::JevBackendHandle,
     cell_model_factory: Option<Arc<dyn crate::CellModelFactory>>,
+    form_host: Option<Arc<dyn crate::FormHost>>,
+    form_registry:
+        Arc<Mutex<std::collections::HashMap<String, std::sync::Weak<crate::forms::MountedForm>>>>,
     /// Set by an actor host that answers `ReleaseAwait`; without one a stop
     /// has no interactive resources to wait for.
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
@@ -655,6 +659,18 @@ fn valid_display_reference(
 }
 
 impl ActorDisplays {
+    fn reserve_rich_slot(&mut self) -> Result<u64, ResidentActorWorkbenchError> {
+        if self.retired {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display actor is retired".into(),
+            ));
+        }
+        let slot = self.next_slot.checked_add(1).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("display slot space exhausted".into())
+        })?;
+        self.next_slot = slot;
+        Ok(slot as u64)
+    }
     fn pending_count(&mut self) -> usize {
         for slot in self.slots.keys().copied().collect::<Vec<_>>() {
             let _ = self.reconcile(slot);
@@ -2131,6 +2147,8 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             source_layers: self.source_layers.clone(),
             jev: Arc::clone(&self.jev),
             cell_model_factory: self.cell_model_factory.clone(),
+            form_host: self.form_host.clone(),
+            form_registry: self.form_registry.clone(),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
             usage_pointers: self.usage_pointers.clone(),
@@ -5338,6 +5356,51 @@ where
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Form {
+                continuation,
+                operation,
+                publication,
+            } => forms::service(
+                environment,
+                kernel,
+                context,
+                ephemeral_work,
+                control,
+                continuation,
+                operation,
+                publication,
+            ),
+            ResidentActorBoundary::RichView {
+                continuation,
+                view,
+                publication,
+            } => {
+                let slot = environment
+                    .actors
+                    .lock()
+                    .get(&context.actor)
+                    .filter(|record| record.owns_display_resources(&context))
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "rich display actor unavailable".into(),
+                        )
+                    })
+                    .and_then(|record| record.displays.lock().reserve_rich_slot());
+                Box::pin(async move {
+                    let slot = slot?;
+                    let host = environment.form_host.as_ref().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "rich display has no host".into(),
+                        )
+                    })?;
+                    host.display(&publication, slot, &view).map_err(|cause| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "rich display: {cause:?}"
+                        ))
+                    })?;
+                    environment.runner.resume_unit(context, continuation).await
+                })
+            }
             ResidentActorBoundary::Command {
                 continuation,
                 request,
@@ -6488,7 +6551,7 @@ where
                                         RequestError::RequestReservationRejected(error),
                                     ),
                                 )
-                                .await
+                                .await;
                         }
                     };
                 if kernel.resolve(reservation.target).is_none() {
@@ -8515,7 +8578,19 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
-                    let boundary = prepare_execution_effect(context, &effect_owner, boundary);
+                    let mut boundary = prepare_execution_effect(context, &effect_owner, boundary);
+                    match &mut boundary {
+                        ResidentActorBoundary::Form { publication, .. }
+                        | ResidentActorBoundary::RichView { publication, .. } => {
+                            publication.operation =
+                                unit.execution.map(|execution| WorkbenchOperationId {
+                                    execution: execution.clone(),
+                                    input_unit_index: unit.input_unit_index,
+                                    effect_ordinal: ordinal,
+                                });
+                        }
+                        _ => {}
+                    }
                     if execution_state.park_effects
                         && matches!(
                             &boundary,
@@ -12402,6 +12477,12 @@ where
         self.environment.source_layers = Some(layers);
     }
 
+    /// Install the durable human interaction owner before actor admission.
+    pub fn with_form_host(mut self, host: Arc<dyn crate::FormHost>) -> Self {
+        self.environment.form_host = Some(host);
+        self
+    }
+
     /// Install the immutable usage pointers supplied by the facade's shipped
     /// workspace. The actor kernel owns lookup behavior; the facade owns the
     /// source inventory and its generated table.
@@ -13033,6 +13114,8 @@ where
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
+            form_host: None,
+            form_registry: Arc::new(Mutex::new(Default::default())),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
             usage_pointers: crate::UsagePointerTable::default(),
