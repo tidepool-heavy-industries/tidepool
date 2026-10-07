@@ -290,7 +290,8 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
     .into()
 }
 
-/// An exact live value required by the selected original native group closure.
+/// An exact live value required by original native code. Execution selection
+/// and conservative authored-module lifetime custody query this separately.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct NativeBindingRequirement {
     pub artifact_id: ArtifactId,
@@ -1673,6 +1674,74 @@ impl ArtifactView {
         roots: &[NativeRequirementRoot],
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
         Ok(self.native_requirements_from_roots(roots)?.bindings)
+    }
+
+    /// Read-only lifetime requirements for accepted authored owners. Retaining a
+    /// full module also retains private helpers that may be called by a later
+    /// exported entry; this query grants no executable group selection.
+    pub(crate) fn authored_native_binding_custody_requirements(
+        &self,
+        accepted_owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let owned = admitted_closure(&state, self.roots().into_iter());
+        let ids = artifact_ids(&owned);
+        let entries = ids
+            .iter()
+            .map(|id| (*id, Arc::clone(&state.payloads[id])))
+            .collect::<BTreeMap<_, _>>();
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        let owners = SelectedOwners::new(&state, &entries, &ids)?;
+        let roots = entries
+            .values()
+            .filter(|entry| {
+                accepted_owners.contains(&entry.descriptor.owner)
+                    && matches!(&entry.payload, ArtifactPayload::Original(product)
+                        if product.module_interface().is_some_and(|interface|
+                            matches!(interface.origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+            })
+            .flat_map(|entry| entry.native_group_ordinals.iter().map(|ordinal| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: *ordinal,
+            }))
+            .collect();
+        // The same owner/version/ordinal resolver used for executable admission
+        // validates full-body dependencies, without installing its planned edges.
+        let (_, groups) = owners.planned_edges(&state, &entries, &roots)?;
+        let mut requirements = BTreeSet::new();
+        for group in groups {
+            state.graph_visits.fetch_add(1, Ordering::Relaxed);
+            for (owner, dependency) in &entries[&group.artifact].native_requirements {
+                if let ArtifactDependency::NativeBinding {
+                    dependent_ordinal,
+                    generation,
+                    namespace,
+                    occurrence,
+                    record_parent,
+                } = dependency
+                {
+                    if *dependent_ordinal == group.original_ordinal {
+                        let id = owners.interfaces.get(owner).copied().ok_or_else(|| {
+                            failure("validated native binding lacks its interface owner")
+                        })?;
+                        requirements.insert(NativeBindingRequirement {
+                            artifact_id: id,
+                            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                                unit: owner.unit.clone(),
+                                module: owner.module.clone(),
+                                namespace: namespace.clone(),
+                                occurrence: occurrence.clone(),
+                                record_parent: record_parent.clone(),
+                            },
+                            generation: *generation,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(requirements.into_iter().collect())
     }
 
     pub fn native_requirements_from_roots(

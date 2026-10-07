@@ -271,6 +271,7 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
             &[],
             &[],
             &[authored_owner],
+            &[],
         )
         .unwrap();
     let before = session.public_visibility_snapshot_in(private).unwrap();

@@ -2019,9 +2019,22 @@ impl BindingTable {
         ids: &[SessionVarId],
         instances: &[SourceLeaseKey],
         accepted_owners: &[tidepool_repr::execution_schema::CachedHomeOwner],
+        binding_dependencies: &[SessionVarId],
     ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
         let mut prepared =
             self.prepare_exact_publication_in(tree, source, target, ids, instances)?;
+        let reachable = self.scope_dependency_ids(tree, source);
+        if binding_dependencies
+            .iter()
+            .any(|id| !reachable.contains(id) || !self.live.contains_key(id))
+        {
+            return Err(BindingPromotionError::MissingOrForeignBinding);
+        }
+        // Authored full-body custody keeps exact hidden values and their
+        // observation dependencies without adding names to the visible writes.
+        prepared
+            .retained
+            .extend(self.dependency_closure(binding_dependencies.iter().copied()));
         let source_view = self
             .source_selection
             .get(&source)

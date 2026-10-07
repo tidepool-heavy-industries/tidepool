@@ -898,6 +898,24 @@ impl AcceptedJoin {
     pub fn exports(&self) -> &[DeclarationExport] {
         &self.input.expected_exports
     }
+    /// Exact live values needed by retained full authored native bodies,
+    /// including helpers not selected for execution during this publication.
+    pub fn native_binding_custody_requirements(
+        &self,
+    ) -> Result<Vec<crate::artifact_inventory::NativeBindingRequirement>, CompileError> {
+        let owners = self
+            .exports()
+            .iter()
+            .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
+            .map(|identity| ExactModuleIdentity {
+                unit: identity.unit.clone(),
+                module: identity.module.clone(),
+            })
+            .collect();
+        self.context
+            .artifact_view()
+            .authored_native_binding_custody_requirements(&owners)
+    }
     pub fn instances(&self) -> &InstanceInventory {
         &self.input.expected_instances
     }
