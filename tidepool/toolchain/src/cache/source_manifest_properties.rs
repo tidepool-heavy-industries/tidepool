@@ -280,10 +280,18 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
             .expect("oracle paths are valid source paths");
         let identity = source_roots_identity(b"history", &[root.clone()]).unwrap();
         if prior_expected != expected_dependencies {
-            prop_assert_ne!(identity, prior_identity, "a changed manifest changes its identity");
+            prop_assert_ne!(
+                identity,
+                prior_identity,
+                "a changed manifest changes its identity"
+            );
             covered.identity_changes += 1;
         } else {
-            prop_assert_eq!(identity, prior_identity, "an unchanged manifest keeps its identity");
+            prop_assert_eq!(
+                identity,
+                prior_identity,
+                "an unchanged manifest keeps its identity"
+            );
             covered.identity_stable_steps += 1;
         }
         prop_assert_eq!(
@@ -337,10 +345,10 @@ fn source_manifest_history_supports_replacement_rename_recreation_and_aliases() 
         Op::Write(1, 1, 1),
         Op::Rename(1, 0, 1),
         // And distinguish a repeated identical write from a replacement.
-        Op::Write(1, 1, 1),
+        Op::Write(1, 1, 0),
     ];
     let covered = replay(&ops).unwrap();
-    assert_eq!(covered.writes, 5);
+    assert_eq!(covered.writes, 6);
     assert_eq!(covered.replacements, 1);
     assert_eq!(covered.renames, 2);
     assert_eq!(covered.rename_replacements, 1);
@@ -394,7 +402,9 @@ fn source_manifest_generated_histories_reach_mutation_transitions() {
         support.accumulate(replay(&tree.current()).unwrap());
     }
 
-    eprintln!("source manifest generated-history observations: mixed={observed:?}, targeted={support:?}");
+    eprintln!(
+        "source manifest generated-history observations: mixed={observed:?}, targeted={support:?}"
+    );
     assert!(support.replacements >= 8);
     assert!(support.rename_replacements >= 8);
     assert!(support.renames >= 8);
@@ -454,12 +464,10 @@ fn source_manifest_rejects_ancestor_cycles_and_metadata_failures() {
         shipped_root.join("Prelude_cbor"),
     )
     .unwrap();
-    assert!(
-        shipped_haskell_source_manifest(&shipped_root)
-            .unwrap()
-            .files
-            .is_empty()
-    );
+    assert!(shipped_haskell_source_manifest(&shipped_root)
+        .unwrap()
+        .files
+        .is_empty());
 }
 
 proptest! {
