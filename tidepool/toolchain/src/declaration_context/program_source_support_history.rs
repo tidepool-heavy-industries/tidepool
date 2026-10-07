@@ -209,14 +209,11 @@ mod program_source_support_history {
             .merge(&support_view(&[alternate.clone()]))
             .unwrap();
         let sparse = [
-            support_product("SparseScaffold"),
+            support_product("Consumer"),
             support_product_in_unit("main", "Tidepool.Internal.Resume"),
         ];
         let (sparse_view, sparse_projection) = original_offer(&sparse);
         assert_eq!(sparse.len(), 2);
-        let sparse_selection = source_selection(&sparse_projection, &sparse_view);
-        let sparse_input =
-            OriginalCompilerInputs::from_selection(&sparse_selection, &sparse_view).unwrap();
 
         // Both exact native versions share the public interface, but each history
         // selects one immutable original and retains the other only as custody.
@@ -253,28 +250,74 @@ mod program_source_support_history {
             assert_private_choices(&request, &expected, &public);
             let captured = request.clone();
 
-            // Sparse output rows publish only interface custody; the private
-            // carrier grows independently of this persistent source projection.
+            let receipt = import_receipt(&root, &request, "Unadmitted");
+            let mut value = read_receipt(&receipt);
+            value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+                .as_array_mut()
+                .unwrap()[3] = Value::Array(vec![]);
+            write_receipt(&receipt, &value);
+            let admission = request.validate_receipt(&receipt, None, &public).unwrap();
+            let generated_owner = admission.generated_source_owner().unwrap();
+            assert_eq!(generated_owner, identity("fixture", "Consumer"));
+            let source = "module Consumer where\n";
+            let effective = request.compiler_inputs().unwrap();
+            let full_view = effective.artifacts.merge(&sparse_view).unwrap();
+            let full_projection = effective.projection.merge(&sparse_projection).unwrap();
+            let full_selection = source_selection(&full_projection, &full_view);
+            let full_input =
+                OriginalCompilerInputs::from_selection(&full_selection, &full_view).unwrap();
+            let execution = ExactProductAdmission {
+                request: &request,
+                source: &admission,
+            }
+            .original_execution_context(&full_input)
+            .unwrap();
+            expected.extend(offered_owners(&sparse));
+            assert_eq!(expected.len(), 22);
+            assert_eq!(
+                offered_owners(&execution.compiler_original_products().unwrap()),
+                expected
+            );
+
+            // The sparse output adds its generated target and Resume. Only the
+            // authenticated generated target leaves the continuation offer.
+            let continuation_artifacts = full_view
+                .select_roots(
+                    full_view
+                        .descriptors()
+                        .into_iter()
+                        .filter(|descriptor| descriptor.owner != generated_owner)
+                        .map(|descriptor| descriptor.id)
+                        .collect(),
+                )
+                .unwrap();
+            let continuation_input = full_input
+                .for_program_continuation(
+                    &continuation_artifacts,
+                    std::slice::from_ref(&admission),
+                    source,
+                )
+                .unwrap();
             let mut publication = request.clone();
             let published = publication
                 .admit_program_support_with_selection(
                     public.clone(),
-                    &sparse_view,
-                    &[],
+                    &continuation_artifacts,
+                    std::slice::from_ref(&admission),
                     None,
-                    &sparse_selection,
+                    &full_selection,
                 )
                 .unwrap();
-            assert_private_choices(&request, &expected, &public);
+            assert_private_choices(&request, &offered_owners(&selected), &public);
             let continued = publication
                 .in_program_context_with_private_input(
                     &root.join("sparse-input"),
                     published.clone(),
-                    &sparse_input,
+                    &continuation_input,
                 )
                 .unwrap();
-            expected.extend(offered_owners(&sparse));
-            assert_eq!(expected.len(), 22);
+            assert!(expected.remove(sparse[0].owner()));
+            assert_eq!(expected.len(), 21);
             assert_private_choices(&continued, &expected, &published);
             assert_private_choices(&captured, &offered_owners(&selected), &public);
             assert_eq!(public.semantic_sha256(), before);
@@ -308,33 +351,7 @@ mod program_source_support_history {
                 .unwrap();
             assert_private_choices(&retried, &expected, &published);
 
-            // Omission is licensed only by the exact generated source owner.
-            let receipt = import_receipt(&root, &continued, "Unadmitted");
-            let mut value = read_receipt(&receipt);
-            value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
-                .as_array_mut()
-                .unwrap()[3] = Value::Array(vec![]);
-            write_receipt(&receipt, &value);
-            let admission = continued
-                .validate_receipt(&receipt, None, &published)
-                .unwrap();
-            let source = "module Consumer where\n";
-            let generated = support_product("Consumer");
-            let effective = continued.compiler_inputs().unwrap();
-            let (generated_view, generated_projection) = original_offer(&[generated.clone()]);
-            let full_view = effective.artifacts.merge(&generated_view).unwrap();
-            let full_projection = effective.projection.merge(&generated_projection).unwrap();
-            let full_selection = source_selection(&full_projection, &full_view);
-            let full_input =
-                OriginalCompilerInputs::from_selection(&full_selection, &full_view).unwrap();
-            let support = full_input
-                .for_program_continuation(
-                    &effective.artifacts,
-                    std::slice::from_ref(&admission),
-                    source,
-                )
-                .unwrap();
-            assert_eq!(support.projection, effective.projection);
+            // An inherited native carrier cannot borrow the generated omission.
             let selected_id =
                 crate::artifact_inventory::ArtifactEntry::original([2; 32], selected[0].clone())
                     .unwrap()
@@ -357,18 +374,6 @@ mod program_source_support_history {
                     source,
                 )
                 .is_err());
-            let execution = ExactProductAdmission {
-                request: &continued,
-                source: &admission,
-            }
-            .original_execution_context(&full_input)
-            .unwrap();
-            let mut execution_expected = expected.clone();
-            execution_expected.insert(generated.owner().clone());
-            assert_eq!(
-                offered_owners(&execution.compiler_original_products().unwrap()),
-                execution_expected
-            );
             assert_private_choices(&continued, &expected, &published);
         }
     }
