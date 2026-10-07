@@ -9,7 +9,7 @@ module Tidepool.SessionArtifacts
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals
   , typedSegmentSessionInterfaces, typedSegmentSessionBinders
   , typedSegmentSessionBindingRepresentations
-  , writeTypedSegmentSessionBindings
+  , withTypedSegmentSessionPublication
   , emitHostBindingInterface
   , parseValModule
   ) where
@@ -221,8 +221,12 @@ prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
 -- Publish only the immutable bytes that supplied the substituted global Ids.
 -- Exclusive links refuse an existing generation, including a racing publisher;
 -- the masked link/record pair makes cancellation rollback own exactly its files.
-writeTypedSegmentSessionBindings :: FilePath -> PreparedTypedSegmentBindings -> IO ()
-writeTypedSegmentSessionBindings root (PreparedTypedSegmentBindings _ items _) = do
+-- Keep publication under the caller's final request completion. A receipt
+-- refusal or cancellation after the last interface write still rolls back
+-- this batch before the compiler operation can publish its successful state.
+withTypedSegmentSessionPublication
+  :: FilePath -> PreparedTypedSegmentBindings -> IO result -> IO result
+withTypedSegmentSessionPublication root (PreparedTypedSegmentBindings _ items _) complete = do
   files <- fmap concat $ forM items $ \item -> case item of
     UncapturedTypedItem _ -> pure []
     CapturedTypedItem _ owner _ _ snapshot -> case capturedSessionInterfaceEvidence snapshot of
@@ -244,7 +248,7 @@ writeTypedSegmentSessionBindings root (PreparedTypedSegmentBindings _ items _) =
             restore (BS.hPut handle bytes >> hClose handle)
             createLink temporary path
             modifyIORef' created (path :))
-  forM_ files publish `onException` (readIORef created >>= removeExisting)
+  (forM_ files publish >> complete) `onException` (readIORef created >>= removeExisting)
 
 sessionBindingPaths :: FilePath -> SessionModule -> [FilePath]
 sessionBindingPaths root owner = let path = sessionHiPath root owner
