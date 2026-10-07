@@ -1212,6 +1212,17 @@ impl ModuleCandidateOffer {
                     .iter()
                     .map(|(_, source)| source.as_str()),
             )?
+            .with_generated_planned_imports(
+                checked_item
+                    .prefix
+                    .planned_declaration_proof()
+                    .map(|proof| &proof.certificate),
+                checked_item
+                    .item
+                    .turn_templates()
+                    .iter()
+                    .map(|(_, source)| source.as_str()),
+            )?
             .prepare_compilation_authorizing(
                 &scratch.join("exact-scope"),
                 producer,
@@ -1255,17 +1266,6 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         checked_item.item.template_context(),
                         &checked_item.item.template_sources(),
-                    )?
-                    .with_generated_planned_imports(
-                        checked_item
-                            .prefix
-                            .planned_declaration_proof()
-                            .map(|proof| &proof.certificate),
-                        checked_item
-                            .item
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
                     )?,
             ),
             checked_cell: None,
