@@ -218,9 +218,11 @@ impl Fixture {
             format!("{pragma}\nimport qualified Tidepool.Async as Async\n{declarations}")
         };
         let result = self.execute(&actor, &setup, None).await;
+        let response = result.expect("checked fixture declarations");
         assert_eq!(
-            result.expect("checked fixture declarations").status,
-            WorkbenchRunStatus::Committed
+            response.status,
+            WorkbenchRunStatus::Committed,
+            "fixture declaration diagnostics: {response:?}"
         );
         actor
     }
