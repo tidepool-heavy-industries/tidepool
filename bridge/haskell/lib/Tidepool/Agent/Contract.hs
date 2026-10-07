@@ -211,7 +211,7 @@ data ToolKind
   | FinishKind
   deriving (Eq, Show)
 
-data Tool m input output = Tool
+data Tool m input (output :: Type) = Tool
   { toolKind :: ToolKind
   , description :: Text
   , handler :: input -> m output
@@ -223,7 +223,7 @@ tool :: Text -> (input -> m output) -> Tool m input output
 tool description run = Tool CallKind description run
 
 -- | Literal input is passed as data to an already compiled handler.
-data RawTool m output = RawTool
+data RawTool m (output :: Type) = RawTool
   { rawDescription :: Text
   , rawHandler :: Text -> m output
   }
