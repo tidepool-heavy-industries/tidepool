@@ -756,14 +756,11 @@ impl WorktreeManager {
         }
 
         let branch = crate::submission::HeadState::read(&self.git, &canonical_source)?;
-        let head = self
-            .git
-            .try_run(&canonical_source, &["rev-parse", "HEAD"])?;
         let receipt = WorktreeReceipt {
             worktree_id: self.registry.mint_id()?,
             cwd: canonical_source.clone(),
             branch: branch.branch().cloned(),
-            source_head: GitOid::from_raw(head.trimmed()),
+            source_head: branch.oid().clone(),
             snapshot_ref: None,
             origin: WorktreeOrigin::SourceCheckout,
             source_repository: canonical_source,

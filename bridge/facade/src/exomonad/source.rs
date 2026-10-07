@@ -2166,6 +2166,11 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         Ok(())
     }
 
+    fn retain_helpers(&self, creator: PrincipalId) -> std::result::Result<String, String> {
+        self.helper_branch_for(creator)
+            .ok_or_else(|| "creator has no selected session helper source".into())
+    }
+
     fn prepare_helpers(
         &self,
         creator: PrincipalId,
@@ -4143,6 +4148,39 @@ mod tests {
             assert_eq!(reload.layer.read_active().unwrap().unwrap(), before);
         }
         assert!(!run.path().join("reload-checks").exists());
+    }
+
+    #[test]
+    fn retained_helper_selection_creates_no_draft_or_source_generation() {
+        use exomonad_actor::ActorSourceLayers;
+
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let helper_root = run.path().join("retained-helpers");
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        )
+        .with_helper_root(helper_root.clone());
+        let creator = PrincipalId::new(1, 1);
+        reload
+            .helper_scopes
+            .write()
+            .insert(creator, "selected-source".into());
+        assert!(!helper_root.exists());
+        for _ in 0..3 {
+            assert_eq!(
+                ActorSourceLayers::retain_helpers(&reload, creator).unwrap(),
+                "selected-source"
+            );
+        }
+        assert!(
+            !helper_root.exists(),
+            "retaining a selection must not copy drafts or publish source"
+        );
+        assert!(ActorSourceLayers::retain_helpers(&reload, PrincipalId::new(1, 2)).is_err());
     }
 
     #[test]

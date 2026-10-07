@@ -91,6 +91,8 @@ mod prepared_runtime_acceptance;
 pub(crate) use overlay_resource::valid_artifact_path;
 
 mod workspace;
+#[cfg(test)]
+mod workspace_admission_tests;
 pub mod workspace_cleanup;
 
 pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};

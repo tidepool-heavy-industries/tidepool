@@ -435,6 +435,12 @@ pub trait ActorSourceLayers: Send + Sync {
         let _ = actor;
         self.validate_source_authority(checkpoint)
     }
+    /// Retain the creator's already selected helper source without capturing
+    /// bytes, copying drafts, or publishing a new generation for a spawn.
+    fn retain_helpers(&self, _creator: PrincipalId) -> Result<String, String> {
+        Ok(String::new())
+    }
+
     /// Reserve one actor-private helper branch before the actor has an ID.
     /// A prepared fork workspace may already have copied its branch.
     fn prepare_helpers(
