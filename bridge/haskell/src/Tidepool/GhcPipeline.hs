@@ -600,8 +600,9 @@ data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
   , prTyCons :: [TyCon]
   , prHscEnv :: HscEnv
-  -- | Actual thin-interface bytes selected by ordinary session injection.
-  -- These authorize type-dependency seals, not source or native products.
+  -- | Actual thin-interface bytes hydrated for selected session inputs and
+  -- typed segment outputs. Admission distinguishes submitted inputs from
+  -- reserved output custody; these snapshots supply only type evidence.
   , prInjectedSessionInterfaces :: [CapturedSessionInterface]
   -- | Verified canonical owners selected by this exact compiler request.
   -- Retained home interfaces have no source location in the GHC finder.

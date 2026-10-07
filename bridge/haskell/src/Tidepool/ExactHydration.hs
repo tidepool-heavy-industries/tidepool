@@ -846,8 +846,9 @@ newOriginalInterfaceArtifacts :: HscEnv -> Map.Map ModuleName FinalizedModule
 newOriginalInterfaceArtifacts env finalized retained =
   newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained []
 
--- | Selected session snapshots supply type-dependency seals alongside exact
--- captures. They do not enter the finalized-source or executable inventory.
+-- | Hydrated session snapshots supply type-dependency seals alongside exact
+-- captures, including compiler-produced typed outputs. They do not enter the
+-- finalized-source or executable inventory or authorize live values.
 newOriginalInterfaceArtifactsWithSessionCaptures :: HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> FilePath -> IO OriginalInterfaceArtifacts
 newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected directory = do

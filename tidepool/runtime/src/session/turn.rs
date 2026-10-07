@@ -3188,6 +3188,96 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
     offer
         .admit_cell_program(root)
         .expect("restored consumed segment source must admit independently");
+    let output_module = valid.items()[index]
+        .native()
+        .unwrap()
+        .value_interface()
+        .expect("this worker control produces an actual capture")
+        .0;
+    let products_path = root.join(format!("item-{index}/certified-products.cbor"));
+    let products_original = std::fs::read(&products_path).unwrap();
+    let products: CborValue = ciborium::de::from_reader(products_original.as_slice()).unwrap();
+    let value_rows = products.as_array().unwrap()[6].as_array().unwrap()[3]
+        .as_array()
+        .unwrap();
+    let output_index = value_rows
+        .iter()
+        .position(|row| row.as_array().unwrap()[1].as_text() == Some(output_module))
+        .expect("the finalization packet carries the produced capture type");
+    for mutation in 0..3 {
+        let restore_products = RestoreReceipt {
+            path: products_path.clone(),
+            original: products_original.clone(),
+        };
+        let mut changed = products.clone();
+        let rows = changed.as_array_mut().unwrap()[6].as_array_mut().unwrap()[3]
+            .as_array_mut()
+            .unwrap();
+        let mut restore_payload = None;
+        let mut foreign_payloads = None;
+        match mutation {
+            0 => {
+                rows.remove(output_index);
+            }
+            1 => {
+                let mut foreign = rows[output_index].clone();
+                let row = foreign.as_array_mut().unwrap();
+                row[1] = CborValue::Text(format!("Tidepool.Session.Val.G{}", u64::MAX));
+                let parent = products_path.parent().unwrap();
+                let directory = tempfile::tempdir_in(parent).unwrap();
+                for (field, name) in [(2, "foreign.hi"), (5, "foreign.packages.cbor")] {
+                    let original = parent.join(row[field].as_text().unwrap());
+                    std::fs::copy(original, directory.path().join(name)).unwrap();
+                    row[field] = CborValue::Text(format!(
+                        "{}/{name}",
+                        directory.path().file_name().unwrap().to_str().unwrap()
+                    ));
+                }
+                foreign_payloads = Some(directory);
+                rows.push(foreign);
+            }
+            2 => {
+                let row = rows[output_index].as_array_mut().unwrap();
+                let payload = products_path
+                    .parent()
+                    .unwrap()
+                    .join(row[2].as_text().unwrap());
+                let original = std::fs::read(&payload).unwrap();
+                let mut substituted = original.clone();
+                assert!(!substituted.is_empty());
+                substituted[0] ^= 1;
+                row[3] = CborValue::Text(
+                    Sha256::digest(&substituted)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                );
+                restore_payload = Some(RestoreReceipt {
+                    path: payload.clone(),
+                    original,
+                });
+                std::fs::write(payload, substituted).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
+        std::fs::write(&products_path, bytes).unwrap();
+        let refusal = offer
+            .admit_cell_program(root)
+            .expect_err("missing, foreign or substituted produced type evidence must refuse");
+        assert!(
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), CertificationError::Mismatch(_))),
+            "produced type mutation {mutation} must reach its evidence guard: {refusal:?}"
+        );
+        drop(restore_payload);
+        drop(restore_products);
+        drop(foreign_payloads);
+        offer
+            .admit_cell_program(root)
+            .expect("restored produced type evidence must admit independently");
+    }
     for field in 0..4 {
         let restore = RestoreReceipt {
             path: path.clone(),
