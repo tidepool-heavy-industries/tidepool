@@ -3015,11 +3015,32 @@ mod tests {
             .unwrap();
         // The declared source projection contains skill bytes, not Git metadata.
         // The scaffold checks out the pin verified against the declared bundle.
-        assert_eq!(installed_revision.trimmed(), scaffold::DEFAULT_WORKSPACE_REV);
-        let mut checked = 0;
-        for skill in std::fs::read_dir(&source).unwrap() {
-            let skill = skill.unwrap().path();
-            let name = skill.file_name().unwrap();
+        assert_eq!(
+            installed_revision.trimmed(),
+            scaffold::DEFAULT_WORKSPACE_REV
+        );
+        let roster = git
+            .try_read(
+                &installed_workspace,
+                &["ls-tree", "--name-only", "HEAD:skills"],
+            )
+            .unwrap();
+        let expected_links: std::collections::BTreeSet<_> = roster
+            .trimmed()
+            .lines()
+            .map(std::ffi::OsString::from)
+            .collect();
+        assert!(
+            !expected_links.is_empty(),
+            "the pinned skill roster is empty"
+        );
+        let actual_links: std::collections::BTreeSet<_> =
+            std::fs::read_dir(workspace.path().join(".agents/skills"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+        assert_eq!(actual_links, expected_links);
+        for name in &expected_links {
             let link = workspace.path().join(".agents/skills").join(name);
             assert_eq!(
                 std::fs::read_link(&link).unwrap(),
@@ -3029,29 +3050,45 @@ mod tests {
             );
             assert_eq!(
                 std::fs::canonicalize(&link).unwrap(),
-                std::fs::canonicalize(
-                    workspace
-                        .path()
-                        .join(".exomonad/workspace/skills")
-                        .join(name),
-                )
-                .unwrap()
+                std::fs::canonicalize(installed_workspace.join("skills").join(name)).unwrap()
             );
-            for file in walk_files(&skill) {
-                let relative = file.strip_prefix(&source).unwrap();
-                let installed = installed_workspace.join("skills").join(relative);
-                assert_eq!(
-                    std::fs::read(&installed).unwrap(),
-                    std::fs::read(&file).unwrap(),
-                    "pinned skill bytes differ for {}",
-                    relative.display()
-                );
-                checked += 1;
-            }
+            assert!(link.join("SKILL.md").is_file(), "{}", link.display());
+        }
+        let pinned_files = git
+            .try_read(
+                &installed_workspace,
+                &["ls-tree", "-r", "--name-only", "HEAD", "skills"],
+            )
+            .unwrap();
+        let mut checked = 0;
+        for relative in pinned_files.trimmed().lines() {
+            let object = format!("HEAD:{relative}");
+            assert_eq!(
+                std::fs::read(installed_workspace.join(relative)).unwrap(),
+                git.stdout_bytes(&installed_workspace, &["show", object.as_str()])
+                    .unwrap(),
+                "installed skill differs from pinned object {relative}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "the pinned skill file inventory is empty");
+        // The declared source projection is a subset used by other tests.
+        // Retain its independent byte oracle without treating it as the roster.
+        let mut projected = 0;
+        for file in walk_files(&source) {
+            let relative = file.strip_prefix(&source).unwrap();
+            let installed = installed_workspace.join("skills").join(relative);
+            assert_eq!(
+                std::fs::read(&installed).unwrap(),
+                std::fs::read(&file).unwrap(),
+                "pinned skill bytes differ for {}",
+                relative.display()
+            );
+            projected += 1;
         }
         assert!(
-            checked >= 11,
-            "expected the shipped skill set, saw {checked}"
+            projected > 0,
+            "the declared skill source projection is empty"
         );
     }
 
