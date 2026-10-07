@@ -432,3 +432,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod properties;
