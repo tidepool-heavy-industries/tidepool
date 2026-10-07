@@ -442,12 +442,10 @@ fn assert_committed(reply: crate::KernelWorkbenchReply) {
         WorkbenchRunStatus::Committed,
         "{response:?}"
     );
-    assert!(
-        response
-            .items
-            .iter()
-            .any(|item| item.output.contains("True")),
-        "Haskell asserted the body and cleanup product: {response:?}"
+    assert_eq!(
+        response.items.last().map(|item| item.output.trim()),
+        Some("True"),
+        "final Haskell fixture result must confirm its assertions: {response:?}"
     );
 }
 
