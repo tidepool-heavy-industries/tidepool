@@ -45,6 +45,7 @@ extra-source-files:
   test-planned-declaration/fixtures/*.hs
   test-check/fixtures/Ext/Tiny.hs
   test-check/tool-profiles/*.hs
+  test-check/quantities/*.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -1049,6 +1050,7 @@ test-suite tool-profiles-contract
   main-is:          ToolProfiles.hs
   hs-source-dirs:   test-check generated/effects generated/protocol lib actors
   other-modules:
+    QuantitiesContract
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson

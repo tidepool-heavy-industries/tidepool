@@ -21,10 +21,7 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
-import Tidepool.Effects.Core
-  ( Actor, ActorContext, AgentLaunch, AgentInspection, AgentControl, Commands
-  , BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration
-  , Notifications, Jev, ModelCall, Console, Reflect, Lookup, Source, Journal, RepoEvent, GitRef (..))
+import Tidepool.Effects.Core (GitRef (..))
 import Tidepool.Agent.Contract (AgentSpec)
 import qualified AgentSpec as Installed
 import qualified Project.Tools as Tools
@@ -36,11 +33,7 @@ import Exomonad.Workspace (workspacePrompt)
 
 -- This workspace chooses its installed API directly. The runtime does not
 -- infer tools or authority from the worker's task, prompt, model or label.
-type WorkspaceEffects =
-  '[Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl
-   , BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration
-   , Notifications, Jev, ModelCall, Commands, Console, Actor, Reflect, Lookup
-   , Source, Journal, RepoEvent]
+type WorkspaceEffects = ActorEffects
 
 workspaceAgentSpec :: AgentSpec (Tools.WorkspaceTools WorkspaceEffects) WorkspaceEffects
 workspaceAgentSpec = Installed.agentSpec
