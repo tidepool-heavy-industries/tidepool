@@ -10024,10 +10024,10 @@ pub(crate) mod tests {
             .iter()
             .map(|module| ((module.unit.clone(), module.module.clone()), INTERFACE))
             .collect();
-        fixture_finalization_from_interfaces(root, modules, interfaces)
+        fixture_finalization_from_interfaces(root, modules, interfaces, None)
     }
 
-    fn fixture_finalization_from_products(
+    pub(crate) fn fixture_finalization_from_products(
         root: Option<&Path>,
         modules: &[CertifiedModuleReceipt],
         products: &ParsedModuleProducts,
@@ -10042,13 +10042,24 @@ pub(crate) mod tests {
                 )
             })
             .collect();
-        fixture_finalization_from_interfaces(root, modules, interfaces)
+        fixture_finalization_from_interfaces(
+            root,
+            modules,
+            interfaces,
+            Some(
+                products
+                    .package_imports
+                    .as_ref()
+                    .expect("product finalization fixture requires actual package bytes"),
+            ),
+        )
     }
 
     fn fixture_finalization_from_interfaces(
         root: Option<&Path>,
         modules: &[CertifiedModuleReceipt],
         interfaces: BTreeMap<(String, String), &[u8]>,
+        package_roots: Option<&BTreeMap<(String, String), Vec<u8>>>,
     ) -> FinalizationEnvelope {
         let mut finalized = BTreeMap::new();
         let mut home_units = BTreeSet::from(["main".to_owned()]);
@@ -10067,19 +10078,28 @@ pub(crate) mod tests {
                 .get(&(module.unit.clone(), module.module.clone()))
                 .expect("fresh finalization fixture requires actual interface bytes");
             let interface_sha256 = sha(interface_bytes);
-            let package_value = value_array([
-                value_text("TPPKGROOTS"),
-                value_text("2"),
-                value_array([
-                    value_text(&module.unit),
-                    value_text(&module.module),
-                    value_text(hex(&interface_sha256)),
-                ]),
-                value_array([]),
-                value_array([]),
-            ]);
-            let mut packages = Vec::new();
-            ciborium::ser::into_writer(&package_value, &mut packages).unwrap();
+            let mut empty_packages = Vec::new();
+            let packages = match package_roots {
+                Some(roots) => roots
+                    .get(&(module.unit.clone(), module.module.clone()))
+                    .expect("fresh finalization fixture requires actual package bytes")
+                    .as_slice(),
+                None => {
+                    let package_value = value_array([
+                        value_text("TPPKGROOTS"),
+                        value_text("2"),
+                        value_array([
+                            value_text(&module.unit),
+                            value_text(&module.module),
+                            value_text(hex(&interface_sha256)),
+                        ]),
+                        value_array([]),
+                        value_array([]),
+                    ]);
+                    ciborium::ser::into_writer(&package_value, &mut empty_packages).unwrap();
+                    empty_packages.as_slice()
+                }
+            };
             let descriptor = |suffix: &str, bytes: &[u8], digest| CapturedArtifactDescriptor {
                 relative_path: PathBuf::from(format!(
                     "finalized-fixture/{}.{}.{}",
@@ -10089,14 +10109,14 @@ pub(crate) mod tests {
                 bytes: bytes.len() as u64,
             };
             let interface = descriptor("hi", interface_bytes, interface_sha256);
-            let package_imports = descriptor("packages", &packages, sha(&packages));
+            let package_imports = descriptor("packages", packages, sha(packages));
             let core_bytes = b"fixture-finalized-core";
             let core = descriptor("core", core_bytes, sha(core_bytes));
             if let Some(root) = root {
                 std::fs::create_dir_all(root.join("finalized-fixture")).unwrap();
                 for (artifact, bytes) in [
                     (&interface, interface_bytes),
-                    (&package_imports, packages.as_slice()),
+                    (&package_imports, packages),
                     (&core, core_bytes.as_slice()),
                 ] {
                     std::fs::write(root.join(&artifact.relative_path), bytes).unwrap();

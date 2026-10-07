@@ -133,6 +133,7 @@ TEST_ONLY_SOURCES = {
 
     }),
     'tidepool-toolchain': frozenset({
+        'tidepool/toolchain/src/artifacts/tests/private_package_input_history.rs',
         'tidepool/toolchain/src/cache/source_manifest_properties.rs',
         'tidepool/toolchain/src/module_candidates/codec_measurement.rs',
         'tidepool/toolchain/src/module_candidates/fixture_packets.rs',

@@ -5125,6 +5125,10 @@ fn store_memo(
 }
 
 #[cfg(test)]
+#[path = "artifacts/tests/private_package_input_history.rs"]
+mod private_package_input_history;
+
+#[cfg(test)]
 mod compiler_sidecar_tests {
     use super::*;
     use sha2::{Digest, Sha256};
