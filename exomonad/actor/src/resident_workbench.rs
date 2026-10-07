@@ -18521,13 +18521,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .observe_watch_progress(owner, identity, request, cursor)
                 .unwrap();
             assert_eq!(captured.0.as_ref().unwrap().revision, revision);
+            let retained_observer = retained_observer.clone();
             let observed = runner
                 .access
                 .with_host_machine(
                     "project-released-watch-snapshot",
                     observer_id,
                     None,
-                    |session, _| {
+                    move |session, _| {
                         session
                             .run_with_sites("captured-note", retained_observer.code())
                             .map_err(Into::into)

@@ -216,6 +216,7 @@ pub enum ReplyError {
     AlreadySettled,
     Unauthorized,
     WrongIncarnation,
+    InvalidReadiness,
     ProgressTypeMismatch,
     CancellationRequested,
 }
