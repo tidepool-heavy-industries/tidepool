@@ -26,18 +26,37 @@ impl tracing::field::Visit for Fields {
 struct Observations {
     requests: Vec<BTreeMap<String, String>>,
     admissions: Vec<BTreeMap<String, String>>,
-    starts: HashMap<String, (Instant, usize)>,
+    starts: HashMap<String, ChildLaunch>,
+    first_child_launch_executions: Option<String>,
     installs: HashMap<String, (BTreeMap<String, String>, usize)>,
 }
 
-#[derive(Clone, Default)]
-struct SetupTrace(Arc<Mutex<Observations>>);
+struct ChildLaunch {
+    at: Instant,
+    compiler_requests: usize,
+    quotation_executions: String,
+}
+
+#[derive(Clone)]
+struct SetupTrace {
+    observations: Arc<Mutex<Observations>>,
+    quotation_counter: PathBuf,
+}
+
+impl SetupTrace {
+    fn new(quotation_counter: PathBuf) -> Self {
+        Self {
+            observations: Arc::default(),
+            quotation_counter,
+        }
+    }
+}
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
-        let mut state = self.0.lock();
+        let mut state = self.observations.lock();
         if fields.0.contains_key("compile_request")
             && fields.0.contains_key("request_ordinal")
             && event.metadata().target() == "tidepool_extract_cmd::endpoint"
@@ -54,12 +73,19 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
             }
             Some("child_launch_requested") => {
                 let label = fields.0["label"].clone();
-                let count = state.requests.len();
+                let at = Instant::now();
+                let quotation_executions = std::fs::read_to_string(&self.quotation_counter)
+                    .expect("read the external quoter counter at the actual child launch");
+                state
+                    .first_child_launch_executions
+                    .get_or_insert_with(|| quotation_executions.clone());
+                let launch = ChildLaunch {
+                    at,
+                    compiler_requests: state.requests.len(),
+                    quotation_executions,
+                };
                 assert!(
-                    state
-                        .starts
-                        .insert(label, (Instant::now(), count))
-                        .is_none(),
+                    state.starts.insert(label, launch).is_none(),
                     "the measured launch labels must be unique"
                 );
             }
@@ -88,6 +114,9 @@ struct Progress {
     compiler_requests_during_setup: usize,
     preparation_requests_observed: usize,
     quotation_executions_before: Option<usize>,
+    quotation_executions_at_first_child_launch: Option<usize>,
+    parent_quotation_executions: Option<usize>,
+    quotation_executions_during_children: Option<usize>,
     quotation_executions_observed: Option<usize>,
     parent_result_verified: bool,
     quotation_execution_unchanged: bool,
@@ -107,11 +136,33 @@ impl Progress {
             compiler_requests_during_setup: 0,
             preparation_requests_observed: 0,
             quotation_executions_before: None,
+            quotation_executions_at_first_child_launch: None,
+            parent_quotation_executions: None,
+            quotation_executions_during_children: None,
             quotation_executions_observed: None,
             parent_result_verified: false,
             quotation_execution_unchanged: false,
             completed: false,
         }
+    }
+
+    fn observe_quotations(&mut self, prepared: &str, first_launch: &str, current: &str) {
+        let preparation_count = prepared.lines().count();
+        let first_launch_count = first_launch.lines().count();
+        let current_count = current.lines().count();
+        self.quotation_executions_at_first_child_launch = Some(first_launch_count);
+        self.parent_quotation_executions = Some(
+            first_launch_count
+                .checked_sub(preparation_count)
+                .expect("the quoter counter cannot shrink before the first child launch"),
+        );
+        self.quotation_executions_during_children = Some(
+            current_count
+                .checked_sub(first_launch_count)
+                .expect("the quoter counter cannot shrink during child execution"),
+        );
+        self.quotation_executions_observed = Some(current_count);
+        self.quotation_execution_unchanged = current == prepared;
     }
 
     fn report(&self) {
@@ -151,12 +202,6 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).expect("owned matched daemon"),
     );
     let endpoint = tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap();
-    let observations = SetupTrace::default();
-    tracing_subscriber::registry()
-        .with(observations.clone())
-        .with(tracing_subscriber::fmt::layer().json().with_ansi(false))
-        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_codegen::prepared_compile=info"))
-        .try_init().expect("one isolated measurement process owns its subscriber");
     let mut files = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
         Some(root) => tempfile::Builder::new()
             .prefix("prepared-quotation-")
@@ -167,6 +212,12 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
     files.disable_cleanup(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").is_some());
     let input = files.path().join("external-input");
     std::fs::write(&input, "41").unwrap();
+    let observations = SetupTrace::new(input.with_extension("executions"));
+    tracing_subscriber::registry()
+        .with(observations.clone())
+        .with(tracing_subscriber::fmt::layer().json().with_ansi(false))
+        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_codegen::prepared_compile=info"))
+        .try_init().expect("one isolated measurement process owns its subscriber");
     let settings = hosted_test_settings(&files, 2);
     let authored_settings = settings.clone();
     let quotation_input = input.clone();
@@ -188,7 +239,8 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
             project.launch.embedded = Some(authored_settings);
             project.haskell.source_roots = vec![".".into()];
-            project.haskell.modules = vec!["PreparedRuntimeSpec".into()];
+            // This module supplies private installer policy, not notebook imports.
+            project.haskell.modules = Vec::new();
             project.haskell.spec = Some("PreparedRuntimeSpec.agentSpec".into());
             project.preparation.roles = vec![exomonad_actor::ActorRole::Research];
         });
@@ -199,7 +251,7 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
     host.run_scenario(|host| Box::pin(async move {
         let scenario = async move {
         {
-            let state = observations.0.lock();
+            let state = observations.observations.lock();
             assert!(!state.requests.is_empty(),
                 "the observer must see actual production preparation before proving no child setup requests");
             assert!(!state.admissions.is_empty(), "the actual compiler transaction was observed");
@@ -274,24 +326,32 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             assert_eq!(conversation.identity().actor, *origin.actor());
             let installed = host.context.observer.installation(child.actor).await;
             progress.observed_installations += 1;
-            let (elapsed, compiler_requests, details) = {
-                let state = observations.0.lock();
-                let (start, before) = state.starts.get(&label).expect("real pre-lookup launch request");
+            let (elapsed, compiler_requests, details, launch_executions, first_launch_executions) = {
+                let state = observations.observations.lock();
+                let start = state.starts.get(&label).expect("real pre-lookup launch request");
                 let (details, after) = state.installs.get(&child.actor.to_string())
                     .expect("same exact actor executed its installer");
-                (installed.installed_at.duration_since(*start).as_nanos(), state.requests[*before..*after].to_vec(), details.clone())
+                (installed.installed_at.duration_since(start.at).as_nanos(),
+                    state.requests[start.compiler_requests..*after].to_vec(), details.clone(),
+                    start.quotation_executions.clone(),
+                    state.first_child_launch_executions.clone().expect("the first actual child launch was observed"))
             };
             assert!(scopes.insert(details["installation_scope"].clone()), "fresh installation heap scope");
             progress.distinct_installation_scopes = scopes.len();
             progress.compiler_requests_during_setup += compiler_requests.len();
             progress.report();
             let current_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
-            progress.quotation_executions_observed = Some(current_executions.lines().count());
-            progress.quotation_execution_unchanged = current_executions == prepared_executions;
+            progress.observe_quotations(&prepared_executions, &first_launch_executions, &current_executions);
             progress.report();
             assert!(compiler_requests.is_empty(), "completed child admission must not compile installer source: {compiler_requests:?}");
+            assert_eq!(first_launch_executions, prepared_executions,
+                "parent notebook compilation must not replay the private installer policy before the first child launch");
+            assert_eq!(launch_executions, first_launch_executions,
+                "no child may replay the quoter between the first launch and launch of {label}");
+            assert_eq!(current_executions, launch_executions,
+                "child launch through its first provider turn must not execute the external quoter: {label}");
             assert!(progress.quotation_execution_unchanged,
-                "child admission must not execute the external quoter again: {current_executions}");
+                "the private installer policy must retain its original quotation after input changes to 42: {current_executions}");
             assert!(!installed.checkpoint);
             assert_eq!(installed.context_parent, None, "selected provider context");
             assert_eq!(installed.role, exomonad_actor::ActorRole::Research);
@@ -316,6 +376,13 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             let output = replied.settled_output("prepared-native-probe");
             assert_eq!(output["status"], "replied", "{output}");
             assert_eq!(output["items"].as_array().unwrap().last().unwrap()["terminalTransfer"], "replyAccepted", "{output}");
+            let replied_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
+            progress.observe_quotations(&prepared_executions, &first_launch_executions, &replied_executions);
+            progress.report();
+            assert_eq!(replied_executions, launch_executions,
+                "child launch through its native reply must not execute the external quoter: {label}");
+            assert_eq!(replied_executions, prepared_executions,
+                "native replies must preserve the private policy's original quotation 41");
             replied.finish();
             progress.observed_native_replies += 1;
             progress.report();
@@ -324,6 +391,12 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
                 "setup_end":"actual_policy_installed","setup_start":"child_launch_requested",
                 "compiler_requests_during_setup":compiler_requests,"installation":details,
                 "acquisition":acquisition,"completed_inventory_match":true,
+                "quotation_executions":{"prepared":prepared_executions.lines().count(),
+                    "first_child_launch":first_launch_executions.lines().count(),
+                    "parent_before_first_child_launch":progress.parent_quotation_executions,
+                    "child_launch":launch_executions.lines().count(),
+                    "first_provider_turn":current_executions.lines().count(),
+                    "native_reply":replied_executions.lines().count()},
                 "native_reply_accepted":true,"producer":endpoint.producer_hex()});
             eprintln!("prepared-runtime-child {row}");
             rows.push(row);
