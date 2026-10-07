@@ -259,7 +259,8 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
       ++ " histories, " ++ show (2 * length sources) ++ " executed programs"))
   where
     execute owner = do
-      setContext [IIDecl (simpleImportDecl (mkModuleName owner))]
+      setContext [IIDecl (simpleImportDecl (mkModuleName owner))
+        , IIDecl (simpleImportDecl (mkModuleName "Prelude"))]
       value <- compileExpr "(oracleRun :: IO ([Int], Maybe (Either String String)))"
       result <- liftIO (unsafeCoerce value :: IO ([Int], Maybe (Either String String)))
       -- Finish the shared base-type result before changing interpreter scope.

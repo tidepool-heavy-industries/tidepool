@@ -36,6 +36,7 @@ import qualified Data.Text as T
 import Data.Generics (Data, cast, gmapM, mkM)
 import GHC
 import GHC.Core.TyCo.FVs (tyCoVarsOfType)
+import GHC.Core.TyCo.Tidy (tidyTopType)
 import GHC.Types.Var.Set (isEmptyVarSet)
 import GHC.CoreToIface (toIfaceType)
 import GHC.Iface.Syntax (IfaceDecl(..), IfaceIdDetails(..), freeNamesIfDecl)
@@ -243,7 +244,9 @@ captureCheckedSignature env key ty = do
   unless (isEmptyVarSet (tyCoVarsOfType ty)) (fail "checked signature contains free type/coercion variables")
   binder <- initIfaceLoad env (lookupOrig
     (mkHomeModule (hsc_home_unit env) (mkModuleName "Tidepool.CheckedAnnotation")) (mkVarOcc key))
-  let interface = IfaceId binder (toIfaceType ty) IfVanillaId []
+  -- The interface codec resolves local type variables by OccName, so distinct
+  -- captured forall binders need GHC's scoped names before serialization.
+  let interface = IfaceId binder (toIfaceType (tidyTopType ty)) IfVanillaId []
       inventory = interfaceNames interface
   unless (length inventory <= 65536) (fail "checked signature Name bound")
   buffer <- openBinMem 1024

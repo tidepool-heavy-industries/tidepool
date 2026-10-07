@@ -95,6 +95,7 @@ import GHC.Types.Id (Id, mkVanillaGlobal, idType)
 import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.Unique (mkUniqueGrimily)
 import GHC.Core.Type (Type, tyConsOfType)
+import GHC.Core.TyCo.Tidy (tidyTopType)
 import GHC.Core.TyCon (tyConName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.TypeEnv (typeEnvIds)
@@ -275,7 +276,9 @@ mkThinSessionIfaceWithFixities hsc sm binders fixities = do
     modl = mkModule (homeUnitAsUnit (hsc_home_unit hsc)) (renderSessionModule sm)
     mkBinder (i, (occ, ty)) =
       let nm   = mkExternalName (mkUniqueGrimily (sessionUniqueSeed sm i)) modl occ noSrcSpan
-          bndr = mkVanillaGlobal nm ty
+          -- Interface-local type variables are encoded by OccName. The
+          -- captured local sigma type has not passed through Core tidying.
+          bndr = mkVanillaGlobal nm (tidyTopType ty)
       in (nm, AnId bndr)
     tts     = map mkBinder (zip [(0 :: Int) ..] binders)
     decls   = [ (fingerprint0, tyThingToIfaceDecl False tt) | (_, tt) <- tts ]

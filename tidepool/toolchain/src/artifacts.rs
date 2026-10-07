@@ -1660,12 +1660,16 @@ impl ModuleCandidateOffer {
                         .in_program_context(&root.join("program-inputs"), context.clone())?;
                     let effective = self.program_offer(program_request.clone());
                     let directory = root.join(format!("item-{index}"));
-                    let output = effective.read_program_output(&directory, &mut validation)?;
+                    let output = effective.read_program_output(
+                        &directory,
+                        &segment_root,
+                        &mut validation,
+                    )?;
                     let source_admissions = effective
                         .exact
                         .as_ref()
                         .expect("exact program offer")
-                        .validate_outputs(&directory)?;
+                        .validate_outputs(&segment_root)?;
                     context = self.admit_program_support(
                         &mut program_request,
                         context,
@@ -1816,6 +1820,7 @@ impl ModuleCandidateOffer {
     fn read_program_output(
         &self,
         directory: &Path,
+        source_directory: &Path,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -1837,7 +1842,9 @@ impl ModuleCandidateOffer {
             seal_turn_outputs_with_validation(
                 self,
                 directory,
-                &directory.join(format!("{module}.hs")),
+                // Entries are projections of one compiled segment. Its exact
+                // receipt binds the consumed source path, not the item copy.
+                &source_directory.join(format!("{module}.hs")),
                 &output.source,
                 &output.target,
                 "__prepared",

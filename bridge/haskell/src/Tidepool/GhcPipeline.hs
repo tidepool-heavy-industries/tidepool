@@ -2096,6 +2096,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     typedSessionInterfacesRef <- liftIO (newIORef [])
     typedSessionEnvironmentRef <- liftIO (newIORef Nothing)
     typedFailureRef <- liftIO (newIORef Nothing)
+    typedPreparationFailureRef <- liftIO (newIORef Nothing)
     pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
     -- Downsweep may select the interpreter for splice dependencies and enable
     -- IgnoreInterfacePragmas. Canonical summaries restore the interface policy
@@ -2118,8 +2119,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             prepare <- maybe (throwIO MissingSegmentPreparation) pure (typedPreparationFor selection)
             segment <- captureTypedSegment typedPlan env
               (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) tcg
-            (hydrated, globals, interfaces) <- prepare env
-              (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) segment
+            -- GHC Make can turn a hook exception into a failed load and a
+            -- diagnostic. This request owns the preparation callback's exact
+            -- refusal or cancellation, independently of source diagnostics.
+            (hydrated, globals, interfaces) <- (prepare env
+              (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) segment)
+              `catch` \(failure :: SomeException) -> do
+                writeIORef typedPreparationFailureRef (Just failure)
+                throwIO failure
             closed <- closeTypedSegment hydrated globals segment
             writeIORef targetTypedSegmentRef (Just closed)
             writeIORef typedSessionInterfacesRef interfaces
@@ -3032,6 +3039,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           unless (Map.null pending && Map.null quotes) $
             liftIO $ throwIO UnfinishedLoadedFrontend
         Failed -> do
+          preparationFailure <- liftIO (readIORef typedPreparationFailureRef)
+          forM_ preparationFailure (liftIO . throwIO)
           typedFailure <- liftIO (readIORef typedFailureRef)
           forM_ typedFailure (liftIO . throwIO)
           canonicalFailure <- liftIO (readIORef canonicalFailureRef)
