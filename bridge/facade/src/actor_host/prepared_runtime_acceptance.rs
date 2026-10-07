@@ -25,6 +25,7 @@ impl tracing::field::Visit for Fields {
 #[derive(Default)]
 struct Observations {
     requests: Vec<BTreeMap<String, String>>,
+    admissions: Vec<BTreeMap<String, String>>,
     starts: HashMap<String, (Instant, usize)>,
     installs: HashMap<String, (BTreeMap<String, String>, usize)>,
 }
@@ -48,6 +49,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
             state.requests.push(fields.0.clone());
         }
         match fields.0.get("phase").map(String::as_str) {
+            Some("compiler_transaction_admission") => {
+                state.admissions.push(fields.0);
+            }
             Some("child_launch_requested") => {
                 let label = fields.0["label"].clone();
                 let count = state.requests.len();
@@ -82,6 +86,7 @@ struct Progress {
     observed_native_replies: usize,
     distinct_installation_scopes: usize,
     compiler_requests_during_setup: usize,
+    preparation_requests_observed: usize,
     quotation_executions_before: Option<usize>,
     quotation_executions_observed: Option<usize>,
     parent_result_verified: bool,
@@ -100,6 +105,7 @@ impl Progress {
             observed_native_replies: 0,
             distinct_installation_scopes: 0,
             compiler_requests_during_setup: 0,
+            preparation_requests_observed: 0,
             quotation_executions_before: None,
             quotation_executions_observed: None,
             parent_result_verified: false,
@@ -192,6 +198,31 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
     .expect("actual production preparation and selected deployment start the host");
     host.run_scenario(|host| Box::pin(async move {
         let scenario = async move {
+        {
+            let state = observations.0.lock();
+            assert!(!state.requests.is_empty(),
+                "the observer must see actual production preparation before proving no child setup requests");
+            assert!(!state.admissions.is_empty(), "the actual compiler transaction was observed");
+            for admission in &state.admissions {
+                assert_eq!(admission["transport"], "daemon");
+                assert_eq!(admission["producer"], endpoint.producer_hex());
+                assert_eq!(admission["endpoint"], endpoint.to_hex());
+            }
+            let mut correlations = HashSet::new();
+            for request in &state.requests {
+                assert!(!request["compile_request"].is_empty(), "actual request correlation");
+                let epoch = &request["daemon_epoch"];
+                assert_eq!(epoch.len(), 64, "actual daemon epoch identity");
+                assert!(epoch.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                let admission = request["admission_id"].parse::<u64>().unwrap();
+                let ordinal = request["request_ordinal"].parse::<u64>().unwrap();
+                assert!(admission > 0 && ordinal > 0, "actual admitted request identity");
+                assert!(correlations.insert((epoch, admission, ordinal)),
+                    "each observed request has a unique admitted daemon correlation");
+            }
+            progress.preparation_requests_observed = state.requests.len();
+        }
+        progress.report();
         let frozen = host.context.config.workspace_inputs.as_ref()
             .expect("the actual host selected its completed workspace");
         let completed_entries = frozen.completed_entry_selections().expect("completed installer inventory");
