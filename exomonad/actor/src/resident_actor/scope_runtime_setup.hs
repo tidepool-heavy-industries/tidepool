@@ -8,7 +8,7 @@ let scopeSpec :: AgentSpec ScopeTools '[]
 let definition :: Mailbox.ActorDefinition () AgentProtocol ()
     definition = Mailbox.ActorDefinition
       { Mailbox.label = "scope-request-target"
-      , Mailbox.effectProfile = Mailbox.ReadOnly
+      , Mailbox.effectProfile = Mailbox.Selected (knownEffects @'[])
       , Mailbox.initialization = \() -> pure ()
       , Mailbox.behavior = \() () ->
           Mailbox.serve @() @AgentProtocol ()

@@ -153,6 +153,7 @@ impl ScopeFixture {
             "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref.Internal as AgentRef",
             "qualified Tidepool.Effects.Core as Core",
+            "Tidepool.Effects.Row (KnownEffects (knownEffects))",
         ] {
             preamble = insert_preamble_imports(&preamble, import);
         }
