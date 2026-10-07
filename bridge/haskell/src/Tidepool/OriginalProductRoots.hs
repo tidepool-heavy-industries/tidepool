@@ -18,11 +18,12 @@ import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
 import Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CanonicalInterfaceProof, scopeModuleInterfaceProofs, canonicalProofMatchesOwner )
+  , CanonicalInterfaceProof, scopeModuleInterfaceProofs, canonicalProofMatchesOwner
+  , scopeAvailableOriginalProducts )
 
--- Recovery can prepare a complete canonical original after an earlier request
--- admitted only selected native groups from that original. Use the new group
--- witness once, after checking its canonical owner and original group evidence.
+-- Package demand and certification share one validated original index. Native
+-- availability uses the old complete census without selecting more roots.
+-- A separately prepared canonical original must still match admitted evidence.
 newtype ReconciledOriginalProducts = ReconciledOriginalProducts [ExactProduct]
 
 unrecoveredExactProducts :: ReconciledOriginalProducts -> [ExactProduct]
@@ -36,8 +37,10 @@ reconcileOriginalProducts (Just scope) proofs recovered = do
   let owners = Map.fromList [((unit, name), groups) | (unit, name, groups) <- recovered]
   unless (Map.size owners == length recovered)
     (Left "duplicate recovered original owner in package root inventory")
+  let available = Map.fromList [((originalUnit original,originalModule original),original)
+        | original <- scopeAvailableOriginalProducts scope]
   selected <- forM (scopeProducts scope) $ \original -> case Map.lookup (originalUnit original, originalModule original) owners of
-    Nothing -> Right (Just original)
+    Nothing -> Right (Map.lookup (originalUnit original,originalModule original) available)
     Just groups -> do
       let owner = (originalUnit original, originalModule original)
           indexed = Map.fromList [(originalOrdinal group, group) | group <- groups]

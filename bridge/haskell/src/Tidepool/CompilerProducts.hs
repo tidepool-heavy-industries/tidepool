@@ -116,7 +116,7 @@ prepareCompilerProjectionContext prepared retainedGenerations owner target auxil
     (prHscEnv (pprPipelineResult prepared))
     (compilationScope <$> preparedExactCompilation prepared)
     retainedGenerations owner target auxiliaryRoots hostJsonAuthority
-  pure context {projectionCurrentOriginals = pprAcceptedCandidateBindings prepared}
+  pure context {projectionCurrentOriginals = pprOriginalBindings prepared}
 
 prepareCompilerProjectionContextForEnvironment
   :: HscEnv -> Maybe ExactScope -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
@@ -281,7 +281,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
             , currentOriginalFinalized = finalized
             , currentReconciledOriginalProducts = reconciled
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
-            , currentOriginalExternalNames = pprAcceptedCandidateBindings prepared
+            , currentOriginalExternalNames = pprOriginalBindings prepared
             }
       pure admittedContext {preparedCurrentOriginalInventory = Just inventory}
 
@@ -424,6 +424,10 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
       acquireOriginal siblings owner = case exact of
         Nothing -> pure Nothing
         Just scope -> do
+          when (any (\original -> (originalUnit original,originalModule original) ==
+              (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
+            (fail ("required binder is absent from the admitted original native census: "
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready

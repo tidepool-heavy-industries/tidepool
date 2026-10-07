@@ -3634,7 +3634,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
                 | identifier <- typeEnvIds (md_types (hm_details hmi))
                 , let identity = preparedRootIdentity identifier
                 , identity `Set.member` supported]
-          unless (pprAcceptedCandidateBindings reused == actual
+          unless (pprOriginalBindings reused == actual
               && (expected /= 42 || not (Map.null actual))) $
             fail "accepted native original inventory lost current HPT Names or admitted an unsupported binder"
           context <- prepareCompilerProjectionContext reused Map.empty
