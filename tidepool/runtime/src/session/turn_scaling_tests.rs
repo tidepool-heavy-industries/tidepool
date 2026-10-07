@@ -1335,9 +1335,9 @@ where
                 Arc::new(specification.clone()),
                 &admitted_include,
             )
-            .unwrap()
         },
-    );
+    )
+    .map_err(crate::session::SessionError::Compile)?;
     use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
     match declarations {
         CellDeclarationExpectation::Total(expected) => assert_eq!(
