@@ -1647,17 +1647,42 @@ fn duplicate_source_binder(
     }))
 }
 
-/// The native namespace actually offered to one compiler request, completed by
+/// Exact type and native roles issued for one compiler request, completed by
 /// that request's validated output rows. Full retained custody is not an offer.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CertifiedSourceSelection {
-    owners: BTreeMap<(String, String), ReceiptSourceSelection>,
+    modules: BTreeMap<(String, String), ReceiptSourceSelection>,
 }
 
 #[derive(Clone, Debug)]
-struct ReceiptSourceSelection {
+enum ReceiptSourceSelection {
+    InterfaceOnly {
+        interface: crate::artifact_inventory::ArtifactId,
+    },
+    Native {
+        interface: crate::artifact_inventory::ArtifactId,
+        native: ReceiptNativeSelection,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ReceiptNativeSelection {
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
+}
+
+impl ReceiptSourceSelection {
+    fn interface(&self) -> crate::artifact_inventory::ArtifactId {
+        match self {
+            Self::InterfaceOnly { interface } | Self::Native { interface, .. } => *interface,
+        }
+    }
+    fn native(&self) -> Option<&ReceiptNativeSelection> {
+        match self {
+            Self::Native { native, .. } => Some(native),
+            Self::InterfaceOnly { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1687,13 +1712,23 @@ impl CertifiedSourceSelection {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        Self::from_projected_originals(&products, operation)
+        let mut selection = Self::from_projected_originals(&products, operation)?;
+        for entry in entries.values().filter(|entry| !entry.is_native()) {
+            selection.admit_interface(entry, operation)?;
+        }
+        Ok(selection)
+    }
+
+    fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
+        self.modules
+            .values()
+            .filter_map(ReceiptSourceSelection::native)
     }
 
     /// Exact originals selected by this request's issuer, including validated
     /// newly finalized rows. The caller still authenticates their artifact IDs.
     pub(crate) fn selected_original_owners(&self) -> impl Iterator<Item = &CachedHomeOwner> {
-        self.owners.values().map(|selected| &selected.owner)
+        self.native_selections().map(|selected| &selected.owner)
     }
 
     /// Convert this transaction's issued complete owner identities to exact
@@ -1704,22 +1739,29 @@ impl CertifiedSourceSelection {
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
         use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
         let metadata = view.metadata_snapshot();
-        let mut originals = Vec::new();
-        for owner in self.selected_original_owners() {
-            let matching = metadata.artifacts.values().filter(|entry| {
-                matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
-            }).collect::<Vec<_>>();
-            let [entry] = matching.as_slice() else {
-                return Err(CertificationError::Mismatch(
-                    "issued compiler original artifact",
-                ));
-            };
-            originals.push(Arc::clone(entry));
+        let mut entries = Vec::new();
+        for selected in self.modules.values() {
+            let interface = metadata
+                .artifacts
+                .get(&selected.interface())
+                .filter(|entry| !entry.is_native())
+                .ok_or(CertificationError::Mismatch(
+                    "issued compiler interface artifact",
+                ))?;
+            entries.push(Arc::clone(interface));
+            if let Some(native) = selected.native() {
+                let matching = metadata.artifacts.values().filter(|entry| {
+                    matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &native.owner)
+                }).collect::<Vec<_>>();
+                let [entry] = matching.as_slice() else {
+                    return Err(CertificationError::Mismatch(
+                        "issued compiler original artifact",
+                    ));
+                };
+                entries.push(Arc::clone(entry));
+            }
         }
-        let projection = CompilerInputProjection::from_interface_view(view)
-            .and_then(|interfaces| {
-                interfaces.merge(&CompilerInputProjection::from_issued_entries(&originals)?)
-            })
+        let projection = CompilerInputProjection::from_issued_entries(&entries)
             .map_err(|_| CertificationError::Mismatch("issued compiler original projection"))?;
         Self::from_compiler_projection(
             &projection,
@@ -1751,12 +1793,24 @@ impl CertifiedSourceSelection {
             )?;
             let key = (witness.owner.unit.clone(), witness.owner.module.clone());
             if selected
-                .owners
+                .modules
                 .insert(
                     key,
-                    ReceiptSourceSelection {
-                        owner: witness.owner.clone(),
-                        version: ReceiptSourceVersion::Original,
+                    ReceiptSourceSelection::Native {
+                        interface: crate::artifact_inventory::ArtifactEntry::canonical(
+                            product
+                                .module_interface()
+                                .ok_or(CertificationError::Mismatch(
+                                    "compiler original canonical interface",
+                                ))?
+                                .clone(),
+                        )
+                        .descriptor
+                        .id,
+                        native: ReceiptNativeSelection {
+                            owner: witness.owner.clone(),
+                            version: ReceiptSourceVersion::Original,
+                        },
                     },
                 )
                 .is_some()
@@ -1769,42 +1823,109 @@ impl CertifiedSourceSelection {
         Ok(selected)
     }
 
-    fn admit_current(
+    fn admit_interface(
         &mut self,
-        owner: &CachedHomeOwner,
-        origin: ProductOrigin,
+        entry: &crate::artifact_inventory::ArtifactEntry,
         operation: &InventoryOperation,
     ) -> CertResult<()> {
-        let key = (owner.unit.clone(), owner.module.clone());
-        if let Some(previous) = self.owners.get(&key) {
-            if previous.owner != *owner || origin != ProductOrigin::Cached {
+        if entry.is_native() {
+            return Err(CertificationError::Mismatch("compiler interface role"));
+        }
+        let key = (
+            entry.descriptor.owner.unit.clone(),
+            entry.descriptor.owner.module.clone(),
+        );
+        if let Some(previous) = self.modules.get(&key) {
+            if previous.interface() != entry.descriptor.id {
                 return Err(CertificationError::Mismatch(
-                    "compiler original owner replaced",
+                    "compiler selected interface replaced",
                 ));
             }
             return Ok(());
         }
         operation.charge(
-            2 * (owner.unit.len() + owner.module.len())
-                + std::mem::size_of::<ReceiptSourceSelection>(),
+            2 * (key.0.len() + key.1.len()) + std::mem::size_of::<ReceiptSourceSelection>(),
         )?;
+        self.modules.insert(
+            key,
+            ReceiptSourceSelection::InterfaceOnly {
+                interface: entry.descriptor.id,
+            },
+        );
+        Ok(())
+    }
+
+    fn admit_current(
+        &mut self,
+        owner: &CachedHomeOwner,
+        origin: ProductOrigin,
+        canonical: &CertifiedModuleInterface,
+        operation: &InventoryOperation,
+    ) -> CertResult<()> {
+        let key = (owner.unit.clone(), owner.module.clone());
+        if let Some(previous) = self
+            .modules
+            .get(&key)
+            .and_then(ReceiptSourceSelection::native)
+        {
+            if previous.owner != *owner || origin != ProductOrigin::Cached {
+                return Err(CertificationError::Mismatch(
+                    "compiler original owner replaced",
+                ));
+            }
+        }
+        if canonical.unit() != owner.unit
+            || canonical.module() != owner.module
+            || canonical.interface_sha256() != owner.skinny_iface_sha256
+        {
+            return Err(CertificationError::Mismatch(
+                "compiler current canonical interface",
+            ));
+        }
+        let interface = crate::artifact_inventory::ArtifactEntry::canonical(canonical.clone())
+            .descriptor
+            .id;
+        if let Some(previous) = self.modules.get(&key) {
+            if previous.interface() != interface {
+                return Err(CertificationError::Mismatch(
+                    "compiler selected interface replaced",
+                ));
+            }
+            if previous.native().is_some() {
+                return Ok(());
+            }
+        } else {
+            operation.charge(
+                2 * (owner.unit.len() + owner.module.len())
+                    + std::mem::size_of::<ReceiptSourceSelection>(),
+            )?;
+        }
         let version = match origin {
             ProductOrigin::Cached => ReceiptSourceVersion::Original,
             ProductOrigin::Fresh => ReceiptSourceVersion::Fresh,
             ProductOrigin::RetainedCore => ReceiptSourceVersion::RetainedCore,
         };
-        self.owners.insert(
+        self.modules.insert(
             key,
-            ReceiptSourceSelection {
-                owner: owner.clone(),
-                version,
+            ReceiptSourceSelection::Native {
+                interface,
+                native: ReceiptNativeSelection {
+                    owner: owner.clone(),
+                    version,
+                },
             },
         );
         Ok(())
     }
 
     fn promote(&mut self, versions: &BTreeMap<(String, String), ModuleVersion>) -> CertResult<()> {
-        for (key, selected) in &mut self.owners {
+        for (key, selected) in &mut self.modules {
+            let ReceiptSourceSelection::Native {
+                native: selected, ..
+            } = selected
+            else {
+                continue;
+            };
             if matches!(selected.version, ReceiptSourceVersion::RetainedCore) {
                 selected.owner.module_version = versions
                     .get(key)
@@ -1814,6 +1935,33 @@ impl CertifiedSourceSelection {
         }
         Ok(())
     }
+}
+
+fn current_module_interface<'a>(
+    owner: &CachedHomeOwner,
+    origin: ProductOrigin,
+    candidates: Option<&'a CandidateSet>,
+    finalized: &'a [CertifiedModuleInterface],
+    inherited: &'a [CertifiedModuleInterface],
+) -> CertResult<&'a CertifiedModuleInterface> {
+    let matches = |interface: &&CertifiedModuleInterface| {
+        interface.unit() == owner.unit && interface.module() == owner.module
+    };
+    match origin {
+        ProductOrigin::Fresh => finalized.iter().find(matches),
+        ProductOrigin::Cached => candidates
+            .and_then(|set| {
+                set.by_owner
+                    .get(&(owner.unit.clone(), owner.module.clone()))
+            })
+            .filter(|bundle| bundle.owner == *owner)
+            .map(|bundle| &bundle.original_module_interface)
+            .or_else(|| finalized.iter().chain(inherited.iter()).find(matches)),
+        ProductOrigin::RetainedCore => inherited.iter().find(matches),
+    }
+    .ok_or(CertificationError::Mismatch(
+        "native canonical module carrier",
+    ))
 }
 
 /// Exact originals whose complete current promotion has been compared with custody.
@@ -1942,9 +2090,12 @@ fn resolve_receipt_owner_with_validation(
             original_ordinal,
             binder,
         } => {
-            let resolved = if let Some(selected) = selection
-                .and_then(|selection| selection.owners.get(&(unit.clone(), module.clone())))
-            {
+            let resolved = if let Some(selected) = selection.and_then(|selection| {
+                selection
+                    .modules
+                    .get(&(unit.clone(), module.clone()))
+                    .and_then(ReceiptSourceSelection::native)
+            }) {
                 match selected.version {
                     ReceiptSourceVersion::Original if module_version.is_none() => {
                         return Err(CertificationError::Mismatch(
@@ -6116,8 +6267,31 @@ pub(crate) fn certify_products_with_validation(
         )?,
         None => CertifiedSourceSelection::default(),
     };
+    for interface in &module_interfaces {
+        source_selection.admit_interface(
+            &crate::artifact_inventory::ArtifactEntry::canonical(interface.clone()),
+            &validation.inventory,
+        )?;
+    }
+    for value in &value_interfaces {
+        source_selection.admit_interface(
+            &crate::artifact_inventory::ArtifactEntry::interface(
+                value.interface().clone(),
+                crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
+                value.requirements().to_vec(),
+            ),
+            &validation.inventory,
+        )?;
+    }
     for (owner, _, _, _, _, origin) in &module_bytes {
-        source_selection.admit_current(owner, *origin, &validation.inventory)?;
+        let canonical = current_module_interface(
+            owner,
+            *origin,
+            candidates,
+            &module_interfaces,
+            &inherited_module_interfaces,
+        )?;
+        source_selection.admit_current(owner, *origin, canonical, &validation.inventory)?;
     }
     let available_originals = inherited_products;
     let mut source_groups = match exact {
@@ -6359,8 +6533,7 @@ pub(crate) fn certify_products_with_validation(
         // A new recipe describes this compiler request's namespace. Older
         // original graphs stay attached to their exact retained carriers.
         let owners: Vec<_> = source_selection
-            .owners
-            .values()
+            .native_selections()
             .filter(|selected| !matches!(selected.version, ReceiptSourceVersion::RetainedCore))
             .map(|selected| selected.owner.clone())
             .collect();
@@ -6507,23 +6680,7 @@ pub(crate) fn certify_products_with_validation(
                     .ok_or(CertificationError::Mismatch(
                         "original interface owner receipt",
                     ))?;
-                let canonical_interface = match origin {
-                    ProductOrigin::Fresh => module_interfaces.iter().find(|interface| {
-                        interface.unit() == owner.unit && interface.module() == owner.module
-                    }),
-                    ProductOrigin::Cached => candidates.and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone()))).filter(|bundle| bundle.owner == owner).map(|bundle| &bundle.original_module_interface).or_else(|| module_interfaces
-                        .iter()
-                        .chain(inherited_module_interfaces.iter())
-                        .find(|interface| {
-                            interface.unit() == owner.unit && interface.module() == owner.module
-                        })),
-                    ProductOrigin::RetainedCore => inherited_module_interfaces.iter().find(|interface| {
-                        interface.unit() == owner.unit && interface.module() == owner.module
-                    }),
-                }
-                .ok_or(CertificationError::Mismatch(
-                    "native canonical module carrier",
-                ))?;
+                let canonical_interface = current_module_interface(&owner, origin, candidates, &module_interfaces, &inherited_module_interfaces)?;
                 if canonical_interface.producer_sha256() != producer_sha256
                     || canonical_interface.source_sha256() != source_sha {
                     return Err(CertificationError::Mismatch("native canonical producer/source"));
@@ -8145,6 +8302,128 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn issued_interface_upgrade_preserves_exact_choice_and_native_authority() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
+        let original = full_native_fixture("Upgrade", vec![(3, vec![])], 7);
+        let canonical = original.module_interface().unwrap();
+        let interface = Arc::new(ArtifactEntry::canonical(canonical.clone()));
+        let native = Arc::new(
+            ArtifactEntry::original(canonical.producer_sha256(), original.clone()).unwrap(),
+        );
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![native, interface.clone()],
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let issued = CompilerInputProjection::from_issued_entries(&[interface]).unwrap();
+        let operation = InventoryOperation::new(Default::default());
+        let mut selection = CertifiedSourceSelection::from_compiler_projection(
+            &issued,
+            &view.metadata_snapshot(),
+            &operation,
+        )
+        .unwrap();
+        assert_eq!(selection.selected_original_owners().count(), 0);
+        assert_eq!(selection.compiler_projection(&view).unwrap(), issued);
+        let sources =
+            available_original_source_map(std::slice::from_ref(&original), &[], &operation)
+                .unwrap();
+        assert!(matches!(
+            resolve_receipt_owner_with_validation(
+                ReceiptImportOwner::Source {
+                    unit: original.owner().unit.clone(),
+                    module: original.owner().module.clone(),
+                    module_version: Some(original.owner().module_version.clone()),
+                    original_ordinal: 3,
+                    binder: testing::identity("Upgrade", "entry_3")
+                },
+                &sources,
+                Some(&selection),
+                &BTreeMap::new(),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "source outside compiler selection"
+            ))
+        ));
+
+        let other = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "Upgrade",
+                vec![(3, vec![])],
+                9,
+                &BTreeMap::new(),
+                vec![0x43],
+            ),
+            [1; 32],
+        )])
+        .remove(0)
+        .product;
+        assert_ne!(
+            ArtifactEntry::canonical(other.module_interface().unwrap().clone())
+                .descriptor
+                .id,
+            issued.roles()[0].interface()
+        );
+        assert!(matches!(
+            selection.admit_current(
+                other.owner(),
+                ProductOrigin::Fresh,
+                other.module_interface().unwrap(),
+                &operation
+            ),
+            Err(CertificationError::Mismatch(
+                "compiler selected interface replaced"
+            ))
+        ));
+        assert_eq!(selection.compiler_projection(&view).unwrap(), issued);
+        selection
+            .admit_current(
+                original.owner(),
+                ProductOrigin::Fresh,
+                canonical,
+                &operation,
+            )
+            .unwrap();
+        assert_eq!(
+            selection.selected_original_owners().collect::<Vec<_>>(),
+            vec![original.owner()]
+        );
+        let upgraded = selection.compiler_projection(&view).unwrap();
+        assert_eq!(
+            upgraded.roles()[0].interface(),
+            issued.roles()[0].interface()
+        );
+        assert!(upgraded.roles()[0].original().is_some());
+        selection
+            .admit_current(
+                original.owner(),
+                ProductOrigin::Cached,
+                canonical,
+                &operation,
+            )
+            .unwrap();
+        assert_eq!(selection.compiler_projection(&view).unwrap(), upgraded);
+        assert!(matches!(
+            selection.admit_current(
+                original.owner(),
+                ProductOrigin::Fresh,
+                canonical,
+                &operation
+            ),
+            Err(CertificationError::Mismatch(
+                "compiler original owner replaced"
+            ))
+        ));
+        assert_eq!(selection.compiler_projection(&view).unwrap(), upgraded);
+    }
+
+    #[test]
     fn full_original_availability_is_read_only_and_checks_selected_authority() {
         let operation = InventoryOperation::new(Default::default());
         let original = full_native_fixture("Available", vec![(8, vec![]), (11, vec![])], 7);
@@ -8298,7 +8577,12 @@ pub(crate) mod tests {
         );
         let mut current_selection = CertifiedSourceSelection::default();
         current_selection
-            .admit_current(new.owner(), ProductOrigin::Fresh, &validation.inventory)
+            .admit_current(
+                new.owner(),
+                ProductOrigin::Fresh,
+                new.module_interface().unwrap(),
+                &validation.inventory,
+            )
             .unwrap();
         for version in [None, Some(new.owner().module_version.clone())] {
             assert_eq!(
@@ -8377,6 +8661,7 @@ pub(crate) mod tests {
             old_selection.clone().admit_current(
                 new.owner(),
                 ProductOrigin::Fresh,
+                new.module_interface().unwrap(),
                 &validation.inventory
             ),
             Err(CertificationError::Mismatch(
@@ -8435,6 +8720,7 @@ pub(crate) mod tests {
             .admit_current(
                 new_helper.owner(),
                 ProductOrigin::Fresh,
+                new_helper.module_interface().unwrap(),
                 &validation.inventory,
             )
             .unwrap();
@@ -8620,7 +8906,8 @@ pub(crate) mod tests {
 
     #[test]
     fn retained_promotion_rekeys_only_its_exact_source_owner() {
-        let old = inherited_owner("Promoted");
+        let original = full_native_fixture("Promoted", vec![(3, vec![])], 7);
+        let old = original.owner().clone();
         let mut staged = old.clone();
         staged.module_version = ModuleVersion([0; 32]);
         staged.product_sha256 = [9; 32];
@@ -8637,7 +8924,12 @@ pub(crate) mod tests {
         let operation = InventoryOperation::new(Default::default());
         let mut selection = CertifiedSourceSelection::default();
         selection
-            .admit_current(&staged, ProductOrigin::RetainedCore, &operation)
+            .admit_current(
+                &staged,
+                ProductOrigin::RetainedCore,
+                original.module_interface().unwrap(),
+                &operation,
+            )
             .unwrap();
         let versions = BTreeMap::from([(
             (staged.unit.clone(), staged.module.clone()),
@@ -12207,10 +12499,12 @@ pub(crate) mod tests {
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
                 let inventory = ArtifactInventory::default();
+                let mut private_entries = request.compiler_inputs().unwrap().artifacts.entries();
+                private_entries.extend(context.artifact_view().entries());
                 let private_view = inventory
                     .admit_recovery_selection(
                         &inventory.empty_view(),
-                        context.artifact_view().entries(),
+                        private_entries,
                         &BTreeSet::new(),
                     )
                     .unwrap();
