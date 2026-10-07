@@ -753,13 +753,21 @@ fn with_magic_hash(preamble: &str) -> String {
     format!("{{-# LANGUAGE MagicHash #-}}\n{preamble}")
 }
 
-/// Package-qualified imports keep the fixed scaffold independent of any home
-/// source with the same module name.
+/// The generated scaffold owns this syntax requirement. Place its pragma
+/// after the preamble's pragmas so an earlier NoPackageImports cannot disable
+/// the package-qualified import. The preamble owner supplies the module header.
 fn with_package_imports(preamble: &str) -> String {
-    if preamble.contains("PackageImports") {
-        return preamble.to_string();
-    }
-    format!("{{-# LANGUAGE PackageImports #-}}\n{preamble}")
+    let mut offset = 0;
+    let module_start = preamble
+        .split_inclusive('\n')
+        .find_map(|line| {
+            let start = offset;
+            offset += line.len();
+            line.trim_start().starts_with("module ").then_some(start)
+        })
+        .unwrap_or(0);
+    let (header, module) = preamble.split_at(module_start);
+    format!("{header}{{-# LANGUAGE PackageImports #-}}\n{module}")
 }
 
 /// Failure from the shared resident-turn boundary.
@@ -8677,10 +8685,18 @@ mod tests {
         assert!(!source
             .lines()
             .any(|line| line == "import qualified Tidepool.Internal.Resume as TidepoolResume"));
-        let enabled = format!("{{-# LANGUAGE PackageImports, MagicHash #-}}\n{preamble}");
-        let source = with_resume_import(&enabled);
-        assert_eq!(source.matches("PackageImports").count(), 1);
-        assert_eq!(source.matches("MagicHash").count(), 1);
+        for header in [
+            "-- PackageImports is mentioned only in this comment\n",
+            "{-# LANGUAGE NoPackageImports #-}\n",
+            "{-# LANGUAGE PackageImports, MagicHash #-}\n",
+        ] {
+            let source = with_resume_import(&format!("{header}{preamble}"));
+            assert!(source.contains("{-# LANGUAGE PackageImports #-}\nmodule Expr where"));
+            assert!(
+                source.find(header).unwrap()
+                    < source.rfind("{-# LANGUAGE PackageImports #-}").unwrap()
+            );
+        }
     }
 
     #[test]
