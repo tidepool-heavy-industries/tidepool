@@ -16310,11 +16310,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         workbench: &ResidentActorWorkbench<H, O>,
         context: crate::ActorSessionContext,
         expected_persistent_roots: usize,
+        stage: &'static str,
     ) where
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut last_counts = None;
+        let cleanup = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let counts = workbench
                     .access
@@ -16323,18 +16325,24 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                             session.parked_count(),
                             session.stowed_roots_count(),
                             session.persistent_roots_count(),
+                            session.value_handle_count(),
+                            session.outstanding_custody(),
                         ))
                     })
                     .await
                     .expect("inspect explicit installer cleanup");
-                if counts == (0, 0, expected_persistent_roots) {
+                last_counts = Some(counts);
+                if (counts.0, counts.1, counts.2) == (0, 0, expected_persistent_roots) {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
         })
-        .await
-        .expect("explicit installer continuations and payload roots retire");
+        .await;
+        assert!(
+            cleanup.is_ok(),
+            "explicit installer cleanup after {stage}: expected parked/stowed/persistent roots (0, 0, {expected_persistent_roots}); last parked/stowed/persistent/handles/custody={last_counts:?}"
+        );
     }
 
     #[tokio::test]
@@ -16498,6 +16506,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     .unwrap(),
             );
             let baseline_roots = session.persistent_roots_count();
+            eprintln!(
+                "explicit installer baseline persistent/handles/custody={:?}",
+                (
+                    baseline_roots,
+                    session.value_handle_count(),
+                    session.outstanding_custody()
+                ),
+            );
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
             let workbench = ResidentActorWorkbench::new(machines, source, None);
@@ -16517,8 +16533,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             assert!(tools.origin.is_explicit());
             drop(receiver);
             drop(tools);
-            wait_for_explicit_installation_cleanup(&workbench, context.clone(), baseline_roots)
-                .await;
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_roots,
+                "accepted application",
+            )
+            .await;
 
             let missing = workbench
                 .prepare_explicit_application(context.clone(), 2, vec![], installer.clone())
@@ -16530,8 +16551,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 matches!(missing, ResidentActorWorkbenchError::ActorProtocol(_)),
                 "a tools-only installer must be refused for public spawn: {missing:?}"
             );
-            wait_for_explicit_installation_cleanup(&workbench, context.clone(), baseline_roots)
-                .await;
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_roots,
+                "missing receiver refusal",
+            )
+            .await;
 
             let duplicate = workbench
                 .prepare_explicit_application(
@@ -16548,8 +16574,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 matches!(duplicate, ResidentActorWorkbenchError::ActorProtocol(_)),
                 "a second receiver registration must be refused: {duplicate:?}"
             );
-            wait_for_explicit_installation_cleanup(&workbench, context.clone(), baseline_roots)
-                .await;
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_roots,
+                "duplicate receiver refusal",
+            )
+            .await;
 
             let replacement = workbench
                 .prepare_explicit_tools(context.clone(), 4, vec![], application_installer.clone())
@@ -16561,7 +16592,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 matches!(replacement, ResidentActorWorkbenchError::ActorProtocol(_)),
                 "tools-only preparation must refuse a receiver-bearing installer: {replacement:?}"
             );
-            wait_for_explicit_installation_cleanup(&workbench, context, baseline_roots).await;
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context,
+                baseline_roots,
+                "tools-only receiver refusal",
+            )
+            .await;
             assert_eq!(
                 tidepool_extract_cmd::extract_spawn_count(),
                 before_preparations,
