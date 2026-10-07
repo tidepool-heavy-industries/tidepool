@@ -11785,6 +11785,23 @@ pub(crate) mod tests {
                 .selected_native_groups
                 .is_empty());
             assert!(request.compiler_original_products().unwrap().is_empty());
+            let effective = request.compiler_inputs().unwrap();
+            assert_eq!(
+                effective
+                    .metadata
+                    .artifacts
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        crate::artifact_inventory::ArtifactPayload::Original(product) =>
+                            Some(product.owner().clone()),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>(),
+                prior
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .collect::<BTreeSet<_>>(),
+            );
             let mut worker = admitted.clone();
             worker.sources[1].path = input.clone();
             let complete_evidence = serde_json::to_vec(&worker).unwrap();
