@@ -4812,7 +4812,7 @@ fn validate_exact_cached_closure_with_validation(
         .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
     let projected_originals = projected
         .entries
-        .iter()
+        .values()
         .filter_map(|entry| match &entry.payload {
             crate::artifact_inventory::ArtifactPayload::Original(product) => Some(product.clone()),
             _ => None,
