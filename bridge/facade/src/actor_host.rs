@@ -2462,11 +2462,12 @@ async fn run_owned(
     let result: Result<(), Box<dyn std::error::Error>> = async {
         loop {
             tokio::select! {
-                signal = operator_shutdown() => { signal?; break Ok(()); }
-                _ = &mut test_stop => break Ok(()),
+                biased;
                 failure = &mut coordination_failure => {
                     break Err(runtime_error(failure.unwrap_or_else(|_| "interactive application coordination owner stopped".into())));
                 }
+                signal = operator_shutdown() => { signal?; break Ok(()); }
+                _ = &mut test_stop => break Ok(()),
                 result = &mut applications_task => {
                     applications_finished = true;
                     break result.map_err(join_error)?.map_err(runtime_error);
