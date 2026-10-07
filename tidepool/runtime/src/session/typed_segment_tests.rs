@@ -1058,8 +1058,8 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     let originals = before.recovery_products();
     let original = originals
         .iter()
-        .find(|product| product.owner().module == "Tidepool.Duration")
-        .expect("the real cold compiler must retain the complete Duration carrier");
+        .find(|product| product.owner().module == "SegmentProbeSupport")
+        .expect("the real cold compiler must retain the complete probe carrier");
     let descriptor = before
         .artifact_view()
         .descriptors()
@@ -1087,30 +1087,38 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         full.groups
             .iter()
             .find(|group| {
-                group
-                    .binders()
-                    .iter()
-                    .any(|binder| binder.module == "Tidepool.Duration" && binder.occurrence == name)
+                group.binders().iter().any(|binder| {
+                    binder.module == "SegmentProbeSupport" && binder.occurrence == name
+                })
             })
             .unwrap()
             .original_ordinal()
     };
-    let seconds = NativeGroupKey {
+    let increment = NativeGroupKey {
         artifact: descriptor.id,
-        original_ordinal: operation_group("seconds"),
+        original_ordinal: operation_group("lateCarrierIncrement"),
     };
-    let minutes = NativeGroupKey {
+    let double = NativeGroupKey {
         artifact: descriptor.id,
-        original_ordinal: operation_group("minutes"),
+        original_ordinal: operation_group("lateCarrierDouble"),
     };
-    assert_ne!(seconds, minutes);
-    let mut selected_duration = before
+    let negate = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("lateCarrierNegate"),
+    };
+    assert_ne!(increment, double);
+    assert_ne!(increment, negate);
+    assert_ne!(double, negate);
+    let mut selected_carrier = before
         .artifact_view()
         .selected_native_groups()
         .into_iter()
         .filter(|key| key.artifact == descriptor.id)
         .collect::<BTreeSet<_>>();
-    assert!(selected_duration.is_empty());
+    assert!(!selected_carrier.contains(&increment));
+    assert!(!selected_carrier.contains(&double));
+    assert!(!selected_carrier.contains(&negate));
+    let initially_selected_carrier = selected_carrier.clone();
     let old_owners = originals
         .iter()
         .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
@@ -1134,12 +1142,12 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         &session.effects,
         &session.images,
         (0, 0),
-        "warm_native_duration_demand",
-        include_str!("fixtures/typed-segment-warm-duration.hs"),
+        "warm_native_carrier_demand",
+        include_str!("fixtures/typed-segment-warm-carrier.hs"),
         CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
         AuthorityChecks::NativeEmissionOwnersAbsent(&old_owners),
-        &SourceImports::from_specs(["qualified Tidepool.Duration as Duration"]),
+        &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
         None,
         |program| {
             for item in program.items() {
@@ -1150,7 +1158,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                 let products = item.native_products().unwrap();
                 let context = execution_context(item);
                 assert_retained(&context);
-                if native.item().binders() == ["warmDurationResult"] {
+                if native.item().binders() == ["warmCarrierResult"] {
                     assert!(warm.is_none());
                     warm = Some((
                         context.clone(),
@@ -1169,24 +1177,25 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                     artifact,
                     original_ordinal
                 }));
-                let duration_groups = selected
+                let carrier_groups = selected
                     .into_iter()
                     .filter(|key| key.artifact == descriptor.id)
                     .collect::<BTreeSet<_>>();
-                assert!(selected_duration.is_subset(&duration_groups));
-                selected_duration = duration_groups;
+                assert!(selected_carrier.is_subset(&carrier_groups));
+                selected_carrier = carrier_groups;
             }
         },
     )
     .unwrap();
     assert!(observed >= 2, "both warm authored actions must be observed");
-    assert!(selected_duration.contains(&seconds));
-    assert!(selected_duration.contains(&minutes));
-    assert!(selected_duration.len() < full.groups.len());
+    assert!(selected_carrier.contains(&increment));
+    assert!(selected_carrier.contains(&double));
+    assert!(!selected_carrier.contains(&negate));
+    assert!(selected_carrier.len() < full.groups.len());
     let (after, result_proof) = warm.unwrap();
     let result_binding = session
         .resident
-        .current_binding_in(session.public, "warmDurationResult")
+        .current_binding_in(session.public, "warmCarrierResult")
         .unwrap();
     assert_eq!(result_binding.1, result_proof.owner());
     assert!(Arc::ptr_eq(
@@ -1204,15 +1213,18 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         baseline_binding,
     );
     assert_retained(&after);
-    assert_eq!(
-        after
-            .artifact_view()
-            .selected_native_groups()
-            .into_iter()
-            .filter(|key| key.artifact == descriptor.id)
-            .collect::<BTreeSet<_>>(),
-        selected_duration
-    );
+    let result_selected_carrier = after
+        .artifact_view()
+        .selected_native_groups()
+        .into_iter()
+        .filter(|key| key.artifact == descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert!(initially_selected_carrier.is_subset(&result_selected_carrier));
+    assert!(result_selected_carrier.contains(&increment));
+    assert!(result_selected_carrier.contains(&double));
+    assert!(!result_selected_carrier.contains(&negate));
+    assert!(result_selected_carrier.len() < full.groups.len());
+    assert!(result_selected_carrier.is_subset(&selected_carrier));
     assert_eq!(session.observed(), [7]);
     session.assert_no_compiler_since_last_effect();
 }
