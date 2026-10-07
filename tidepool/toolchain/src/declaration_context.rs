@@ -6156,45 +6156,46 @@ mod tests {
             .unwrap()
         };
         let inventory = ArtifactInventory::default();
-        let view = inventory
-            .admit(
-                &inventory.empty_view(),
-                vec![
-                    ArtifactEntry::original(
-                        producer_sha256,
-                        crate::certified_products::fixture_finalized_product(
-                            support_product("Alpha"),
-                            producer_sha256,
-                        ),
-                    )
-                    .unwrap(),
-                    ArtifactEntry::original(
-                        producer_sha256,
-                        crate::certified_products::fixture_finalized_product(
-                            support_product("Beta"),
-                            producer_sha256,
-                        ),
-                    )
-                    .unwrap(),
-                    ArtifactEntry::interface(
-                        interface("Joined"),
-                        JoinedInterfaceRole::LexicalJoin,
-                        vec![identity("fixture", "Alpha"), identity("fixture", "Beta")],
-                    ),
-                    ArtifactEntry::interface(
-                        interface("Value"),
-                        JoinedInterfaceRole::ValueInterface,
-                        vec![identity("fixture", "Alpha")],
-                    ),
-                ],
+        let entries = vec![
+            ArtifactEntry::original(
+                producer_sha256,
+                crate::certified_products::fixture_finalized_product(
+                    support_product("Alpha"),
+                    producer_sha256,
+                ),
             )
+            .unwrap(),
+            ArtifactEntry::original(
+                producer_sha256,
+                crate::certified_products::fixture_finalized_product(
+                    support_product("Beta"),
+                    producer_sha256,
+                ),
+            )
+            .unwrap(),
+            ArtifactEntry::interface(
+                interface("Joined"),
+                JoinedInterfaceRole::LexicalJoin,
+                vec![identity("fixture", "Alpha"), identity("fixture", "Beta")],
+            ),
+            ArtifactEntry::interface(
+                interface("Value"),
+                JoinedInterfaceRole::ValueInterface,
+                vec![identity("fixture", "Alpha")],
+            ),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
+        let compiler_projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
         let context = ExactDeclarationContext {
             producer: producer_sha256,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            compiler_projection: CompilerInputProjection::from_issued_entries(&view.entries())
-                .unwrap(),
+            compiler_projection,
             inventory: view,
             lexical: vec![
                 ExactLexicalNode {
@@ -10181,11 +10182,11 @@ mod tests {
             )
             .unwrap();
             let inventory = ArtifactInventory::default();
-            let entries = vec![ArtifactEntry::interface(
+            let entries = vec![Arc::new(ArtifactEntry::interface(
                 interface,
                 JoinedInterfaceRole::LexicalJoin,
                 vec![],
-            )];
+            ))];
             let compiler_projection =
                 CompilerInputProjection::from_issued_entries(&entries).unwrap();
             Arc::new(ExactDeclarationContext {
@@ -10193,7 +10194,9 @@ mod tests {
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
                 template_imports: None,
                 compiler_projection,
-                inventory: inventory.admit(&inventory.empty_view(), entries).unwrap(),
+                inventory: inventory
+                    .admit_shared(&inventory.empty_view(), entries)
+                    .unwrap(),
                 lexical: if selected {
                     vec![ExactLexicalNode {
                         owner,
