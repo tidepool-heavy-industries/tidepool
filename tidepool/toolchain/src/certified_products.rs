@@ -405,6 +405,30 @@ pub(crate) struct OriginalNativeWitness {
 }
 
 impl OriginalNativeWitness {
+    fn validate_promoted_groups(
+        &self,
+        current: &[(&ProjectedGroup, Vec<PendingImportOwner>)],
+    ) -> CertResult<()> {
+        if current.len() != self.groups.len() {
+            return Err(CertificationError::Mismatch("shared original home groups"));
+        }
+        let mut ordinals = BTreeSet::new();
+        for (group, imports) in current {
+            if !ordinals.insert(group.original_ordinal()) {
+                return Err(CertificationError::Mismatch("shared original home groups"));
+            }
+            let original = self
+                .groups
+                .iter()
+                .find(|original| original.group.original_ordinal() == group.original_ordinal())
+                .ok_or(CertificationError::Mismatch("shared original home groups"))?;
+            if original.group() != *group || original.imports() != imports {
+                return Err(CertificationError::Mismatch("shared original home groups"));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn matches_original(
         &self,
         product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
@@ -1716,6 +1740,10 @@ impl CertifiedSourceSelection {
     }
 }
 
+/// Exact originals whose complete current promotion has been compared with custody.
+#[derive(Default)]
+struct ValidatedPromotionSharing(BTreeSet<CachedHomeOwner>);
+
 #[derive(Default)]
 struct SourceGroupMap {
     groups: BTreeMap<SourceGroupKey, (CachedHomeOwner, ProductOrigin)>,
@@ -1786,18 +1814,23 @@ impl SourceGroupMap {
         self.modules.contains(unit, module)
     }
 
-    fn promote(&mut self, versions: &BTreeMap<CachedHomeOwner, ModuleVersion>) -> CertResult<()> {
+    fn promote(
+        &mut self,
+        versions: &BTreeMap<CachedHomeOwner, ModuleVersion>,
+        sharing: &ValidatedPromotionSharing,
+    ) -> CertResult<()> {
         let staged = std::mem::take(&mut self.groups);
         for ((mut key_owner, ordinal, binder), (mut owner, origin)) in staged {
             if let Some(version) = versions.get(&key_owner) {
                 owner.module_version = version.clone();
                 key_owner.module_version = version.clone();
             }
-            self.insert_unique(
-                (key_owner, ordinal, binder),
-                (owner, origin),
-                SourceBinderPhase::NativePromotion,
-            )?;
+            let key = (key_owner, ordinal, binder);
+            if self.groups.contains_key(&key) && sharing.0.contains(&key.0) {
+                // Two validated provenance paths name one exact original membership.
+                continue;
+            }
+            self.insert_unique(key, (owner, origin), SourceBinderPhase::NativePromotion)?;
         }
         Ok(())
     }
@@ -6048,8 +6081,61 @@ pub(crate) fn certify_products_with_validation(
                 .clone();
         }
     }
+    // A stable derived owner can already be present in full custody even when
+    // only its canonical/Core carrier was offered to this compiler request.
+    // Prove complete equality before merging those two membership paths.
+    let mut sharing = ValidatedPromotionSharing::default();
+    for (owner, source_sha, interface, product_bytes, package_bytes, origin) in &module_bytes {
+        if *origin != ProductOrigin::RetainedCore {
+            continue;
+        }
+        let Some(original) = available_originals
+            .iter()
+            .find(|product| product.owner() == owner)
+        else {
+            continue;
+        };
+        let canonical = inherited_module_interfaces
+            .iter()
+            .find(|interface| interface.unit() == owner.unit && interface.module() == owner.module)
+            .ok_or(CertificationError::Mismatch("retained canonical identity"))?;
+        if original.interface_bytes() != interface
+            || original.product_bytes() != product_bytes
+            || original.package_imports_bytes() != package_bytes
+            || original.source_sha256() != Some(*source_sha)
+            || original
+                .module_interface()
+                .map(|interface| interface.certificate_bytes())
+                != Some(canonical.certificate_bytes())
+        {
+            return Err(CertificationError::Mismatch("shared original native bytes"));
+        }
+        let native = original
+            .original_native()
+            .ok_or(CertificationError::Mismatch(
+                "available original native witness",
+            ))?;
+        let resolved = &promoted[&(owner.unit.clone(), owner.module.clone())].groups;
+        let current = groups
+            .iter()
+            .filter(|(_, current, _, _)| current == owner)
+            .map(|(_, _, group, _)| {
+                let mut imports = resolved[&group.original_ordinal()].clone();
+                for import in &mut imports {
+                    if let PendingImportOwner::Source { owner, .. } = import {
+                        if let Some(version) = promotion_owners.get(owner) {
+                            owner.module_version = version.clone();
+                        }
+                    }
+                }
+                (group, imports)
+            })
+            .collect::<Vec<_>>();
+        native.validate_promoted_groups(&current)?;
+        sharing.0.insert(owner.clone());
+    }
     source_selection.promote(&promotion_versions)?;
-    source_groups.promote(&promotion_owners)?;
+    source_groups.promote(&promotion_owners, &sharing)?;
     let mut groups: Vec<PendingCertifiedGroup> = groups
         .into_iter()
         .map(|(origin, owner, group, imports)| {
@@ -6265,7 +6351,7 @@ pub(crate) fn certify_products_with_validation(
         .into_iter()
         .map(
             |(owner, source_sha, interface, product_bytes, package_bytes, origin)| {
-                if origin == ProductOrigin::Cached {
+                if origin == ProductOrigin::Cached || sharing.0.contains(&owner) {
                     if let Some(product) = available_originals.iter().find(|product| product.owner() == &owner) {
                         if product.interface_bytes() != interface || product.product_bytes() != product_bytes
                             || product.package_imports_bytes() != package_bytes || product.source_sha256() != Some(source_sha) {
@@ -8395,7 +8481,10 @@ pub(crate) mod tests {
         )]);
         selection.promote(&versions).unwrap();
         sources
-            .promote(&BTreeMap::from([(staged.clone(), ModuleVersion([3; 32]))]))
+            .promote(
+                &BTreeMap::from([(staged.clone(), ModuleVersion([3; 32]))]),
+                &ValidatedPromotionSharing::default(),
+            )
             .unwrap();
         let mut final_owner = staged.clone();
         final_owner.module_version = ModuleVersion([3; 32]);
@@ -8443,7 +8532,10 @@ pub(crate) mod tests {
             (staged.clone(), 3, binder.clone()),
             (staged.clone(), ProductOrigin::RetainedCore),
         );
-        let failure = sources.promote(&BTreeMap::from([(staged, original.module_version.clone())]));
+        let failure = sources.promote(
+            &BTreeMap::from([(staged, original.module_version.clone())]),
+            &ValidatedPromotionSharing::default(),
+        );
         let Err(CertificationError::DuplicateSourceBinder(conflict)) = failure else {
             panic!("convergent promotion must retain its exact conflict");
         };
@@ -11055,6 +11147,27 @@ pub(crate) mod tests {
             .extend_checked_original_products(canonical_producer, &prior)
             .unwrap();
 
+        let native = prior[0].original_native().unwrap();
+        let valid = parsed.products()[0]
+            .groups
+            .iter()
+            .map(|group| (group, vec![]))
+            .collect::<Vec<_>>();
+        native.validate_promoted_groups(&valid).unwrap();
+        assert!(native.validate_promoted_groups(&valid[..1]).is_err());
+        // The first collided binder can agree while a later group's body or
+        // import history differs. Sharing requires the entire native witness.
+        let changed =
+            ParsedModuleProducts::decode(&nonempty_sidecar(1), &empty_package_bundle()).unwrap();
+        let mut wrong_body = valid.clone();
+        wrong_body[1].0 = &changed.products()[0].groups[1];
+        assert!(native.validate_promoted_groups(&wrong_body).is_err());
+        let mut wrong_import = valid.clone();
+        wrong_import[1].1.push(PendingImportOwner::Retained {
+            identity: testing::identity("Val.G1", "captured"),
+            generation: 1,
+        });
+        assert!(native.validate_promoted_groups(&wrong_import).is_err());
         let canonical = prior[0].module_interface().unwrap().clone();
         packet.modules[0].origin = ProductOrigin::RetainedCore;
         packet.modules[0].module_version = None;
