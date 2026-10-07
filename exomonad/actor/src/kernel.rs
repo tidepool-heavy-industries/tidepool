@@ -705,10 +705,10 @@ impl HostedCellPublications {
             {
                 return true;
             }
-            if let Some(original) = control.provider_replay.get() {
-                entry.provider = Some(original.clone());
-                entry.control.take();
-                return true;
+            if control.provider_replay.get().is_some() {
+                // The exact journal replay already names the retained logical
+                // owner. Drop this physical transport entry, not that owner.
+                return false;
             }
             match &entry.provider {
                 Some(provider) => {

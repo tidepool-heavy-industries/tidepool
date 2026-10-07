@@ -168,10 +168,12 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
         ),
     ] {
         let (_, operation, invocation) = operation(actor.identity(), call);
-        assert!(snapshot
-            .dispatch(name.into(), arguments, invocation.clone(), None, None)
-            .await
-            .is_err());
+        assert!(matches!(
+            snapshot
+                .dispatch(name.into(), arguments, invocation.clone(), None, None)
+                .await,
+            Err(ResidentToolError::InvalidInvocation(_))
+        ));
         let owner = policy.retained_operation(invocation).unwrap();
         assert!(matches!(
             owner.finalization(),
@@ -228,16 +230,20 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
     .unwrap();
     actor.seal_hosted_work().await.unwrap();
     let (_, sealed, invocation) = operation(actor.identity(), "sealed");
-    assert!(snapshot
-        .dispatch(
-            "status".into(),
-            ToolArguments::Structured(json!({})),
-            invocation,
-            None,
-            None
-        )
-        .await
-        .is_err());
+    assert!(matches!(
+        snapshot
+            .dispatch(
+                "status".into(),
+                ToolArguments::Structured(json!({})),
+                invocation,
+                None,
+                None
+            )
+            .await,
+        Err(ResidentToolError::Invocation(
+            KernelInvocationFailure::Rejected { .. }
+        ))
+    ));
     host.output_committed(&sealed).await.unwrap();
     actor
         .shutdown(ActorTerminal {
@@ -249,16 +255,20 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
         .unwrap();
     task.await.unwrap();
     let (_, retired, invocation) = operation(actor.identity(), "retired");
-    assert!(snapshot
-        .dispatch(
-            "status".into(),
-            ToolArguments::Structured(json!({})),
-            invocation,
-            None,
-            None
-        )
-        .await
-        .is_err());
+    assert!(matches!(
+        snapshot
+            .dispatch(
+                "status".into(),
+                ToolArguments::Structured(json!({})),
+                invocation,
+                None,
+                None
+            )
+            .await,
+        Err(ResidentToolError::Invocation(
+            KernelInvocationFailure::Rejected { .. }
+        ))
+    ));
     host.output_committed(&retired).await.unwrap();
     host.output_aborted(&retired).await.unwrap();
 }
