@@ -112,6 +112,208 @@ fn escaped_scope_cannot_admit_after_parent_is_dropped_or_publishing() {
     assert!(scope.new_scope().is_err());
 }
 
+proptest::proptest! {
+    #[test]
+    fn scope_admission_matches_independent_ancestor_closure(
+        parents in proptest::collection::vec(0usize..32, 1..24),
+        close in 0usize..32,
+    ) {
+        let owner = ActorRef::first(crate::ActorId(1));
+        let root = InvocationWork::new(owner, reservation());
+        let mut nodes = vec![root.clone()];
+        let mut parent_indices = vec![None];
+        for selected in parents {
+            let parent = selected % nodes.len();
+            nodes.push(nodes[parent].new_scope().unwrap());
+            parent_indices.push(Some(parent));
+        }
+        let closed = close % nodes.len();
+        nodes[closed].close();
+        for (index, node) in nodes.iter().enumerate() {
+            let mut ancestor = Some(index);
+            let mut expected_open = true;
+            while let Some(current) = ancestor {
+                if current == closed { expected_open = false; }
+                ancestor = parent_indices[current];
+            }
+            proptest::prop_assert_eq!(node.with_admission(|| ()).is_ok(), expected_open);
+            if let Some(token) = node.scope_token() {
+                proptest::prop_assert_eq!(root.find_scope(owner, token).is_ok(), expected_open);
+            }
+        }
+    }
+}
+
+#[test]
+fn scope_transfer_gate_locks_shared_ancestry_once_and_refuses_closed_destination() {
+    let owner = ActorRef::first(crate::ActorId(1));
+    let root = InvocationWork::new(owner, reservation());
+    let source = root.new_scope().unwrap();
+    let target = root.new_scope().unwrap();
+    let calls = AtomicUsize::new(0);
+    source
+        .with_transfer_admission(&target, || calls.fetch_add(1, Ordering::Relaxed))
+        .unwrap();
+    source
+        .with_transfer_admission(&root, || calls.fetch_add(1, Ordering::Relaxed))
+        .unwrap();
+    source
+        .with_transfer_admission(&source, || calls.fetch_add(1, Ordering::Relaxed))
+        .unwrap();
+    target.close();
+    assert!(source
+        .with_transfer_admission(&target, || calls.fetch_add(1, Ordering::Relaxed))
+        .is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn nested_scope_cleanup_is_local_and_parent_cleanup_retains_confirmed_children() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let root = InvocationWork::new(owner, reservation());
+    let scope = root.new_scope().unwrap();
+    let nested = scope.new_scope().unwrap();
+    let (parent_job, parent_backend) = fixture.pending_command().await;
+    let (scope_job, scope_backend) = fixture.pending_command().await;
+    let (nested_job, nested_backend) = fixture.pending_command().await;
+    root.register_command(parent_job.clone()).unwrap();
+    root.register_command(scope_job.clone()).unwrap();
+    root.transfer_command_to_scope(&scope, &fixture.environment.commands, owner, &scope_job)
+        .unwrap();
+    nested.register_command(nested_job).unwrap();
+    fixture.cleanup(&scope).await;
+    assert_eq!(scope_backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(nested_backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(parent_backend.cancellations.load(Ordering::Relaxed), 0);
+    assert!(root.with_admission(|| ()).is_ok());
+    assert!(scope.with_admission(|| ()).is_err());
+    assert!(nested.with_admission(|| ()).is_err());
+    fixture.cleanup(&root).await;
+    assert_eq!(parent_backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(scope_backend.cancellations.load(Ordering::Relaxed), 1);
+    assert_eq!(nested_backend.cancellations.load(Ordering::Relaxed), 1);
+    let receipt = root.cleanup_observation().unwrap();
+    assert_eq!(receipt.scopes.len(), 1);
+    assert_eq!(receipt.scopes[0].1.scopes.len(), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn scope_worker_transfer_preserves_exact_identity_without_scope_retirement() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let root = InvocationWork::new(owner, reservation());
+    let scope = root.new_scope().unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = fixture
+        .kernel
+        .spawn_worker(None, Owner::new(send), crate::WorkerLifetime::ActorOwned)
+        .await
+        .unwrap();
+    let _worker_context = receive.await.unwrap();
+    let child = worker.identity();
+    scope.register_worker(worker.clone()).unwrap();
+    assert!(scope
+        .transfer_worker_to_actor(ActorRef::first(crate::ActorId(999)), child)
+        .is_err());
+    assert!(scope
+        .transfer_worker_to_actor(
+            owner,
+            ActorRef {
+                incarnation: crate::Incarnation(2),
+                ..child
+            }
+        )
+        .is_err());
+    scope.transfer_worker_to_actor(owner, child).unwrap();
+    scope.transfer_worker_to_actor(owner, child).unwrap();
+    fixture.cleanup(&root).await;
+    assert!(worker.terminal().get().is_none());
+    assert!(!scope.owns_worker(child));
+    worker
+        .retire_by(
+            owner,
+            ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "test resource completed".into(),
+                diagnostic: None,
+            },
+        )
+        .await
+        .unwrap();
+    fixture.finish().await;
+}
+
+#[test]
+fn scope_request_transfer_refuses_closed_parent_and_preserves_child_rollback() {
+    let owner = ActorRef::first(crate::ActorId(1));
+    let root = InvocationWork::new(owner, reservation());
+    let scope = root.new_scope().unwrap();
+    let target = root.new_scope().unwrap();
+    let requests = RequestRegistry::default();
+    let request = requests.reserve_for_cleanup_owner(
+        owner,
+        ActorRef::first(crate::ActorId(2)),
+        "scope request".into(),
+        true,
+        Some(scope.reservation_owner()),
+        scope.resource_cleanup_owner(),
+    );
+    target.close();
+    assert_eq!(
+        scope.transfer_request_to_owner(&target, &requests, owner, request),
+        Err(crate::ReplyError::CancellationRequested)
+    );
+    scope
+        .transfer_request_to_owner(&root, &requests, owner, request)
+        .unwrap();
+    assert_eq!(
+        requests.cleanup_owner_requests(owner, &root.resource_cleanup_owner()),
+        vec![request]
+    );
+    assert_eq!(
+        requests
+            .abort_unsubmitted(owner, &scope.reservation_owner())
+            .0,
+        vec![request]
+    );
+}
+
+#[tokio::test]
+async fn scope_realm_cleanup_failure_is_retained_for_parent_retry() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let root = InvocationWork::new(owner, reservation());
+    let scope = root.new_scope().unwrap();
+    let realm = RealmId::fresh();
+    let descriptor = ActorDescriptor::new(
+        "scope realm",
+        crate::ActorPlacement {
+            session: tidepool_repr::SessionId(99),
+            resource_scope: RealmId::ROOT,
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    );
+    let context = descriptor.session_context(owner);
+    assert!(root.register_scope_realm(context.clone(), realm).is_err());
+    assert!(scope
+        .register_scope_realm(
+            descriptor.session_context(ActorRef::first(crate::ActorId(999))),
+            realm
+        )
+        .is_err());
+    scope.register_scope_realm(context.clone(), realm).unwrap();
+    scope.register_scope_realm(context, realm).unwrap();
+    let first = root.cleanup(&fixture.environment, &fixture.kernel).await;
+    assert!(first.uncertainty().unwrap().contains("realm"));
+    assert_eq!(scope.state.lock().realms.len(), 1);
+    let retry = root.cleanup(&fixture.environment, &fixture.kernel).await;
+    assert!(retry.uncertainty().unwrap().contains("realm"));
+    assert_eq!(scope.state.lock().realms.len(), 1);
+    fixture.finish().await;
+}
+
 #[test]
 fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     let owner = ActorRef::first(crate::ActorId(1));
