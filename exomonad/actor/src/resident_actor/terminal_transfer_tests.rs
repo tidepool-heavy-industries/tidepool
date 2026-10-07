@@ -1,4 +1,4 @@
-//! Native reply acceptance followed by deterministic private-publication refusal.
+//! Request-local native reply helpers and private-publication settlement.
 
 use super::*;
 use crate::request::{ResponseFailure, ResponseObservation};
@@ -28,6 +28,21 @@ async fn execute(
 
 #[tokio::test]
 async fn accepted_native_reply_publication_refusal_settles_request_and_retires_actor() {
+    run_native_reply_case(NativeReplyCase::PublicationRefused).await;
+}
+
+#[tokio::test]
+async fn request_local_reply_helper_settles_exact_request_and_keeps_actor_live() {
+    run_native_reply_case(NativeReplyCase::Committed).await;
+}
+
+#[derive(Clone, Copy)]
+enum NativeReplyCase {
+    Committed,
+    PublicationRefused,
+}
+
+async fn run_native_reply_case(case: NativeReplyCase) {
     eval_harness::require_extract();
     // Fixed compiler-backed setup precedes the reply settlement deadline.
     // Readiness and retirement still use exact request/actor events.
@@ -196,6 +211,45 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
     // of compiling the fixed setup and activating the native receiver.
     tokio::time::timeout(std::time::Duration::from_secs(240), async {
         let control = crate::WorkbenchExecutionControl::untracked();
+        if let NativeReplyCase::Committed = case {
+            let reply = execute(&child, "respond (42 :: Int)", Some(control.clone()))
+                .await
+                .expect("request-local helper settles its actual typed request");
+            assert_eq!(reply.status, WorkbenchRunStatus::Committed, "{reply:?}");
+            assert_eq!(
+                reply
+                    .items
+                    .iter()
+                    .filter(|receipt| {
+                        receipt.terminal_transfer
+                            == Some(WorkbenchTerminalTransfer::ReplyAccepted)
+                    })
+                    .count(),
+                1,
+                "exactly one native terminal transfer"
+            );
+            assert_eq!(
+                forest
+                    .environment
+                    .requests
+                    .observe_response(requester.identity(), request),
+                Ok(ResponseObservation::Ready)
+            );
+            assert!(matches!(control.terminal_reply(), Some(Ok(_))));
+            assert!(child.terminal().get().is_none(), "reply does not retire the actor");
+            assert!(requester.terminal().get().is_none(), "requester remains live");
+            let continued = execute(&child, "pure True", None)
+                .await
+                .expect("actor accepts work after request settlement");
+            assert_eq!(continued.status, WorkbenchRunStatus::Committed, "{continued:?}");
+            let outcomes = forest.shutdown().await;
+            assert!(!outcomes.is_empty(), "the owning forest retires its roots");
+            assert!(
+                outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+                "hosted actor cleanup is independent of successful reply: {outcomes:?}"
+            );
+            return;
+        }
         control.publication_decision().terminate();
         assert!(!control
             .native_cancel()
