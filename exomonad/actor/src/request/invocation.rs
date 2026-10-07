@@ -1,6 +1,6 @@
 use super::{
     authorize_owner, CancellationReason, ReplyError, RequestId, RequestRegistry,
-    RequestReservationOwner, TargetState,
+    RequestReservationOwner, ResourceCleanupOwner, TargetState,
 };
 use crate::ActorRef;
 use serde::{Deserialize, Serialize};
@@ -30,14 +30,24 @@ impl RequestRegistry {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
+        if record.command_job.is_some() {
+            return Err(ReplyError::Unauthorized);
+        }
         if let Some(reservation) = reservation {
-            if record.command_job.is_some()
-                || record.reservation_owner.as_ref() != Some(reservation)
+            if record.reservation_owner.as_ref() != Some(reservation)
                 || !matches!(reservation, RequestReservationOwner::Workbench { .. })
             {
                 return Err(ReplyError::Unauthorized);
             }
-            record.invocation_detached = true;
+            match &record.cleanup_owner {
+                ResourceCleanupOwner::Invocation(current) if current == reservation => {
+                    record.cleanup_owner = ResourceCleanupOwner::Actor;
+                }
+                ResourceCleanupOwner::Actor => {}
+                _ => return Err(ReplyError::Unauthorized),
+            }
+        } else if record.cleanup_owner != ResourceCleanupOwner::Actor {
+            return Err(ReplyError::Unauthorized);
         }
         // A serialized record handler has no hosted invocation. Its existing
         // actor-owned request needs no transfer.
@@ -54,20 +64,66 @@ impl RequestRegistry {
         if !matches!(reservation, RequestReservationOwner::Workbench { .. }) {
             return Vec::new();
         }
+        self.cleanup_owner_requests(
+            owner,
+            &ResourceCleanupOwner::Invocation(reservation.clone()),
+        )
+    }
+
+    /// Include terminal rows so cleanup can retain actual target closure
+    /// evidence. Command settlement rows belong to their command's owner.
+    pub(crate) fn cleanup_owner_requests(
+        &self,
+        owner: ActorRef,
+        cleanup_owner: &ResourceCleanupOwner,
+    ) -> Vec<RequestId> {
         let state = self.state.lock();
         let mut requests = state
             .requests
             .iter()
             .filter_map(|(request, record)| {
                 (record.owner == owner
-                    && record.reservation_owner.as_ref() == Some(reservation)
-                    && !record.invocation_detached
+                    && &record.cleanup_owner == cleanup_owner
                     && record.command_job.is_none())
                 .then_some(*request)
             })
             .collect::<Vec<_>>();
         requests.sort_unstable();
         requests
+    }
+
+    pub(crate) fn request_cleanup_owner(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+    ) -> Result<ResourceCleanupOwner, ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if record.command_job.is_some() {
+            return Err(ReplyError::Unauthorized);
+        }
+        Ok(record.cleanup_owner.clone())
+    }
+
+    /// The source and destination resource owners must fence closure while
+    /// this comparison and transfer runs. Actor authority and construction
+    /// provenance do not move with cleanup membership.
+    pub(crate) fn transfer_request_cleanup_owner(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+        expected: &ResourceCleanupOwner,
+        destination: ResourceCleanupOwner,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if record.command_job.is_some() || &record.cleanup_owner != expected {
+            return Err(ReplyError::Unauthorized);
+        }
+        record.cleanup_owner = destination;
+        Ok(())
     }
 
     pub(crate) fn request_cleanup_state(
@@ -188,6 +244,165 @@ mod tests {
             registry.detach_invocation_request(owner, request, Some(&scope)),
             Err(ReplyError::Stale)
         );
+    }
+
+    #[test]
+    fn explicit_cleanup_lifetime_does_not_change_construction_provenance() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let construction = invocation(1);
+        let retry = invocation(1);
+        for cleanup_owner in [
+            ResourceCleanupOwner::Actor,
+            ResourceCleanupOwner::Scope(9),
+            ResourceCleanupOwner::Run,
+        ] {
+            let request = registry.reserve_for_cleanup_owner(
+                owner,
+                actor(2),
+                "request".into(),
+                true,
+                Some(construction.clone()),
+                cleanup_owner.clone(),
+            );
+            assert!(registry
+                .invocation_requests(owner, &construction)
+                .is_empty());
+            assert_eq!(
+                registry.cleanup_owner_requests(owner, &cleanup_owner),
+                vec![request]
+            );
+            assert!(registry.abort_unsubmitted(owner, &retry).0.is_empty());
+            assert_eq!(
+                registry.abort_unsubmitted(owner, &construction).0,
+                vec![request]
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_transfer_preserves_authority_and_abort_fence() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let construction = invocation(1);
+        let source = ResourceCleanupOwner::Scope(3);
+        let parent = ResourceCleanupOwner::Scope(2);
+        let request = registry.reserve_for_cleanup_owner(
+            owner,
+            actor(2),
+            "scope request".into(),
+            true,
+            Some(construction.clone()),
+            source.clone(),
+        );
+        assert_eq!(
+            registry.transfer_request_cleanup_owner(actor(2), request, &source, parent.clone()),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.transfer_request_cleanup_owner(
+                ActorRef {
+                    id: owner.id,
+                    incarnation: Incarnation(2)
+                },
+                request,
+                &source,
+                parent.clone(),
+            ),
+            Err(ReplyError::WrongIncarnation)
+        );
+        assert_eq!(
+            registry.transfer_request_cleanup_owner(owner, request, &source, parent.clone()),
+            Ok(())
+        );
+        assert!(registry.cleanup_owner_requests(owner, &source).is_empty());
+        assert_eq!(
+            registry.cleanup_owner_requests(owner, &parent),
+            vec![request]
+        );
+        assert_eq!(
+            registry.transfer_request_cleanup_owner(
+                owner,
+                request,
+                &source,
+                ResourceCleanupOwner::Actor
+            ),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.request_cleanup_owner(owner, request),
+            Ok(parent.clone())
+        );
+        assert_eq!(
+            registry.detach_invocation_request(owner, request, Some(&construction)),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.detach_invocation_request(owner, request, None),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.transfer_request_cleanup_owner(
+                owner,
+                request,
+                &parent,
+                ResourceCleanupOwner::Actor
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            registry.abort_unsubmitted(owner, &construction).0,
+            vec![request]
+        );
+    }
+
+    #[test]
+    fn cleanup_owner_selection_cannot_transfer_command_settlements() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let request = registry.reserve_command_settlement(owner, "job".into(), true);
+        assert!(registry
+            .cleanup_owner_requests(owner, &ResourceCleanupOwner::Actor)
+            .is_empty());
+        assert_eq!(
+            registry.transfer_request_cleanup_owner(
+                owner,
+                request,
+                &ResourceCleanupOwner::Actor,
+                ResourceCleanupOwner::Scope(1)
+            ),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.request_cleanup_owner(owner, request),
+            Err(ReplyError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn run_cleanup_rows_survive_requester_metadata_retirement() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve_for_cleanup_owner(
+            owner,
+            target,
+            "run request".into(),
+            true,
+            None,
+            ResourceCleanupOwner::Run,
+        );
+        registry.mark_queued(owner, target, request).unwrap();
+        assert_eq!(registry.forget_terminal_actor_metadata(owner), Ok(vec![]));
+        assert_eq!(
+            registry.cleanup_owner_requests(owner, &ResourceCleanupOwner::Run),
+            vec![request]
+        );
+        assert_eq!(
+            registry.request_cleanup_state(owner, request),
+            Ok(RequestCleanupState::Active)
+        );
+        assert!(registry.forget_terminal_actor_metadata(target).is_err());
     }
 
     #[test]

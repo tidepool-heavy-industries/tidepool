@@ -91,6 +91,17 @@ pub(crate) enum RequestReservationOwner {
     Route(WatchId),
 }
 
+/// Cleanup lifetime is independent of actor authority and request construction.
+/// Scope and run admission are checked by the existing resource owner before
+/// entering the request registry; these identities do not grant authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResourceCleanupOwner {
+    Actor,
+    Invocation(RequestReservationOwner),
+    Scope(i64),
+    Run,
+}
+
 /// Distinguishes a concrete workbench attempt from a replay identity. An
 /// execution id can recur when a caller retries the same logical operation;
 /// cleanup from that earlier attempt must never release the retry's requests.
@@ -350,8 +361,7 @@ struct RequestRecord {
     activation: Option<activation::ActivationRecord>,
     owner: ActorRef,
     reservation_owner: Option<RequestReservationOwner>,
-    /// Detachment changes lifetime, never the original reservation rollback fence.
-    invocation_detached: bool,
+    cleanup_owner: ResourceCleanupOwner,
     target: ActorRef,
     label: String,
     target_state: TargetState,
@@ -523,6 +533,7 @@ enum RequestAdmission {
         label: String,
         notify_owner: bool,
         reservation_owner: Option<RequestReservationOwner>,
+        cleanup_owner: ResourceCleanupOwner,
     },
     CommandSettlement {
         owner: ActorRef,
@@ -565,6 +576,7 @@ impl RequestStateTable {
             label,
             notify_owner,
             reservation_owner,
+            cleanup_owner,
             target_state,
             command_job,
             held_for_watch,
@@ -575,12 +587,14 @@ impl RequestStateTable {
                 label,
                 notify_owner,
                 reservation_owner,
+                cleanup_owner,
             } => (
                 owner,
                 target,
                 label,
                 notify_owner,
                 reservation_owner,
+                cleanup_owner,
                 TargetState::Reserved,
                 None,
                 false,
@@ -595,6 +609,7 @@ impl RequestStateTable {
                 format!("job {job}"),
                 notify_owner,
                 None,
+                ResourceCleanupOwner::Actor,
                 TargetState::Presented,
                 Some(job),
                 !notify_owner,
@@ -608,7 +623,7 @@ impl RequestStateTable {
                 activation: None,
                 owner,
                 reservation_owner,
-                invocation_detached: false,
+                cleanup_owner,
                 target,
                 label,
                 target_state,
@@ -1445,12 +1460,41 @@ impl RequestRegistry {
         notify_owner: bool,
         reservation_owner: Option<RequestReservationOwner>,
     ) -> RequestId {
+        let cleanup_owner = match &reservation_owner {
+            Some(reservation @ RequestReservationOwner::Workbench { .. }) => {
+                ResourceCleanupOwner::Invocation(reservation.clone())
+            }
+            _ => ResourceCleanupOwner::Actor,
+        };
+        self.reserve_for_cleanup_owner(
+            owner,
+            target,
+            label,
+            notify_owner,
+            reservation_owner,
+            cleanup_owner,
+        )
+    }
+
+    /// The resource owner's admission gate must remain held until this
+    /// reservation is registered. Construction provenance remains unchanged
+    /// when cleanup lifetime later transfers to another owner.
+    pub(crate) fn reserve_for_cleanup_owner(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+        notify_owner: bool,
+        reservation_owner: Option<RequestReservationOwner>,
+        cleanup_owner: ResourceCleanupOwner,
+    ) -> RequestId {
         self.state.lock().admit(RequestAdmission::Operation {
             owner,
             target,
             label,
             notify_owner,
             reservation_owner,
+            cleanup_owner,
         })
     }
 
@@ -2421,7 +2465,9 @@ impl RequestRegistry {
             .filter(|(_, record)| {
                 record.command_job.is_none()
                     && (record.target == actor
-                        || (record.owner == actor && record.target_state != TargetState::Closed))
+                        || (record.owner == actor
+                            && record.cleanup_owner != ResourceCleanupOwner::Run
+                            && record.target_state != TargetState::Closed))
             })
             .map(|(request, _)| *request)
             .collect::<Vec<_>>();
@@ -2454,7 +2500,10 @@ impl RequestRegistry {
         let released = state
             .requests
             .iter()
-            .filter_map(|(request, record)| (record.owner == actor).then_some(*request))
+            .filter_map(|(request, record)| {
+                (record.owner == actor && record.cleanup_owner != ResourceCleanupOwner::Run)
+                    .then_some(*request)
+            })
             .collect::<Vec<_>>();
         let mut notifications = Vec::new();
         for request in released {
