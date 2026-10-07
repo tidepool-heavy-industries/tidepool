@@ -8,7 +8,10 @@ impl Drop for Released {
     }
 }
 
-fn pending(thread: i64, dropped: Arc<AtomicUsize>) -> (Pending, tokio::sync::oneshot::Sender<()>) {
+fn pending(
+    thread: i64,
+    dropped: Arc<AtomicUsize>,
+) -> (Pending<()>, tokio::sync::oneshot::Sender<()>) {
     let (send, receive) = tokio::sync::oneshot::channel();
     let lease = Released(dropped);
     (
@@ -21,7 +24,7 @@ fn pending(thread: i64, dropped: Arc<AtomicUsize>) -> (Pending, tokio::sync::one
                     thread,
                     scopes: Vec::new(),
                     result: None,
-                    receipt: None,
+                    attachment: None,
                     terminal: Vec::new(),
                 }
             }),
@@ -55,7 +58,7 @@ async fn independent_frontiers_settle_in_reverse_order_without_losing_sibling() 
     let dropped = Arc::new(AtomicUsize::new(0));
     let (first, finish_first) = pending(1, dropped.clone());
     let (second, finish_second) = pending(2, dropped.clone());
-    let mut green = GreenThreads {
+    let mut green = GreenInvocation::<()> {
         pending: vec![first, second],
         ..Default::default()
     };
@@ -74,7 +77,7 @@ async fn cancelling_thread_discards_descendants_and_preserves_sibling_readiness(
     let (first, _finish_first) = pending(1, dropped.clone());
     let (nested, _finish_nested) = pending(3, dropped.clone());
     let (sibling, finish_sibling) = pending(2, dropped.clone());
-    let mut green = GreenThreads {
+    let mut green = GreenInvocation::<()> {
         threads: [(1, thread(0)), (2, thread(0)), (3, thread(1))].into(),
         pending: vec![first, nested, sibling],
         ..Default::default()
@@ -91,7 +94,7 @@ fn parent_cancellation_fences_every_child_and_releases_all_effect_futures() {
     let dropped = Arc::new(AtomicUsize::new(0));
     let (first, _finish_first) = pending(1, dropped.clone());
     let (second, _finish_second) = pending(2, dropped.clone());
-    let mut green = GreenThreads {
+    let mut green = GreenInvocation::<()> {
         threads: [(1, thread(0)), (2, thread(0))].into(),
         pending: vec![first, second],
         ..Default::default()
@@ -107,7 +110,7 @@ fn parent_cancellation_fences_every_child_and_releases_all_effect_futures() {
 
 #[test]
 fn join_validates_all_handles_and_observes_terminal_input_order() {
-    let mut green = GreenThreads {
+    let mut green = GreenInvocation::<()> {
         threads: [(1, thread(0)), (2, thread(0))].into(),
         ..Default::default()
     };

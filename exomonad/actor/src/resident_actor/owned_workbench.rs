@@ -2012,14 +2012,14 @@ where
             .as_ref()
             .is_some_and(|current| current.green.is_some())
         {
-            let (wait, receipt) = green::EffectReceipt::split(pending);
+            let (wait, receipt) = green_notebook::EffectReceipt::split(pending);
             let control = owned
                 .state
                 .cursor
                 .running
                 .as_ref()
                 .and_then(|current| current.green.as_ref())
-                .and_then(green::GreenThreads::active_wait_control)
+                .and_then(green::GreenInvocation::active_wait_control)
                 .unwrap_or(control);
             // Each child's expiry claim is independent. Whole-cell cancellation
             // is still observed by the original owned Green task.
@@ -2046,7 +2046,10 @@ where
                 .green
                 .as_mut()
                 .expect("async frontiers")
-                .enqueue_effect(std::mem::take(&mut current.scopes), receipt, operation);
+                .enqueue_frontier(
+                    std::mem::take(&mut current.scopes),
+                    Box::pin(async move { receipt.attach(operation.await) }),
+                );
             return self.owned_green_task(owned);
         }
         let observed_child = pending.wait.observe_after_resume();

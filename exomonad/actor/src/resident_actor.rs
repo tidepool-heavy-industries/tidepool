@@ -22,6 +22,7 @@ mod display_settlement;
 mod drain_wait;
 pub(crate) mod forms;
 pub(crate) mod green;
+mod green_notebook;
 #[cfg(test)]
 mod green_runtime_tests;
 mod inspection_wait;
@@ -3079,7 +3080,7 @@ struct WorkbenchFragmentExecution {
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
     scopes: Vec<scopes::ScopeFrame>,
-    green: Option<green::GreenThreads>,
+    green: Option<green::GreenInvocation<green_notebook::EffectCompletion>>,
 }
 
 impl WorkbenchFragmentExecution {
@@ -8366,7 +8367,7 @@ where
                             || current
                                 .green
                                 .as_ref()
-                                .and_then(green::GreenThreads::active_realm)
+                                .and_then(green::GreenInvocation::active_realm)
                                 .is_some() =>
                         {
                             owned_workbench::WorkbenchFragmentRequest::Scoped {
@@ -8383,7 +8384,7 @@ where
                                         current
                                             .green
                                             .as_ref()
-                                            .and_then(green::GreenThreads::active_realm)
+                                            .and_then(green::GreenInvocation::active_realm)
                                     })
                                     .expect("active native resource scope"),
                             }
@@ -8454,7 +8455,7 @@ where
                             current
                                 .green
                                 .as_ref()
-                                .and_then(green::GreenThreads::active_work)
+                                .and_then(green::GreenInvocation::active_work)
                         }) {
                         Some(work) => CurrentEffectOwner::Scoped {
                             base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
@@ -8462,7 +8463,7 @@ where
                             wait_control: current
                                 .green
                                 .as_ref()
-                                .and_then(green::GreenThreads::active_wait_control),
+                                .and_then(green::GreenInvocation::active_wait_control),
                         },
                         None => CurrentEffectOwner::Workbench(execution_state),
                     };
@@ -8486,7 +8487,7 @@ where
                             if current
                                 .green
                                 .as_ref()
-                                .and_then(green::GreenThreads::active_realm)
+                                .and_then(green::GreenInvocation::active_realm)
                                 .is_some()
                                 && current.scopes.is_empty() =>
                         {

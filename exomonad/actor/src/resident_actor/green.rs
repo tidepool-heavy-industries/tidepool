@@ -10,6 +10,16 @@ use std::task::Poll;
 #[path = "green_tests.rs"]
 mod tests;
 
+pub(super) enum GreenAdvance {
+    Start {
+        callback: RootCustody,
+        realm: RealmId,
+        token: i64,
+        work: Arc<InvocationWork>,
+    },
+    Wait,
+}
+
 pub(crate) enum GreenBoundary {
     Spawn {
         continuation: ResidentHole,
@@ -60,26 +70,17 @@ struct Thread {
     control: Arc<crate::WorkbenchExecutionControl>,
 }
 
-pub(super) struct EffectReceipt {
-    display: Option<WorkbenchDisplayOutput>,
-    success_disposition: WorkbenchOperationDisposition,
-    ordinal: usize,
-    effect: String,
-    started: std::time::Instant,
-    observed_child: Option<ActorRef>,
-}
-
-pub(super) struct Completion {
+pub(super) struct Completion<A> {
     pub thread: i64,
     pub scopes: Vec<scopes::ScopeFrame>,
-    pub result: Option<commands::CommandResolution>,
-    receipt: Option<EffectReceipt>,
+    pub result: Option<Result<ResidentOutcome, ResidentActorWorkbenchError>>,
+    pub attachment: Option<A>,
     terminal: Vec<(i64, ThreadStatus)>,
 }
 
-struct Pending {
+struct Pending<A> {
     thread: i64,
-    future: BoxFuture<'static, Completion>,
+    future: BoxFuture<'static, Completion<A>>,
 }
 
 struct Join {
@@ -89,15 +90,25 @@ struct Join {
     scopes: Vec<scopes::ScopeFrame>,
 }
 
-#[derive(Default)]
-pub(super) struct GreenThreads {
+pub(super) struct GreenInvocation<A> {
     active: i64,
     threads: BTreeMap<i64, Thread>,
-    pending: Vec<Pending>,
+    pending: Vec<Pending<A>>,
     joins: Vec<Join>,
 }
 
-impl GreenThreads {
+impl<A> Default for GreenInvocation<A> {
+    fn default() -> Self {
+        Self {
+            active: 0,
+            threads: BTreeMap::new(),
+            pending: Vec::new(),
+            joins: Vec::new(),
+        }
+    }
+}
+
+impl<A: Send + 'static> GreenInvocation<A> {
     pub(super) fn active_work(&self) -> Option<Arc<InvocationWork>> {
         self.threads
             .get(&self.active)
@@ -147,41 +158,36 @@ impl GreenThreads {
                 Completion {
                     thread,
                     scopes,
-                    receipt: None,
+                    attachment: None,
                     terminal: Vec::new(),
-                    result: Some(commands::CommandResolution {
-                        disposition: WorkbenchOperationDisposition::Committed,
-                        outcome,
-                        started_job: None,
-                        retained_job_binding: None,
-                    }),
+                    result: Some(outcome),
                 }
             }),
         });
     }
 
-    pub(super) fn enqueue_effect(
+    pub(super) fn enqueue_frontier(
         &mut self,
         scopes: Vec<scopes::ScopeFrame>,
-        receipt: EffectReceipt,
-        future: BoxFuture<'static, commands::CommandResolution>,
+        future: BoxFuture<'static, (Result<ResidentOutcome, ResidentActorWorkbenchError>, A)>,
     ) {
         let thread = self.active;
         self.pending.push(Pending {
             thread,
             future: Box::pin(async move {
+                let (result, attachment) = future.await;
                 Completion {
                     thread,
                     scopes,
-                    result: Some(future.await),
-                    receipt: Some(receipt),
+                    result: Some(result),
+                    attachment: Some(attachment),
                     terminal: Vec::new(),
                 }
             }),
         });
     }
 
-    pub(super) async fn next(&mut self) -> Result<Completion, ResidentActorWorkbenchError> {
+    pub(super) async fn next(&mut self) -> Result<Completion<A>, ResidentActorWorkbenchError> {
         if self.pending.is_empty() {
             return Err(protocol(
                 "async computations have no runnable effect frontier",
@@ -227,37 +233,20 @@ impl GreenThreads {
     }
 }
 
-impl EffectReceipt {
-    pub(super) fn split(pending: ParkedWorkbenchEffect) -> (OwnedWorkbenchWait, Self) {
-        let observed_child = pending.wait.observe_after_resume();
-        (
-            pending.wait,
-            Self {
-                display: pending.display,
-                success_disposition: pending.success_disposition,
-                ordinal: pending.ordinal,
-                effect: pending.effect,
-                started: pending.started,
-                observed_child,
-            },
-        )
-    }
-}
-
 impl<H, O> ResidentKernelBehavior<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    pub(super) fn prepare_green_boundary(
+    pub(super) fn prepare_green_operation<A: Send + 'static>(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         owner: &CurrentEffectOwner<'_>,
-        current: &mut WorkbenchFragmentExecution,
+        green: &mut GreenInvocation<A>,
+        active_scopes: &mut Vec<scopes::ScopeFrame>,
         boundary: GreenBoundary,
-    ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
-        let mut green = current.green.take().unwrap_or_default();
+    ) -> Result<GreenAdvance, ResidentActorWorkbenchError> {
         let runner = self.environment.runner.clone();
         let resume_context = context.clone();
         match boundary {
@@ -270,7 +259,7 @@ where
                     .map_err(|detail| protocol(&detail))?;
                 let token = work.scope_token().expect("native child resource identity");
                 green.enqueue(
-                    std::mem::take(&mut current.scopes),
+                    std::mem::take(active_scopes),
                     Box::pin(async move {
                         runner
                             .resume_value(resume_context, continuation, token)
@@ -288,25 +277,18 @@ where
                     },
                 );
                 green.active = token;
-                current.native_start =
-                    Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
-                        fragment: current
-                            .fragment
-                            .take()
-                            .expect("async child borrows original fragment"),
-                        callback,
-                        realm,
-                        token,
-                        work,
-                    });
-                current.green = Some(green);
-                return Ok(FragmentAdvance::ParkNative);
+                return Ok(GreenAdvance::Start {
+                    callback,
+                    realm,
+                    token,
+                    work,
+                });
             }
             GreenBoundary::Done {
                 continuation,
                 token,
             } => {
-                if green.active == 0 || token != green.active || !current.scopes.is_empty() {
+                if green.active == 0 || token != green.active || !active_scopes.is_empty() {
                     return Err(protocol(
                         "async completion does not match its current thread delimiter",
                     ));
@@ -325,7 +307,7 @@ where
                         Completion {
                             thread,
                             scopes: Vec::new(),
-                            receipt: None,
+                            attachment: None,
                             terminal: if closed.is_ok() {
                                 descendants
                                     .into_iter()
@@ -343,12 +325,7 @@ where
                             } else {
                                 Vec::new()
                             },
-                            result: closed.err().map(|error| commands::CommandResolution {
-                                outcome: Err(error),
-                                disposition: WorkbenchOperationDisposition::Unknown,
-                                started_job: None,
-                                retained_job_binding: None,
-                            }),
+                            result: closed.err().map(Err),
                         }
                     }),
                 });
@@ -363,7 +340,7 @@ where
                     ThreadStatus::Cancelled => 2,
                 };
                 green.enqueue(
-                    std::mem::take(&mut current.scopes),
+                    std::mem::take(active_scopes),
                     Box::pin(async move {
                         runner
                             .resume_value(resume_context, continuation, status)
@@ -376,7 +353,7 @@ where
                 threads,
             } => {
                 let winner = green.winner(&threads)?;
-                let scopes = std::mem::take(&mut current.scopes);
+                let scopes = std::mem::take(active_scopes);
                 match winner {
                     Some(winner) => green.enqueue(
                         scopes,
@@ -400,7 +377,7 @@ where
             } => {
                 if green.status(thread)? != ThreadStatus::Running {
                     green.enqueue(
-                        std::mem::take(&mut current.scopes),
+                        std::mem::take(active_scopes),
                         Box::pin(
                             async move { runner.resume_unit(resume_context, continuation).await },
                         ),
@@ -410,7 +387,7 @@ where
                     let work = green.threads[&thread].work.clone();
                     work.close();
                     let caller = green.active;
-                    let scopes = std::mem::take(&mut current.scopes);
+                    let scopes = std::mem::take(active_scopes);
                     let environment = self.environment.clone();
                     let kernel = kernel.clone();
                     green.pending.push(Pending {
@@ -427,30 +404,20 @@ where
                             };
                             let result = if caller == thread {
                                 drop(continuation);
-                                closed.err().map(|error| commands::CommandResolution {
-                                    outcome: Err(error),
-                                    disposition: WorkbenchOperationDisposition::Unknown,
-                                    started_job: None,
-                                    retained_job_binding: None,
-                                })
+                                closed.err().map(Err)
                             } else {
-                                Some(commands::CommandResolution {
-                                    outcome: match closed {
-                                        Ok(()) => {
-                                            runner.resume_unit(resume_context, continuation).await
-                                        }
-                                        Err(error) => Err(error),
-                                    },
-                                    disposition: WorkbenchOperationDisposition::Committed,
-                                    started_job: None,
-                                    retained_job_binding: None,
+                                Some(match closed {
+                                    Ok(()) => {
+                                        runner.resume_unit(resume_context, continuation).await
+                                    }
+                                    Err(error) => Err(error),
                                 })
                             };
                             Completion {
                                 thread: caller,
                                 scopes,
                                 result,
-                                receipt: None,
+                                attachment: None,
                                 terminal,
                             }
                         }),
@@ -458,27 +425,18 @@ where
                 }
             }
         }
-        current.green = Some(green);
-        Ok(FragmentAdvance::ParkGreen)
+        Ok(GreenAdvance::Wait)
     }
 
-    /// Apply one ready frontier under the original owned execution fence.
-    pub(super) fn apply_green_completion(
-        &mut self,
-        state: &mut WorkbenchExecutionState,
-        mut completion: Completion,
-    ) -> Result<bool, ResidentActorWorkbenchError> {
-        let current = state
-            .cursor
-            .running
-            .as_mut()
-            .expect("original async fragment");
-        let green = current
-            .green
-            .as_mut()
-            .expect("invocation-local async frontiers");
+    /// Apply native terminal metadata and wake joins in this invocation.
+    pub(super) fn apply_green_frontier<A: Send + 'static>(
+        &self,
+        context: &ActorSessionContext,
+        green: &mut GreenInvocation<A>,
+        mut completion: Completion<A>,
+    ) -> Result<Option<Completion<A>>, ResidentActorWorkbenchError> {
         if !completion.terminal.is_empty() {
-            for (thread, status) in completion.terminal {
+            for (thread, status) in std::mem::take(&mut completion.terminal) {
                 green
                     .threads
                     .get_mut(&thread)
@@ -490,7 +448,7 @@ where
                 match green.winner(&join.threads)? {
                     Some(winner) => {
                         let runner = self.environment.runner.clone();
-                        let context = state.effects.context.clone();
+                        let context = context.clone();
                         let previous = green.active;
                         green.active = join.thread;
                         green.enqueue(
@@ -507,64 +465,11 @@ where
                 }
             }
         }
-        let Some(mut result) = completion.result.take() else {
-            return Ok(false);
-        };
+        if completion.result.is_none() {
+            return Ok(None);
+        }
         green.active = completion.thread;
-        current.scopes = completion.scopes;
-        current.inflight_effect = None;
-        if let Some(receipt) = completion.receipt {
-            if let Some(binding) = result.retained_job_binding.take() {
-                if !state
-                    .effects
-                    .control
-                    .as_ref()
-                    .is_some_and(|control| control.cancellation_requested())
-                {
-                    match binding.accept() {
-                        Ok(binding) => {
-                            state.cursor.unit.recovered_bindings.push(binding.clone());
-                            current
-                                .fragment
-                                .as_mut()
-                                .expect("original command fragment")
-                                .retain_job_binding(binding);
-                        }
-                        Err(error) => {
-                            result.disposition = WorkbenchOperationDisposition::Unknown;
-                            result.outcome = Err(error);
-                        }
-                    }
-                }
-            }
-            record_workbench_operation(
-                &mut state.cursor.unit.operations,
-                state.request.execution_id(),
-                state.cursor.index,
-                receipt.ordinal,
-                &receipt.effect,
-                receipt.display,
-                receipt.started.elapsed(),
-                scoped_operation_disposition(receipt.success_disposition, result.disposition),
-            );
-            if let Some(job) = result.started_job {
-                current
-                    .fragment
-                    .as_mut()
-                    .expect("original command fragment")
-                    .record_started_job(job);
-            }
-            if result.outcome.is_ok() {
-                if let Some(child) = receipt.observed_child {
-                    self.record_child_observation(child);
-                }
-            }
-        }
-        match result.outcome {
-            Ok(outcome) => current.outcome = Some(outcome),
-            Err(error) => current.resume_failure = Some(error),
-        }
-        Ok(true)
+        Ok(Some(completion))
     }
 }
 
