@@ -2625,6 +2625,42 @@ pub fn compile_cell_program_admitted(
     ),
     CellCheckFailure,
 > {
+    compile_cell_program_admitted_inner(
+        req,
+        admission,
+        templates,
+        #[cfg(test)]
+        false,
+    )
+}
+
+#[cfg(test)]
+fn compile_cell_program_admitted_receipt_controls(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    compile_cell_program_admitted_inner(req, admission, templates, true)
+}
+
+fn compile_cell_program_admitted_inner(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+    #[cfg(test)] audit_receipts: bool,
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
     validate_cell_admitted_request(&req, &admission)?;
     let planned = admission.plan_reservation().ok_or_else(|| {
         CompileError::ExtractFailed(
@@ -2719,6 +2755,10 @@ pub fn compile_cell_program_admitted(
             .map_err(|error| {
             offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
         })?;
+    #[cfg(test)]
+    if audit_receipts {
+        audit_compiler_issued_item_receipts(&offer, scratch.path());
+    }
     let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
         offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
     })?;
@@ -3024,6 +3064,81 @@ fn decode_cell_program_turn(
             "complete native cell output has another item kind".into(),
         )),
     }
+}
+
+#[cfg(test)]
+fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path) {
+    use tidepool_toolchain::certified_products::CertificationError;
+    struct RestoreReceipt {
+        path: PathBuf,
+        original: Vec<u8>,
+    }
+    impl Drop for RestoreReceipt {
+        fn drop(&mut self) {
+            std::fs::write(&self.path, &self.original).expect("restore original compiler receipt");
+        }
+    }
+    let before = tidepool_extract_cmd::extract_spawn_count();
+    let valid = offer
+        .admit_cell_program(root)
+        .expect("unchanged original worker receipts must admit");
+    let index = valid
+        .items()
+        .iter()
+        .find(|item| item.native().is_some())
+        .expect("witness controls require a real native entry")
+        .checked_item()
+        .index();
+    let path = root.join(format!("item-{index}")).join("checked-item.cbor");
+    let original = std::fs::read(&path).unwrap();
+    let receipt: CborValue = ciborium::de::from_reader(original.as_slice()).unwrap();
+    let fields = receipt.as_array().unwrap();
+    assert_eq!(fields.len(), 9);
+    assert_eq!(fields[0].as_text(), Some("TPEXACTITEM"));
+    assert_eq!(fields[1].as_text(), Some("2"));
+    assert_eq!(fields[8].as_array().unwrap().len(), 4);
+    for field in 0..4 {
+        let restore = RestoreReceipt {
+            path: path.clone(),
+            original: original.clone(),
+        };
+        let mut changed = receipt.clone();
+        let proof = changed.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        match field {
+            0 => proof[0] = CborValue::Text("0".repeat(64)),
+            1 | 2 => {
+                let identity = proof[field].as_array_mut().unwrap();
+                let occurrence = identity[2].as_text().unwrap();
+                identity[2] = CborValue::Text(format!("{occurrence}_substituted"));
+            }
+            3 => {
+                let ordinal = u32::try_from(proof[3].as_integer().unwrap()).unwrap();
+                proof[3] = CborValue::Integer((u64::from(ordinal ^ 1)).into());
+            }
+            _ => unreachable!(),
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
+        assert_ne!(bytes, original);
+        std::fs::write(&path, bytes).unwrap();
+        let refusal = offer
+            .admit_cell_program(root)
+            .expect_err("a substituted ITEM2 witness must refuse");
+        assert!(
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), CertificationError::Mismatch(_))),
+            "field {field} must reach the typed native-entry seal guard: {refusal:?}"
+        );
+        drop(restore);
+        offer
+            .admit_cell_program(root)
+            .expect("restored actual worker bytes must admit independently");
+    }
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        before,
+        "receipt controls revalidate original outputs without another compiler request"
+    );
 }
 
 /// Compile only the next item of a runtime-owned completed prefix. Body,

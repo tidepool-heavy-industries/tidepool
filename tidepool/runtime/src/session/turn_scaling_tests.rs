@@ -1019,21 +1019,22 @@ where
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = view.injected_module_names();
     let compile_cell = || {
-        compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
+        let request = CellCheckRequest {
+            exact_context: view.exact_compile_context(),
+            session_id: Some(view.session()),
+            cell_text: source,
+            template: &template,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            compile_generation: admission.initial_value_generation().0,
+            compile_view_evidence: "",
+        };
+        if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+            compile_cell_program_admitted_receipt_controls(request, admission.clone(), &templates)
+        } else {
+            compile_cell_program_admitted(request, admission.clone(), &templates)
+        }
     };
     if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
         struct RestoreDeployment(std::ffi::OsString);
@@ -1201,7 +1202,9 @@ where
                     &format!("{label}.native_bind"),
                     Some(index),
                     |resident| {
-                        if bound.len() == 1 {
+                        if bound.is_empty() {
+                            resident.run_with_sites(label, compiled.code())
+                        } else if bound.len() == 1 {
                             resident.run_bind_with_sites(
                                 &bound[0].name,
                                 compiled.code(),
@@ -1209,7 +1212,6 @@ where
                                 reservation.generation(),
                             )
                         } else {
-                            assert!(!bound.is_empty());
                             resident.run_projected_bind_with_sites(
                                 label,
                                 compiled.code(),

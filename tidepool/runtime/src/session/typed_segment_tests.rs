@@ -696,3 +696,59 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
     ).unwrap();
     assert_eq!(session.observed(), [4]);
 }
+
+#[test]
+fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
+    let mut session = SemanticSession::new();
+    let before = session.resident.binding_names_in(session.public);
+    session
+        .execute("zero_let", "let _ = (undefined :: Int)", 0)
+        .unwrap();
+    assert_eq!(session.resident.binding_names_in(session.public), before);
+    assert!(session.observed().is_empty());
+    session
+        .execute(
+            "zero_let_order",
+            "record 1; let _ = (undefined :: Int); record 2",
+            0,
+        )
+        .unwrap();
+    assert_eq!(session.observed(), [1, 2]);
+}
+
+#[test]
+fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
+    let mut session = SemanticSession::new();
+    let before = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let error = session.execute("zero_bang_let", "{-# LANGUAGE BangPatterns #-}\nrecord 1\nlet !_ = (error \"strict discarded let\" :: Int)\nrecord 2", 1).unwrap_err();
+    assert!(
+        is_raised_exception(&error),
+        "the native strict wildcard must actually force: {error:?}"
+    );
+    assert_eq!(session.observed(), [1]);
+    session.assert_no_compiler_since_last_effect();
+    assert_eq!(
+        session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap(),
+        before
+    );
+    session
+        .execute("zero_bang_retry", "record (3 :: Int)", 0)
+        .unwrap();
+    assert_eq!(session.observed(), [1, 3]);
+}
+
+#[test]
+fn zero_capture_action_runs_once_before_the_next_item() {
+    let mut session = SemanticSession::new();
+    session
+        .execute("zero_action", "_ <- record 1; record 2", 0)
+        .unwrap();
+    assert_eq!(session.observed(), [1, 2]);
+    session.assert_no_compiler_since_last_effect();
+}

@@ -798,7 +798,6 @@ fn decode_typed_segment_plans(
                     if *value == generation
                         && step.is_empty()
                         && probe.is_empty()
-                        && !captures.is_empty()
                         && captures == parsed.binders()
                         && parsed.binding_form()
                             == Some(crate::cell_plan::ParsedCellBindingForm::Let) =>
@@ -3122,7 +3121,9 @@ impl CheckedItemOffer {
                         if original.owner() == matches[0].owner())
                 })
             {
-                return Err(failure("typed native root, canonical original group or entry differs"));
+                return Err(CompileError::CompilerEvidence(Box::new(
+                    crate::certified_products::CertificationError::Mismatch("typed native entry"),
+                )));
             }
             Some(CheckedTypedEntry {
                 plan_digest: plan.digest.clone(),
