@@ -363,11 +363,6 @@ instance Display a => Display (WatchState a) where
   displayTreePrec precedence (WatchReady value) = application precedence "WatchReady" [displayTreePrec 11 value]
   displayTreePrec precedence (WatchUnavailable reason) = application precedence "WatchUnavailable" [displayTreePrec 11 reason]
 
-instance Display a => Display (Settlement a) where
-  displayTree = displayTreePrec 0
-  displayTreePrec precedence (ReplyAvailable value) = application precedence "ReplyAvailable" [displayTreePrec 11 value]
-  displayTreePrec precedence (ReplyUnavailable reason) = application precedence "ReplyUnavailable" [displayTreePrec 11 reason]
-
 instance Display a => Display (ProgressState a) where
   displayTree = displayTreePrec 0
   displayTreePrec _ ProgressPending = TextLeaf "ProgressPending"
