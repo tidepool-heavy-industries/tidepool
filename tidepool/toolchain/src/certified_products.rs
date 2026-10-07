@@ -290,7 +290,7 @@ pub(crate) struct CertifiedProducts {
     pub module_interfaces: Vec<CertifiedModuleInterface>,
     pub value_interfaces: Vec<crate::recovery_artifacts::CertifiedValueInterface>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
-    pub source_selection: CertifiedSourceSelection,
+    pub(crate) source_selection: CertifiedSourceSelection,
 }
 
 /// Assembly authority issued only after complete native promotion certification.
