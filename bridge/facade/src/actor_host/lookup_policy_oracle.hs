@@ -14,7 +14,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Tidepool.Agent.Contract (AsServerT, ToolDispatchSuccess (..), compileTools, dispatch)
-import Tidepool.Aeson.Value (toJSON)
+import Tidepool.Aeson.Value (object, toJSON, (.=))
 import Tidepool.Lookup
 import Tidepool.Effects.Core (Lookup (..))
 import qualified Tidepool.Lookup.Tools as Tools
@@ -57,7 +57,7 @@ main = do
       hostedTools = Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup]))
       hosted = either (error . show) id (compileTools hostedTools)
       (hostedRequests, hostedResult) = observe
-        (dispatch hosted "lookup" (toJSON (Tools.LookupArguments ["Cmd.quiet"])))
+        (dispatch hosted "lookup" (object ["queries" .= (["Cmd.quiet"] :: [T.Text])]))
       expectedPresentation = Tools.renderResult
         (LookupResult "Cmd.quiet" (LookupFound [entry "Cmd.quiet"] False))
   check "cell lookup constructor matches the shipped hosted tool request"
