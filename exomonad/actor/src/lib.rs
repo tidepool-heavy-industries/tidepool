@@ -87,6 +87,8 @@ pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
+pub use exomonad_worktree::WorkspaceAccess;
+
 pub use fork_workspace::{
     WorkspaceAdmission, WorkspaceAdmissionError, WorkspaceAdmissionFuture,
     WorkspaceCustody, ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedWorkspaceAttachment,

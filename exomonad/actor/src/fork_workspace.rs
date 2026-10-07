@@ -13,13 +13,10 @@ use tidepool_bridge_effects::{WtDirtyPolicy, WtWorktreeHandle, WtWorktreeSpec};
 
 use crate::ActorRef;
 
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
-pub struct WorkspaceHandle(pub String);
-
 #[derive(Debug, Clone, tidepool_bridge_derive::FromHaskell)]
 pub enum SpawnWorkspaceWire {
     SameDirectory,
-    ExistingDirectory(WorkspaceHandle),
+    ExistingDirectory(tidepool_bridge_effects::WtWorkspaceHandle),
     ForkDirectory(tidepool_bridge_effects::WtWorktreeSource),
 }
 

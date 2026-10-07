@@ -71,7 +71,8 @@ impl std::ops::Deref for Model {
 pub enum WorkerLifetime {
     InvocationOwned,
     ActorOwned,
-    SwarmOwned,
+    RunOwned,
+    InScope(tidepool_bridge_effects::ResourceScopeId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
@@ -161,6 +162,7 @@ pub enum ActorLaunchRoleWire {
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
 pub enum ActorEffectKeyWire {
+    EffectResourceScopes,
     EffectReplies,
     EffectWatches,
     EffectForks,
@@ -189,6 +191,7 @@ pub enum ActorEffectKeyWire {
 impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
     fn from(value: ActorEffectKeyWire) -> Self {
         match value {
+            ActorEffectKeyWire::EffectResourceScopes => Self::ResourceScopes,
             ActorEffectKeyWire::EffectReplies => Self::Replies,
             ActorEffectKeyWire::EffectWatches => Self::Watches,
             ActorEffectKeyWire::EffectForks => Self::Forks,
@@ -430,7 +433,7 @@ impl ResidentActorStart {
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()))
         .with_model(model).with_fork_effort(effort).with_instructions(instructions)
         .with_fork_budget(limits);
-        if lifetime != WorkerLifetime::SwarmOwned {
+        if lifetime != WorkerLifetime::RunOwned {
             descriptor = descriptor.with_supervisor_parent(parent_actor);
         }
         Ok(Self { parent_hole, child: CapturedChildLaunch {
@@ -595,7 +598,7 @@ impl ResidentActorStart {
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
         .with_source_imports(source_imports);
-        if lifetime != WorkerLifetime::SwarmOwned {
+        if lifetime != WorkerLifetime::RunOwned {
             descriptor = descriptor.with_supervisor_parent(parent_actor);
         }
         if context_fork {
@@ -1071,7 +1074,7 @@ mod tests {
 /// Static launch inputs after actor authority attenuation. The host resolves its
 /// provider defaults and frozen prompts; the actor runtime owns admission.
 pub struct WorkerLaunchRequest {
-    pub role: crate::EffectiveRole,
+    pub capabilities: crate::ActorCapabilities,
     pub model: Option<Model>,
     pub effort: Option<ForkEffort>,
     pub context: ForkContext,

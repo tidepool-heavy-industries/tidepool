@@ -12,6 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 exomonad-model.workspace = true
+exomonad-worktree.workspace = true
 blake3.workspace = true
 futures-util.workspace = true
 parking_lot.workspace = true
