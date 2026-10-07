@@ -3752,17 +3752,20 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
-    let mut homes = BTreeMap::new();
-    for product in available.values() {
+    use crate::artifact_inventory::NativeGroupKey;
+    let mut native_ids = std::collections::HashMap::new();
+    let mut home_modules = BTreeSet::new();
+    for (id, product) in available {
         let owner = product.owner();
-        if homes
-            .insert((owner.unit.clone(), owner.module.clone()), *product)
-            .is_some_and(|previous| previous.owner() != owner)
+        if native_ids
+            .insert(owner.clone(), *id)
+            .is_some_and(|old| old != *id)
         {
             return Err(CertificationError::Mismatch(
-                "ambiguous inherited/current home module",
+                "ambiguous exact original native identity",
             ));
         }
+        home_modules.insert((owner.unit.clone(), owner.module.clone()));
     }
     let mut originals = BTreeMap::new();
     for key in selected {
@@ -3784,48 +3787,22 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
             .iter()
             .find(|group| group.group().original_ordinal() == key.original_ordinal)
             .ok_or(CertificationError::Mismatch("selected original group"))?;
-        if originals
-            .insert(
-                (
-                    witness.owner.unit.clone(),
-                    witness.owner.module.clone(),
-                    key.original_ordinal,
-                ),
-                (group, witness),
-            )
-            .is_some()
-        {
+        if originals.insert(*key, (group, witness)).is_some() {
             return Err(CertificationError::Mismatch(
                 "duplicate selected original ordinal",
             ));
         }
     }
-    let mut sources = SourceGroupMap::new();
-    for (group, _) in originals.values() {
-        for binder in group.group.binders() {
-            if sources
-                .insert(
-                    (
-                        group.owner.unit.clone(),
-                        group.owner.module.clone(),
-                        group.group.original_ordinal(),
-                        binder.clone(),
-                    ),
-                    (group.owner.clone(), ProductOrigin::Cached),
-                )
-                .is_some()
-            {
-                return Err(CertificationError::Mismatch("duplicate source binder"));
-            }
-        }
-    }
     let mut inherited = BTreeSet::new();
     for group in current_groups {
-        let key = (
-            group.owner.unit.clone(),
-            group.owner.module.clone(),
-            group.group.original_ordinal(),
-        );
+        let key = NativeGroupKey {
+            artifact: *native_ids
+                .get(group.owner())
+                .ok_or(CertificationError::Mismatch(
+                    "current group has no exact original identity",
+                ))?,
+            original_ordinal: group.group().original_ordinal(),
+        };
         let (original, _) = originals.get(&key).ok_or(CertificationError::Mismatch(
             "current group outside selected closure",
         ))?;
@@ -3843,7 +3820,10 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
         }
     }
     let mut additional = Vec::new();
-    for (key, (group, witness)) in originals {
+    // Package refusal uses the complete admitted home census. Native source
+    // membership uses exact artifact keys, never a module-only source map.
+    let package_sources = SourceGroupMap::new();
+    for (key, (group, witness)) in &originals {
         for import in group.imports() {
             match import {
                 PendingImportOwner::Source {
@@ -3851,18 +3831,16 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
                     original_ordinal,
                     binder,
                 } => {
-                    if homes
-                        .get(&(owner.unit.clone(), owner.module.clone()))
-                        .is_none_or(|product| product.owner() != owner)
-                        || sources
-                            .get(&(
-                                owner.unit.clone(),
-                                owner.module.clone(),
-                                *original_ordinal,
-                                binder.clone(),
-                            ))
-                            .is_none_or(|(selected_owner, _)| selected_owner != owner)
-                    {
+                    let artifact = native_ids
+                        .get(owner)
+                        .ok_or(CertificationError::Mismatch("source binder/group closure"))?;
+                    let required = NativeGroupKey {
+                        artifact: *artifact,
+                        original_ordinal: *original_ordinal,
+                    };
+                    if originals.get(&required).is_none_or(|(original, _)| {
+                        original.owner != *owner || !original.group.binders().contains(binder)
+                    }) {
                         return Err(CertificationError::Mismatch("source binder/group closure"));
                     }
                 }
@@ -3879,7 +3857,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
                     interface_digest,
                     ..
                 } => {
-                    if homes.contains_key(&(unit.clone(), module.clone())) {
+                    if home_modules.contains(&(unit.clone(), module.clone())) {
                         return Err(CertificationError::Mismatch(
                             "home owner downgraded to package",
                         ));
@@ -3889,7 +3867,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
                         module,
                         binder,
                         interface_digest,
-                        &sources,
+                        &package_sources,
                         &witness.packages,
                         validation,
                     )?;
@@ -3897,7 +3875,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
                 PendingImportOwner::Retained { .. } => {}
             }
         }
-        if !inherited.contains(&key) {
+        if !inherited.contains(key) {
             additional.push(group.admitted());
         }
     }
