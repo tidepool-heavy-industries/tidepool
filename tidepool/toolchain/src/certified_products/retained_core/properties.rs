@@ -1,6 +1,9 @@
+//! Metamorphic checks for prevalidated retained-identity hash inputs. These
+//! tests do not establish import authority, product validation, or certifier
+//! selection and publication.
 use super::*;
 use proptest::prelude::*;
-use proptest::test_runner::{FileFailurePersistence, ProptestConfig};
+use proptest::test_runner::FileFailurePersistence;
 use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion, SymbolIdentity};
 
 const MAX_NODES: usize = 6;
@@ -9,9 +12,13 @@ type Key = (String, String);
 #[derive(Clone, Debug)]
 struct LogicalNode {
     body: u8,
-    interface: u8,
+    skinny_interface: u8,
+    product: u8,
+    package: u8,
     dependencies: Vec<usize>,
     external_history: u8,
+    external_binder: u8,
+    declared_ordinal: u32,
     binder: u8,
 }
 
@@ -31,27 +38,27 @@ fn identity(unit: &str, module: &str, occurrence: &str) -> SymbolIdentity {
     }
 }
 
-fn external_owner(history: u8) -> PendingImportOwner {
+fn external_owner(history: u8, binder: u8) -> PendingImportOwner {
     let mut module_version = [0; 32];
     module_version[0] = history;
-    let mut interface = [0; 32];
-    interface[0] = history.wrapping_add(31);
-    let mut product = [0; 32];
-    product[0] = history.wrapping_add(67);
     PendingImportOwner::Source {
         owner: CachedHomeOwner {
             unit: "historical-unit".into(),
             module: "External".into(),
             module_version: ModuleVersion(module_version),
-            skinny_iface_sha256: interface,
-            product_sha256: product,
+            skinny_iface_sha256: [31; 32],
+            product_sha256: [67; 32],
         },
-        original_ordinal: 101 + u32::from(history),
-        binder: identity("historical-unit", "External", &format!("v{history}")),
+        original_ordinal: 101,
+        binder: identity(
+            "historical-unit",
+            "External",
+            &format!("v{history}-binder-{binder}"),
+        ),
     }
 }
 
-fn local_owner(from: usize, to: usize, binder: u8) -> PendingImportOwner {
+fn local_owner(to: usize, target: &LogicalNode) -> PendingImportOwner {
     PendingImportOwner::Source {
         owner: CachedHomeOwner {
             unit: "model-unit".into(),
@@ -59,14 +66,14 @@ fn local_owner(from: usize, to: usize, binder: u8) -> PendingImportOwner {
             // The selected local source is promoted in this graph, so its
             // unissued version must not feed back into the retained identity.
             module_version: ModuleVersion([0; 32]),
-            skinny_iface_sha256: [to as u8; 32],
-            product_sha256: [from as u8; 32],
+            skinny_iface_sha256: [target.skinny_interface; 32],
+            product_sha256: [target.product; 32],
         },
-        original_ordinal: 17 + to as u32,
+        original_ordinal: target.declared_ordinal,
         binder: identity(
             "model-unit",
             &format!("M{to}"),
-            &format!("edge-{from}-{to}-binder-{binder}"),
+            &format!("value-{}", target.binder),
         ),
     }
 }
@@ -77,18 +84,21 @@ fn promote(graph: &LogicalGraph, reverse_insertion: bool) -> BTreeMap<Key, Promo
         let mut imports = logical
             .dependencies
             .iter()
-            .map(|to| local_owner(index, *to, logical.binder))
+            .map(|to| local_owner(*to, &graph[*to]))
             .collect::<Vec<_>>();
         // Every node has an external, historically-versioned owner, even when
         // its local dependency set is empty.
-        imports.push(external_owner(logical.external_history));
+        imports.push(external_owner(
+            logical.external_history,
+            logical.external_binder,
+        ));
         rows.push((
             module_key(index),
             PromotedModule {
                 canonical_sha256: [logical.body; 32],
-                product_sha256: [logical.interface; 32],
-                package_sha256: [logical.interface.wrapping_add(1); 32],
-                groups: BTreeMap::from([(17, imports)]),
+                product_sha256: [logical.product; 32],
+                package_sha256: [logical.package; 32],
+                groups: BTreeMap::from([(logical.declared_ordinal, imports)]),
             },
         ));
     }
@@ -100,6 +110,39 @@ fn promote(graph: &LogicalGraph, reverse_insertion: bool) -> BTreeMap<Key, Promo
 
 fn versions(graph: &LogicalGraph) -> BTreeMap<Key, ModuleVersion> {
     module_versions(&promote(graph, false), &BTreeMap::new()).unwrap()
+}
+
+fn local_input_variant(
+    graph: &LogicalGraph,
+    from: usize,
+    change: impl FnOnce(&mut PendingImportOwner),
+) -> BTreeMap<Key, ModuleVersion> {
+    let mut promoted = promote(graph, false);
+    let imports = promoted
+        .get_mut(&module_key(from))
+        .unwrap()
+        .groups
+        .get_mut(&graph[from].declared_ordinal)
+        .unwrap();
+    let import = imports
+        .iter_mut()
+        .find(|import| match import {
+            PendingImportOwner::Source { owner, .. } => {
+                promoted_has_target(graph, owner.unit.as_str(), owner.module.as_str())
+            }
+            _ => false,
+        })
+        .expect("logical node with dependency has a local source import");
+    change(import);
+    module_versions(&promoted, &BTreeMap::new()).unwrap()
+}
+
+fn promoted_has_target(graph: &LogicalGraph, unit: &str, module: &str) -> bool {
+    unit == "model-unit"
+        && graph
+            .iter()
+            .enumerate()
+            .any(|(index, _)| module == format!("M{index}"))
 }
 
 /// Recompute reachability from logical dependency facts, without consulting
@@ -137,17 +180,19 @@ fn sample_graph(masks: &[u8], bodies: &[u8], histories: &[u8], binders: &[u8]) -
             let mut dependencies = Vec::new();
             for to in from + 1..count {
                 let bit = to - from - 1;
-                // Keep at least a chain; the remaining bits produce branches
-                // and shared descendants while preserving a bounded DAG.
-                if bit == 0 || masks[from] & (1 << (bit - 1)) != 0 {
+                if masks[from] & (1 << bit) != 0 {
                     dependencies.push(to);
                 }
             }
             LogicalNode {
                 body: bodies[from],
-                interface: bodies[from].wrapping_add(13),
+                skinny_interface: bodies[from].wrapping_add(13),
+                product: bodies[from].wrapping_add(23),
+                package: bodies[from].wrapping_add(29),
                 dependencies,
                 external_history: histories[from],
+                external_binder: binders[from],
+                declared_ordinal: 17 + from as u32,
                 binder: binders[from],
             }
         })
@@ -173,44 +218,68 @@ fn retained_graph_chain_diamond_shares_descendants_and_isolates_disconnected_nod
     let graph = vec![
         LogicalNode {
             body: 1,
-            interface: 2,
+            skinny_interface: 12,
+            product: 22,
+            package: 3,
             dependencies: vec![1, 2],
             external_history: 1,
+            external_binder: 1,
+            declared_ordinal: 17,
             binder: 1,
         },
         LogicalNode {
             body: 2,
-            interface: 3,
+            skinny_interface: 13,
+            product: 23,
+            package: 4,
             dependencies: vec![3],
             external_history: 2,
+            external_binder: 2,
+            declared_ordinal: 18,
             binder: 2,
         },
         LogicalNode {
             body: 3,
-            interface: 4,
+            skinny_interface: 14,
+            product: 24,
+            package: 5,
             dependencies: vec![3],
             external_history: 3,
+            external_binder: 3,
+            declared_ordinal: 19,
             binder: 3,
         },
         LogicalNode {
             body: 4,
-            interface: 5,
+            skinny_interface: 15,
+            product: 25,
+            package: 6,
             dependencies: vec![4],
             external_history: 4,
+            external_binder: 4,
+            declared_ordinal: 20,
             binder: 4,
         },
         LogicalNode {
             body: 5,
-            interface: 6,
+            skinny_interface: 16,
+            product: 26,
+            package: 7,
             dependencies: vec![],
             external_history: 5,
+            external_binder: 5,
+            declared_ordinal: 21,
             binder: 5,
         },
         LogicalNode {
             body: 6,
-            interface: 7,
+            skinny_interface: 17,
+            product: 27,
+            package: 8,
             dependencies: vec![],
             external_history: 6,
+            external_binder: 6,
+            declared_ordinal: 22,
             binder: 6,
         },
     ];
@@ -243,48 +312,136 @@ fn retained_graph_chain_diamond_shares_descendants_and_isolates_disconnected_nod
 }
 
 #[test]
-fn retained_graph_fixed_seed_samples_cover_shared_and_historical_inputs() {
-    let mut state = 0x6d6f_6465_6c_u64;
+fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
     let mut edge_count = 0;
-    let mut shared_descendant_cases = 0;
-    let mut distinct_history_cases = 0;
-    for _ in 0..32 {
-        let mut masks = [0; MAX_NODES];
-        let mut bodies = [0; MAX_NODES];
-        let mut histories = [0; MAX_NODES];
-        let mut binders = [0; MAX_NODES];
-        for index in 0..MAX_NODES {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            masks[index] = (state >> 32) as u8;
-            bodies[index] = ((state >> 24) as u8).max(1);
-            histories[index] = (state as u8).wrapping_add(index as u8);
-            binders[index] = ((state >> 16) as u8).max(1);
-        }
-        let graph = sample_graph(&masks, &bodies, &histories, &binders);
-        let mut incoming = [0; MAX_NODES];
+    let mut shared_descendant_topologies = 0;
+    let mut empty_topologies = 0;
+    for topology in 0u8..8 {
+        let graph = vec![
+            LogicalNode {
+                body: 1,
+                skinny_interface: 31,
+                product: 41,
+                package: 21,
+                dependencies: [1usize, 2]
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(bit, target)| (topology & (1 << bit) != 0).then_some(target))
+                    .collect(),
+                external_history: 1,
+                external_binder: 4,
+                declared_ordinal: 17,
+                binder: 7,
+            },
+            LogicalNode {
+                body: 2,
+                skinny_interface: 32,
+                product: 42,
+                package: 22,
+                dependencies: (topology & 4 != 0).then_some(2).into_iter().collect(),
+                external_history: 2,
+                external_binder: 5,
+                declared_ordinal: 18,
+                binder: 8,
+            },
+            LogicalNode {
+                body: 3,
+                skinny_interface: 33,
+                product: 43,
+                package: 23,
+                dependencies: vec![],
+                external_history: 3,
+                external_binder: 6,
+                declared_ordinal: 19,
+                binder: 9,
+            },
+        ];
+        edge_count += graph
+            .iter()
+            .map(|node| node.dependencies.len())
+            .sum::<usize>();
+        let mut incoming = [0; 3];
         for node in &graph {
-            edge_count += node.dependencies.len();
             for target in &node.dependencies {
                 incoming[*target] += 1;
             }
         }
-        shared_descendant_cases += usize::from(incoming.iter().any(|owners| *owners > 1));
-        distinct_history_cases += usize::from(histories.iter().collect::<BTreeSet<_>>().len() > 1);
+        if incoming.iter().any(|owners| *owners > 1) {
+            shared_descendant_topologies += 1;
+        }
+        if graph.iter().all(|node| node.dependencies.is_empty()) {
+            empty_topologies += 1;
+        }
+        let before = versions(&graph);
+        let promoted = promote(&graph, false);
+        for (from, node) in promoted.values().enumerate() {
+            let local_imports = node
+                .groups
+                .values()
+                .flatten()
+                .filter_map(|import| match import {
+                    PendingImportOwner::Source { owner, .. }
+                        if promoted.contains_key(&(owner.unit.clone(), owner.module.clone())) =>
+                    {
+                        Some(owner)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(node.groups.values().any(|imports| !imports.is_empty()));
+            assert!(local_imports
+                .iter()
+                .all(|owner| owner.module_version == ModuleVersion([0; 32])));
+            if !graph[from].dependencies.is_empty() {
+                let expected = affected_by(&graph, from);
+                // These isolated mutations probe hash sensitivity at the
+                // semantic input boundary; they are not claims about accepted
+                // compiler receipts after owner validation.
+                let ordinal_changed = local_input_variant(&graph, from, |import| {
+                    if let PendingImportOwner::Source {
+                        original_ordinal, ..
+                    } = import
+                    {
+                        *original_ordinal += 1;
+                    }
+                });
+                assert_eq!(changed_versions(&before, &ordinal_changed), expected);
 
-        let current = versions(&graph);
-        let target = (state as usize) % MAX_NODES;
-        let mut changed = graph.clone();
-        changed[target].interface = changed[target].interface.wrapping_add(1);
-        assert_eq!(
-            changed_versions(&current, &versions(&changed)),
-            affected_by(&graph, target)
-        );
+                let binder_changed = local_input_variant(&graph, from, |import| {
+                    if let PendingImportOwner::Source { binder, .. } = import {
+                        binder.occurrence.push_str("-variant");
+                    }
+                });
+                assert_eq!(changed_versions(&before, &binder_changed), expected);
+            }
+        }
+
+        for from in 0..graph.len() {
+            for to in from + 1..graph.len() {
+                let mut changed = graph.clone();
+                if let Some(position) = changed[from]
+                    .dependencies
+                    .iter()
+                    .position(|item| *item == to)
+                {
+                    changed[from].dependencies.remove(position);
+                } else {
+                    changed[from].dependencies.push(to);
+                    changed[from].dependencies.sort_unstable();
+                }
+                assert_eq!(
+                    changed_versions(&before, &versions(&changed)),
+                    affected_by(&graph, from),
+                    "topology={topology}, changed import M{from}->M{to}"
+                );
+            }
+        }
     }
-    assert!(edge_count > 32);
-    assert!(shared_descendant_cases > 0);
-    assert!(distinct_history_cases > 0);
+    assert_eq!(edge_count, 12);
+    assert_eq!(shared_descendant_topologies, 1);
+    assert_eq!(empty_topologies, 1);
     eprintln!(
-        "retained graph sample coverage: samples=32, edges={edge_count}, shared_descendant_cases={shared_descendant_cases}, distinct_history_cases={distinct_history_cases}"
+        "handcrafted exhaustive retained graph support: topologies=8, edges={edge_count}, shared_descendant_topologies={shared_descendant_topologies}, empty_topologies={empty_topologies}, external_history_versions=3"
     );
 }
 
@@ -301,8 +458,8 @@ proptest! {
         let mut graph = sample_graph(&masks[..count], &bodies[..count], &histories[..count], &binders[..count]);
         let before = versions(&graph);
 
-        // Body, interface, and external historical owner changes affect
-        // precisely the roots that can reach the changed logical node.
+        // Canonical body, product seal, package seal, and historical module
+        // version are independent inputs and affect exactly their ancestors.
         for target in [0, count / 2, count - 1] {
             let expected = affected_by(&graph, target);
             let mut changed = graph.clone();
@@ -310,7 +467,11 @@ proptest! {
             prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected.clone());
 
             let mut changed = graph.clone();
-            changed[target].interface = changed[target].interface.wrapping_add(1);
+            changed[target].product = changed[target].product.wrapping_add(1);
+            prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected.clone());
+
+            let mut changed = graph.clone();
+            changed[target].package = changed[target].package.wrapping_add(1);
             prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected.clone());
 
             let mut changed = graph.clone();
@@ -318,11 +479,11 @@ proptest! {
             prop_assert_eq!(changed_versions(&before, &versions(&changed)), expected);
         }
 
-        // Changing an import binder changes that node's identity and all
-        // ancestors that retain it, while independent components stay equal.
+        // Every module has an external import; its binder identity can be
+        // varied independently even when this generated topology has no edge.
         let target = count / 2;
         let expected = affected_by(&graph, target);
-        graph[target].binder = graph[target].binder.wrapping_add(1);
+        graph[target].external_binder = graph[target].external_binder.wrapping_add(1);
         prop_assert_eq!(changed_versions(&before, &versions(&graph)), expected);
 
         let forward = promote(&graph, false);
