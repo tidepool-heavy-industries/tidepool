@@ -12205,6 +12205,46 @@ mod tool_dispatch_tests {
 pub(crate) mod request_tests {
     use super::*;
 
+    proptest::proptest! {
+        #[test]
+        fn source_toolset_recipe_projects_public_rows_in_requested_order(
+            mask in proptest::prelude::any::<u64>(),
+            context_support in proptest::prelude::any::<bool>(),
+        ) {
+            let workbench = ActorWorkbenchSource::new(String::new(), Vec::new());
+            let source = crate::CheckpointSourceLayer::default();
+            let before = tidepool_extract_cmd::extract_spawn_count();
+            for row in exomonad_tool::PublicActorEffectRow::ALL {
+              for selected_mask in [0, u64::MAX, mask] {
+                let requested = row.effect_keys();
+                let members = requested.iter().enumerate()
+                    .filter(|(index, _)| selected_mask & (1_u64 << *index) != 0)
+                    .map(|(_, key)| *key)
+                    .collect::<std::collections::HashSet<_>>();
+                let expected = requested.iter().copied()
+                    .filter(|key| members.contains(key))
+                    .collect::<Vec<_>>();
+                let mut support = members.iter().copied()
+                    .map(exomonad_tool::ToolEffectKey::Actor)
+                    .collect::<Vec<_>>();
+                if context_support {
+                    support.push(exomonad_tool::ToolEffectKey::ContextReadWrite);
+                }
+                let actual = workbench.source_toolset_recipe(&source, requested, &support).unwrap();
+                proptest::prop_assert_eq!(actual.requested_effects.as_slice(), requested);
+                proptest::prop_assert_eq!(&actual.effective_effects, &expected);
+                // Interpreter support is a membership observation. Its order
+                // and repeated observations cannot change the installer row.
+                support.reverse();
+                support.extend(support.clone());
+                let repeated = workbench.source_toolset_recipe(&source, requested, &support).unwrap();
+                proptest::prop_assert_eq!(actual, repeated);
+              }
+            }
+            proptest::prop_assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        }
+    }
+
     fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
         // Native resource locations can be relative to the runner's CWD.
         // Resolve only the source roots selected by the owning producers.

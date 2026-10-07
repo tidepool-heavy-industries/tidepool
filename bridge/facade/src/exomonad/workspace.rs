@@ -1595,6 +1595,134 @@ mod tests {
     }
 
     #[test]
+    fn prepared_toolset_coverage_history_refuses_mutated_promises() {
+        let (_libraries, selection) = deployment_fixture();
+        let project = deployment_project(
+            "[defaults]\nmodel = 'gpt-6-sol'\n[preparation]\nroles = ['research']\n",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let frozen = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            directory.path(),
+            Some(selection),
+        )
+        .unwrap();
+        let config = frozen.config().unwrap();
+        let original = uuid::Uuid::new_v4();
+        let recipe = "a".repeat(64);
+        let coverage = config
+            .preparation
+            .selected_profiles(config.research)
+            .unwrap()
+            .into_iter()
+            .map(|profile| PreparedToolsetCoverage {
+                profile: profile.profile,
+                requested_effects: profile.requested_effects,
+                effective_effects: vec![exomonad_actor::ActorEffectKey::Replies],
+                recipe: recipe.clone(),
+                original,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(coverage.len(), 2);
+        let admitted = serde_json::to_vec(&coverage).unwrap();
+        let expected = [(recipe.clone(), original)].into_iter().collect::<BTreeMap<_, _>>();
+        frozen.validate_toolset_coverage(&coverage).unwrap();
+        assert_eq!(coverage_entries(&coverage).unwrap(), expected);
+
+        // Logical record order does not change the derived exact selection.
+        let mut reordered = coverage.clone();
+        reordered.reverse();
+        frozen.validate_toolset_coverage(&reordered).unwrap();
+        assert_eq!(coverage_entries(&reordered).unwrap(), expected);
+
+        for mutation in 0..8 {
+            let mut changed = coverage.clone();
+            match mutation {
+                0 => { changed.pop(); }
+                1 => changed[1].profile = super::super::PreparationProfile::Root,
+                2 => changed[1].profile = super::super::PreparationProfile::Public(
+                    exomonad_tool::PublicActorProfile::Integration,
+                ),
+                3 => changed[1].requested_effects.reverse(),
+                4 => changed[1].original = uuid::Uuid::new_v4(),
+                5 => changed[1].effective_effects.push(exomonad_actor::ActorEffectKey::Watches),
+                6 => changed[1].recipe = "invalid".into(),
+                7 => changed[1].original = uuid::Uuid::nil(),
+                _ => unreachable!(),
+            }
+            assert!(frozen.validate_toolset_coverage(&changed).is_err(), "mutation {mutation}");
+            // Refusal leaves the primary records available for the next
+            // observation; it cannot repair them or infer another original.
+            assert_eq!(serde_json::to_vec(&coverage).unwrap(), admitted);
+            frozen.validate_toolset_coverage(&coverage).unwrap();
+            assert_eq!(coverage_entries(&coverage).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn prepared_toolset_recipe_refuses_changed_projection_without_compilation() {
+        use exomonad_actor::ActorEffectKey;
+        use exomonad_tool::ToolEffectKey;
+        let (_libraries, selection) = deployment_fixture();
+        let project = deployment_project(
+            "[defaults]\nmodel = 'gpt-6-sol'\n[preparation]\nroles = ['research']\n",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let mut frozen = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            directory.path(),
+            Some(selection),
+        )
+        .unwrap();
+        let config = frozen.config().unwrap();
+        let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new());
+        let source = exomonad_actor::CheckpointSourceLayer::default();
+        let support = vec![
+            ToolEffectKey::Actor(ActorEffectKey::Replies),
+            ToolEffectKey::Actor(ActorEffectKey::Watches),
+        ];
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let original = uuid::Uuid::new_v4();
+        let coverage = config
+            .preparation
+            .selected_profiles(config.research)
+            .unwrap()
+            .into_iter()
+            .map(|profile| {
+                let actual = workbench
+                    .source_toolset_recipe(&source, &profile.requested_effects, &support)
+                    .unwrap();
+                assert_eq!(actual.effective_effects, vec![ActorEffectKey::Replies, ActorEffectKey::Watches]);
+                PreparedToolsetCoverage {
+                    profile: profile.profile,
+                    requested_effects: profile.requested_effects,
+                    effective_effects: actual.effective_effects,
+                    recipe: actual.recipe,
+                    original,
+                }
+            })
+            .collect::<Vec<_>>();
+        frozen.preparation = Some(WorkspacePreparation::Completed {
+            original,
+            revision: "b".repeat(64),
+            coverage,
+        });
+        let admitted = serde_json::to_vec(&frozen.preparation).unwrap();
+        frozen.validate_prepared_toolset_recipes(&workbench, &source, &support).unwrap();
+        let mut changed_support = support.clone();
+        changed_support.pop();
+        assert!(frozen.validate_prepared_toolset_recipes(&workbench, &source, &changed_support).is_err());
+        // Context support selects a different builtin installer even when its
+        // support-filtered actor row remains unchanged.
+        let mut changed_installer = support.clone();
+        changed_installer.push(ToolEffectKey::ContextReadWrite);
+        assert!(frozen.validate_prepared_toolset_recipes(&workbench, &source, &changed_installer).is_err());
+        assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
+        frozen.validate_prepared_toolset_recipes(&workbench, &source, &support).unwrap();
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+    }
+
+    #[test]
     fn preparing_retry_preserves_original_nonce_and_refuses_mutable_source_drift() {
         let (_libraries, selection) = deployment_fixture();
         let project = deployment_project(
@@ -1760,13 +1888,20 @@ mod tests {
         let manifest = directory.path().join("workspace/selection.json");
         let mut selected: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        selected["version"] = serde_json::json!(4);
-        std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
-        let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported frozen workspace format"));
-        assert!(!run.path().join("workspace-prepared.json").exists());
+        for version in [4, 5] {
+            selected["version"] = serde_json::json!(version);
+            // An old completed inventory must be refused by its version,
+            // before decoding its missing current coverage fields.
+            selected["preparation"] = serde_json::json!({
+                "state": "completed", "entries": {"old-recipe": uuid::Uuid::new_v4()}
+            });
+            std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
+            let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("unsupported frozen workspace format"));
+            assert!(!run.path().join("workspace-prepared.json").exists());
+        }
     }
 
     #[test]
