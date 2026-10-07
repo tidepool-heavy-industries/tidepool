@@ -7847,7 +7847,7 @@ pub(crate) mod tests {
         let path = root.path().join("External.hi");
         std::fs::write(&path, [0x43]).unwrap();
         let packages = BTreeMap::from([(
-            ("fixture".into(), "External".into()),
+            ("external-package".into(), "External".into()),
             PackageInterfaceWitness {
                 selected_path: path,
                 sha256: sha(&[0x43]),
@@ -7857,9 +7857,12 @@ pub(crate) mod tests {
             original_witness_fixture(
                 "Consumer",
                 Some(PendingImportOwner::Package {
-                    unit: "fixture".into(),
+                    unit: "external-package".into(),
                     module: "External".into(),
-                    binder: testing::identity("External", "entry"),
+                    binder: SymbolIdentity {
+                        unit: "external-package".into(),
+                        ..testing::identity("External", "entry")
+                    },
                     interface_digest: sha(&[0x43]),
                 }),
                 7,
@@ -8012,7 +8015,7 @@ pub(crate) mod tests {
         }
         let package = |path| {
             BTreeMap::from([(
-                ("fixture".into(), "External".into()),
+                ("external-package".into(), "External".into()),
                 PackageInterfaceWitness {
                     selected_path: path,
                     sha256: sha(&[0x43]),
@@ -8024,9 +8027,12 @@ pub(crate) mod tests {
                 original_witness_fixture(
                     module,
                     Some(PendingImportOwner::Package {
-                        unit: "fixture".into(),
+                        unit: "external-package".into(),
                         module: "External".into(),
-                        binder: testing::identity("External", "entry"),
+                        binder: SymbolIdentity {
+                            unit: "external-package".into(),
+                            ..testing::identity("External", "entry")
+                        },
                         interface_digest: sha(&[0x43]),
                     }),
                     7,
