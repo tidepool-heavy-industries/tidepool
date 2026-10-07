@@ -1787,7 +1787,46 @@ fn certified_source_map(groups: &[PendingCertifiedGroup]) -> CertResult<SourceGr
 fn available_original_source_map(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     selected: &[PendingCertifiedGroup],
+    operation: &InventoryOperation,
 ) -> CertResult<SourceGroupMap> {
+    // Charge the complete lookup before allocating owned keys. This conservative
+    // bound covers the owner/ordinal and binder indices plus source-map copies;
+    // it uses the enclosing admission's budget, not a new decoding operation.
+    for product in products {
+        let witness = product
+            .original_native()
+            .ok_or(CertificationError::Mismatch(
+                "available original native witness",
+            ))?;
+        operation.charge(
+            4 * (witness.owner.unit.len() + witness.owner.module.len())
+                + 4 * std::mem::size_of::<CachedHomeOwner>(),
+        )?;
+        for group in witness.groups.iter() {
+            operation.charge(
+                2 * (witness.owner.unit.len() + witness.owner.module.len())
+                    + std::mem::size_of::<SourceGroupKey>(),
+            )?;
+            for binder in group.group.binders() {
+                operation.charge(
+                    3 * (witness.owner.unit.len() + witness.owner.module.len())
+                        + 3 * std::mem::size_of::<SourceGroupKey>(),
+                )?;
+                for _ in 0..3 {
+                    charge_symbol(operation, binder)?;
+                }
+            }
+        }
+    }
+    for group in selected {
+        for binder in group.group.binders() {
+            operation.charge(
+                2 * (group.owner.unit.len() + group.owner.module.len())
+                    + 2 * std::mem::size_of::<SourceGroupKey>(),
+            )?;
+            charge_symbol(operation, binder)?;
+        }
+    }
     let mut sources = certified_source_map(selected)?;
     let mut owners = BTreeSet::new();
     let mut binders = BTreeSet::new();
@@ -5393,6 +5432,7 @@ pub(crate) fn certify_products_with_validation(
         Some(admission) => available_original_source_map(
             &admission.request.context.recovery_products(),
             &admission.request.groups,
+            &validation.inventory,
         )?,
         None => SourceGroupMap::new(),
     };
@@ -5890,7 +5930,7 @@ pub(crate) fn certify_target_available_owners_with_validation(
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingImportOwner>> {
-    let sources = available_original_source_map(products, selected)?;
+    let sources = available_original_source_map(products, selected, &validation.inventory)?;
     certify_target_owners_from_sources(prepared, accepted, &sources, packages, validation)
 }
 
@@ -7285,8 +7325,11 @@ pub(crate) mod tests {
 
     #[test]
     fn full_original_availability_is_read_only_and_checks_selected_authority() {
+        let operation = InventoryOperation::new(Default::default());
         let original = full_native_fixture("Available", vec![(8, vec![]), (11, vec![])], 7);
-        let sources = available_original_source_map(std::slice::from_ref(&original), &[]).unwrap();
+        let sources =
+            available_original_source_map(std::slice::from_ref(&original), &[], &operation)
+                .unwrap();
         let owner = original.owner();
         let key = (
             owner.unit.clone(),
@@ -7303,26 +7346,50 @@ pub(crate) mod tests {
         available_original_source_map(
             std::slice::from_ref(&original),
             std::slice::from_ref(&selected),
+            &operation,
         )
         .unwrap();
         let mut wrong = selected.clone();
         wrong.owner.module_version = ModuleVersion([9; 32]);
-        assert!(available_original_source_map(std::slice::from_ref(&original), &[wrong]).is_err());
+        assert!(available_original_source_map(
+            std::slice::from_ref(&original),
+            &[wrong],
+            &operation
+        )
+        .is_err());
         let mut wrong = selected.clone();
         wrong.imports = vec![PendingImportOwner::Retained {
             identity: testing::identity("Available", "captured"),
             generation: 9,
         }]
         .into();
-        assert!(available_original_source_map(std::slice::from_ref(&original), &[wrong]).is_err());
         assert!(available_original_source_map(
             std::slice::from_ref(&original),
-            &[selected.clone(), selected]
+            &[wrong],
+            &operation
         )
         .is_err());
-        assert!(available_original_source_map(&[original.clone(), original.clone()], &[]).is_err());
+        assert!(available_original_source_map(
+            std::slice::from_ref(&original),
+            &[selected.clone(), selected],
+            &operation,
+        )
+        .is_err());
+        assert!(available_original_source_map(
+            &[original.clone(), original.clone()],
+            &[],
+            &operation
+        )
+        .is_err());
         let other = full_native_fixture("Available", vec![(8, vec![]), (11, vec![])], 9);
-        assert!(available_original_source_map(&[original, other], &[]).is_err());
+        assert!(
+            available_original_source_map(&[original.clone(), other], &[], &operation).is_err()
+        );
+        let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 0,
+            ..Default::default()
+        });
+        assert!(available_original_source_map(&[original], &[], &exhausted).is_err());
     }
 
     #[test]

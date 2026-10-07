@@ -2652,40 +2652,6 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
-    if publication == OriginalOutputPublication::Transaction {
-        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
-    }
-    if publication == OriginalOutputPublication::Transaction
-        && offer
-            .exact
-            .as_ref()
-            .is_none_or(|exact| empty_exact_context(&exact.context))
-    {
-        let publication_products = match owned_fresh_products {
-            Some(products) => products,
-            None => shared_fresh_products
-                .ok_or_else(|| CompileError::ExtractFailed("shared inventory absent".into()))?
-                .copy_for_publication()
-                .map_err(compiler_evidence_failure)?,
-        };
-        let (_, publication) = module_candidates::prepare_publication(
-            &offer.producer,
-            &offer.include,
-            valid,
-            publication_products,
-            source,
-            exact.as_ref().map_or(
-                module_candidates::CandidateVersionOrigin::Ordinary,
-                |admission| module_candidates::CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.request.semantic_sha256,
-                },
-            ),
-            &certified.recovery_products,
-        );
-        module_candidates::publish_prepared(publication);
-    } else if publication == OriginalOutputPublication::Transaction {
-        module_candidates::record_exact_context_publication_skip(fresh_products.products());
-    }
     let typed_entry = typed_item
         .map(|(plans, index, admission_digest)| {
             let admission = exact.as_ref().ok_or_else(|| {
@@ -2848,6 +2814,40 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
+    }
+    if publication == OriginalOutputPublication::Transaction
+        && offer
+            .exact
+            .as_ref()
+            .is_none_or(|exact| empty_exact_context(&exact.context))
+    {
+        let publication_products = match owned_fresh_products {
+            Some(products) => products,
+            None => shared_fresh_products
+                .ok_or_else(|| CompileError::ExtractFailed("shared inventory absent".into()))?
+                .copy_for_publication()
+                .map_err(compiler_evidence_failure)?,
+        };
+        let (_, publication) = module_candidates::prepare_publication(
+            &offer.producer,
+            &offer.include,
+            valid,
+            publication_products,
+            source,
+            exact.as_ref().map_or(
+                module_candidates::CandidateVersionOrigin::Ordinary,
+                |admission| module_candidates::CandidateVersionOrigin::Exact {
+                    semantic_sha256: admission.request.semantic_sha256,
+                },
+            ),
+            &certified.recovery_products,
+        );
+        module_candidates::publish_prepared(publication);
+    } else if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_exact_context_publication_skip(fresh_products.products());
+    }
     Ok(Some(SealedTurnProducts {
         artifact_view,
         typed_entry,
