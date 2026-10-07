@@ -73,17 +73,13 @@ The Store keeps the originals. Incomplete or unauthenticated opaque exchanges
 and incompatible compaction prevent switching; they are not converted into
 empty summaries.
 
-The returned `Context` has a bounded structural display, so a direct
-`getContext` or `modifyContext` result shows authored blocks and safe native
-previews. `ContextWorkflow.inspectAndCurate` demonstrates provenance-preserving
-notes and editing full eligible text. Its parent curation example commits once,
-then uses `unfoldDeferred` to admit two actor-owned children; children inherit
-the committed transcript and persistent Haskell bindings, and cannot be
-awaited inside the cell that creates them. The current call, pending operation
-identities/pairing, and later arrivals remain protected. Each visible body has
-its own editability flag. A completed editing exchange's admitted visible
-message/result bodies can be edited by a later cell;
-its native tool source/input and function arguments remain pinned.
+Use `display` on a returned `Context` for its bounded structural view of authored
+blocks and safe native previews. `ContextWorkflow.inspectAndCurate` demonstrates
+provenance-preserving notes and editing full eligible text. The current call,
+pending operation identities/pairing, and later arrivals remain protected.
+Each visible body has its own editability flag. A later cell can edit admitted
+visible message/result bodies from a completed editing exchange; native tool
+source/input and function arguments remain pinned.
 Restoring a saved `Context` intentionally replaces the editable visible prefix,
 but does not restore authority. It must preserve the current protected and
 opaque groups; a stale snapshot missing required groups is refused. Persistent
