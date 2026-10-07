@@ -701,8 +701,10 @@ async fn record_actor_launch_publishes_and_routes_child_reply() {
     committed(
         root.as_ref(),
         r#"import LaunchFixture
+import Tidepool.Worktree (workspaceFor)
 Right launcherTree <- createWorktree (fromRef (GitRef "HEAD") "resident-launcher")
-launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"#,
+Right launcherWorkspace <- workspaceFor launcherTree
+launcher <- R.start (R.withWorkspace launcherWorkspace launchDefinition)"#,
     )
     .await;
     committed(

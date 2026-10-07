@@ -34,7 +34,7 @@ launchDefinition =
     , launchAndAwait = \() -> do
         Right workerAgent <- spawnSubagent (FreshCtx "Return the requested typed result.")
           (ForkWorktree currentCheckout)
-          ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+          ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
             { spawnLabel = Just "review", spawnLifetime = ActorOwned })
         Right worker <- request @Text workerAgent ("reply once" :: Text)
           (defaultRequestOptions { requestLabel = Just "review" })
