@@ -2089,6 +2089,9 @@ impl Eq for ArtifactView {}
 mod native_history_properties;
 
 #[cfg(test)]
+mod compiler_projection_properties;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
