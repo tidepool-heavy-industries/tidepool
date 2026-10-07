@@ -618,7 +618,9 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         .unwrap()
                         .merge(actual[*right].as_ref().unwrap());
                     prop_assert!(result.is_ok(), "step {}: {:?}: {:?}", step, op, result);
-                    let inventory = if left_view.facts.is_empty() {
+                    let inventory = if right_view.facts.is_empty() {
+                        left_view.inventory
+                    } else if left_view.facts.is_empty() {
                         right_view.inventory
                     } else {
                         left_view.inventory
