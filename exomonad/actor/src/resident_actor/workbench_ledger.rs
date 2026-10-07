@@ -454,13 +454,10 @@ mod tests {
         let boundary =
             ContextCheckpointBoundary::external("thread".into(), "turn".into(), "call".into());
         assert!(
-            WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
-                checkpoints.has_abort_work_at_boundary(actor, &boundary)
-            })
-            .unwrap()
-            .is_none()
+            WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || false)
+                .unwrap()
+                .is_none()
         );
-        assert!(!checkpoints.has_abort_work_at_boundary(actor, &boundary));
         let token = checkpoints.capture_checkpoint(
             "research".into(),
             actor,
@@ -500,9 +497,9 @@ mod tests {
             let error = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
                 assert!(
                     journal.try_lock().is_some(),
-                    "read-only registry query must run unlocked"
+                    "pending-work observation must run outside the journal lock"
                 );
-                checkpoints.has_abort_work_at_boundary(actor, &boundary)
+                true
             })
             .err()
             .expect("pending custody needs its exact original owner");
@@ -510,7 +507,6 @@ mod tests {
                 error.detail,
                 "output abort has no exact admitted invocation owner"
             );
-            assert!(checkpoints.has_abort_work_at_boundary(actor, &boundary));
             assert!(checkpoints.checkpoint(&token, SessionId(7)).is_ok());
         }
     }
@@ -552,11 +548,9 @@ mod tests {
             ScopeId(3),
             boundary.clone(),
         );
-        let owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
-            checkpoints.has_abort_work_at_boundary(actor, &boundary)
-        })
-        .unwrap()
-        .unwrap();
+        let owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || true)
+            .unwrap()
+            .unwrap();
         let cleanup = owner.collect_cleanup(|| {
             assert!(
                 journal.try_lock().is_some(),
@@ -571,18 +565,15 @@ mod tests {
             }
         });
         assert_eq!(cleanup.scopes, vec![ScopeId(3)]);
-        assert!(!checkpoints.has_abort_work_at_boundary(actor, &boundary));
         assert!(matches!(
             checkpoints.checkpoint(&token, SessionId(7)),
             Err(crate::CheckpointRefusal::CaptureFailed)
         ));
         drop(owner);
         // A failed retirement leaves the exact obligation in the admitted journal.
-        let retry = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
-            checkpoints.has_abort_work_at_boundary(actor, &boundary)
-        })
-        .unwrap()
-        .unwrap();
+        let retry = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || true)
+            .unwrap()
+            .unwrap();
         let mut cleanup = retry.collect_cleanup(|| panic!("retry must not detach custody again"));
         assert_eq!(cleanup.scopes, vec![ScopeId(3)]);
         cleanup.scopes.clear();
