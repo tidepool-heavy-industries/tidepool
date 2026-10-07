@@ -683,7 +683,10 @@ impl OutputSink for QuietOutput {
     }
 }
 
-pub(in crate::session) type ScaleSession = ResidentSession<frunk::HNil, QuietOutput>;
+pub(in crate::session) type ScaleSession<H = frunk::HNil> = ResidentSession<H, QuietOutput>;
+
+#[path = "typed_segment_tests.rs"]
+mod typed_segment_tests;
 
 /// Choose the existing publication owner; durable measurements never use the
 /// ephemeral publication shortcut.
@@ -743,7 +746,10 @@ fn scale_workspace(durable: bool) -> (PathBuf, Option<tempfile::TempDir>) {
     }
 }
 
-fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Value {
+fn counters<H>(resident: &ScaleSession<H>, images: &ImageRegistry) -> serde_json::Value
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let residency = resident.residency().unwrap_or_default();
     let (functions, code_bytes) = resident.codegen_totals().unwrap_or_default();
     serde_json::json!({
@@ -759,14 +765,17 @@ fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Valu
     })
 }
 
-fn measured_duration<T>(
-    resident: &mut ScaleSession,
+fn measured_duration<T, H>(
+    resident: &mut ScaleSession<H>,
     images: &ImageRegistry,
     scenario: (usize, usize),
     phase: &str,
     item: Option<usize>,
-    action: impl FnOnce(&mut ScaleSession) -> T,
-) -> (T, u128) {
+    action: impl FnOnce(&mut ScaleSession<H>) -> T,
+) -> (T, u128)
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let before = counters(resident, images);
     let started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(resident)));
@@ -786,19 +795,22 @@ fn measured_duration<T>(
     }
 }
 
-fn measured<T>(
-    resident: &mut ScaleSession,
+fn measured<T, H>(
+    resident: &mut ScaleSession<H>,
     images: &ImageRegistry,
     scenario: (usize, usize),
     phase: &str,
     item: Option<usize>,
-    action: impl FnOnce(&mut ScaleSession) -> T,
-) -> T {
+    action: impl FnOnce(&mut ScaleSession<H>) -> T,
+) -> T
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     measured_duration(resident, images, scenario, phase, item, action).0
 }
 
-pub(in crate::session) fn execute_cell(
-    resident: &mut ScaleSession,
+pub(in crate::session) fn execute_cell<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -807,7 +819,10 @@ pub(in crate::session) fn execute_cell(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-) -> Duration {
+) -> Duration
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     execute_cell_with_authority_checks(
         resident,
         public,
@@ -826,10 +841,156 @@ pub(in crate::session) fn execute_cell(
 enum AuthorityChecks {
     Configured,
     RefusalBranches,
+    TypedEntryRefusalBranches,
+    FreshTargetWork,
+    SegmentWorkCounts(usize),
 }
 
-fn execute_cell_with_authority_checks(
-    resident: &mut ScaleSession,
+// The caller supplies the response of the same physical request whose products
+// have just passed admission. Module identity comes from those products, rather
+// than a diagnostic filename or a generated-name convention.
+pub(super) fn assert_compiler_work(
+    program: &tidepool_toolchain::checked_cell::CellProgram,
+    stderr: &[u8],
+    expected_items: Option<usize>,
+) {
+    use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
+
+    if let Some(count) = expected_items {
+        assert_eq!(program.typed_segments().len(), 1);
+        let segment = &program.typed_segments()[0];
+        assert_eq!(segment.items().len(), count);
+        assert_eq!(program.items().len(), count);
+        assert!(segment
+            .items()
+            .iter()
+            .all(|item| matches!(item.body(), CheckedTypedSegmentBody::Action { .. })));
+        let entries = program
+            .items()
+            .iter()
+            .map(|item| item.native().unwrap().typed_entry().unwrap().entry())
+            .map(|entry| (&entry.unit, &entry.module, &entry.occurrence))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            entries.len(),
+            count,
+            "each item must have its own actual entry"
+        );
+    }
+
+    let mut owners = std::collections::BTreeMap::new();
+    for item in program.items() {
+        let owner = if let Some(native) = item.native() {
+            let entry = native.typed_entry().unwrap().entry();
+            (entry.unit.clone(), entry.module.clone(), "typed_segment")
+        } else {
+            let declaration = item.checked_item().planned_declaration().unwrap();
+            let owner = declaration.product().owner();
+            (owner.unit.clone(), owner.module.clone(), "program_item")
+        };
+        if let Some(previous) = owners.insert((owner.0, owner.1), owner.2) {
+            assert_eq!(previous, owner.2);
+        }
+    }
+    assert!(!owners.is_empty());
+    if expected_items.is_some() {
+        assert_eq!(
+            owners.len(),
+            1,
+            "one segment must retain one original source owner"
+        );
+    }
+    let stderr = std::str::from_utf8(stderr).unwrap();
+    let rows = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("tidepool-reuse "))
+        .map(|row| serde_json::from_str::<serde_json::Value>(row).unwrap())
+        .collect::<Vec<_>>();
+    for ((unit, module), purpose) in &owners {
+        let mut cycle = None;
+        for stage in ["source_frontend", "finalized_core"] {
+            let work = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    row["unit"] == *unit
+                        && row["module"] == *module
+                        && row["purpose"] == *purpose
+                        && row["stage"] == stage
+                        && row["decision"] == "work"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(work.len(), 1, "fresh {module} {stage} work: {stderr}");
+            let (work_index, row) = work[0];
+            assert_eq!(row["schema"], 1);
+            assert_eq!(row["items"], 1);
+            assert_eq!(row["version_kind"], "source_fingerprint");
+            assert!(!row["version"].as_str().unwrap().is_empty());
+            let actual_cycle = row["cycle"].as_u64().unwrap();
+            if let Some(previous) = cycle.replace(actual_cycle) {
+                assert_eq!(actual_cycle, previous, "stages must belong to one attempt");
+            }
+            let complete = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    row["cycle"] == actual_cycle
+                        && row["purpose"] == *purpose
+                        && row["stage"] == stage
+                        && row["decision"] == "complete"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(complete.len(), 1, "missing or repeated stage completion");
+            assert!(complete[0].0 > work_index);
+            assert_eq!(complete[0].1["reason"], "stage_complete");
+            assert!(complete[0].1["unit"].is_null() && complete[0].1["module"].is_null());
+        }
+        let cycle = cycle.unwrap();
+        let dependency_counts = ["source_frontend", "finalized_core"].map(|stage| {
+            rows.iter()
+                .filter(|row| {
+                    row["cycle"] == cycle
+                        && row["purpose"] == *purpose
+                        && row["stage"] == stage
+                        && row["decision"] == "work"
+                        && !(row["unit"] == *unit && row["module"] == *module)
+                })
+                .count()
+        });
+        eprintln!(
+            "typed-segment-work {}",
+            serde_json::json!({
+                "admission": program.admission_digest(), "unit": unit, "module": module,
+                "cycle": cycle, "purpose": purpose, "target_frontends": 1,
+                "target_finalizations": 1, "dependency_frontends": dependency_counts[0],
+                "dependency_finalizations": dependency_counts[1], "items": expected_items,
+            })
+        );
+    }
+    if let Some(count) = expected_items {
+        for (name, expected) in [
+            ("typed_segment_kept_entries", count),
+            ("typed_segment_generated_instance_retries", 0),
+        ] {
+            let prefix = format!("tidepool-count name={name} count=");
+            let counts = stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .map(|rest| {
+                    rest.split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(counts, [expected], "successful segment counter: {stderr}");
+        }
+    }
+}
+
+fn execute_cell_with_authority_checks<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -839,7 +1000,10 @@ fn execute_cell_with_authority_checks(
     declarations: usize,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
-) -> Duration {
+) -> Duration
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     try_execute_cell_with_authority_checks(
         resident,
         public,
@@ -855,8 +1019,8 @@ fn execute_cell_with_authority_checks(
     .unwrap()
 }
 
-fn try_execute_cell_with_authority_checks(
-    resident: &mut ScaleSession,
+fn try_execute_cell_with_authority_checks<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -866,7 +1030,10 @@ fn try_execute_cell_with_authority_checks(
     declarations: usize,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
-) -> Result<Duration, ResidentError> {
+) -> Result<Duration, ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     try_execute_cell_with_template_imports(
         resident,
         public,
@@ -883,8 +1050,8 @@ fn try_execute_cell_with_authority_checks(
     .map(|(elapsed, _)| elapsed)
 }
 
-fn try_execute_cell_with_template_imports(
-    resident: &mut ScaleSession,
+fn try_execute_cell_with_template_imports<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -895,7 +1062,10 @@ fn try_execute_cell_with_template_imports(
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
-) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     try_execute_cell_with_template_imports_expectation(
         resident,
         public,
@@ -912,8 +1082,8 @@ fn try_execute_cell_with_template_imports(
     )
 }
 
-fn try_execute_cell_with_template_imports_expectation(
-    resident: &mut ScaleSession,
+fn try_execute_cell_with_template_imports_expectation<H>(
+    resident: &mut ScaleSession<H>,
     public: ScopeId,
     effects: &TestEffectSurface,
     images: &ImageRegistry,
@@ -925,7 +1095,10 @@ fn try_execute_cell_with_template_imports_expectation(
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
     expected_observation: Option<i64>,
-) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -991,21 +1164,41 @@ fn try_execute_cell_with_template_imports_expectation(
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = view.injected_module_names();
     let compile_cell = || {
-        compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
+        let request = CellCheckRequest {
+            exact_context: view.exact_compile_context(),
+            session_id: Some(view.session()),
+            cell_text: source,
+            template: &template,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            compile_generation: admission.initial_value_generation().0,
+            compile_view_evidence: "",
+        };
+        match authority_checks {
+            AuthorityChecks::TypedEntryRefusalBranches => {
+                compile_cell_program_admitted_receipt_controls(
+                    request,
+                    admission.clone(),
+                    &templates,
+                )
+            }
+            AuthorityChecks::FreshTargetWork => compile_cell_program_admitted_work_controls(
+                request,
+                admission.clone(),
+                &templates,
+                None,
+            ),
+            AuthorityChecks::SegmentWorkCounts(count) => {
+                compile_cell_program_admitted_work_controls(
+                    request,
+                    admission.clone(),
+                    &templates,
+                    Some(count),
+                )
+            }
+            _ => compile_cell_program_admitted(request, admission.clone(), &templates),
+        }
     };
     if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
         struct RestoreDeployment(std::ffi::OsString);
@@ -1065,10 +1258,78 @@ fn try_execute_cell_with_template_imports_expectation(
         .iter()
         .filter_map(|item| item.native().map(|native| native.target_owned()))
         .collect();
+    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+        let native_items = program
+            .items()
+            .iter()
+            .filter(|item| item.native().is_some())
+            .collect::<Vec<_>>();
+        assert!(
+            native_items.len() >= 2,
+            "the root substitution control needs two actually compiled roots"
+        );
+        let first = native_items[0];
+        let second = native_items[1];
+        let first_native = first.native().unwrap();
+        let second_target = second.native().unwrap().target_owned();
+        assert_ne!(
+            first_native.typed_entry().unwrap().entry(),
+            second.native().unwrap().typed_entry().unwrap().entry()
+        );
+        let (table, _) =
+            tidepool_repr::serial::read_metadata(first.native_metadata_bytes().unwrap()).unwrap();
+        let turn: ciborium::value::Value =
+            ciborium::de::from_reader(first.native_turn_bytes().unwrap()).unwrap();
+        let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+        let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+        let context = first_native
+            .original_execution_context(&first_native.target_owned(), &table, &sites)
+            .unwrap();
+        let requirements = context
+            .artifact_view()
+            .native_requirements_from_roots(&[first_native
+                .typed_entry()
+                .unwrap()
+                .native_requirement_root()])
+            .unwrap();
+        assert!(
+            !requirements.bindings.is_empty(),
+            "the first entry requires an actual admitted baseline binding"
+        );
+        assert!(
+            requirements
+                .bindings
+                .iter()
+                .all(
+                    |requirement| requirement.generation != first_native.generation()
+                        && requirement.generation != second.native().unwrap().generation()
+                ),
+            "selected first entry must exclude later captures in the same complete original"
+        );
+        assert!(
+            first_native
+                .original_execution_context(&second_target, &table, &sites)
+                .is_err(),
+            "a genuine other item root cannot substitute for the sealed native entry"
+        );
+    }
     let prefix = resident
         .begin_cell_program(admission, program)
         .unwrap()
         .expect("nonempty compiled cell has an ordered prefix");
+    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+        assert!(checked.items.len() >= 2);
+        let before = resident.public_visibility_snapshot_in(public).unwrap();
+        let wrong = checked.checked_item(1).unwrap();
+        assert!(matches!(
+            resident.admit_checked_item(prefix.clone(), wrong),
+            Err(crate::session::SessionError::StaleStagedDeclaration)
+        ));
+        assert_eq!(
+            resident.public_visibility_snapshot_in(public).unwrap(),
+            before
+        );
+    }
     let submissions_before_effects = tidepool_extract_cmd::extract_spawn_count();
     let mut expected_observation_seen = false;
     resident
@@ -1107,6 +1368,93 @@ fn try_execute_cell_with_template_imports_expectation(
             else {
                 panic!("checked native item did not return its binding recipe")
             };
+            if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) && index == 1
+            {
+                let proof = compiled
+                    .certification
+                    .as_ref()
+                    .unwrap()
+                    .checked_execution()
+                    .unwrap();
+                let actual = reservation
+                    .snapshot()
+                    .actual_retained_imports()
+                    .collect::<Vec<_>>();
+                proof
+                    .validate_required_native_imports(actual.iter().copied())
+                    .unwrap();
+                proof
+                    .validate_settled_native_bindings(
+                        reservation.snapshot().settled_native_bindings(),
+                    )
+                    .unwrap();
+                let context = proof
+                    .original_execution_context(&compiled.prepared, &compiled.table, &compiled.asks)
+                    .unwrap();
+                let requirements = context
+                    .artifact_view()
+                    .native_requirements_from_roots(&[proof
+                        .typed_entry()
+                        .unwrap()
+                        .native_requirement_root()])
+                    .unwrap();
+                let settled = reservation
+                    .snapshot()
+                    .settled_native_bindings()
+                    .collect::<Vec<_>>();
+                let required = requirements
+                    .bindings
+                    .iter()
+                    .find(|requirement| {
+                        settled.iter().any(|(_, identity, generation, _)| {
+                            *identity == &requirement.identity
+                                && *generation == requirement.generation
+                        })
+                    })
+                    .expect("the second entry requires a genuinely completed earlier capture");
+                assert!(compiled.prepared.globals().iter().all(|global| global.identity != required.identity),
+                    "the capture obligation must come through the selected original, not direct target globals");
+                let missing = actual
+                    .iter()
+                    .copied()
+                    .filter(|(identity, generation)| {
+                        *identity != &required.identity || *generation != required.generation
+                    })
+                    .collect::<Vec<_>>();
+                assert!(missing.len() < actual.len());
+                assert!(matches!(proof.validate_required_native_imports(missing),
+                    Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
+                let stale = actual
+                    .iter()
+                    .map(|(identity, generation)| {
+                        (
+                            *identity,
+                            *generation ^ u64::from(*identity == &required.identity),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert!(matches!(proof.validate_required_native_imports(stale),
+                    Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
+                let edited = settled
+                    .iter()
+                    .map(|(name, identity, generation, identifier)| {
+                        (
+                            *name,
+                            *identity,
+                            *generation,
+                            *identifier ^ u64::from(*identity == &required.identity),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    proof.validate_settled_native_bindings(edited).is_err(),
+                    "transitive same-cell capture must retain its exact settled native identifier"
+                );
+                proof.validate_required_native_imports(actual).unwrap();
+                proof.validate_settled_native_bindings(settled).unwrap();
+            }
             if item.kind() == CheckedItemKind::Bind {
                 assert_eq!(
                     bound
@@ -1126,28 +1474,25 @@ fn try_execute_cell_with_template_imports_expectation(
                     &format!("{label}.native_bind"),
                     Some(index),
                     |resident| {
-                        if bound.len() == 1 {
-                            resident
-                                .run_bind_with_sites(
-                                    &bound[0].name,
-                                    compiled.code(),
-                                    &bound[0],
-                                    reservation.generation(),
-                                )
-                                .unwrap();
+                        if bound.is_empty() {
+                            resident.run_with_sites(label, compiled.code())
+                        } else if bound.len() == 1 {
+                            resident.run_bind_with_sites(
+                                &bound[0].name,
+                                compiled.code(),
+                                &bound[0],
+                                reservation.generation(),
+                            )
                         } else {
-                            assert!(!bound.is_empty());
-                            resident
-                                .run_projected_bind_with_sites(
-                                    label,
-                                    compiled.code(),
-                                    &bound,
-                                    reservation.generation(),
-                                )
-                                .unwrap();
+                            resident.run_projected_bind_with_sites(
+                                label,
+                                compiled.code(),
+                                &bound,
+                                reservation.generation(),
+                            )
                         }
                     },
-                );
+                )?;
             } else {
                 let observed = measured(
                     resident,
@@ -2863,7 +3208,7 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
             source,
             usize::from(declaration),
             &ScalePublication::Ephemeral,
-            AuthorityChecks::Configured,
+            AuthorityChecks::FreshTargetWork,
             &imports,
         )
         .expect("the admitted checked/native pair must preserve its retained value");
@@ -2915,12 +3260,6 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
                     .is_some_and(|count| count > 0)
             }),
             "native compilation must consume validated canonical products: {stderr}"
-        );
-        assert!(
-            stderr.lines().any(|line| {
-                line.starts_with("tidepool-checked module=") && line.ends_with(" target=True")
-            }),
-            "checking still owns its fresh generated target: {stderr}"
         );
         if declaration {
             execute_cell(

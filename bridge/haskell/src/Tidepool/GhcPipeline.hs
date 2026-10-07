@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
+  ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..), PreparedPipelineResult(..), PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
   , runPipelineSelected, runPipelineSessionSelected
@@ -78,6 +78,9 @@ import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction, makeThreadSafe)
+import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, TypedSegmentFailure(..),
+  typedSegmentItems, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
+import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -127,10 +130,10 @@ import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (is_cls, is_tys)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
-import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
+import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe, isCoVarType)
 import GHC.Builtin.Names (gHC_PRIM, fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
 import GHC.Builtin.Types (zonkAnyTyCon)
-import GHC.Core.DataCon (dataConOrigArgTys)
+import GHC.Core.DataCon (dataConRepArgTys)
 import GHC.Data.Bag (listToBag)
 import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
@@ -199,7 +202,7 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, registerSessionInterfaceLocation, renderSessionModule
+  , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, registerSessionInterfaceLocation, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
@@ -210,7 +213,8 @@ import Tidepool.Timing
   , newTimingRequestIdentity
   , ReuseContext(..), ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
   , ReuseVersionKind(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
-  , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
+  , readMemoTraceEnabled, MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
+  , emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
   , PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
 import Tidepool.FatIface
@@ -273,10 +277,22 @@ import Tidepool.OriginalProductRoots (candidateOriginalGlobalDemand)
 data PipelineSelection result where
   PreparedStg :: PipelineSelection PreparedPipelineResult
   PreparedProducts :: Maybe FilePath -> PipelineSelection PreparedPipelineResult
+  PreparedSegmentProducts :: TypedSegmentPlan -> Maybe FilePath -> PipelineSelection PreparedSegmentProductsResult
+  WithTypedSegmentPreparation :: TypedSegmentPreparation -> PipelineSelection result -> PipelineSelection result
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
   CheckedEnvironmentProducts :: FilePath -> PipelineSelection CheckedEnvironmentResult
   WithCompilerExecution :: CompilerExecutionGrant -> CompilerExecutor -> PipelineSelection result -> PipelineSelection result
   WithPreparedModuleCompletion :: PreparedModuleCompletion -> PipelineSelection result -> PipelineSelection result
+
+-- The Session owner emits and hydrates all captures as one private batch. The
+-- returned actual globals replace earlier capture parameters before simplify.
+type TypedSegmentPreparation = HscEnv -> Map.Map (String,String) CanonicalInterfaceAdmission
+  -> TypedSegment -> IO (HscEnv, [(Id,Id)], [CapturedSessionInterface])
+
+data PreparedSegmentProductsResult = PreparedSegmentProductsResult
+  { preparedSegmentProducts :: PreparedPipelineResult
+  , preparedSegmentCaptures :: TypedSegment
+  }
 
 -- | Acquired after finalization, before independent lowering starts. The
 -- observer owns actual projection inputs captured by the request, including
@@ -565,6 +581,8 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
 selectionKind :: PipelineSelection result -> PreparationKind
 selectionKind PreparedStg = PrepareStg
 selectionKind (PreparedProducts _) = PrepareStg
+selectionKind (PreparedSegmentProducts _ _) = PrepareStg
+selectionKind (WithTypedSegmentPreparation _ inner) = selectionKind inner
 selectionKind CheckedEnvironment = CheckOnly
 selectionKind (CheckedEnvironmentProducts _) = CheckOnly
 selectionKind (WithCompilerExecution _ _ selection) = selectionKind selection
@@ -572,6 +590,8 @@ selectionKind (WithPreparedModuleCompletion _ selection) = selectionKind selecti
 
 capturesProductInterfaces :: PipelineSelection result -> Bool
 capturesProductInterfaces (PreparedProducts _) = True
+capturesProductInterfaces (PreparedSegmentProducts _ _) = True
+capturesProductInterfaces (WithTypedSegmentPreparation _ inner) = capturesProductInterfaces inner
 capturesProductInterfaces (WithCompilerExecution _ _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces (WithPreparedModuleCompletion _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces _ = False
@@ -619,9 +639,9 @@ data PipelineResult = PipelineResult
   }
 
 checkCellInstances
-  :: (CellSourcePlan -> IO CheckedEnvironmentResult)
+  :: (CellSourcePlan -> IO result)
   -> CellSourcePlan
-  -> IO (CellSourcePlan, CheckedEnvironmentResult)
+  -> IO (CellSourcePlan, result)
 checkCellInstances compile plan = do
   attempted <- try (compile plan)
   case attempted of
@@ -993,6 +1013,8 @@ data PipelineVariant = PipelineVariant
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
+candidateManifestFor (PreparedSegmentProducts _ path) = path
+candidateManifestFor (WithTypedSegmentPreparation _ inner) = candidateManifestFor inner
 candidateManifestFor (CheckedEnvironmentProducts path) = Just path
 candidateManifestFor (WithCompilerExecution _ _ selection) = candidateManifestFor selection
 candidateManifestFor (WithPreparedModuleCompletion _ selection) = candidateManifestFor selection
@@ -1001,17 +1023,33 @@ candidateManifestFor _ = Nothing
 executionGrantFor :: PipelineSelection result -> CompilerExecutionGrant
 executionGrantFor (WithCompilerExecution grant _ _) = grant
 executionGrantFor (WithPreparedModuleCompletion _ selection) = executionGrantFor selection
+executionGrantFor (WithTypedSegmentPreparation _ selection) = executionGrantFor selection
 executionGrantFor _ = serialCompilerExecutionGrant
 
 executorFor :: PipelineSelection result -> Maybe CompilerExecutor
 executorFor (WithCompilerExecution _ executor _) = Just executor
 executorFor (WithPreparedModuleCompletion _ selection) = executorFor selection
+executorFor (WithTypedSegmentPreparation _ selection) = executorFor selection
 executorFor _ = Nothing
 
 completionFactoryFor :: PipelineSelection result -> Maybe PreparedModuleCompletion
 completionFactoryFor (WithCompilerExecution _ _ selection) = completionFactoryFor selection
 completionFactoryFor (WithPreparedModuleCompletion factory _) = Just factory
+completionFactoryFor (WithTypedSegmentPreparation _ selection) = completionFactoryFor selection
 completionFactoryFor _ = Nothing
+
+typedPreparationFor :: PipelineSelection result -> Maybe TypedSegmentPreparation
+typedPreparationFor (WithTypedSegmentPreparation prepare _) = Just prepare
+typedPreparationFor (WithCompilerExecution _ _ inner) = typedPreparationFor inner
+typedPreparationFor (WithPreparedModuleCompletion _ inner) = typedPreparationFor inner
+typedPreparationFor _ = Nothing
+
+typedPlanFor :: PipelineSelection result -> Maybe TypedSegmentPlan
+typedPlanFor (PreparedSegmentProducts plan _) = Just plan
+typedPlanFor (WithTypedSegmentPreparation _ inner) = typedPlanFor inner
+typedPlanFor (WithCompilerExecution _ _ inner) = typedPlanFor inner
+typedPlanFor (WithPreparedModuleCompletion _ inner) = typedPlanFor inner
+typedPlanFor _ = Nothing
 
 -- Body demand is a property of the request, not of whether its environment
 -- came from a session. GHC still loads and finalizes the complete selected
@@ -1157,6 +1195,7 @@ data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCo
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | HostActivationPreviewCompile CheckedSignature
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
+  | TypedSegmentCompile TypedSegmentPlan GeneratedSegmentOperations CompilePurpose
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | ExactScopeCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
@@ -1172,6 +1211,7 @@ withSourceImportIntents prologue = ParsedImportSelection
   (map locatedImportIntent (prologueImports prologue))
 
 sourceImportIntents :: CompilePurpose -> [ImportIntent]
+sourceImportIntents (TypedSegmentCompile _ _ inner) = sourceImportIntents inner
 sourceImportIntents (ParsedImportSelection intents inner) = intents ++ sourceImportIntents inner
 sourceImportIntents (CompletedProgramImports _ inner) = sourceImportIntents inner
 sourceImportIntents (GeneratedInstanceCheck _ inner) = sourceImportIntents inner
@@ -1180,6 +1220,7 @@ sourceImportIntents (ExactScopeCompile inner _) = sourceImportIntents inner
 sourceImportIntents _ = []
 
 generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
+generatedInstanceRecipe (TypedSegmentCompile _ _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (ParsedImportSelection _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (CompletedProgramImports _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
@@ -1190,6 +1231,7 @@ generatedInstanceRecipe _ = Nothing
 -- A request supplies its admitted baseline; an inner ordered-cell stage may
 -- carry a scope extended with freshly admitted originals from that request.
 purposeExactScope :: CompilePurpose -> Maybe ExactScope
+purposeExactScope (TypedSegmentCompile _ _ inner) = purposeExactScope inner
 purposeExactScope (ParsedImportSelection _ inner) = purposeExactScope inner
 purposeExactScope (CompletedProgramImports _ inner) = purposeExactScope inner
 purposeExactScope (GeneratedInstanceCheck _ inner) = purposeExactScope inner
@@ -1199,6 +1241,7 @@ purposeExactScope (PlannedDeclarationCheck _ scope) = Just scope
 purposeExactScope _ = Nothing
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
+generatedRecipe (TypedSegmentCompile _ _ inner) = generatedRecipe inner
 generatedRecipe (ParsedImportSelection _ inner) = generatedRecipe inner
 generatedRecipe (CompletedProgramImports _ inner) = generatedRecipe inner
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
@@ -1207,12 +1250,22 @@ generatedRecipe (GeneratedInstanceCheck _ inner) = generatedRecipe inner
 generatedRecipe _ = Nothing
 
 originalPurpose :: CompilePurpose -> CompilePurpose
+originalPurpose (TypedSegmentCompile _ _ inner) = originalPurpose inner
 originalPurpose (ParsedImportSelection _ inner) = originalPurpose inner
 originalPurpose (CompletedProgramImports _ inner) = originalPurpose inner
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
 originalPurpose (ExactScopeCompile inner _) = originalPurpose inner
 originalPurpose (GeneratedInstanceCheck _ inner) = originalPurpose inner
 originalPurpose purpose = purpose
+
+typedPurposePlan :: CompilePurpose -> Maybe TypedSegmentPlan
+typedPurposePlan (TypedSegmentCompile plan _ _) = Just plan
+typedPurposePlan (ParsedImportSelection _ inner) = typedPurposePlan inner
+typedPurposePlan (CompletedProgramImports _ inner) = typedPurposePlan inner
+typedPurposePlan (GeneratedInstanceCheck _ inner) = typedPurposePlan inner
+typedPurposePlan (GeneratedScaffoldCompile _ inner) = typedPurposePlan inner
+typedPurposePlan (ExactScopeCompile inner _) = typedPurposePlan inner
+typedPurposePlan _ = Nothing
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformFor GeneralCompile _ _ _ = pure . unannotatedModule
@@ -1245,6 +1298,10 @@ transformFor (ProgramItemCompile original annotations originals _) target env su
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
   | otherwise = pure . unannotatedModule
+transformFor (TypedSegmentCompile plan operations inner) target env summary
+  | ms_mod_name summary == target = \parsed ->
+      transformFor inner target env summary parsed >>= mapNativeModule (rewriteParsedSegmentRoot operations plan)
+  | otherwise = transformFor inner target env summary
 transformFor (ExactScopeCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
 transformFor (GeneratedInstanceCheck _ purpose) target env summary = transformFor purpose target env summary
@@ -1254,6 +1311,11 @@ transformFor (CompletedProgramImports _ purpose) target env summary = transformF
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
+  TypedSegmentCompile plan operations inner
+    | ms_mod_name summary == target -> \parsed ->
+        transformWithCompletedValues captured inner target env summary parsed
+          >>= mapNativeModule (rewriteParsedSegmentRoot operations plan)
+    | otherwise -> transformWithCompletedValues captured inner target env summary
   ParsedImportSelection _ inner -> transformWithCompletedValues captured inner target env summary
   CompletedProgramImports _ inner -> transformWithCompletedValues captured inner target env summary
   ExactScopeCompile inner _ -> transformWithCompletedValues captured inner target env summary
@@ -1495,6 +1557,23 @@ data MemoSelectionKey = MemoSelectionKey Fingerprint (Set.Set SymbolIdentity)
   (Map.Map HomeDependency HomeDependencyDigest) (Maybe String)
   (Map.Map (String,String) HomeDependencyDigest)
   deriving (Eq, Ord)
+
+data MemoSelectionRefusal
+  = MemoSelectionOwner | MemoSelectionUnsealedClosure | MemoSelectionUnsealedUsage
+  | MemoSelectionSourceHash | MemoSelectionRetained | MemoSelectionHomeDependencies
+  | MemoSelectionExactEnvironmentAndUsages | MemoSelectionIncarnation
+  deriving (Eq, Show)
+
+memoSelectionRefusalName :: MemoSelectionRefusal -> String
+memoSelectionRefusalName reason = case reason of
+  MemoSelectionOwner -> "owner"
+  MemoSelectionUnsealedClosure -> "unsealed_closure"
+  MemoSelectionUnsealedUsage -> "unsealed_usage"
+  MemoSelectionSourceHash -> "source_hash"
+  MemoSelectionRetained -> "retained"
+  MemoSelectionHomeDependencies -> "home_dependencies"
+  MemoSelectionExactEnvironmentAndUsages -> "exact_environment_and_usages"
+  MemoSelectionIncarnation -> "incarnation"
 
 memoSelectionKey :: MemoValidity -> MemoSelectionKey
 memoSelectionKey validity = MemoSelectionKey (memoSourceHash validity)
@@ -1929,6 +2008,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         Nothing -> liftIO (throwIO CompilerProducerUnavailable)
         Just producer -> unless (producer == scopeProducerSha256 scope)
           (liftIO (throwIO CompilerProducerScopeMismatch))
+    unless (typedPlanFor selection == typedPurposePlan (pvPurpose variant)) $
+      liftIO (throwIO SegmentPlanPurposeMismatch)
+    when (isJust (typedPlanFor selection) && isNothing (typedPreparationFor selection)) $
+      liftIO (throwIO MissingSegmentPreparation)
     memoTrace <- liftIO readMemoTraceEnabled
     sourceReuseDisabled <- liftIO ((== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_SOURCE_REUSE")
     disabledSourceOwnersRef <- liftIO (newIORef Set.empty)
@@ -2009,6 +2092,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     finalizedModulesRef <- liftIO (newIORef Map.empty)
     loadedModulesRef <- liftIO (newIORef Map.empty)
     targetEnvironmentRef <- liftIO (newIORef Nothing)
+    targetTypedSegmentRef <- liftIO (newIORef Nothing)
+    typedSessionInterfacesRef <- liftIO (newIORef [])
+    typedSessionEnvironmentRef <- liftIO (newIORef Nothing)
+    typedFailureRef <- liftIO (newIORef Nothing)
     pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
     -- Downsweep may select the interpreter for splice dependencies and enable
     -- IgnoreInterfacePragmas. Canonical summaries restore the interface policy
@@ -2026,6 +2113,32 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     modGraphRaw <- elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
     targetName <- liftIO (targetModuleNameFor path)
     let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit previous)) targetName
+        prepareTypedTarget summary env tcg = case typedPlanFor selection of
+          Just typedPlan | ms_mod_name summary == targetName -> do
+            prepare <- maybe (throwIO MissingSegmentPreparation) pure (typedPreparationFor selection)
+            segment <- captureTypedSegment typedPlan env
+              (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) tcg
+            (hydrated, globals, interfaces) <- prepare env
+              (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) segment
+            closed <- closeTypedSegment hydrated globals segment
+            writeIORef targetTypedSegmentRef (Just closed)
+            writeIORef typedSessionInterfacesRef interfaces
+            writeIORef typedSessionEnvironmentRef (Just hydrated)
+            modifyIORef' (tcg_keep tcg) (`extendNameSetList` map (idName . typedItemRoot) (typedSegmentItems closed))
+            pure (hydrated, Just closed)
+          _ -> pure (env, Nothing)
+        installSegment Nothing guts = pure guts
+        installSegment (Just segment) guts = installTypedSegmentRoots segment guts
+        includeTypedSession final = do
+          hydrated <- readIORef typedSessionEnvironmentRef
+          interfaces <- readIORef typedSessionInterfacesRef
+          pure $ case hydrated of
+            Nothing -> final
+            Just env -> hscUpdateHPT (\home -> foldl (\table (owner,_) ->
+              maybe table (\entry -> addToHpt table (moduleName owner) entry)
+                (lookupHpt (hsc_HPT env) (moduleName owner))) home
+              (map capturedSessionInterface interfaces)) final
+
     -- Module names do not identify generated content across independent
     -- requests. A memo hit therefore requires the current source hash and
     -- the selected path/fingerprint closure of every home import. The
@@ -2109,18 +2222,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       "tidepool-dependency-witness nodes=" ++ show (Map.size dependencyGraph)
         ++ " direct_edges=" ++ show dependencyEdgeCount
         ++ " digest_computations=" ++ show digestComputations
-    -- The selected module graph, once per cycle (never per lookup).
-    -- Graph capture holds paths and fingerprints only.
-    when memoTrace $ liftIO $
-      forM_ (Map.toList summaryByDependency) $ \(dependency@(HomeDependency name kind), summary) -> do
-        let HomeDependencyWitness selectedPath fingerprint = summaryFingerprints Map.! dependency
-            resolvedPath = normalise <$> ml_hs_file (ms_location summary)
-            directDeps = [ moduleNameString d | d <- Set.toList (directHomeDeps summary) ]
-            digestHex = case Map.lookup dependency dependencyDigests of
-              Just (HomeDependencyDigest bytes) -> hexBytes bytes
-              Nothing -> "<none>"
-        emitMemoCycleGraph memoTrace requestIdentity (moduleNameString name) (show kind)
-          selectedPath resolvedPath fingerprint directDeps digestHex
     validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
     executableValidRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
     dropMemoInterface <- liftIO (lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
@@ -2164,27 +2265,34 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       StandaloneCycle -> liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
       TransactionCycle _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
     selectedVersionsRef <- liftIO (newIORef Map.empty)
+    executableObservationsRef <- liftIO $ if memoTrace
+      then Just <$> newIORef Map.empty else pure Nothing
+    -- 'null' forces only through the first refusal, preserving the selection
+    -- predicate's short circuit. Rendering/full refusal enumeration is opt-in.
+    let selectionRefusals :: ModSummary -> CompletedModuleVersion -> [MemoSelectionRefusal]
+        selectionRefusals summary node =
+          let entry = completedModuleEntry node
+              validity = gmeValidity entry
+          in [reason | (valid, reason) <-
+               [(payloadOwner (gmePayload entry) == ms_mod summary, MemoSelectionOwner)
+               ,(ms_mod summary `Set.notMember` unsealedClosure, MemoSelectionUnsealedClosure)
+               ,(not (usesUnsealedSourceInputs unsealedInputs previous entry), MemoSelectionUnsealedUsage)
+               ,(memoSourceHash validity == ms_hs_hash summary, MemoSelectionSourceHash)
+               ,(memoRetained validity == retainedFor summary, MemoSelectionRetained)
+               ,(memoHomeDependencies validity == homeDependencyWitnesses summary, MemoSelectionHomeDependencies)
+               ,(sameExactEnvironment summary validity, MemoSelectionExactEnvironmentAndUsages)
+               ,(not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
+                   || (isJust incarnation && memoIncarnation validity == incarnation), MemoSelectionIncarnation)]
+             , not valid]
     case cycleState of
       TransactionCycle _ memo _ versions _ _ _ _ -> liftIO $ do
-        let matching summary node =
-              let entry = completedModuleEntry node
-                  validity = gmeValidity entry
-              in payloadOwner (gmePayload entry) == ms_mod summary
-                && ms_mod summary `Set.notMember` unsealedClosure
-                && not (usesUnsealedSourceInputs unsealedInputs previous entry)
-                && memoSourceHash validity == ms_hs_hash summary
-                && memoRetained validity == retainedFor summary
-                && memoHomeDependencies validity == homeDependencyWitnesses summary
-                && sameExactEnvironment summary validity
-                && (not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
-                  || (isJust incarnation && memoIncarnation validity == incarnation))
-            select summary = do
+        let select summary = do
               byIngress <- Map.lookup (ms_mod summary) versions
               let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
                     (homeDependencyWitnesses summary) (incarnationFor summary)
                     (exactImportEnvironment summary)
               narrowed <- Map.lookup ingress byIngress
-              find (matching summary) (Map.elems narrowed)
+              find (null . selectionRefusals summary) (Map.elems narrowed)
             selected = Map.fromList [(ms_mod summary,node)
               | summary <- Map.elems summaryByDependency, ms_mod summary /= targetOwner
               , Just node <- [select summary]]
@@ -2361,7 +2469,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
              , iface <- scopeValueInterfaces scope])
     normalCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates (forkExactContextWithPackageFacts packageFinder)
+      Just manifest -> certifyModuleCandidates requestIdentity (forkExactContextWithPackageFacts packageFinder)
         compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners capturedCandidates manifest modGraphRaw path
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
@@ -2470,6 +2578,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 || isJust (homeMod_object (hm_linkable home))
               needsBytecode = backendGeneratesCode (backend (ms_hspp_opts summary))
                 && (not sameEpoch || not hasCode)
+          -- Observe the actual capacity branch separately from source validity.
+          forM_ executableObservationsRef $ \observations -> liftIO $
+            modifyIORef' observations (Map.insert (ms_mod summary)
+              (MemoExecutableTrace nodeEpoch epoch hasCode needsBytecode))
           refreshed <- if needsBytecode
             then do
               -- Executable demand can follow metadata-only preparation in the
@@ -2488,6 +2600,52 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           -- selected complete owner retains the exact current executable
           -- capacity, including across code-to-metadata-to-code transitions.
           liftIO (addHmiToCache cache refreshed)
+    -- Observe the original ingress, not the already-pruned working memo.
+    -- Failed checks inspect only versions under this exact immutable key.
+    when memoTrace $ liftIO $ do
+      observedSelections <- readIORef selectedVersionsRef
+      observedExecutables <- maybe (pure Map.empty) readIORef executableObservationsRef
+      forM_ (Map.toList summaryByDependency) $ \(dependency@(HomeDependency name kind), summary) -> do
+        let HomeDependencyWitness selectedPath fingerprint = summaryFingerprints Map.! dependency
+            resolvedPath = normalise <$> ml_hs_file (ms_location summary)
+            directDeps = [moduleNameString d | d <- Set.toList (directHomeDeps summary)]
+            digestHex = case Map.lookup dependency dependencyDigests of
+              Just (HomeDependencyDigest bytes) -> hexBytes bytes
+              Nothing -> "<none>"
+            keyFacts = show (ms_hs_hash summary, retainedFor summary,
+              [(moduleNameString child, show sourceKind, hexBytes bytes)
+                | (HomeDependency child sourceKind, HomeDependencyDigest bytes) <-
+                    Map.toAscList (homeDependencyWitnesses summary)],
+              incarnationFor summary,
+              [(owner, hexBytes bytes) | (owner, HomeDependencyDigest bytes) <-
+                  Map.toAscList (exactImportEnvironment summary)])
+            keySha = hexBytes (SHA256.hash (TextEncoding.encodeUtf8 (Text.pack keyFacts)))
+            observation state narrowed originating failures omitted = MemoSelectionTrace
+              state (unitString (moduleUnit (ms_mod summary))) keySha narrowed originating failures omitted
+                (Map.lookup (ms_mod summary) observedExecutables)
+            selection = case cycleState of
+              StandaloneCycle -> observation MemoStandalone 0 Nothing [] 0
+              TransactionCycle _ _ _ versions _ _ _ _
+                | ms_mod summary == targetOwner -> observation MemoTargetExcluded 0 Nothing [] 0
+                | otherwise -> case Map.lookup (ms_mod summary) versions of
+                    Nothing -> observation MemoOwnerAbsent 0 Nothing [] 0
+                    Just byIngress ->
+                      let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
+                            (homeDependencyWitnesses summary) (incarnationFor summary)
+                            (exactImportEnvironment summary)
+                      in case Map.lookup ingress byIngress of
+                        Nothing -> observation MemoIngressAbsent 0 Nothing [] 0
+                        Just narrowed ->
+                          let checked = [(node, map memoSelectionRefusalName (selectionRefusals summary node))
+                                | node <- Map.elems narrowed]
+                              selected = Map.lookup (ms_mod summary) observedSelections
+                              rejected = [(gmeCycle (completedModuleEntry node), checks)
+                                | (node, checks) <- checked, not (null checks)]
+                          in observation (if isJust selected then MemoSelected else MemoMatchingRejected)
+                            (Map.size narrowed) (gmeCycle . completedModuleEntry <$> selected)
+                            (take 16 rejected) (max 0 (length rejected - 16))
+        emitMemoCycleGraph memoTrace requestIdentity (moduleNameString name) (show kind)
+          selectedPath resolvedPath fingerprint directDeps digestHex selection
     let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -2716,25 +2874,27 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (Map.delete (ms_mod summary) known, Map.lookup (ms_mod summary) known))
                 >>= maybe (throwIO MissingLoadedFrontend) pure
               let summaryC = canonicalSummary summary
-                  flags = hsc_dflags env
+              (typedEnv, typedSegment) <- prepareTypedTarget summaryC env tcg
+              let flags = hsc_dflags typedEnv
                   resultRoots = [idName identifier | cpKeepPrivateResult plan
                     , ms_mod_name summaryC == targetName
                     , identifier <- typeEnvIds (tcg_type_env tcg)
                     , occNameString (nameOccName (idName identifier)) `elem` cpResultBinders plan
                     , nameModule_maybe (idName identifier) == Just (ms_mod summaryC)]
               modifyIORef' (tcg_keep tcg) (`extendNameSetList` resultRoots)
-              (desugared, dsWarnings) <- timeDetailPhase timing "ghc_load_desugar"
+              (desugared0, dsWarnings) <- timeDetailPhase timing "ghc_load_desugar"
                 (moduleNameString (ms_mod_name summaryC)) $
-                runHsc' env (hscDesugar' (ms_location summaryC) tcg)
+                runHsc' typedEnv (hscDesugar' (ms_location summaryC) tcg)
+              desugared <- installSegment typedSegment desugared0
               printOrThrowDiagnostics (hsc_logger env) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
               plugins <- readIORef (tcg_th_coreplugins tcg)
               simplified <- timeDetailPhase timing "ghc_load_simplify"
-                (moduleNameString (ms_mod_name summaryC)) (hscSimplify env plugins desugared)
-              (tidy, details) <- hscTidy env simplified
+                (moduleNameString (ms_mod_name summaryC)) (hscSimplify typedEnv plugins desugared)
+              (tidy, details) <- hscTidy typedEnv simplified
               roots <- directPackageImports env tcg
               files <- readIORef (tcg_dependent_files tcg)
-              let partial = force (mkPartialIface env (cg_binds tidy) details summaryC
+              let partial = force (mkPartialIface typedEnv (cg_binds tidy) details summaryC
                     (tcg_import_decls tcg) simplified)
                   externalized = externalizeInternalTops simplified
                   output = ModuleOutput (mg_module externalized) (mg_binds externalized)
@@ -2742,7 +2902,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan])
                   facts = ModuleFacts (mg_tcs desugared) (moduleRefs desugared) roots
                     (not (null files)) quotes
-                  pending = PendingFinalization summaryC facts output tidy details env
+                  pending = PendingFinalization summaryC facts output tidy details typedEnv
                   action = HscRecomp tidy (ms_location summaryC) partial oldHash
               reuseEvent FinalizedCore ReuseWork Absent summaryC
               reuseEvent Interface ReuseWork Absent summaryC
@@ -2750,7 +2910,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 "tidepool-canonical-finalization module=" ++ moduleNameString (ms_mod_name summaryC)
               if not (backendGeneratesCode (backend (hsc_dflags phaseEnv)))
                 then do
-                  iface <- mkFullIface env partial Nothing Nothing NoStubs []
+                  iface <- mkFullIface typedEnv partial Nothing Nothing NoStubs []
                   hscMaybeWriteIface (hsc_logger env) flags True iface oldHash (ms_location summaryC)
                   retainLoaded pending iface
                   pure (HscUpdate (set_mi_extra_decls Nothing iface))
@@ -2782,7 +2942,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         targetPhase (T_HscBackend _ _ name _ _ _) = name == targetName
         targetPhase _ = False
         captureCanonicalFailure :: TPhase a -> IO a
-        captureCanonicalFailure phase = observedCanonicalLoad phase
+        captureCanonicalFailure phase = (observedCanonicalLoad phase
+          `catch` (\failure -> do
+            when (targetPhase phase) (writeIORef typedFailureRef (Just (failure :: TypedSegmentFailure)))
+            throwIO failure))
           `catch` (\failure -> do
             when (targetPhase phase) (writeIORef targetLoadFailure (Just (failure :: SourceError)))
             throwIO failure)
@@ -2869,6 +3032,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           unless (Map.null pending && Map.null quotes) $
             liftIO $ throwIO UnfinishedLoadedFrontend
         Failed -> do
+          typedFailure <- liftIO (readIORef typedFailureRef)
+          forM_ typedFailure (liftIO . throwIO)
           canonicalFailure <- liftIO (readIORef canonicalFailureRef)
           forM_ canonicalFailure (liftIO . throwIO)
           instanceFailure <- liftIO (readIORef targetInstanceFailure)
@@ -2972,8 +3137,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   liftIO (writeIORef targetEnvironmentRef (Just tcGblEnv))
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
-                let hscEnv   = scopeRetainedSummaryHscEnv modSum hscEnv0
-                    -- Capture the inferred type of the eval's top expression NOW,
+                (hscEnv, typedSegment) <- liftIO (prepareTypedTarget modSum
+                  (scopeRetainedSummaryHscEnv modSum hscEnv0) tcGblEnv)
+                setSession hscEnv
+                let -- Capture the inferred type of the eval's top expression NOW,
                     -- before optimization can inline/rename @__user@ away. Types
                     -- live on the Id in the typechecked type env; the prepared wire program erases
                     -- them after compiler-owned decisions.
@@ -3001,7 +3168,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 liftIO $ modifyIORef' (tcg_keep tcGblEnv) (`extendNameSetList` resultRoots)
                 (desugared0, dsMs) <- timeSection $
                   timeDetailPhase timing "deferred_desugar" (moduleNameString (ms_mod_name modSum)) $
-                    liftIO (hscDesugar hscEnv modSum tcGblEnv)
+                    liftIO (hscDesugar hscEnv modSum tcGblEnv >>= installSegment typedSegment)
                 let retainResult identifier = if idName identifier `elem` resultRoots
                       then setIdExported identifier else identifier
                     retainBinding (NonRec identifier rhs) = NonRec (retainResult identifier) rhs
@@ -3515,7 +3682,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           -- sorted over the target's own import closure, so the target is last) is
           -- the dependencies-then-target order it used to build by hand.
           moduleFacts <- liftIO (mapM observationFacts observations)
-          hscFinal <- getSession
+          hscFinal0 <- getSession
+          hscFinal <- liftIO (includeTypedSession hscFinal0)
+          setSession hscFinal
           exactTyCons <- liftIO (exactInterfaceTyCons hscFinal (pvExactScope variant))
           let allBinds  = concatMap moduleOutputBinds depOutputs
                 ++ moduleOutputBinds targetOutput
@@ -3523,7 +3692,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           targetEnvironment <- liftIO (readIORef targetEnvironmentRef) >>= maybe
             (liftIO (ioError (userError (pvLabel variant ++ ": target frontend environment is absent")))) pure
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-          injectedInterfaces <- liftIO (cpInjectedSessionInterfaces plan)
+          injectedBaseline <- liftIO (cpInjectedSessionInterfaces plan)
+          injectedTyped <- liftIO (readIORef typedSessionInterfacesRef)
+          let injectedInterfaces = injectedBaseline ++ injectedTyped
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
@@ -3709,10 +3880,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
               , pprAcceptedCandidateBindings = acceptedBindings
               }
+          PreparedSegmentProducts _ candidatePath -> do
+            products <- finish (PreparedProducts candidatePath)
+            segment <- liftIO (readIORef targetTypedSegmentRef) >>= maybe
+              (liftIO (throwIO MissingCaptureRoot)) pure
+            pure (PreparedSegmentProductsResult products segment)
           CheckedEnvironment -> compileChecked
           CheckedEnvironmentProducts _ -> compileChecked
           WithCompilerExecution _ _ inner -> finish inner
           WithPreparedModuleCompletion _ inner -> finish inner
+          WithTypedSegmentPreparation _ inner -> finish inner
     result <- finish selection
     liftIO $ do
       emitReuseComplete timing reuseContext SourceFrontend
@@ -3728,6 +3905,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
 
 compilePurposeLabel :: CompilePurpose -> String
 compilePurposeLabel purpose = case purpose of
+  TypedSegmentCompile _ _ _ -> "typed_segment"
   GeneralCompile -> "general"
   LookupTypeCompile -> "lookup_type"
   CertifyHomeProductsCompile -> "certify_home_products"
@@ -3800,13 +3978,16 @@ data CandidateExecutionProofFailure
   deriving (Eq, Show)
 
 certifyModuleCandidates
-  :: (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> FilePath
+  :: Word64 -> (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> FilePath
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetPath = do
+certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetPath = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
-  let record owner reason detail = when timing $ liftIO $
-        modifyIORef' observations (Map.insert owner (reason, fmap (take 192) detail))
+  let boundedDetail detail = case splitAt 192 detail of
+        (prefix, []) -> prefix
+        (prefix, _) -> take 176 prefix ++ "...[truncated]"
+      record owner reason detail = when timing $ liftIO $
+        modifyIORef' observations (Map.insert owner (reason, fmap boundedDetail detail))
       recordCandidate candidate = record (candidateUnit candidate, candidateModule candidate)
   decoded <- liftIO $ case captured of
     Nothing -> readModuleCandidatesWithGraphs (maybe [] scopeExecutionGraphs exactScope) manifest
@@ -3938,6 +4119,40 @@ certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exact
             either (const False) (const True) (candidateExecutionProof candidate)
           admissionDetail candidate CandidateExecutionProof =
             either (Just . show) (const Nothing) (candidateExecutionProof candidate)
+          admissionDetail candidate CandidateImportTuple =
+            case Map.lookup (candidateModule candidate) currentModules of
+              Nothing -> Nothing
+              Just node ->
+                let historical = mapM (\imported -> normalizeImport candidate
+                      (candidateDependencyQualifier (candidateImportQualifier imported))
+                      (candidateImportModule imported) (candidateImportBoot imported)
+                      (candidateImportSelected imported)) (candidateImports candidate)
+                    currentImports = mapM (\imported -> normalizeImport candidate
+                      (dependencyImportQualifier imported) (dependencyImportName imported)
+                      (dependencyImportBoot imported) (dependencyImportSelected imported))
+                      (dependencyModuleImports node)
+                    limited label rows = label ++ "=" ++ show (take 2 rows)
+                      ++ ";omitted=" ++ show (max 0 (length rows - 2))
+                in Just $ case (historical, currentImports) of
+                  (Just expected, Just actual) ->
+                    let expectedCounts = Map.fromListWith (+) [(row, 1 :: Int) | row <- expected]
+                        actualCounts = Map.fromListWith (+) [(row, 1 :: Int) | row <- actual]
+                        changed = [(row, oldCount, newCount)
+                          | row <- Set.toAscList (Map.keysSet expectedCounts `Set.union` Map.keysSet actualCounts)
+                          , let oldCount = Map.findWithDefault 0 row expectedCounts
+                          , let newCount = Map.findWithDefault 0 row actualCounts
+                          , oldCount /= newCount]
+                        actualOriginals = Set.toAscList (Set.fromList
+                          [(candidateUnit candidate, name) | (qualifier, name, _, _) <- actual
+                            , isJust (exactImportKey candidate qualifier name)])
+                    in limited "normalized_changed_counts" changed
+                      ++ ";" ++ limited "expected_originals" (Map.keys (provenOriginals candidate))
+                      ++ ";" ++ limited "actual_originals" actualOriginals
+                  _ -> "normalization_failed;" ++ limited "historical_raw" (candidateImports candidate)
+                    ++ ";" ++ limited "current_raw"
+                      [(dependencyImportQualifier imported, dependencyImportName imported,
+                        dependencyImportBoot imported, dependencyImportSelected imported)
+                        | imported <- dependencyModuleImports node]
           admissionDetail _ _ = Nothing
           candidateDependencyQualifier CandidateUnqualified = DependencyUnqualified
           candidateDependencyQualifier (CandidateThisUnit unit) = DependencyThisUnit unit
@@ -3963,7 +4178,9 @@ certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exact
                 source <- liftIO $ traverse canonicalizePath
                   (ml_hs_file (ms_location summary))
                 if source /= Just (candidateSource candidate)
-                  then recordCandidate candidate CandidateSourcePath Nothing >> pure Nothing
+                  then recordCandidate candidate CandidateSourcePath
+                    (Just ("historical=" ++ show (candidateSource candidate) ++ ";current=" ++ show source))
+                    >> pure Nothing
                   else do
                     inspected <- liftIO (try (sourceEvidenceWithFingerprint
                       (candidateSource candidate))
@@ -4142,7 +4359,8 @@ certifyModuleCandidates forkContext compilerViewDirectory expectedProducer exact
       emitCount timing ("candidate_admission." ++ show reason) count
     forM_ (take 128 (Map.toAscList observed)) $ \((unit, name), (reason, detail)) ->
       hPutStrLn stderr ("tidepool-candidate-admission owner=" ++ show (take 192 (unit ++ ":" ++ name))
-        ++ " reason=" ++ show reason ++ maybe "" ((" detail=" ++) . show) detail)
+        ++ " reason=" ++ show reason ++ " cycle=" ++ show requestIdentity
+        ++ maybe "" ((" detail=" ++) . show) detail)
     emitCount timing "candidate_admission_rows_omitted" (toInteger (max 0 (Map.size observed - 128)))
   pure result
 
@@ -5884,7 +6102,7 @@ stripMonadHead ty =
 -- instantiated at a partially-applied arrow (@data Box f = Box (f Int)@ at
 -- @f = (->) Bool@) reaches 'goT' as one of @Box@'s own outer type
 -- arguments — the CONCRETE @(->) Bool@, not @Box@'s abstract, unsubstituted
--- field declaration @f Int@ (which 'dataConOrigArgTys' can never resolve to
+-- field declaration @f Int@ (which 'dataConRepArgTys' can never resolve to
 -- a function regardless of what @f@ is instantiated to, and correctly so —
 -- it is genuinely opaque without that instantiation). A SATURATED arrow
 -- always normalizes to GHC's own @FunTy@ sugar (an invariant GHC itself
@@ -5896,12 +6114,19 @@ stripMonadHead ty =
 -- 'False', misclassifying the whole @Box@ value as Tier0 and crashing the
 -- same deep-force this function exists to prevent.
 isClosureType :: Type -> Bool
-isClosureType ty0 =
-  let (_, _, body) = tcSplitSigmaTy ty0
-  in goT emptyUniqSet body
+isClosureType = goT emptyUniqSet
   where
     goT :: UniqSet TyCon -> Type -> Bool
-    goT visited ty
+    goT visited ty =
+      let (_, constraints, body) = tcSplitSigmaTy ty
+      -- Class dictionaries are value arguments even when the result is a
+      -- scalar (@forall a. Num a => a@). Type binders and primitive equality
+      -- evidence erase; they alone do not make a runtime closure. Inspect
+      -- nested sigma types too, including polymorphic constructor fields.
+      in any (not . isCoVarType) constraints || goBody visited body
+
+    goBody :: UniqSet TyCon -> Type -> Bool
+    goBody visited ty
       | Just{} <- splitFunTy_maybe ty = True
       | Just (tc, tyArgs) <- splitTyConApp_maybe ty = any (goT visited) tyArgs || goTc visited tc
       | otherwise = False
@@ -5915,9 +6140,12 @@ isClosureType ty0 =
               newtypeHit = case unwrapNewTyCon_maybe tc of
                 Just (_tvs, reprTy, _coax) -> goT visited' reprTy
                 Nothing -> False
+              -- The worker fields include stored constructor dictionaries;
+              -- source argument types omit them. Primitive coercion evidence
+              -- has zero runtime width and does not need opaque retention.
               fieldHit = case tyConDataCons_maybe tc of
-                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> goT visited' ft)
-                                             (dataConOrigArgTys dc)) dcs
+                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> not (isCoVarType ft) && goT visited' ft)
+                                             (dataConRepArgTys dc)) dcs
                 Nothing -> False
           in newtypeHit || fieldHit
 
