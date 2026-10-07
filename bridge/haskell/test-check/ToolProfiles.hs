@@ -79,9 +79,9 @@ narrowTools = Narrow (haskellTool "A pure notebook in a command-capable actor")
 tools :: Tools (AsServerT (Eff '[]))
 tools = Tools
   { ordinary = presentWith id (tool "Echo" pure)
-  , curate = presentWith id $ syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
-  , rawCurate = presentWith id (syncRawTool "Echo literal" pure)
-  , notifyCurate = presentWith (const "") $ syncNotify "Select next model" (send . SetNextModelWith)
+  , curate = presentWith (const "selected sync call") $ syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
+  , rawCurate = presentWith (const "selected sync raw") (syncRawTool "Echo literal" pure)
+  , notifyCurate = presentWith (const "selected sync notice") $ syncNotify "Select next model" (send . SetNextModelWith)
   , notebook = haskellTools
   }
 
@@ -146,11 +146,11 @@ installedToolContracts = do
       , object ["status" .= ("success" :: Text), "output" .= ("updated" :: Text)]
       ])
   require "sync compiled handler emits context effect in shared dispatcher"
-    (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), ["executor"]))
+    (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "selected sync call"), ["executor"]))
   require "sync raw handler reuses compiled function"
-    (runTool "raw_curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), []))
-  require "sync notification runs context effect"
-    (snd (runTool "notify_curate") == ["executor"])
+    (runTool "raw_curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "selected sync raw"), []))
+  require "sync notification preserves selected presentation and context effect"
+    (runTool "notify_curate" == (Right (ToolDispatchSuccess (toJSON ()) "selected sync notice"), ["executor"]))
   asyncDefault <- either (error . show) pure (compileInstalledTools (specTools (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools '[]) '[])))
   require "host without context support declares only the async notebook"
     (map (\entry -> (dtdName entry, dtdSchedule entry, dtdImplementation entry, dtdEffectKeys entry)) (declarations asyncDefault)
