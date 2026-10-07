@@ -139,7 +139,7 @@ encodeCertifiedProducts
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
 encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes =
-  case reconcileOriginalProducts exact Map.empty
+  case reconcileOriginalProducts exact
       [(T.unpack unit,T.unpack name,map originalGroupFromProjected groups) | (unit,name,_,groups) <- fresh] of
     Left reason -> pure (Left reason)
     Right reconciled -> fmap (fmap fst) (encodeCertifiedProductsWithOriginals Map.empty Map.empty reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes)

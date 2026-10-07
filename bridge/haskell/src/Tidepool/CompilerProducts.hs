@@ -269,9 +269,6 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
         (pprPackageImports prepared)
       reconciled <- either (ioError . userError) pure (reconcileOriginalProducts
         (compilationScope <$> preparedExactCompilation prepared)
-        (Map.fromList [((unitString (moduleUnit owner), moduleNameString (moduleName owner)),
-            admittedOriginalProof original)
-          | (owner, original) <- Map.toAscList (preparedRetainedOriginals admittedContext)])
         [(T.unpack unit, T.unpack name, map originalGroupFromProjected groups)
           | product <- products, let (unit,name,_,groups) = moduleProductInput product])
       let inventory = CurrentOriginalInventory
@@ -673,7 +670,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
       reconciled <- case inventory of
         Just current -> pure (currentReconciledOriginalProducts current)
         Nothing -> either (ioError . userError) pure (reconcileOriginalProducts
-          (compilationScope <$> preparedExactCompilation prepared) retainedProofs [])
+          (compilationScope <$> preparedExactCompilation prepared) [])
       certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets

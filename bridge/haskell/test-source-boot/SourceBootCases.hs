@@ -2885,7 +2885,7 @@ originalReconciliationChecks scope recovered = do
       provider = ("main", "ProjectionUnavailableProvider")
       proofs = scopeModuleInterfaceProofs scope
       productOwner value = (originalUnit value, originalModule value)
-      reconcile selected evidence rows = reconcileOriginalProducts (Just selected) evidence rows
+      reconcile selected _ rows = reconcileOriginalProducts (Just selected) rows
       requireRefused selected evidence rows = case reconcile selected evidence rows of
         Left _ -> pure ()
         Right _ -> fail "altered canonical original reconciliation was accepted"

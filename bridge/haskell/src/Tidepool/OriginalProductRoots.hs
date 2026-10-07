@@ -6,7 +6,7 @@ module Tidepool.OriginalProductRoots
   , ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand ) where
 
-import Control.Monad (foldM, forM, forM_, unless)
+import Control.Monad (foldM, forM_, unless)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isNothing)
 import qualified Data.Set as Set
@@ -18,47 +18,36 @@ import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
 import Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CanonicalInterfaceProof, scopeModuleInterfaceProofs, canonicalProofMatchesOwner
   , scopeAvailableOriginalProducts )
 
 -- Package demand and certification share one validated original index. Native
 -- availability uses the old complete census without selecting more roots.
--- A separately prepared canonical original must still match admitted evidence.
+-- A new production never replaces an existing native carrier, including when
+-- both lowerings came from the same canonical Core and interface.
 newtype ReconciledOriginalProducts = ReconciledOriginalProducts [ExactProduct]
 
 unrecoveredExactProducts :: ReconciledOriginalProducts -> [ExactProduct]
 unrecoveredExactProducts (ReconciledOriginalProducts products) = products
 
 reconcileOriginalProducts
-  :: Maybe ExactScope -> Map.Map (String, String) CanonicalInterfaceProof
-  -> [(String, String, [ExactOriginalGroup])] -> Either String ReconciledOriginalProducts
-reconcileOriginalProducts Nothing _ _ = Right (ReconciledOriginalProducts [])
-reconcileOriginalProducts (Just scope) proofs recovered = do
+  :: Maybe ExactScope -> [(String, String, [ExactOriginalGroup])]
+  -> Either String ReconciledOriginalProducts
+reconcileOriginalProducts scope recovered = do
   let owners = Map.fromList [((unit, name), groups) | (unit, name, groups) <- recovered]
   unless (Map.size owners == length recovered)
     (Left "duplicate recovered original owner in package root inventory")
-  let available = Map.fromList [((originalUnit original,originalModule original),original)
-        | original <- scopeAvailableOriginalProducts scope]
-  selected <- forM (scopeProducts scope) $ \original -> case Map.lookup (originalUnit original, originalModule original) owners of
-    Nothing -> Right (Map.lookup (originalUnit original,originalModule original) available)
-    Just groups -> do
-      let owner = (originalUnit original, originalModule original)
-          indexed = Map.fromList [(originalOrdinal group, group) | group <- groups]
-      unless (Map.size indexed == length groups)
-        (Left "duplicate recovered original ordinal in package root inventory")
-      case (Map.lookup owner proofs, Map.lookup owner (scopeModuleInterfaceProofs scope)) of
-        (Just proof, Just admitted)
-          | canonicalProofMatchesOwner (scopeProducerSha256 scope) owner proof && proof == admitted -> Right ()
-        _ -> Left "recovered original group lacks its exact canonical owner"
-      forM_ (originalGroups original) $ \group -> case Map.lookup (originalOrdinal group) indexed of
-        Nothing -> Left "recovered original lacks an admitted native group ordinal"
-        Just current -> do
-          unless (originalBinders current == originalBinders group
-              && Set.fromList (originalGlobals current) == Set.fromList (originalGlobals group))
-            (Left "recovered original group differs from its admitted native witness")
-          Right ()
-      Right Nothing
-  Right (ReconciledOriginalProducts [original | Just original <- selected])
+  forM_ recovered $ \(_,_,groups) -> unless
+    (Set.size (Set.fromList (map originalOrdinal groups)) == length groups)
+    (Left "duplicate recovered original ordinal in package root inventory")
+  let available = maybe [] scopeAvailableOriginalProducts scope
+  forM_ available $ \original ->
+    let owner = (originalUnit original,originalModule original)
+    in forM_ (Map.lookup owner owners) $ \groups ->
+      Left ("new original production replaces an admitted native carrier: " ++ show owner
+        ++ "; native version=" ++ originalVersion original
+        ++ "; admitted ordinals=" ++ show (map originalOrdinal (originalGroups original))
+        ++ "; offered ordinals=" ++ show (map originalOrdinal groups))
+  Right (ReconciledOriginalProducts available)
 
 -- The outline bit records whether recovery must supply a definition. GHC's
 -- evaluatedness flag is independent: an unevaluated dictionary still needs
