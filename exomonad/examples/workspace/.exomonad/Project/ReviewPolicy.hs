@@ -21,7 +21,7 @@ import Tidepool.Agent.Contract (AgentSpec)
 import qualified AgentSpec as Installed
 import qualified Project.Tools as Tools
 import Tidepool.Aeson.Value (object, (.=))
-import Tidepool.Effects.Core (GitRef (..), Jev)
+import Tidepool.Effects.Core (GitRef (..), Jev, Commands, Lookup)
 import Tidepool.Worktree (renderGitOid)
 import Exomonad.Contrib.Types
 import Project.Work
