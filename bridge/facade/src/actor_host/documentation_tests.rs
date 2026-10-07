@@ -2036,6 +2036,19 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 }
 
 #[tokio::test]
+async fn candidate_reports_preserve_admissions_receipts_and_observation_failures() {
+    let campaign = workspace_campaign().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        "import Project.WorkflowExamplesChecks\nworkflowContracts",
+    )
+    .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn project_review_retains_evidence_and_owns_direct_repair() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".exomonad").unwrap();
