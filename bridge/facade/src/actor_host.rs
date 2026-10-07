@@ -1315,6 +1315,14 @@ enum NativeRetirement {
     Terminate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum ApplicationShutdown {
+    #[default]
+    Running,
+    Draining(NativeRetirement),
+    ForestSettled(NativeRetirement),
+}
+
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
 
 fn with_embedded_state<R>(
@@ -2398,7 +2406,8 @@ async fn run_owned(
         }
     };
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
-    let (shutdown, shutdown_rx) = watch::channel(None);
+    let (shutdown, shutdown_rx) = watch::channel(ApplicationShutdown::Running);
+    let (coordination_failed, mut coordination_failure) = oneshot::channel();
     let (_root_config, root_config_rx) = watch::channel(config.clone());
 
     let host_graph_forest = Arc::clone(&forest);
@@ -2437,6 +2446,7 @@ async fn run_owned(
             test_observer,
         },
         shutdown_rx,
+        coordination_failed,
         root_config_rx,
         embedded_service,
     ));
@@ -2454,6 +2464,9 @@ async fn run_owned(
             tokio::select! {
                 signal = operator_shutdown() => { signal?; break Ok(()); }
                 _ = &mut test_stop => break Ok(()),
+                failure = &mut coordination_failure => {
+                    break Err(runtime_error(failure.unwrap_or_else(|_| "interactive application coordination owner stopped".into())));
+                }
                 result = &mut applications_task => {
                     applications_finished = true;
                     break result.map_err(join_error)?.map_err(runtime_error);
@@ -2467,13 +2480,15 @@ async fn run_owned(
             }
         }
     }.await;
-    shutdown.send_replace(Some(if result.is_ok() {
+    let retirement = if result.is_ok() {
         NativeRetirement::Terminate
     } else {
         NativeRetirement::Preserve
-    }));
+    };
+    shutdown.send_replace(ApplicationShutdown::Draining(retirement));
     operator.shutdown().await;
     let forest_shutdown = forest.shutdown().await;
+    shutdown.send_replace(ApplicationShutdown::ForestSettled(retirement));
     let cleanup = if !applications_finished {
         await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
     } else {
@@ -3993,12 +4008,12 @@ fn open_embedded_actor_binding(
     ))
 }
 
-async fn wait_for_shutdown(mut shutdown: watch::Receiver<Option<NativeRetirement>>) {
-    if shutdown.borrow().is_some() {
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<ApplicationShutdown>) {
+    if *shutdown.borrow() != ApplicationShutdown::Running {
         return;
     }
     while shutdown.changed().await.is_ok() {
-        if shutdown.borrow().is_some() {
+        if *shutdown.borrow() != ApplicationShutdown::Running {
             return;
         }
     }
