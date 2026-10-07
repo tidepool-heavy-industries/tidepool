@@ -181,6 +181,16 @@ fn compare<T: std::fmt::Debug + PartialEq>(
     coverage: &mut Coverage,
 ) -> Result<(), TestCaseError> {
     coverage.refusals += usize::from(expected.is_err());
+    if let Err(refusal) = &expected {
+        match refusal {
+            Refusal::Regression(..) => coverage.ack_regressions += 1,
+            Refusal::Beyond(..) => coverage.ack_beyond_end += 1,
+            Refusal::Unavailable(_) => coverage.receipt_unavailable += 1,
+            Refusal::Transition(..) => coverage.receipt_transitions_refused += 1,
+            Refusal::Mismatch(_) => coverage.context_mismatches += 1,
+            Refusal::Barrier(_) => coverage.tracked_barriers += 1,
+        }
+    }
     let actual = match actual {
         Ok(value) => Ok(value),
         Err(error) => Err(actual_refusal(error)?),
@@ -416,6 +426,12 @@ struct Coverage {
     redelivered: usize,
     ack_advanced: usize,
     refusals: usize,
+    ack_regressions: usize,
+    ack_beyond_end: usize,
+    receipt_unavailable: usize,
+    receipt_transitions_refused: usize,
+    context_mismatches: usize,
+    tracked_barriers: usize,
     successful_after_refusal: usize,
     reopens: usize,
     reads: usize,
@@ -1054,4 +1070,87 @@ fn acknowledged_receipt_retention_crosses_limit_and_row_compaction() {
         rows.lines().count(),
         (MAX_RETAINED_RECEIPTS + 2) % COMPACT_ACKNOWLEDGED_ROWS as usize
     );
+}
+
+#[test]
+fn deterministic_inbox_context_refusals_preserve_continued_delivery() {
+    let operations = vec![
+        Operation::Append {
+            payload: 1,
+            context: Some(0),
+        },
+        Operation::Attempt {
+            sequence: Sequence::Front,
+            finish: Finish::Submitted,
+            race: None,
+            context: 0,
+        },
+        Operation::Native {
+            sequence: Sequence::Front,
+            evidence: Native::Presented,
+            context: 1,
+        },
+        Operation::Redeliver {
+            sequence: Sequence::Front,
+            context: 2,
+            possibly_seen: false,
+        },
+        Operation::Ack(Sequence::Last),
+        Operation::Reopen,
+        Operation::Native {
+            sequence: Sequence::Front,
+            evidence: Native::Presented,
+            context: 0,
+        },
+        Operation::Ack(Sequence::Zero),
+        Operation::Ack(Sequence::Future),
+        Operation::Native {
+            sequence: Sequence::First,
+            evidence: Native::Admitted,
+            context: 0,
+        },
+        Operation::Native {
+            sequence: Sequence::Future,
+            evidence: Native::Presented,
+            context: 0,
+        },
+        Operation::Append {
+            payload: 2,
+            context: Some(2),
+        },
+        Operation::Attempt {
+            sequence: Sequence::Front,
+            finish: Finish::Drop,
+            race: None,
+            context: 2,
+        },
+        Operation::Reopen,
+        Operation::Native {
+            sequence: Sequence::Front,
+            evidence: Native::Rejected,
+            context: 2,
+        },
+        Operation::Read,
+    ];
+    let mut coverage = Coverage::default();
+    for observe_each in [false, true] {
+        replay(
+            &operations,
+            &[
+                serde_json::Value::Null,
+                serde_json::json!(0),
+                serde_json::json!({"actor": 1, "incarnation": 2}),
+            ],
+            observe_each,
+            &mut coverage,
+        )
+        .unwrap();
+    }
+    // This fixed history reaches each refusal's own intended boundary and then
+    // resumes through a genuine publisher/consumer operation, not a reset.
+    assert!(coverage.context_mismatches > 0 && coverage.tracked_barriers > 0);
+    assert!(coverage.ack_regressions > 0 && coverage.ack_beyond_end > 0);
+    assert!(coverage.receipt_unavailable > 0 && coverage.receipt_transitions_refused > 0);
+    assert!(coverage.successful_after_refusal > 0 && coverage.rejected > 0);
+    eprintln!("durable inbox refusal/recovery support coverage: {coverage:#?}");
 }
