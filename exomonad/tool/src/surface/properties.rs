@@ -8,7 +8,9 @@ use crate::{
     ToolScheduling,
 };
 use proptest::prelude::*;
-use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
+use proptest::test_runner::{
+    contextualize_config, Config, FileFailurePersistence, TestCaseError, TestRunner,
+};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -561,28 +563,31 @@ fn replay(history: &History, coverage: &mut Coverage) -> Result<(), TestCaseErro
 
 #[test]
 fn declared_surface_histories_match_independent_field_model() {
-    let mut config = Config {
-        source_file: Some(file!()),
-        test_name: Some(concat!(
-            module_path!(),
-            "::declared_surface_histories_match_independent_field_model"
-        )),
-        ..Config::default()
-    };
+    let mut config = Config::default();
     if std::env::var_os("PROPTEST_CASES").is_none() {
         config.cases = 96;
     }
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
-        eprintln!("surface seed persistence: {path}");
     }
-    eprintln!("surface configured fresh cases: {}", config.cases);
+    let mut config = contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::declared_surface_histories_match_independent_field_model"
+    ));
+    let resolved = config.clone();
     let coverage = RefCell::new(Coverage::default());
     let result = TestRunner::new(config).run(&histories(), |history| {
         let mut coverage = coverage.borrow_mut();
         coverage.callbacks += 1;
         replay(&history, &mut coverage)
     });
+    eprintln!("surface resolved runner configuration: {resolved:#?}");
+    eprintln!(
+        "surface configured fresh cases: {}, maximum shrink iterations: {}",
+        resolved.cases, resolved.max_shrink_iters
+    );
     eprintln!(
         "declared surface observed coverage: {:#?}",
         coverage.borrow()
