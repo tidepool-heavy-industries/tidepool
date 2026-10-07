@@ -45,13 +45,16 @@ A notebook field uses `HaskellCell effects`, optionally wrapped in `Sync`;
 `ContextReadWrite`. The installer checks selected effects against this actor's
 grants and installed interpreters.
 
-Every named handler in an installed spec must choose how its semantic result
-becomes model-facing text. Write `presentWith id $ tool description handler`
-for `Text`, `presentWith presentJson $ tool description handler` for JSON
-output, or `presentWith presentDisplay` when the existing `Display` rendering
-is intended. Apply the same wrapper to `rawTool`, `syncTool`, `syncRawTool`, and
-notifications. If a named handler has no presenter, spec compilation refuses
-it before running a handler.
+Every hosted function handler field (`Call`, `RawCall`, `Notify`, and their
+`Sync` forms) in an installed spec must use `presentWith`, which returns an
+abstract `Presented handler` carrying the model-facing text choice. The
+underlying handler and its semantic result remain typed; the presenter selects
+only the text sent to the hosted model. Write `presentWith id $ tool description
+handler` for `Text`, `presentWith presentJson $ tool description handler` for
+JSON output, or `presentWith presentDisplay` when the existing `Display`
+rendering is intended. A bare handler fails Haskell typechecking because the
+hosted field requires `Presented`. Native `HaskellCell`/`HaskellTool` fields
+and programmatic actor handlers do not use this wrapper.
 
 When the tool needs to select or present its own result, use that tool's typed
 seam:

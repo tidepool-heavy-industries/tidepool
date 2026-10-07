@@ -31,13 +31,16 @@ a request defaults to its caller's ownership. Returning a handle does not transf
 either resource. Waiting cancellation does not cancel the request, and request
 cancellation does not retire its target actor.
 
-`result pending` projects a typed `Await`. `await` is the observation path. Compose
-independent waits applicatively or traverse a collection; use `eitherOf` when the
-first terminal branch should decide, including a failure. An all-branches wait
-requires each branch to succeed. The watch owner retains immutable readiness
-decisions, so a losing branch cannot later change a selected result. Settlement
-projections expose failures as values when a collector must report every outcome.
-Progress is an independent typed observation and does not replace the final reply.
+`response pending` retains the full `ResponseResult`, including its execution
+receipt and worktree evidence; `settledResponse` also keeps `ResponseFailure` as
+data. `result` and `settlement` project the typed reply, with only `settlement`
+preserving `ResponseFailure`. `await` is the observation path, and `AwaitError`
+remains a separate failure of observation. Compose independent waits
+applicatively or traverse a collection; use `eitherOf` when the first terminal
+branch should decide, including a failure. An all-branches wait requires each
+branch to succeed. The watch owner retains immutable readiness decisions, so a
+losing branch cannot later change a selected result. Progress is an independent
+typed observation and does not replace the final reply.
 
 Use `withScope` for a runtime-owned delimiter. The callback receives its opaque
 scope, and each resource joins only when its options explicitly use

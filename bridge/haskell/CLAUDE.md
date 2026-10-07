@@ -453,16 +453,6 @@ the model provider and parses its JSON response.
 
 ## Recorded design rationale
 
-- **Read-only questions and typed child groups**
-  (`bridge/haskell/actors/Tidepool/Actors/Unfold.hs`). `errand` starts a small
-  invocation-owned inspection leaf without a fork group or worktree; await its
-  watch in the same invocation. `unfold`/`child` admit typed applicative groups
-  immediately from `selected` or `fromCheckpoint` context, so their continuation
-  can await results before returning. `unfoldDeferred` instead publishes after
-  the enclosing call's real result and requires explicit persistent lifetime;
-  never await its children before that call returns. Use `ActorOwned` branches
-  or `withAgentLifetime ActorOwned` on a direct `AgentLaunchSpec` for work
-  intentionally spanning invocations. Returning a handle does not extend lifetime.
 - **Diagnostic structure loss** (`bridge/haskell/src/Tidepool/DiagJson.hs`,
   `bridge/haskell/src/Tidepool/Introspection.hs`). GHC's `diagnosticCode` (the
   `[GHC-NNNNN]` code) is never extracted as a field by `envelopeToDiag`; it

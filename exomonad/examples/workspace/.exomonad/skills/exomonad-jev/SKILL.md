@@ -112,8 +112,9 @@ packet to a function that wants it as one value. A choice answer has `.key`,
 `.expectation`, `.confidence` and `.masses`. Those fields are all there is: an
 answer cannot be built or matched, and what it decides is reached through
 `J.settle`, `J.judge`, `J.grade`, `J.taken` and `J.takenUnder`. Ending a cell
-with the bound `answer` shows every distribution — do that the first few times
-you write a packet, then project what the next decision needs.
+with the bound `answer` retains the typed value without displaying it. Use
+`display answer` while learning a packet, then display only the projection the
+next decision needs.
 
 Use `J.handle` or `J.settle` for dispatch: each handler receives the alternative's
 original typed payload, including its captured values or prepared action. `.key`

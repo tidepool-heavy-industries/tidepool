@@ -36,12 +36,18 @@ are not inherited. Calls in one cell share its model budget. Match `modelOutcome
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 
-Every function tool in an installed `AgentSpec` selects its model-facing text
-explicitly: use `presentWith id` for `Text`, `presentWith presentJson` for JSON,
-or `presentWith presentDisplay` for a `Display` value. For example,
-`lookup = presentWith id $ tool description handler`. The hook receives
-`toolResultValue` as semantic JSON and `toolResultOutput` as the selected text;
-it does not render or replace the tool's text.
+Each hosted function handler field (`Call`, `RawCall`, `Notify`, and their
+`Sync` forms) in an installed `AgentSpec` must use `presentWith`, which returns
+an abstract `Presented handler`. This required finishing constructor selects
+model-facing text while preserving the handler's semantic result. Use
+`presentWith id` for `Text`, `presentWith presentJson` for JSON, or
+`presentWith presentDisplay` for a `Display` value. For example,
+`lookup = presentWith id $ tool description handler`. A bare handler fails
+Haskell typechecking because the hosted field requires `Presented`. Native
+`HaskellCell`/`HaskellTool` fields and programmatic actor handlers do not use
+this wrapper. The after-tool hook receives `toolResultValue` as semantic JSON
+and `toolResultOutput` as the selected text; it does not render or replace the
+tool's text.
 
 ## Agent work
 
@@ -51,7 +57,14 @@ or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
 `ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
 The options carry the actual typed `AgentSpec`, model and effort choices,
 instructions, an optional ordinary text label, lifetime, and limits. Labels are
-descriptive only; they do not identify actors, workspaces, or groups.
+descriptive only; they do not identify actors, workspaces, or groups. `spawnLimits`
+is an optional `SpawnLimits` record whose `maximumDescendantDepth` and
+`maximumActiveDescendants` fields use opaque `DescendantDepth` and
+`ActiveDescendants` quantities. Construct those quantities with
+`descendantDepth` and `activeDescendants`; each accepts values from zero through
+65,535, and zero forbids descendants. Active descendants include pending
+admissions throughout the sponsored subtree. `Nothing` inherits the caller's
+attenuated caps, including unbounded width; an explicit cap can only narrow them.
 
 A successful spawn returns an idle `AgentRef`. It has not run inference. Its
 first typed request or a human message activates it. A typed request supplies raw
@@ -88,12 +101,35 @@ containing the request and an independent `Progress Progress` handle.
 `result :: Request a -> Await a`; `await` observes an `Await` as either
 `AwaitError` or its typed result.
 
+Use `response :: Request a -> Await (ResponseResult a)` when the full result
+matters: it retains the typed value together with its execution receipt and
+worktree evidence. `settledResponse` returns the same result inside
+`Either ResponseFailure`; `result` projects only its typed value, and
+`settlement` projects the value while preserving `ResponseFailure`. An
+`AwaitError` remains a separate failure of observation. In record actors,
+`R.settlement request` is an event source for
+`Either ResponseFailure (ResponseResult a)`.
+
 The short request fence above shows only successful admission and reply. In the
-example workspace's optional Project package, `Project.WorkflowExamples` shows
-a composition that retains spawn and request refusals, traverses admitted
-settlements, and keeps `AwaitError` distinct from an authored result:
-`admitCandidates`, `awaitCandidates`, `scopedCandidates`, and
-`nextCandidateEvent`.
+example workspace's optional Project package,
+[`Project.WorkflowExamples`](../examples/workspace/.exomonad/Project/WorkflowExamples.hs)
+shows how `admitCandidates` retains admissions in `candidateAdmissions` and the
+checkpoint-release outcome in `candidateCheckpointRelease`.
+`awaitCandidates` returns either `CandidateObservationFailed AwaitError` or
+`CandidateObservationReady` with every `CandidateSettlement`, including
+`CandidateSpawnNotAdmitted`, `CandidateRequestNotAdmitted`,
+`CandidateResponseUnavailable`, and `CandidateResponseReceived`. The last
+contains a full `ResponseResult`; an authored `Blocked` outcome stays inside
+its `responseValue`. `scopedCandidates` returns `ScopeOutcome CandidateRunReport`
+with `runAdmissions` and `runObservation`, preserving body and cleanup outcomes
+separately. `nextCandidateEvent` chooses between a terminal result and a
+progress update. `AwaitError`, `ResponseFailure`, and an authored blocked result
+remain distinct layers.
+
+The workspace's `Project.Work.WorkspaceEffects` is a local alias of generated
+`ActorEffects`. A task, prompt, or label does not select or narrow that installed
+profile; the actual supplied `AgentSpec` and runtime grants determine the child's
+tools and effects.
 
 For Git project implementation and delivery, `exomonad-project-work` describes
 an optional authored workflow for scaffolding, assigning ready work, reviewing
