@@ -6167,6 +6167,16 @@ mod maintained_binding_lifetime_properties {
 
         // These fixture bytes exercise generation/interface lifetime only; they
         // are not Haskell compiler authority or checked-interface evidence.
+        let scope_ids = [owner, before, after]
+            .into_iter()
+            .chain(chained)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(scope_ids.len(), 3 + usize::from(chained.is_some()));
+        for scope in &scope_ids {
+            assert!(state.scope_tree().is_live(*scope));
+            assert_eq!(state.scope_tree().parent_of(*scope), None);
+        }
+
         let modules = [source_module, alias_module, shadow_binding.module];
         let interfaces: HashMap<_, _> = modules
             .into_iter()
@@ -6393,6 +6403,10 @@ mod maintained_binding_lifetime_properties {
             .prepared_handle_of(old_raw)
             .is_none());
         let fresh_scope = state.mint_isolated_scope();
+        assert!(
+            !scope_ids.contains(&fresh_scope),
+            "scope identity cannot revive"
+        );
         state.bind_in(fresh_scope, fresh).unwrap();
         assert_eq!(state.retire_scope(fresh_scope).roots_released, 1);
         assert_eq!(state.value_handle_count(), 0);
