@@ -3,7 +3,8 @@
 -- Constructors for witnesses are intentionally private. A row can only be
 -- reflected when every effect has a registered 'KnownEffect' instance.
 module Tidepool.Actors.Role
-  ( ActorContext
+  ( ActorEffects
+  , ActorContext
   , AgentLaunch
   , AgentInspection
   , AgentControl
