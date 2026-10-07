@@ -301,6 +301,9 @@ fn groups(facts: &BTreeSet<Fact>) -> BTreeSet<RawGroup> {
 struct View {
     inventory: usize,
     facts: BTreeSet<Fact>,
+    // Artifact projection of explicit typed roots, separate from reachable
+    // carrier custody. A zero-edge group root projects to its own carrier.
+    roots: BTreeSet<ArtifactId>,
 }
 
 #[derive(Clone, Debug)]
@@ -536,6 +539,21 @@ fn prefix() -> Vec<Op> {
             right: 5,
             to: 7,
         },
+        Op::Project {
+            from: 2,
+            nodes: vec![0],
+            to: 3,
+        },
+        Op::Project {
+            from: 5,
+            nodes: vec![0],
+            to: 5,
+        },
+        Op::Merge {
+            left: 3,
+            right: 5,
+            to: 7,
+        },
     ]
 }
 
@@ -552,6 +570,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 model[*to] = Some(View {
                     inventory: *inventory,
                     facts: BTreeSet::new(),
+                    roots: BTreeSet::new(),
                 });
             }
             Op::Admit {
@@ -580,10 +599,14 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         if facts == view.facts {
                             coverage.repeated += 1;
                         }
+                        let mut roots = view.roots;
+                        roots.extend(catalog.supplied_ids(*future));
+                        roots.extend(demanded.iter().map(|group| catalog.key(*group).artifact));
                         actual[*to] = Some(result);
                         model[*to] = Some(View {
                             inventory: view.inventory,
                             facts,
+                            roots,
                         });
                         coverage.admissions += 1;
                     } else {
@@ -624,11 +647,12 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                             .into_iter()
                             .filter(|group| nodes.contains(&group.0))
                             .collect();
-                        let facts = catalog.facts(ids, selected);
+                        let facts = catalog.facts(ids.clone(), selected);
                         actual[*to] = Some(result);
                         model[*to] = Some(View {
                             inventory: view.inventory,
                             facts,
+                            roots: ids,
                         });
                         coverage.projections += 1;
                     } else {
@@ -656,8 +680,14 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     };
                     let mut facts = left_view.facts;
                     facts.extend(right_view.facts);
+                    let mut roots = left_view.roots;
+                    roots.extend(right_view.roots);
                     actual[*to] = Some(result.unwrap());
-                    model[*to] = Some(View { inventory, facts });
+                    model[*to] = Some(View {
+                        inventory,
+                        facts,
+                        roots,
+                    });
                     coverage.merges += 1;
                     if left_view.inventory != right_view.inventory {
                         coverage.cross_merges += 1;
@@ -715,6 +745,17 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     observed.selected_native_groups(),
                     catalog.selection(&groups(&view.facts)),
                     "step {}, slot {}",
+                    step,
+                    slot
+                );
+                prop_assert_eq!(
+                    observed
+                        .root_entries()
+                        .iter()
+                        .map(|entry| entry.descriptor.id)
+                        .collect::<BTreeSet<_>>(),
+                    view.roots.clone(),
+                    "root intent at step {}, slot {}",
                     step,
                     slot
                 );

@@ -65,6 +65,13 @@ pub(crate) enum NativeArtifactDemand<'a> {
     VerifiedGroupRoot(&'a crate::checked_cell::CheckedTypedEntry),
 }
 
+/// Copying a retained closure preserves its issuing view's root intent. Full
+/// carrier custody does not promote hidden dependencies to explicit roots.
+enum ArtifactRootIntent<'a> {
+    SuppliedArtifacts,
+    RetainedView(&'a ArtifactView),
+}
+
 /// Graph vertices retain one full artifact allocation separately from its
 /// admitted native groups. A carrier never implies demand for every group.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -1122,7 +1129,13 @@ impl ArtifactInventory {
                 BTreeSet::from([root.native_group_key()])
             }
         };
-        self.admit_selected(parent, entries, groups, false)
+        self.admit_selected(
+            parent,
+            entries,
+            groups,
+            false,
+            ArtifactRootIntent::SuppliedArtifacts,
+        )
     }
     /// Persisted keys are checked against full certified bytes and exact closure.
     pub(crate) fn admit_recovery_selection(
@@ -1131,7 +1144,13 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selected_native_groups: &BTreeSet<NativeGroupKey>,
     ) -> Result<ArtifactView, CompileError> {
-        self.admit_selected(parent, entries, selected_native_groups.clone(), true)
+        self.admit_selected(
+            parent,
+            entries,
+            selected_native_groups.clone(),
+            true,
+            ArtifactRootIntent::SuppliedArtifacts,
+        )
     }
     fn admit_selected(
         &self,
@@ -1139,6 +1158,7 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         groups: BTreeSet<NativeGroupKey>,
         exact: bool,
+        root_intent: ArtifactRootIntent<'_>,
     ) -> Result<ArtifactView, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.0.inventory.0) {
             return Err(failure("view belongs to another inventory"));
@@ -1146,6 +1166,14 @@ impl ArtifactInventory {
         if entries.is_empty() && groups.is_empty() {
             return Ok(parent.clone());
         }
+        let mut materialization_parents = Vec::new();
+        let retained_roots = match root_intent {
+            ArtifactRootIntent::SuppliedArtifacts => None,
+            ArtifactRootIntent::RetainedView(source) => {
+                source.collect_materializations(&mut materialization_parents, &mut BTreeSet::new());
+                Some(source.roots())
+            }
+        };
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -1178,12 +1206,14 @@ impl ArtifactInventory {
                 };
             supplied.insert(id, retained);
         }
-        let mut roots = supplied
-            .keys()
-            .copied()
-            .map(InventoryNodeKey::Artifact)
-            .collect::<Vec<_>>();
-        roots.extend(groups.iter().copied().map(InventoryNodeKey::Group));
+        let roots = retained_roots.unwrap_or_else(|| {
+            supplied
+                .keys()
+                .copied()
+                .map(InventoryNodeKey::Artifact)
+                .chain(groups.iter().copied().map(InventoryNodeKey::Group))
+                .collect()
+        });
         let mut selected_ids = parent_ids.clone();
         selected_ids.extend(artifact_ids(&admitted_closure(
             &state,
@@ -1200,6 +1230,12 @@ impl ArtifactInventory {
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
         let mut selected_groups = native_groups(&parent_nodes);
         selected_groups.extend(groups.iter().copied());
+        if roots.iter().any(|root| match root {
+            InventoryNodeKey::Artifact(id) => !selected.contains_key(id),
+            InventoryNodeKey::Group(group) => !selected_groups.contains(group),
+        }) {
+            return Err(failure("retained merge root outside copied selection"));
+        }
         let (edges, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
@@ -1229,7 +1265,7 @@ impl ArtifactInventory {
             inventory: self.clone(),
             roots,
             parents: vec![parent.clone()],
-            materialization_parents: Vec::new(),
+            materialization_parents,
             materialization: Mutex::new(None),
         })))
     }
@@ -1754,10 +1790,12 @@ impl ArtifactView {
                 materialization: Mutex::new(None),
             })))
         } else {
-            self.0.inventory.admit_recovery_selection(
+            self.0.inventory.admit_selected(
                 self,
                 other.entries(),
-                &other.selected_native_groups(),
+                other.selected_native_groups(),
+                true,
+                ArtifactRootIntent::RetainedView(other),
             )
         }
     }
