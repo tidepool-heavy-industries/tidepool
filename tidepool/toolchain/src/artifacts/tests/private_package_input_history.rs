@@ -328,10 +328,12 @@ fn private_original_package_witness_survives_sparse_literal_target() {
 
     // Public inheritance and a current package receipt independently reach
     // the same consumer. Neither grants lexical imports for this original.
-    let public_original = ExactDeclarationContext::new(&[], &[], Vec::new())
-        .unwrap()
-        .extend_checked_original_products(producer, &issued.recovery_products)
-        .unwrap();
+    let public_original = Arc::new(
+        ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .extend_checked_original_products(producer, &issued.recovery_products)
+            .unwrap(),
+    );
     let public_request = public_original
         .prepare_compilation(&directory.path().join("public-original-inputs"), &PRODUCER)
         .unwrap();
