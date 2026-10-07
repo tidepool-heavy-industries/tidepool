@@ -373,6 +373,24 @@ where
 }
 
 pub(super) enum WorkbenchFragmentRequest {
+    Scoped {
+        fragment: ResidentWorkbenchFragment,
+        outcome: ResidentOutcome,
+        realm: RealmId,
+    },
+    ScopeStart {
+        fragment: ResidentWorkbenchFragment,
+        callback: RootCustody,
+        realm: RealmId,
+        token: i64,
+    },
+    ScopeResume {
+        fragment: ResidentWorkbenchFragment,
+        operation: futures_util::future::BoxFuture<
+            'static,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        >,
+    },
     Settle {
         fragment: ResidentWorkbenchFragment,
         outcome: ResidentOutcome,
@@ -384,6 +402,10 @@ pub(super) enum WorkbenchFragmentRequest {
 }
 
 pub(super) enum WorkbenchFragmentAdvance {
+    ScopeFailed {
+        fragment: ResidentWorkbenchFragment,
+        error: ResidentActorWorkbenchError,
+    },
     Captured {
         fragment: ResidentWorkbenchFragment,
         boundary: ResidentActorBoundary,
@@ -404,11 +426,73 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    let scoped = match request {
+        WorkbenchFragmentRequest::Scoped {
+            fragment,
+            outcome,
+            realm,
+        } => Some((fragment, Ok(outcome), Some(realm))),
+        WorkbenchFragmentRequest::ScopeStart {
+            fragment,
+            callback,
+            realm,
+            token,
+        } => Some((
+            fragment,
+            runner
+                .run_scope_callback(context.clone(), callback, realm, token)
+                .await,
+            Some(realm),
+        )),
+        WorkbenchFragmentRequest::ScopeResume {
+            fragment,
+            operation,
+        } => {
+            return Ok(match operation.await {
+                Ok(outcome) => WorkbenchFragmentAdvance::Captured {
+                    fragment,
+                    boundary: ResidentActorBoundary::ScopeResumed { outcome },
+                },
+                Err(error) => WorkbenchFragmentAdvance::ScopeFailed { fragment, error },
+            });
+        }
+        request => return advance_unscoped(workbench, runner, context, request).await,
+    };
+    let (fragment, outcome, realm) = scoped.expect("scoped request");
+    let boundary = match outcome {
+        Ok(outcome) => {
+            runner
+                .capture_boundary(context, outcome, realm.expect("body realm"))
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    Ok(match boundary {
+        Ok(boundary) => WorkbenchFragmentAdvance::Captured { fragment, boundary },
+        Err(error) => WorkbenchFragmentAdvance::ScopeFailed { fragment, error },
+    })
+}
+
+async fn advance_unscoped<H, O>(
+    workbench: &crate::ResidentActorWorkbench<H, O>,
+    runner: &ResidentActorRunner<H, O>,
+    context: ActorSessionContext,
+    request: WorkbenchFragmentRequest,
+) -> Result<WorkbenchFragmentAdvance, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     let step = match request {
         WorkbenchFragmentRequest::Settle { fragment, outcome } => {
             workbench
                 .settle_item(context.clone(), fragment, outcome)
                 .await?
+        }
+        WorkbenchFragmentRequest::Scoped { .. }
+        | WorkbenchFragmentRequest::ScopeStart { .. }
+        | WorkbenchFragmentRequest::ScopeResume { .. } => {
+            unreachable!("scoped request routed before fragment settlement")
         }
         WorkbenchFragmentRequest::ReplyRejection {
             continuation,

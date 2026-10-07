@@ -2557,6 +2557,17 @@ pub(crate) struct CleanupReceiptProjection {
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    ScopeResumed {
+        outcome: ResidentOutcome,
+    },
+    ScopeRun {
+        continuation: ResidentHole,
+        callback: RootCustody,
+    },
+    ScopeDone {
+        continuation: ResidentHole,
+        token: i64,
+    },
     External {
         continuation: ResidentHole,
         work: tidepool_effect::DeferredEffect,
@@ -2727,9 +2738,10 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         job: String,
     },
-    RequestDetachment {
+    RequestRetention {
         continuation: ResidentHole,
         request: crate::RequestId,
+        lifetime: crate::WorkerLifetime,
     },
     RequestCancellation(RequestCancellation),
     ResponseAbandonment(ResponseAbandonment),
@@ -2886,6 +2898,9 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::ScopeRun { .. } => "withScope",
+            Self::ScopeResumed { .. } => "scope resumed",
+            Self::ScopeDone { .. } => "scope completion",
             Self::External { .. } => "external effect",
             Self::Sleep { .. } => "sleep",
             Self::Jev { .. } => "jev",
@@ -2959,7 +2974,7 @@ impl ResidentActorBoundary {
             Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
             Self::CommandReportPoll { .. } => "pollWatch command",
-            Self::RequestDetachment { .. } => "detachRequest",
+            Self::RequestRetention { .. } => "retainRequest",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
             Self::ResponseForget(_) => "forgetResponse",
@@ -3049,6 +3064,7 @@ macro_rules! resident_request_roster {
 }
 
 resident_request_roster! {
+    ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ResourceScopes)),
     Console(crate::generated::console::ConsoleReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Console)),
     Sleep(crate::generated::sleep::SleepReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Sleep)),
     Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
@@ -3146,6 +3162,10 @@ impl ResidentRequest {
             Self::AgentSession,
             crate::generated::agent_session::AgentSessionReq
         );
+        try_member!(
+            Self::ResourceScopes,
+            crate::generated::resource_scopes::ResourceScopesReq
+        );
         try_member!(Self::Reflect, crate::generated::reflect::ReflectReq);
         try_member!(Self::Replies, RepliesReq);
         try_member!(Self::Watches, WatchesReq);
@@ -3160,6 +3180,7 @@ impl ResidentRequest {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Jev(crate::generated::jev::JevReq::JevAskWith(..)) => "jev",
             Self::Model(_) => "model call",
+            Self::ResourceScopes(_) => "withScope",
             Self::Context(_) => "context transformation",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
@@ -3350,7 +3371,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
             Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
-            Self::Replies(RepliesReq::DetachRequestWith(..)) => "detachRequest",
+            Self::Replies(RepliesReq::RetainRequestWith(..)) => "retainRequest",
             Self::Replies(RepliesReq::AbandonResponseWith(..)) => "abandonResponse",
             Self::Replies(RepliesReq::ForgetResponseWith(..)) => "forgetResponse",
             Self::Replies(RepliesReq::ObserveReplyWith(..)) => "pollReply",
@@ -8901,12 +8922,20 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
-                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address, notify_owner)) => Ok(
+                    ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(_)) => {
+                        let callback = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("scope callback has no retained payload".into()))?;
+                        Ok(ResidentActorBoundary::ScopeRun { continuation: hole, callback })
+                    }
+                    ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeDoneWith(token)) =>
+                        Ok(ResidentActorBoundary::ScopeDone { continuation: hole, token }),
+                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address, notify_owner, lifetime)) => Ok(
                         ResidentActorBoundary::RequestReservation(RequestReservation {
                             continuation: hole,
                             target: crate::wait::decode_address(address.0, address.1)?,
                             label,
                             notify_owner,
+                            lifetime,
                         }),
                     ),
                     ResidentRequest::Replies(RepliesReq::CurrentRequestWith(site)) => Ok(
@@ -9005,10 +9034,11 @@ where
                             update: crate::RequestUpdateId { request: crate::request_effect::request_id(request)?,
                                 sequence: u64::try_from(sequence).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid update sequence".into()))? } })
                     }
-                    ResidentRequest::Replies(RepliesReq::DetachRequestWith(request_id)) => Ok(
-                        ResidentActorBoundary::RequestDetachment {
+                    ResidentRequest::Replies(RepliesReq::RetainRequestWith(request_id, lifetime)) => Ok(
+                        ResidentActorBoundary::RequestRetention {
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
+                            lifetime,
                         },
                     ),
                     ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
@@ -9204,6 +9234,22 @@ where
             .with_machine(context, move |session, _context, _| {
                 session
                     .run_rooted_entry("actor_program", entry, 0, realm, None)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn run_scope_callback(
+        &self,
+        context: crate::ActorSessionContext,
+        callback: RootCustody,
+        realm: RealmId,
+        token: i64,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .run_rooted_entry("scope_callback", callback, token, realm, None)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
@@ -19657,6 +19703,112 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .host_binding_identity_for_test(public, "capturedInput")
                 .await,
             original_capture
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_live_closure_survives_body_realm_retirement() {
+        with_test_compiler_owner(
+            scope_live_closure_survives_body_realm_retirement_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn scope_live_closure_survives_body_realm_retirement_with_compiler_owner() {
+        let (session, context, mut source, _root) = host_mount_fixture_with_effects(
+            |_| {},
+            &[tidepool_mcp::resource_scopes_decl()],
+            "'[ResourceScopes]",
+        );
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Scope as Scope");
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
+        let runner = workbench_runner_for_test(&workbench);
+        let code = include_str!("fixtures/scope-live-result.hs");
+        let (checked, prepared) = workbench
+            .prepare_cell(context.clone(), code.into())
+            .await
+            .unwrap();
+        assert_eq!(checked.items.len(), 1);
+        let PreparedCell {
+            mut items,
+            dependencies: _dependencies,
+        } = prepared;
+        let step = workbench
+            .begin_prepared_cell_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: code.into(),
+                },
+                items.remove(0),
+            )
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("scope body suspends")
+        };
+        let boundary = runner
+            .capture_boundary(
+                context.clone(),
+                (*outcome).into(),
+                context.placement.resource_scope,
+            )
+            .await
+            .unwrap();
+        let ResidentActorBoundary::ScopeRun {
+            continuation,
+            callback,
+        } = boundary
+        else {
+            panic!("scope delimiter captures live callback")
+        };
+        let body_realm = RealmId::fresh();
+        let body = runner
+            .run_scope_callback(context.clone(), callback, body_realm, 41)
+            .await
+            .unwrap();
+        let boundary = runner
+            .capture_boundary(context.clone(), body, body_realm)
+            .await
+            .unwrap();
+        assert!(matches!(
+            boundary,
+            ResidentActorBoundary::ScopeDone { token: 41, .. }
+        ));
+        runner
+            .close_realm(context.clone(), body_realm)
+            .await
+            .unwrap();
+        let resumed = runner
+            .resume_value(
+                context.clone(),
+                continuation,
+                (
+                    Ok::<(), tidepool_bridge_effects::ScopeFailure>(()),
+                    Ok::<(), tidepool_bridge_effects::CleanupError>(()),
+                ),
+            )
+            .await
+            .unwrap();
+        let settled = workbench
+            .settle_item(context, *fragment, resumed)
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Committed { output, .. } = settled else {
+            panic!("parent commits after scope retirement")
+        };
+        assert!(
+            output.contains("True"),
+            "parent applies the returned live closure: {output}"
         );
     }
 

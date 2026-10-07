@@ -33,6 +33,7 @@ mod owned_workbench;
 mod provider_owner_tests;
 mod replacement;
 mod request_wait;
+mod scopes;
 mod status_rendering;
 mod terminal_wait;
 mod tool_support;
@@ -546,6 +547,7 @@ struct ResidentActorRecord {
     public_owner: ActorPublicOwnerPlane,
     recovery_claimed: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
+    actor_scopes: Arc<Mutex<Option<Arc<InvocationWork>>>>,
     forest_control: bool,
     interactive_policy_installed: bool,
     observation_roots: std::collections::HashSet<ActorRef>,
@@ -2780,6 +2782,7 @@ pub struct ResidentKernelBehavior<H, O> {
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
+    actor_scopes: Arc<Mutex<Option<Arc<InvocationWork>>>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     fork_publication: ForkPublication,
     active_route_reservation_owner: Option<RequestReservationOwner>,
@@ -3061,6 +3064,7 @@ struct WorkbenchFragmentExecution {
     resume_failure: Option<ResidentActorWorkbenchError>,
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
+    scopes: Vec<scopes::ScopeFrame>,
 }
 
 impl WorkbenchFragmentExecution {
@@ -3073,6 +3077,7 @@ impl WorkbenchFragmentExecution {
             resume_failure: None,
             fragment: Some(fragment),
             outcome: Some(outcome.into()),
+            scopes: Vec::new(),
         }
     }
 }
@@ -3247,6 +3252,10 @@ enum FragmentAdvance {
 #[derive(Clone)]
 enum CurrentEffectOwner<'a> {
     Workbench(&'a WorkbenchEffectState),
+    Scoped {
+        base: Box<CurrentEffectOwner<'a>>,
+        scope: Arc<InvocationWork>,
+    },
     Actor {
         publication: ForkPublication,
         reservation_owner: Option<RequestReservationOwner>,
@@ -3257,6 +3266,8 @@ enum CurrentEffectOwner<'a> {
 impl CurrentEffectOwner<'_> {
     fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
         match self {
+            Self::Scoped { base, .. } => base.context_binding(),
+
             Self::Workbench(execution) if !execution.after_tool_active => {
                 execution.context_binding.clone()
             }
@@ -3265,6 +3276,8 @@ impl CurrentEffectOwner<'_> {
     }
     fn model(&self) -> Option<Arc<dyn crate::CellModelBinding>> {
         match self {
+            Self::Scoped { base, .. } => base.model(),
+
             Self::Workbench(execution) => execution.model.clone(),
             Self::Actor { .. } => None,
         }
@@ -3272,6 +3285,8 @@ impl CurrentEffectOwner<'_> {
 
     fn invocation_work(&self) -> Option<Arc<InvocationWork>> {
         match self {
+            Self::Scoped { base, .. } => base.invocation_work(),
+
             Self::Workbench(execution) => {
                 assert!(execution
                     .invocation_work
@@ -3284,6 +3299,8 @@ impl CurrentEffectOwner<'_> {
 
     fn publication(&self) -> &ForkPublication {
         match self {
+            Self::Scoped { base, .. } => base.publication(),
+
             Self::Workbench(execution) => &execution.publication,
             Self::Actor { publication, .. } => publication,
         }
@@ -3291,6 +3308,8 @@ impl CurrentEffectOwner<'_> {
 
     fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
+            Self::Scoped { base, .. } => base.control(),
+
             Self::Workbench(execution) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
         }
@@ -3298,6 +3317,8 @@ impl CurrentEffectOwner<'_> {
 
     fn admitted_source(&self) -> Option<&crate::CheckpointSourceLayer> {
         match self {
+            Self::Scoped { base, .. } => base.admitted_source(),
+
             Self::Workbench(execution) => Some(&execution.admitted_source),
             Self::Actor { .. } => None,
         }
@@ -3305,6 +3326,8 @@ impl CurrentEffectOwner<'_> {
 
     fn reservation_owner(&self) -> Option<RequestReservationOwner> {
         match self {
+            Self::Scoped { scope, .. } => Some(scope.reservation_owner()),
+
             Self::Workbench(execution) => Some(execution.reservation_owner.clone()),
             Self::Actor {
                 reservation_owner, ..
@@ -3313,7 +3336,11 @@ impl CurrentEffectOwner<'_> {
     }
 
     fn after_tool_active(&self) -> bool {
-        matches!(self, Self::Workbench(execution) if execution.after_tool_active)
+        match self {
+            Self::Scoped { base, .. } => base.after_tool_active(),
+            Self::Workbench(execution) => execution.after_tool_active,
+            Self::Actor { .. } => false,
+        }
     }
 }
 
@@ -3690,6 +3717,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             workbench_executions: Arc::default(),
+            actor_scopes: Arc::default(),
             active_route: None,
             fork_publication: ForkPublication::Resident,
             active_route_reservation_owner: None,
@@ -6315,6 +6343,23 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::ScopeResumed { outcome } => Box::pin(async move { Ok(outcome) }),
+            ResidentActorBoundary::ScopeRun {
+                continuation,
+                callback,
+            } => Box::pin(self.run_resource_scope(
+                kernel,
+                context,
+                effect_owner,
+                ancestry,
+                continuation,
+                callback,
+            )),
+            ResidentActorBoundary::ScopeDone { .. } => Box::pin(async {
+                Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "scope completion outside its owning delimiter".into(),
+                ))
+            }),
             ResidentActorBoundary::External { continuation, work } => Box::pin(async move {
                 owned_workbench::await_external(
                     self.environment.clone(),
@@ -7381,24 +7426,87 @@ where
                 })
             }
             ResidentActorBoundary::RequestReservation(reservation) => Box::pin(async move {
-                crate::ActorPathSegment::new(&reservation.label).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "invalid request label: {error}"
-                    ))
-                })?;
-                let request = self.environment.requests.reserve_for_operation(
-                    context.actor,
-                    reservation.target,
-                    reservation.label,
-                    reservation.notify_owner,
-                    effect_owner.reservation_owner(),
-                );
+                use crate::request_effect::RequestError;
+                let owner =
+                    match self.request_resource_owner(context, &effect_owner, reservation.lifetime)
+                    {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            return self
+                                .environment
+                                .runner
+                                .resume_value(
+                                    context.clone(),
+                                    reservation.continuation,
+                                    Err::<i64, _>(RequestError::RequestReservationRejected(error)),
+                                )
+                                .await
+                        }
+                    };
+                if kernel.resolve(reservation.target).is_none() {
+                    return self
+                        .environment
+                        .runner
+                        .resume_value(
+                            context.clone(),
+                            reservation.continuation,
+                            Err::<i64, _>(RequestError::RequestReservationRejected(
+                                crate::ReplyError::Stale,
+                            )),
+                        )
+                        .await;
+                }
+                let cleanup_owner = match reservation.lifetime {
+                    crate::WorkerLifetime::ActorOwned => {
+                        crate::request::ResourceCleanupOwner::Actor
+                    }
+                    crate::WorkerLifetime::RunOwned => crate::request::ResourceCleanupOwner::Run,
+                    _ => owner
+                        .as_ref()
+                        .expect("bounded lifetime resolved an owner")
+                        .resource_cleanup_owner(),
+                };
+                let reserve = || {
+                    self.environment.requests.reserve_for_cleanup_owner(
+                        context.actor,
+                        reservation.target,
+                        reservation.label.unwrap_or_default(),
+                        reservation.notify_owner,
+                        effect_owner.reservation_owner(),
+                        cleanup_owner,
+                    )
+                };
+                let admitted = match owner {
+                    Some(owner) => owner.with_admission(reserve).map_err(|_| {
+                        RequestError::RequestReservationRejected(
+                            crate::ReplyError::CancellationRequested,
+                        )
+                    }),
+                    None => Ok(reserve()),
+                }
+                .map(|request| request.0);
                 self.environment
                     .runner
-                    .resume_int(context.clone(), reservation.continuation, request.0)
+                    .resume_value(context.clone(), reservation.continuation, admitted)
                     .await
             }),
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
+                use crate::request_effect::RequestError;
+                if let Err(error) = self
+                    .environment
+                    .requests
+                    .request_cleanup_owner(context.actor, submission.request)
+                {
+                    return self
+                        .environment
+                        .runner
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Err::<(), _>(RequestError::RequestSubmissionRejected(error)),
+                        )
+                        .await;
+                }
                 let request_deadline = submission
                     .deadline
                     .map(crate::request::ActiveRequestDeadline::start)
@@ -7425,19 +7533,22 @@ where
                             target_context.placement.resource_scope,
                         )
                         .await?;
-                    self.environment
-                        .requests
-                        .mark_queued_with_deadline(
-                            context.actor,
-                            submission.target,
-                            submission.request,
-                            request_deadline.clone(),
-                        )
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "request submission was rejected: {error:?}"
-                            ))
-                        })?;
+                    if let Err(error) = self.environment.requests.mark_queued_with_deadline(
+                        context.actor,
+                        submission.target,
+                        submission.request,
+                        request_deadline.clone(),
+                    ) {
+                        return self
+                            .environment
+                            .runner
+                            .resume_value(
+                                context.clone(),
+                                submission.continuation,
+                                Err::<(), _>(RequestError::RequestSubmissionRejected(error)),
+                            )
+                            .await;
+                    }
                     if target
                         .address()
                         .send_message(KernelMessage::Cast {
@@ -7455,7 +7566,11 @@ where
                     let outcome = self
                         .environment
                         .runner
-                        .resume_unit(context.clone(), submission.continuation)
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Ok::<(), RequestError>(()),
+                        )
                         .await;
                     if let Some(deadline) = request_deadline {
                         self.schedule_request_deadline(context.actor, submission.request, deadline);
@@ -7470,11 +7585,14 @@ where
                     let outcome = self
                         .environment
                         .runner
-                        .resume_unit(context.clone(), submission.continuation)
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Err::<(), _>(RequestError::RequestSubmissionRejected(
+                                crate::ReplyError::Stale,
+                            )),
+                        )
                         .await;
-                    if let Some(deadline) = request_deadline {
-                        self.schedule_request_deadline(context.actor, submission.request, deadline);
-                    }
                     outcome
                 }
             }),
@@ -7501,25 +7619,16 @@ where
                     .resume_progress_publication(context.clone(), continuation, outcome)
                     .await
             }),
-            ResidentActorBoundary::RequestDetachment {
+            ResidentActorBoundary::RequestRetention {
                 continuation,
                 request,
+                lifetime,
             } => Box::pin(async move {
-                let detached = match effect_owner.invocation_work() {
-                    Some(invocation) => invocation.detach_request(
-                        &self.environment.requests,
-                        context.actor,
-                        request,
-                    ),
-                    None => self.environment.requests.detach_invocation_request(
-                        context.actor,
-                        request,
-                        None,
-                    ),
-                };
+                let retained =
+                    self.retain_request_resource(context, &effect_owner, request, lifetime);
                 self.environment
                     .runner
-                    .resume_request_update(context.clone(), continuation, detached)
+                    .resume_request_update(context.clone(), continuation, retained)
                     .await
             }),
             ResidentActorBoundary::RequestCancellation(cancellation) => Box::pin(async move {
@@ -9565,6 +9674,19 @@ where
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
         loop {
+            if !execution_state.park_effects {
+                if let Some(request) = current.native_start.take() {
+                    current.native_result = Some(
+                        owned_workbench::advance_fragment(
+                            workbench,
+                            &self.environment.runner,
+                            context.clone(),
+                            request,
+                        )
+                        .await,
+                    );
+                }
+            }
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
                     input_unit_index: unit.input_unit_index,
@@ -9572,10 +9694,57 @@ where
                 },
             );
             let native = match current.native_result.take() {
-                Some(result) => result?,
+                Some(Ok(result)) => result,
+                Some(Err(error)) => {
+                    if current.scopes.is_empty() {
+                        return Err(error);
+                    }
+                    self.prepare_scope_finish(
+                        kernel,
+                        context,
+                        current,
+                        Err(
+                            tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                error.to_string(),
+                            ),
+                        ),
+                    )?;
+                    if execution_state.park_effects {
+                        return Ok(FragmentAdvance::ParkNative);
+                    }
+                    continue;
+                }
                 None => {
                     let request = match current.resume_failure.take() {
-                        Some(error) => return Err(error),
+                        Some(error) => {
+                            if current.scopes.is_empty() {
+                                return Err(error);
+                            }
+                            self.prepare_scope_finish(
+                                kernel,
+                                context,
+                                current,
+                                Err(
+                                    tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                        error.to_string(),
+                                    ),
+                                ),
+                            )?;
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        None if !current.scopes.is_empty() => {
+                            owned_workbench::WorkbenchFragmentRequest::Scoped {
+                                fragment: current
+                                    .fragment
+                                    .take()
+                                    .expect("scope retains parent fragment"),
+                                outcome: current.outcome.take().expect("scope owns body frontier"),
+                                realm: current.scopes.last().expect("active scope").realm,
+                            }
+                        }
                         None => owned_workbench::WorkbenchFragmentRequest::Settle {
                             fragment: current
                                 .fragment
@@ -9593,7 +9762,10 @@ where
                             "one captured native request"
                         );
                         current.native_start = Some(request);
-                        return Ok(FragmentAdvance::ParkNative);
+                        if execution_state.park_effects {
+                            return Ok(FragmentAdvance::ParkNative);
+                        }
+                        continue;
                     }
                     owned_workbench::advance_fragment(
                         workbench,
@@ -9605,12 +9777,138 @@ where
                 }
             };
             match native {
+                owned_workbench::WorkbenchFragmentAdvance::ScopeFailed { fragment, error } => {
+                    current.fragment = Some(fragment);
+                    if current.scopes.is_empty() {
+                        return Err(error);
+                    }
+                    self.prepare_scope_finish(
+                        kernel,
+                        context,
+                        current,
+                        Err(
+                            tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                error.to_string(),
+                            ),
+                        ),
+                    )?;
+                    if execution_state.park_effects {
+                        return Ok(FragmentAdvance::ParkNative);
+                    }
+                    continue;
+                }
                 owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
                     current.outcome = Some(outcome);
                     continue;
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
                     current.fragment = Some(fragment);
+                    let effect_owner = match current.scopes.last() {
+                        Some(frame) => CurrentEffectOwner::Scoped {
+                            base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
+                            scope: frame.work.clone(),
+                        },
+                        None => CurrentEffectOwner::Workbench(execution_state),
+                    };
+                    let boundary = match boundary {
+                        ResidentActorBoundary::ScopeResumed { outcome } => {
+                            current.outcome = Some(outcome);
+                            continue;
+                        }
+                        ResidentActorBoundary::ScopeRun {
+                            continuation,
+                            callback,
+                        } => {
+                            let (work, realm) = match self
+                                .register_resource_scope(context, &effect_owner)
+                            {
+                                Ok(registered) => registered,
+                                Err(detail) => {
+                                    let runner = self.environment.runner.clone();
+                                    let context = context.clone();
+                                    current.native_start = Some(
+                                        owned_workbench::WorkbenchFragmentRequest::ScopeResume {
+                                            fragment: current
+                                                .fragment
+                                                .take()
+                                                .expect("scope retains parent fragment"),
+                                            operation: Box::pin(async move {
+                                                runner.resume_value(context, continuation,
+                                            (Err::<(), _>(tidepool_bridge_effects::ScopeFailure::ScopeRejected(detail)), Ok::<(), tidepool_bridge_effects::CleanupError>(()))).await
+                                            }),
+                                        },
+                                    );
+                                    if execution_state.park_effects {
+                                        return Ok(FragmentAdvance::ParkNative);
+                                    }
+                                    continue;
+                                }
+                            };
+                            let frame = scopes::ScopeFrame {
+                                continuation,
+                                work,
+                                realm,
+                            };
+                            let token =
+                                frame.work.scope_token().expect("registered scope identity");
+                            let realm = frame.realm;
+                            current.scopes.push(frame);
+                            current.native_start =
+                                Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
+                                    fragment: current
+                                        .fragment
+                                        .take()
+                                        .expect("scope retains parent fragment"),
+                                    callback,
+                                    realm,
+                                    token,
+                                });
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        ResidentActorBoundary::ScopeDone { token, .. }
+                            if !current.scopes.is_empty() =>
+                        {
+                            let body = if current
+                                .scopes
+                                .last()
+                                .and_then(|frame| frame.work.scope_token())
+                                == Some(token)
+                            {
+                                Ok(())
+                            } else {
+                                Err(
+                                    tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                        "scope completion belongs to a different delimiter".into(),
+                                    ),
+                                )
+                            };
+                            self.prepare_scope_finish(kernel, context, current, body)?;
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
+                            self.prepare_scope_finish(
+                                kernel,
+                                context,
+                                current,
+                                Err(
+                                    tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                        "scope body completed without its result marker".into(),
+                                    ),
+                                ),
+                            )?;
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        boundary => boundary,
+                    };
                     let next_fragment = current
                         .fragment
                         .as_mut()
@@ -9680,11 +9978,7 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
-                    let boundary = prepare_execution_effect(
-                        context,
-                        &CurrentEffectOwner::Workbench(execution_state),
-                        boundary,
-                    );
+                    let boundary = prepare_execution_effect(context, &effect_owner, boundary);
                     if execution_state.park_effects
                         && matches!(
                             &boundary,
@@ -9791,13 +10085,9 @@ where
                                     group,
                                 ),
                             )),
-                            ResidentActorBoundary::Start(start) => {
-                                Ok(OwnedWorkbenchWait::Launch(self.prepare_child_launch(
-                                    context,
-                                    CurrentEffectOwner::Workbench(execution_state),
-                                    start,
-                                )))
-                            }
+                            ResidentActorBoundary::Start(start) => Ok(OwnedWorkbenchWait::Launch(
+                                self.prepare_child_launch(context, effect_owner.clone(), start),
+                            )),
                             ResidentActorBoundary::Drain {
                                 continuation,
                                 target,
@@ -9806,11 +10096,8 @@ where
                                 target: self.capture_drain_target(kernel, context, target)?,
                             }),
                             ResidentActorBoundary::Wait(wait) => {
-                                let terminal = self.capture_exit_target(
-                                    kernel,
-                                    &CurrentEffectOwner::Workbench(execution_state),
-                                    wait.target,
-                                )?;
+                                let terminal =
+                                    self.capture_exit_target(kernel, &effect_owner, wait.target)?;
                                 self.record_child_observation(wait.target);
                                 Ok(OwnedWorkbenchWait::Exit {
                                     continuation: wait.continuation,
@@ -9840,7 +10127,7 @@ where
                                 match self.prepare_independent_effect(
                                     kernel,
                                     context,
-                                    &CurrentEffectOwner::Workbench(execution_state),
+                                    &effect_owner,
                                     boundary,
                                 ) {
                                     Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),
@@ -10130,7 +10417,7 @@ where
                                     self.resolve_effect(
                                         kernel,
                                         context,
-                                        CurrentEffectOwner::Workbench(execution_state),
+                                        effect_owner.clone(),
                                         &crate::CallAncestry::begin(context.actor),
                                         boundary,
                                     )
@@ -10175,7 +10462,14 @@ where
                                             }),
                                         ),
                                     );
-                                    return Err(error);
+                                    if current.scopes.is_empty() {
+                                        return Err(error);
+                                    }
+                                    self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
+                                    if execution_state.park_effects {
+                                        return Ok(FragmentAdvance::ParkNative);
+                                    }
+                                    continue;
                                 }
                             });
                         }
@@ -12299,6 +12593,7 @@ where
                     public_owner,
                     recovery_claimed: false,
                     workbench_executions: self.workbench_executions.clone(),
+                    actor_scopes: self.actor_scopes.clone(),
                     forest_control: self.forest_control,
                     interactive_policy_installed: false,
                     observation_roots: Default::default(),
@@ -13828,7 +14123,10 @@ where
     > {
         Box::pin(async move {
             use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
-            let invocations = self.workbench_executions.lock().invocation_work();
+            let mut invocations = self.workbench_executions.lock().invocation_work();
+            if let Some(scopes) = self.actor_scopes.lock().clone() {
+                invocations.push(scopes);
+            }
             for invocation in &invocations {
                 invocation.close();
             }

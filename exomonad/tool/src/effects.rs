@@ -6,6 +6,7 @@
 #[serde(rename_all = "PascalCase")]
 pub enum ActorEffectKey {
     Replies,
+    ResourceScopes,
     Watches,
     Forks,
     ActorContext,
@@ -39,6 +40,7 @@ impl ActorEffectKey {
     pub const fn haskell_name(self) -> &'static str {
         match self {
             Self::Replies => "Replies",
+            Self::ResourceScopes => "ResourceScopes",
             Self::Watches => "Watches",
             Self::Forks => "Forks",
             Self::ActorContext => "ActorContext",

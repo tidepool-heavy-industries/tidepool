@@ -216,11 +216,19 @@ impl AwaitDependency {
     }
 }
 
+#[derive(Debug, tidepool_bridge_derive::ToHaskell)]
+#[haskell(module = "Tidepool.Agent.Reply.Internal")]
+pub(crate) enum RequestError {
+    RequestReservationRejected(ReplyError),
+    RequestSubmissionRejected(ReplyError),
+}
+
 pub(crate) struct RequestReservation {
     pub continuation: ResidentHole,
     pub target: ActorRef,
-    pub label: String,
+    pub label: Option<String>,
     pub notify_owner: bool,
+    pub lifetime: crate::WorkerLifetime,
 }
 
 pub(crate) struct RequestSubmission {

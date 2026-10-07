@@ -1,8 +1,10 @@
-let Right requestLabel = Agents.labelFromText "publication-refusal"
 response <- do
-  pending <- Agents.request @Int nativeAgent (Agents.assignment requestLabel ())
-  detached <- detachRequest pending
-  case detached of
-    Left _ -> error "original request detachment refused"
+  admitted <- Agents.request @Int nativeAgent () Agents.defaultRequestOptions
+  pending <- case admitted of
+    Left _ -> error "original request admission refused"
+    Right request -> pure request
+  retained <- retainRequest pending ActorOwned
+  case retained of
+    Left _ -> error "original request retention refused"
     Right () -> pure pending
 pure True
