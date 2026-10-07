@@ -1267,6 +1267,7 @@ where
                         Ok(WorkbenchRunAdvance::ParkEffect) => {
                             behavior.owned_effect_task(owned, kernel.clone())
                         }
+                        Ok(WorkbenchRunAdvance::ParkGreen) => behavior.owned_green_task(owned),
                         Ok(WorkbenchRunAdvance::ParkUnit) => Self::owned_unit_task(owned),
                         Ok(WorkbenchRunAdvance::ParkNative) => behavior.owned_fragment_task(owned),
                         Ok(WorkbenchRunAdvance::ParkAfterToolStart) => {
@@ -2004,6 +2005,24 @@ where
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
         let invocation = owned.state.effects.invocation_work.clone();
         let model = owned.state.effects.model.clone();
+        if owned.state.cursor.running.as_ref().is_some_and(|current| current.green.is_some()) {
+            let (wait, receipt) = green::EffectReceipt::split(pending);
+            let control = owned.state.cursor.running.as_ref().and_then(|current| current.green.as_ref())
+                .and_then(green::GreenThreads::active_wait_control).unwrap_or(control);
+            // Each child's expiry claim is independent. Whole-cell cancellation
+            // is still observed by the original owned Green task.
+            control.arm_sleep();
+            let operation = Box::pin(await_effect(
+                environment, kernel, context, control, wait, commands_permitted, invocation, model,
+            ));
+            let mut owned = owned;
+            let current = owned.state.cursor.running.as_mut().expect("async original fragment");
+            current.inflight_effect = None;
+            current.green.as_mut().expect("async frontiers").enqueue_effect(
+                std::mem::take(&mut current.scopes), receipt, operation,
+            );
+            return self.owned_green_task(owned);
+        }
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -2103,6 +2122,39 @@ where
                     Err(error) => current.resume_failure = Some(error),
                 }
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
+    }
+
+    fn owned_green_task(&self, owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
+        Self::owned_step_task(
+            owned,
+            |owned| Box::pin(async move {
+                let control = owned.state.effects.control.clone().expect("original async cancellation owner");
+                let green = owned.state.cursor.running.as_mut().expect("original async fragment")
+                    .green.as_mut().expect("async frontiers");
+                tokio::select! {
+                    biased;
+                    () = control.wait_for_cancellation() => {
+                        green.cancel_parent();
+                        Err(ResidentActorWorkbenchError::ActorProtocol("async invocation cancelled".into()))
+                    }
+                    ready = green.next() => ready,
+                }
+            }),
+            |behavior, kernel, mut owned, result| {
+                let applied = result.and_then(|completion| behavior.apply_green_completion(&mut owned.state, completion));
+                match applied {
+                    Ok(true) => Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned))),
+                    Ok(false) => Ok(WorkbenchAdvance::Park(behavior.owned_green_task(owned))),
+                    Err(error) => {
+                        let failure = workbench_failure(
+                            &owned.state.cursor.receipts, owned.state.cursor.index,
+                            owned.state.request.items.len(), error,
+                        );
+                        Self::begin_owned_finalization(behavior, kernel, owned, Err(failure))
+                    }
+                }
             },
         )
     }

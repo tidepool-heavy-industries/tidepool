@@ -21,6 +21,7 @@ mod commands;
 mod display_settlement;
 mod drain_wait;
 pub(crate) mod forms;
+pub(crate) mod green;
 mod inspection_wait;
 pub(crate) mod invocation_work;
 mod owned_workbench;
@@ -3076,6 +3077,7 @@ struct WorkbenchFragmentExecution {
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
     scopes: Vec<scopes::ScopeFrame>,
+    green: Option<green::GreenThreads>,
 }
 
 impl WorkbenchFragmentExecution {
@@ -3089,6 +3091,7 @@ impl WorkbenchFragmentExecution {
             fragment: Some(fragment),
             outcome: Some(outcome.into()),
             scopes: Vec::new(),
+            green: None,
         }
     }
 }
@@ -3246,6 +3249,7 @@ enum WorkbenchRunAdvance {
     ParkUnit,
     ParkNative,
     ParkEffect,
+    ParkGreen,
     ParkAfterToolStart,
     ParkAfterToolFinish,
 }
@@ -3254,6 +3258,7 @@ enum FragmentAdvance {
     Settled(ResidentWorkbenchStep),
     ParkEffect,
     ParkNative,
+    ParkGreen,
 }
 
 /// Structured actor turns retain actor publication authority. Workbench effects
@@ -3264,6 +3269,7 @@ enum CurrentEffectOwner<'a> {
     Scoped {
         base: Box<CurrentEffectOwner<'a>>,
         scope: Arc<InvocationWork>,
+        wait_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     },
     Actor {
         ephemeral_work: Arc<InvocationWork>,
@@ -3334,7 +3340,7 @@ impl CurrentEffectOwner<'_> {
 
     fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
-            Self::Scoped { base, .. } => base.control(),
+            Self::Scoped { base, wait_control, .. } => wait_control.clone().or_else(|| base.control()),
 
             Self::Workbench(execution) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
@@ -8352,14 +8358,17 @@ where
                             }
                             continue;
                         }
-                        None if !current.scopes.is_empty() => {
+                        None if !current.scopes.is_empty()
+                            || current.green.as_ref().and_then(green::GreenThreads::active_realm).is_some() => {
                             owned_workbench::WorkbenchFragmentRequest::Scoped {
                                 fragment: current
                                     .fragment
                                     .take()
                                     .expect("scope retains parent fragment"),
                                 outcome: current.outcome.take().expect("scope owns body frontier"),
-                                realm: current.scopes.last().expect("active scope").realm,
+                                realm: current.scopes.last().map(|scope| scope.realm)
+                                    .or_else(|| current.green.as_ref().and_then(green::GreenThreads::active_realm))
+                                    .expect("active native resource scope"),
                             }
                         }
                         None => owned_workbench::WorkbenchFragmentRequest::Settle {
@@ -8420,14 +8429,31 @@ where
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
                     current.fragment = Some(fragment);
-                    let effect_owner = match current.scopes.last() {
-                        Some(frame) => CurrentEffectOwner::Scoped {
+                    let effect_owner = match current.scopes.last().map(|frame| frame.work.clone())
+                        .or_else(|| current.green.as_ref().and_then(green::GreenThreads::active_work)) {
+                        Some(work) => CurrentEffectOwner::Scoped {
                             base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
-                            scope: frame.work.clone(),
+                            scope: work,
+                            wait_control: current.green.as_ref().and_then(green::GreenThreads::active_wait_control),
                         },
                         None => CurrentEffectOwner::Workbench(execution_state),
                     };
                     let boundary = match boundary {
+                        ResidentActorBoundary::Green(boundary) => {
+                            if !execution_state.park_effects {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "async requires an independently admitted notebook execution".into(),
+                                ));
+                            }
+                            return self.prepare_green_boundary(kernel, context, &effect_owner, current, boundary);
+                        }
+                        ResidentActorBoundary::Completed
+                            if current.green.as_ref().and_then(green::GreenThreads::active_realm).is_some()
+                                && current.scopes.is_empty() => {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "async body completed without publishing its result marker".into(),
+                            ));
+                        }
                         ResidentActorBoundary::ScopeResumed { outcome } => {
                             current.outcome = Some(outcome);
                             continue;
@@ -9331,7 +9357,7 @@ where
                     .await?
                 {
                     FragmentAdvance::Settled(step) => step,
-                    FragmentAdvance::ParkEffect | FragmentAdvance::ParkNative => {
+                    FragmentAdvance::ParkEffect | FragmentAdvance::ParkNative | FragmentAdvance::ParkGreen => {
                         unreachable!("nested after-tool remains serial")
                     }
                 }
@@ -9637,6 +9663,9 @@ where
                             Ok(FragmentAdvance::ParkNative) => {
                                 return Ok(WorkbenchRunAdvance::ParkNative);
                             }
+                            Ok(FragmentAdvance::ParkGreen) => {
+                                return Ok(WorkbenchRunAdvance::ParkGreen);
+                            }
                             Ok(FragmentAdvance::Settled(step)) => settled = Some(Ok(step)),
                             Err(error) => settled = Some(Err(error)),
                         }
@@ -9819,6 +9848,9 @@ where
                             }
                             Ok(FragmentAdvance::ParkNative) => {
                                 return Ok(WorkbenchRunAdvance::ParkNative);
+                            }
+                            Ok(FragmentAdvance::ParkGreen) => {
+                                return Ok(WorkbenchRunAdvance::ParkGreen);
                             }
                             Err(source) => {
                                 let mut failure = workbench_failure_after_unit(

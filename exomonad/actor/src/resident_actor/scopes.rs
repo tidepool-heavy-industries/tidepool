@@ -241,6 +241,7 @@ where
             };
             let token = frame.work.scope_token().expect("registered scope identity");
             let scoped_owner = CurrentEffectOwner::Scoped {
+                wait_control: None,
                 base: Box::new(effect_owner),
                 scope: frame.work.clone(),
             };
