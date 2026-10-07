@@ -19759,11 +19759,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .unwrap();
         let boundary = runner
-            .capture_boundary(
-                context.clone(),
-                outcome,
-                context.placement.resource_scope,
-            )
+            .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
             .await
             .unwrap();
         let ResidentActorBoundary::ScopeRun {
