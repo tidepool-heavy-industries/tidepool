@@ -20,8 +20,7 @@ use structured_introspection::StructuredIntrospectionAnswer;
 #[cfg(test)]
 use to_haskell::visit_usage_summary;
 use to_haskell::{
-    ActorContextProjection, CallStatus, ForkCleanupAnswer, LifecycleAnswer, ProgressAnswer,
-    RouteStateAnswer,
+    ActorContextProjection, CallStatus, LifecycleAnswer, ProgressAnswer, RouteStateAnswer,
 };
 
 use serde::Serialize;
@@ -2395,20 +2394,10 @@ pub(crate) struct ExecutionPrivateScope {
     pub admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
 }
 
-#[derive(Clone)]
-pub(crate) struct PublishedForkSource {
-    pub(crate) lexical: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    pub(crate) session: tidepool_repr::SessionId,
-    pub(crate) public_scope: ScopeId,
-    pub(crate) public_epoch: u64,
-    pub(crate) machine_incarnation: Option<tidepool_repr::SessionId>,
-}
-
 pub(crate) enum PrivateExecutionPublication {
     Manifest {
         commit: tidepool_runtime::session::PublicManifestCommit,
         native_bindings: Vec<String>,
-        fork_source: Option<PublishedForkSource>,
     },
     Rejected {
         reason: tidepool_toolchain::declaration_join::JoinRejection,
@@ -2505,48 +2494,6 @@ pub(crate) enum AgentStopProjection {
     Unavailable,
     Unauthorized,
     Failed(String),
-}
-
-#[derive(Clone)]
-pub(crate) struct CleanupActorProjection {
-    pub actor: crate::ActorRef,
-    pub label: String,
-    pub terminal: bool,
-    pub revision: u64,
-}
-
-#[derive(Clone)]
-pub(crate) struct CleanupPlanProjection {
-    pub group: crate::ForkGroupId,
-    pub actors: Vec<CleanupActorProjection>,
-    pub pending_responses: Vec<crate::RequestId>,
-    pub pending_watches: Vec<crate::WatchId>,
-    pub refusal: Option<String>,
-}
-
-pub(crate) enum CleanupStepProjection {
-    ForgotResponses(Vec<crate::RequestId>),
-    ForgotWatches(Vec<crate::WatchId>),
-    StoppedActor(crate::ActorRef, AgentStopProjection),
-    ForgotActor(crate::ActorRef),
-    ActorRetained {
-        actor: crate::ActorRef,
-        requests: Vec<crate::RequestId>,
-        watches: Vec<crate::WatchId>,
-    },
-    ActorOutputPending {
-        actor: crate::ActorRef,
-        displays: usize,
-    },
-    GroupRetired(crate::ForkGroupId),
-    Blocked(String),
-    StalePlan,
-}
-
-pub(crate) struct CleanupReceiptProjection {
-    pub plan: CleanupPlanProjection,
-    pub steps: Vec<CleanupStepProjection>,
-    pub complete: bool,
 }
 
 /// One fully captured boundary reached by an installed actor program.
@@ -2648,7 +2595,7 @@ pub(crate) enum ResidentActorBoundary {
         owner: crate::ActorRef,
         source: crate::request::sources::SourceBinding,
     },
-    ForkGroup(ForkGroupBoundary),
+    ContextCheckpoint(ContextCheckpointBoundary),
     Start(crate::ResidentActorStart),
     ReplaceSpec {
         continuation: ResidentHole,
@@ -2690,25 +2637,12 @@ pub(crate) enum ResidentActorBoundary {
         recipient: crate::ActorRef,
         scope: crate::ActorRef,
     },
-    AgentGroupList {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
-    },
     AgentForget(AgentInspectionBoundary),
     AgentStop(AgentInspectionBoundary),
     AgentRetention {
         continuation: ResidentHole,
         target: ActorRef,
         lifetime: crate::WorkerLifetime,
-    },
-    CleanupPlan {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
-    },
-    CleanupExecute {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
-        inspected: Vec<(crate::ActorRef, u64)>,
     },
     RequestReservation(RequestReservation),
     RequestAdmissionRejected {
@@ -2778,61 +2712,7 @@ pub(crate) enum ResidentActorBoundary {
     WatchRelease(WatchForget),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ForkReply {
-    Actor,
-    Forks,
-}
-
-pub(crate) struct ForkContinuation {
-    pub(crate) hole: ResidentHole,
-    reply: ForkReply,
-}
-
-impl ForkContinuation {
-    pub(crate) fn for_reply(hole: ResidentHole, reply: ForkReply) -> Self {
-        Self { hole, reply }
-    }
-
-    fn actor(hole: ResidentHole) -> Self {
-        Self {
-            hole,
-            reply: ForkReply::Actor,
-        }
-    }
-
-    pub(crate) fn forks(hole: ResidentHole) -> Self {
-        Self {
-            hole,
-            reply: ForkReply::Forks,
-        }
-    }
-
-    fn resume<H, O, T>(
-        self,
-        session: &mut ResidentSession<H, O>,
-        result: Result<T, String>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
-    where
-        H: DispatchEffect<O> + Send,
-        O: OutputSink + Sync,
-        T: tidepool_bridge::ToHaskell + Send + 'static,
-    {
-        match (self.reply, result) {
-            (ForkReply::Actor, Ok(value)) => session
-                .resume_classified(self.hole, value)
-                .map_err(classify_resumption),
-            (ForkReply::Actor, Err(detail)) => session
-                .abort(self.hole.cont_id(), detail)
-                .map_err(ResidentActorWorkbenchError::Resident),
-            (ForkReply::Forks, result) => session
-                .resume_classified(self.hole, result)
-                .map_err(classify_resumption),
-        }
-    }
-}
-
-pub(crate) enum ForkGroupBoundary {
+pub(crate) enum ContextCheckpointBoundary {
     CheckCheckpoint {
         continuation: ResidentHole,
         token: String,
@@ -2844,39 +2724,6 @@ pub(crate) enum ForkGroupBoundary {
     Checkpoint {
         continuation: ResidentHole,
         name: String,
-    },
-    Preview {
-        continuation: ResidentHole,
-        role: crate::ActorLaunchRoleWire,
-        effect_keys: Vec<crate::ActorEffectKeyWire>,
-        budget: Option<(i64, i64)>,
-        model: Option<crate::Model>,
-        effort: Option<crate::ForkEffort>,
-        context: crate::ForkContext,
-        instructions: Option<String>,
-        lifetime: crate::WorkerLifetime,
-    },
-    Begin {
-        continuation: ForkContinuation,
-        relative: bool,
-        group: String,
-        branches: Vec<String>,
-    },
-    Commit {
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    },
-    CommitCaptured {
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    },
-    Abort {
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    },
-    Cleanup {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
     },
 }
 
@@ -2936,21 +2783,15 @@ impl ResidentActorBoundary {
             Self::ActorContext(_) => "actorContext",
             Self::ActorLocalContext(_) => "actor local context",
             Self::AttachSource { .. } => "attach source",
-            Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
-            Self::ForkGroup(ForkGroupBoundary::Checkpoint { .. }) => "capture context checkpoint",
-            Self::ForkGroup(ForkGroupBoundary::CheckCheckpoint { .. }) => {
+            Self::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { .. }) => {
+                "capture context checkpoint"
+            }
+            Self::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { .. }) => {
                 "check context checkpoint"
             }
-            Self::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint { .. }) => {
+            Self::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { .. }) => {
                 "release context checkpoint"
             }
-            Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
-            Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
-            Self::ForkGroup(ForkGroupBoundary::CommitCaptured { .. }) => {
-                "commit captured context-fork group"
-            }
-            Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
-            Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
             Self::Replace { .. } => "replaceActor",
             Self::ReplaceSpec { .. } => "replaceSpec",
@@ -2976,12 +2817,9 @@ impl ResidentActorBoundary {
             Self::AgentList(_) => "listAgents",
             Self::ReflectConversation { .. } => "reflect",
             Self::AgentShareObservation { .. } => "shareObservation",
-            Self::AgentGroupList { .. } => "observeForkGroup",
             Self::AgentForget(_) => "forgetAgent",
             Self::AgentStop(_) => "stopAgent",
             Self::AgentRetention { .. } => "retainAgent",
-            Self::CleanupPlan { .. } => "planCleanup",
-            Self::CleanupExecute { .. } => "executeCleanup",
             Self::RequestReservation(_) => "request",
             Self::RequestAdmissionRejected { .. } => "request admission rejected",
             Self::CurrentRequest { .. } => "currentRequest",
@@ -3101,7 +2939,6 @@ resident_request_roster! {
     Lookup(crate::generated::lookup::LookupReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Lookup)),
     Introspection(crate::generated::introspection::IntrospectionReq) => None,
     AgentLaunch(crate::generated::agent_launch::AgentLaunchReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentLaunch)),
-    Forks(crate::generated::forks::ForksReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Forks)),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq) => None,
     ActorLocal(crate::generated::actor_local::ActorLocalReq) => None,
     AgentTools(crate::generated::agent_tools::AgentToolsReq) => None,
@@ -3167,7 +3004,6 @@ impl ResidentRequest {
             Self::AgentLaunch,
             crate::generated::agent_launch::AgentLaunchReq
         );
-        try_member!(Self::Forks, crate::generated::forks::ForksReq);
         try_member!(
             Self::ActorKernel,
             crate::generated::actor_kernel::ActorKernelReq
@@ -3212,9 +3048,6 @@ impl ResidentRequest {
             Self::Notifications(
                 crate::generated::notifications::NotificationsReq::PollNotificationWith(..),
             ) => "pollNotification",
-            Self::Actor(crate::generated::actor::ActorReq::ActorBeginForkGroupWith(..)) => {
-                "begin context-fork group"
-            }
             Self::ActorContext(
                 crate::generated::actor_context::ActorContextReq::ActorContextWith,
             ) => "actorContext",
@@ -3226,14 +3059,6 @@ impl ResidentRequest {
                 crate::generated::agent_control::AgentControlReq::AgentControlRetainWith(..),
             ) => "retainAgent",
             Self::AgentInspection(
-                crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(..),
-            ) => "planCleanup",
-            Self::AgentControl(
-                crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
-                    ..,
-                ),
-            ) => "executeCleanup",
-            Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(..),
             ) => "observeAgent",
             Self::AgentInspection(
@@ -3244,9 +3069,6 @@ impl ResidentRequest {
                     ..,
                 ),
             ) => "shareObservation",
-            Self::AgentInspection(
-                crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(..),
-            ) => "observeForkGroup",
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
             ) => "forgetAgent",
@@ -3260,43 +3082,21 @@ impl ResidentRequest {
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(..),
             ) => "replaceSpec",
-            Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
-                ..,
-            )) => "spawnSubagent",
-            Self::Forks(crate::generated::forks::ForksReq::ForksBeginWith(..)) => {
-                "begin context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksStartWith(..)) => "context fork",
-            Self::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(..)) => "checkpoint",
-            Self::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(..)) => {
-                "checkCheckpoint"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksReleaseCheckpointWith(..)) => {
-                "releaseCheckpoint"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(..)) => {
-                "preview context-fork policy"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksCommitWith(..)) => {
-                "commit context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(..)) => {
-                "commit captured context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksAbortWith(..)) => {
-                "abort context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksCleanupWith(..)) => {
-                "cleanup context-fork group"
-            }
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(..),
+            ) => "spawnSubagent",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(..),
+            ) => "checkpoint",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(..),
+            ) => "checkCheckpoint",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(
+                    ..,
+                ),
+            ) => "releaseCheckpoint",
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
-            Self::Actor(crate::generated::actor::ActorReq::ActorForkWith(..)) => "context fork",
-            Self::Actor(crate::generated::actor::ActorReq::ActorCommitForkGroupWith(..)) => {
-                "commit context-fork group"
-            }
-            Self::Actor(crate::generated::actor::ActorReq::ActorAbortForkGroupWith(..)) => {
-                "abort context-fork group"
-            }
             Self::Actor(crate::generated::actor::ActorReq::ActorWaitWith(..)) => "awaitExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorPollWith(..)) => "pollExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
@@ -7434,9 +7234,9 @@ mod activation_preview_tests {
     #[test]
     fn activation_renders_a_whole_task_and_names_the_cap_past_it() {
         let task = format!(
-            "Task {{taskGroup = ForkGroupPath False \"wave/lane\", planPath = \"plans/x.md\", \
+            "Task {{taskName = \"wave/lane\", planPath = \"plans/x.md\", \
              taskSource = GitOid \"3454b78\", obligation = \"{}\", rationale = \"r\", \
-             ownedPaths = [\"src/a.rs\"], acceptance = [\"tests pass\"], decisions = []}}",
+             ownedPaths = [\"src/a.rs\"], acceptance = \"tests pass\", acceptedDecisions = []}}",
             "o".repeat(4 * 1024)
         );
         assert_eq!(
@@ -7633,35 +7433,6 @@ where
             .await
     }
 
-    /// Consume the child's original retained placement under the same
-    /// checkout that initializes its canonical durable public surface.
-    pub(crate) async fn initialize_fork_child_public_owner(
-        &self,
-        context: crate::ActorSessionContext,
-        owner: tidepool_runtime::session::RecoveryPublicOwner,
-        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-        retirement: crate::RetainedActorExit,
-    ) -> Result<NativePublicOwnerPublication, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine_wait(
-                context,
-                MachineCheckoutAdmission::UntilRetirement(retirement),
-                move |session, context, _| {
-                    let scope = context.placement.lexical_scope;
-                    session.validate_lexical_scope_lease(scope, &lease)?;
-                    let outcome = session
-                        .initialize_durable_public_scope(owner.clone(), scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })?;
-                    NativePublicOwnerPublication::capture(outcome, || {
-                        session.durable_public_readiness(&owner, scope)
-                    })
-                },
-            )
-            .await
-    }
-
     pub(crate) async fn begin_public_bootstrap(
         &self,
         context: crate::ActorSessionContext,
@@ -7724,25 +7495,6 @@ where
                 other => Ok(other),
             }
         }).await
-    }
-
-    pub(crate) async fn validate_fork_child_scope(
-        &self,
-        context: crate::ActorSessionContext,
-        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
-                if let Some(captured) = context.source_imports.inherited_scope()? {
-                    session.validate_initial_lexical_scope(
-                        &captured,
-                        context.placement.lexical_scope,
-                    )?;
-                }
-                Ok(())
-            })
-            .await
     }
 
     /// Transfer only the journal-certified durable predecessor to this exact
@@ -7994,7 +7746,6 @@ where
         &self,
         context: crate::ActorSessionContext,
         execution: Arc<ExecutionPrivateScope>,
-        retain_fork_source: bool,
     ) -> Result<PrivateExecutionPublication, ResidentActorWorkbenchError> {
         if context.placement.lexical_scope != execution.private_scope {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -8041,7 +7792,6 @@ where
                 return Ok(PrivateExecutionPublication::Manifest {
                     commit: tidepool_runtime::session::PublicManifestCommit::Cancelled,
                     native_bindings,
-                    fork_source: None,
                 });
             }
             let owner = execution.owner.clone();
@@ -8093,35 +7843,17 @@ where
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
                     let decision = execution.decision.clone();
-                    let public_scope = execution.public_scope;
-                    let source_session = context.placement.session;
-                    let (outcome, fork_source) = self
+                    let outcome = self
                         .access
                         .with_machine(context.clone(), move |session, _, _| {
                             let outcome = session
                                 .publish_staged_public_manifest(ticket, &decision)
                                 .map_err(|error| {
-                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    ))
                                 })?;
-                            // Capture under the same checkout as the visible commit. A
-                            // later independent publication must not change this boundary.
-                            let fork_source = if retain_fork_source && matches!(outcome,
-                                tidepool_runtime::session::PublicManifestCommit::Durable
-                                | tidepool_runtime::session::PublicManifestCommit::Ephemeral
-                                | tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
-                            ) {
-                                let visible = session.public_visibility_snapshot_in(public_scope).ok_or_else(|| {
-                                    ResidentActorWorkbenchError::ActorProtocol("published fork source has no public compile view".into())
-                                })?;
-                                Some(PublishedForkSource {
-                                    lexical: session.retain_lexical_scope(public_scope).map_err(ResidentActorWorkbenchError::Resident)?,
-                                    session: source_session,
-                                    public_scope,
-                                    public_epoch: visible.epoch,
-                                    machine_incarnation: visible.machine_incarnation,
-                                })
-                            } else { None };
-                            Ok((outcome, fork_source))
+                            Ok(outcome)
                         })
                         .await
                         .map_err(|error| {
@@ -8134,7 +7866,6 @@ where
                     return Ok(PrivateExecutionPublication::Manifest {
                         commit: outcome,
                         native_bindings,
-                        fork_source,
                     });
                 }
                 PreparedExecutionPublication::Rejected(rejected) => {
@@ -8504,100 +8235,9 @@ where
                         effort, instructions, lifetime, limits, context.placement.session, context.actor,
                     ).map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksStartWith(
-                        label,
-                        _,
-                        unbound_label,
-                        group,
-                        role,
-                        profile,
-                        worktrees,
-                        worktree_spec,
-                        bound_dirty_policy,
-                        effect_keys,
-                        effort,
-                        budget,
-                        model, fork_context, checkpoint, instructions, lifetime,
-                    )) => {
-                        let group = u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid fork group id {group}"
-                            ))
-                        })?;
-                        crate::ResidentActorStart::capture_decoded(
-                            session,
-                            hole,
-                            crate::start::ActorStartRequest {
-                                label, role, profile, launch_worktrees: worktrees,
-                                fork_group: Some(crate::ForkGroupId(group)),
-                                fork_workspace: Some(match worktree_spec {
-                                    Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
-                                    None => crate::ForkWorkspaceSeed::CurrentCheckout(bound_dirty_policy),
-                                }),
-                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, checkpoint, lifetime,
-                                session_id: context.placement.session, parent_actor: context.actor,
-                                unbound_label,
-                            },
-                        )
-                        .map(ResidentActorBoundary::Start)
-                        .map_err(ResidentActorWorkbenchError::StartCapture)
-                    }
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget, model, effort, context, instructions, lifetime)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget, model, effort, context, instructions, lifetime })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(name)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Checkpoint { continuation: hole, name })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint { continuation: hole, token })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint { continuation: hole, token })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
-                        relative,
-                        group,
-                        branches,
-                    )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                        continuation: ForkContinuation::forks(hole),
-                        relative,
-                        group,
-                        branches,
-                    })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitWith(
-                        group,
-                    )) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::Commit {
-                            continuation: ForkContinuation::forks(hole),
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid fork group id {group}"
-                                ))
-                            })?),
-                        },
-                    )),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(group)) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::CommitCaptured {
-                            continuation: ForkContinuation::forks(hole),
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
-                            })?),
-                        },
-                    )),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksAbortWith(
-                        group,
-                    )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                        continuation: ForkContinuation::forks(hole),
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid fork group id {group}"
-                            ))
-                        })?),
-                    })),
-                    ResidentRequest::Forks(
-                        crate::generated::forks::ForksReq::ForksCleanupWith(group),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::Cleanup {
-                            continuation: hole,
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid fork group id {group}"
-                                ))
-                            })?),
-                        },
-                    )),
+                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
+                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
+                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { continuation: hole, token })),
                     ResidentRequest::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(target, message)) => {
                         Ok(ResidentActorBoundary::NotificationSend { continuation: hole, target: crate::wait::decode_address(target.0, target.1)?, message })
                     }
@@ -8656,14 +8296,6 @@ where
                         scope: crate::wait::decode_address(scope.0, scope.1)?,
                     }),
                     ResidentRequest::AgentInspection(
-                        crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(group),
-                    ) => Ok(ResidentActorBoundary::AgentGroupList {
-                        continuation: hole,
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
-                        })?),
-                    }),
-                    ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(
                             target,
                         ),
@@ -8697,38 +8329,8 @@ where
                         target: crate::wait::decode_address(target.0, target.1)?,
                         continuation: hole,
                     })),
-                    ResidentRequest::AgentInspection(
-                        crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(
-                            group,
-                        ),
-                    ) => Ok(ResidentActorBoundary::CleanupPlan {
-                        continuation: hole,
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid cleanup group id {group}"
-                            ))
-                        })?),
-                    }),
-                    ResidentRequest::AgentControl(
-                        crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
-                            group, inspected,
-                        ),
-                    ) => Ok(ResidentActorBoundary::CleanupExecute {
-                        continuation: hole,
-                        inspected: inspected.into_iter().map(|(id, incarnation, revision)| {
-                            Ok((crate::wait::decode_address(id, incarnation)?, u64::try_from(revision).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol("invalid cleanup revision".into())
-                            })?))
-                        }).collect::<Result<_, ResidentActorWorkbenchError>>()?,
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid cleanup group id {group}"
-                            ))
-                        })?),
-                    }),
                     ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorStartWith(..)
-                        | crate::generated::actor::ActorReq::ActorForkWith(..),
+                        crate::generated::actor::ActorReq::ActorStartWith(..),
                     ) => {
                         let table = session.data_con_table().clone();
                         crate::ResidentActorStart::capture(
@@ -8742,40 +8344,6 @@ where
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
-                    ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorBeginForkGroupWith(
-                            relative,
-                            group,
-                            branches,
-                        ),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                        continuation: ForkContinuation::actor(hole),
-                        relative,
-                        group,
-                        branches,
-                    })),
-                    ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorCommitForkGroupWith(group),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::Commit {
-                            continuation: ForkContinuation::actor(hole),
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid fork group id {group}"
-                                ))
-                            })?),
-                        },
-                    )),
-                    ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorAbortForkGroupWith(group),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                        continuation: ForkContinuation::actor(hole),
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid fork group id {group}"
-                            ))
-                        })?),
-                    })),
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorCallWith(
                         target,
                         _,
@@ -9250,25 +8818,6 @@ where
                         .map_err(ResidentActorWorkbenchError::Resident)
                 })
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?
-            })
-            .await
-    }
-
-    /// Admit the original child entry only while its retained lexical grant
-    /// still belongs to this runtime epoch and exact installed scope.
-    pub(crate) async fn run_fork_child_rooted_entry(
-        &self,
-        context: crate::ActorSessionContext,
-        entry: RootCustody,
-        realm: RealmId,
-        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
-                session
-                    .run_rooted_entry("actor_program", entry, 0, realm, None)
-                    .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
     }
@@ -9824,21 +9373,6 @@ where
             .await
     }
 
-    pub(crate) async fn resume_group_roster(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        roster: Option<Vec<AgentRosterProjection>>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, roster)
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
     pub(crate) async fn resume_agent_observation(
         &self,
         context: crate::ActorSessionContext,
@@ -9951,56 +9485,6 @@ where
                 session
                     .resume_classified(hole, outcome)
                     .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_cleanup_plan(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        plan: CleanupPlanProjection,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, plan)
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_cleanup_receipt(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        receipt: CleanupReceiptProjection,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, receipt)
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_group(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ForkContinuation,
-        group: crate::ForkGroupId,
-        group_path: String,
-        paths: Vec<String>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let group = i64::try_from(group.0).map_err(|_| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "fork group identity exceeds Haskell Int".into(),
-                    )
-                })?;
-                hole.resume(session, Ok((group, group_path, paths)))
             })
             .await
     }
@@ -10740,53 +10224,6 @@ where
             .await
     }
 
-    /// Retain the committed fork's exact lexical surface before replacing
-    /// its provisional child placement. The lease's detached scope is the
-    /// mutable child target; token release cannot retire it prematurely.
-    pub(crate) async fn retain_fork_release_scope(
-        &self,
-        session_id: tidepool_repr::SessionId,
-        scope: ScopeId,
-    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError>
-    {
-        self.access
-            .with_host_machine(
-                "retain-fork-release-scope",
-                session_id,
-                None,
-                move |session, _| session.retain_lexical_scope(scope).map_err(Into::into),
-            )
-            .await
-    }
-
-    /// Derive a mutable child from the publication's immutable final source
-    /// seed, while retaining the already admitted entry's exact dependencies.
-    pub(crate) async fn retain_deferred_child_scope(
-        &self,
-        session_id: tidepool_repr::SessionId,
-        original: ScopeId,
-        capture: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError>
-    {
-        self.access
-            .with_host_machine(
-                "retain-deferred-child-scope",
-                session_id,
-                None,
-                move |session, _| {
-                    session.validate_lexical_scope_lease(capture.scope(), &capture)?;
-                    let lexical = session.retain_lexical_scope(capture.scope())?;
-                    if !session.retain_scope_dependencies(original, lexical.scope()) {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "deferred child entry dependencies were unavailable".into(),
-                        ));
-                    }
-                    Ok(lexical)
-                },
-            )
-            .await
-    }
-
     pub(crate) async fn close_realm(
         &self,
         context: crate::ActorSessionContext,
@@ -10850,71 +10287,6 @@ where
                             allocated_label,
                         ),
                     )
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub async fn resume_fork_starting_parent(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        actor: crate::ActorRef,
-        allocated_label: String,
-        worktree: tidepool_bridge_effects::WtWorktreeHandle,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(
-                        hole,
-                        Ok::<_, String>((
-                            (
-                                actor.id.0 as i64,
-                                actor.incarnation.0 as i64,
-                                allocated_label,
-                            ),
-                            worktree,
-                        )),
-                    )
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_failure(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ForkContinuation,
-        detail: String,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                hole.resume(session, Err::<(), _>(detail))
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_unit(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ForkContinuation,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| hole.resume(session, Ok(())))
-            .await
-    }
-
-    pub(crate) async fn resume_fork_cleanup(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        outcome: Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, ForkCleanupAnswer(outcome))
                     .map_err(classify_resumption)
             })
             .await
@@ -13594,7 +12966,7 @@ pub(crate) mod request_tests {
             .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
         let selected = workbench_runner_for_test(&workbench)
-            .publish_private_execution(private.clone(), execution, false)
+            .publish_private_execution(private.clone(), execution)
             .await
             .unwrap();
         let PrivateExecutionPublication::Manifest {
@@ -13643,156 +13015,6 @@ pub(crate) mod request_tests {
             unaccepted.accept().is_err(),
             "a sealed cell refuses late effect acceptance"
         );
-    }
-
-    #[tokio::test]
-    async fn deferred_children_use_publication_scope_after_later_independent_publication() {
-        with_test_compiler_owner(deferred_children_use_publication_scope_after_later_independent_publication_with_compiler_owner()).await;
-    }
-
-    async fn deferred_children_use_publication_scope_after_later_independent_publication_with_compiler_owner(
-    ) {
-        let (machines, public, source, _root) = actor_registry_fixture();
-        let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-        let original_child = workbench_runner_for_test(&initial)
-            .retain_fork_release_scope(public.placement.session, public.placement.lexical_scope)
-            .await
-            .unwrap();
-        let (first, private) = initial
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
-        first
-            .execute_cell_for_test(
-                private.clone(),
-                "deferredHelper value = value + 3 :: Int\ndeferredValue <- pure (40 :: Int)",
-            )
-            .await
-            .unwrap();
-        let published = workbench_runner_for_test(&first)
-            .publish_private_execution(
-                private,
-                first.private_execution.as_ref().unwrap().clone(),
-                true,
-            )
-            .await
-            .unwrap();
-        let PrivateExecutionPublication::Manifest {
-            commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
-            fork_source: Some(capture),
-            ..
-        } = published
-        else {
-            panic!("successful publication must retain its exact fork source")
-        };
-        let first_epoch = capture.public_epoch;
-        let capture = capture.lexical;
-        let first_value = first
-            .access
-            .with_machine(public.clone(), {
-                let capture = Arc::clone(&capture);
-                move |session, context, _| {
-                    session.validate_initial_lexical_scope(
-                        &capture,
-                        context.placement.lexical_scope,
-                    )?;
-                    assert!(session
-                        .current_decl_heads_in(capture.scope())
-                        .iter()
-                        .any(|(name, _)| name == "deferredHelper"));
-                    Ok(session
-                        .current_binding_in(capture.scope(), "deferredValue")
-                        .unwrap()
-                        .0)
-                }
-            })
-            .await
-            .unwrap();
-
-        // A later owned cell advances the same public tip before A's children
-        // release. The producer's retained boundary must still select A.
-        let (later, private) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
-        later
-            .execute_cell_for_test(
-                private.clone(),
-                "laterHelper value = value + 7 :: Int\ndeferredValue <- pure (99 :: Int)",
-            )
-            .await
-            .unwrap();
-        let later_published = workbench_runner_for_test(&later)
-            .publish_private_execution(
-                private,
-                later.private_execution.as_ref().unwrap().clone(),
-                false,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            later_published,
-            PrivateExecutionPublication::Manifest {
-                commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
-                fork_source: None,
-                ..
-            }
-        ));
-        let runner = workbench_runner_for_test(&later);
-        let mut children = Vec::new();
-        for _ in 0..2 {
-            children.push(
-                runner
-                    .retain_deferred_child_scope(
-                        public.placement.session,
-                        original_child.scope(),
-                        Arc::clone(&capture),
-                    )
-                    .await
-                    .unwrap(),
-            );
-        }
-        assert_ne!(children[0].scope(), children[1].scope());
-        assert_ne!(children[0].scope(), capture.scope());
-        later
-            .access
-            .with_machine(public, move |session, context, _| {
-                assert!(
-                    session
-                        .public_visibility_snapshot_in(context.placement.lexical_scope)
-                        .unwrap()
-                        .epoch
-                        > first_epoch
-                );
-                assert_ne!(
-                    session
-                        .current_binding_in(context.placement.lexical_scope, "deferredValue")
-                        .unwrap()
-                        .0,
-                    first_value
-                );
-                assert!(session
-                    .validate_initial_lexical_scope(&capture, context.placement.lexical_scope)
-                    .is_err());
-                for child in children {
-                    session.validate_initial_lexical_scope(&capture, child.scope())?;
-                    assert_eq!(
-                        session
-                            .current_binding_in(child.scope(), "deferredValue")
-                            .unwrap()
-                            .0,
-                        first_value
-                    );
-                    let declarations = session.current_decl_heads_in(child.scope());
-                    assert!(declarations
-                        .iter()
-                        .any(|(name, _)| name == "deferredHelper"));
-                    assert!(!declarations.iter().any(|(name, _)| name == "laterHelper"));
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -13875,7 +13097,7 @@ pub(crate) mod request_tests {
         .await
         .expect("unaccepted mount guard retires its exact binding");
         let outcome = workbench_runner_for_test(&workbench)
-            .publish_private_execution(private, execution, false)
+            .publish_private_execution(private, execution)
             .await
             .unwrap();
         assert!(matches!(
@@ -14167,7 +13389,6 @@ pub(crate) mod request_tests {
             (120, "AgentForgetRetained", 2),
             (121, "AgentForgotten", 0),
             (122, "AgentForgetOutputPending", 1),
-            (123, "CleanupActorOutputPending", 3),
         ] {
             table.insert(DataCon {
                 id: DataConId(id),
@@ -14198,15 +13419,6 @@ pub(crate) mod request_tests {
             HaskellValue::Con(DataConId(122), ref fields) if fields.len() == 1
                 && <i64 as tidepool_bridge::FromHaskell>::from_value(&fields[0], &table).unwrap() == 2
         ));
-        assert!(matches!(
-            CleanupStepProjection::ActorOutputPending {
-                actor: crate::ActorRef::first(crate::ActorId(37)), displays: 2,
-            }.to_value(&table).unwrap(),
-            HaskellValue::Con(DataConId(123), ref fields)
-                if fields.iter().map(|field| <i64 as tidepool_bridge::FromHaskell>::from_value(field, &table).unwrap())
-                    .collect::<Vec<_>>() == vec![37, 1, 2]
-        ));
-
         let error = AgentForgetProjection::Retained {
             requests: vec![crate::RequestId(u64::MAX)],
             watches: Vec::new(),
@@ -14778,7 +13990,7 @@ pub(crate) mod request_tests {
                 .as_ref()
                 .expect("admitted private cell");
             let published = workbench_runner_for_test(self)
-                .publish_private_execution(context.clone(), Arc::clone(execution), false)
+                .publish_private_execution(context.clone(), Arc::clone(execution))
                 .await?;
             assert!(matches!(
                 published,
@@ -19616,7 +18828,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .publish_private_execution(
                 context,
                 workbench.private_execution.as_ref().unwrap().clone(),
-                false,
             )
             .await
             .unwrap();
@@ -21661,262 +20872,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(declared.bindings, bound.bindings);
     }
 
-    fn fork_reply_fixture() -> (
-        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
-        crate::ActorSessionContext,
-        ActorWorkbenchSource,
-        tempfile::TempDir,
-    ) {
-        let (session, context, source, root) = host_mount_fixture_with_effects(
-            |_| {},
-            &[tidepool_mcp::actor_decl(), tidepool_mcp::forks_decl()],
-            "'[Core.Actor, Core.Forks]",
-        );
-        let fixture_dir = root.path().join("fork-reply-fixtures");
-        std::fs::create_dir(&fixture_dir).expect("fixture directory");
-        std::fs::write(
-            fixture_dir.join("ForkReplyContracts.hs"),
-            include_str!("fixtures/ForkReplyContracts.hs"),
-        )
-        .expect("fork reply contract fixture");
-        let mut include = source.base_include.to_vec();
-        include.push(fixture_dir);
-        let source = ActorWorkbenchSource::new(
-            insert_preamble_imports(
-                &source.preamble,
-                "qualified Tidepool.Effects.Core as Core\nqualified ForkReplyContracts as Contracts",
-            ),
-            include,
-        );
-        let machines = Arc::new(ActorMachineRegistry::new());
-        machines.insert_idle(context.placement.session, Box::new(session));
-        (machines, context, source, root)
-    }
-
-    async fn fork_reply_boundary(
-        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        context: &crate::ActorSessionContext,
-        source: &ActorWorkbenchSource,
-        text: &str,
-    ) -> ForkGroupBoundary {
-        let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: text.into(),
-                },
-                None,
-            )
-            .await
-            .expect("authentic fork request suspends");
-        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-            panic!("expected a suspended fork request");
-        };
-        let ResidentActorBoundary::ForkGroup(boundary) = runner
-            .capture_boundary(
-                context.clone(),
-                (*outcome).into(),
-                context.placement.resource_scope,
-            )
-            .await
-            .expect("fork request decodes through its production owner")
-        else {
-            panic!("expected a fork-group boundary");
-        };
-        boundary
-    }
-
-    #[tokio::test]
-    async fn fork_group_replies_preserve_actor_and_forks_answer_contracts() {
-        with_test_compiler_owner(async {
-            let (machines, context, source, _root) = fork_reply_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-            let runner = ResidentActorRunner::new(machines, source.clone());
-            for text in [
-                "Contracts.actorBegin",
-                "Contracts.actorCommit",
-                "Contracts.actorAbort",
-                "Contracts.forksBegin",
-                "Contracts.forksCommit",
-                "Contracts.forksAbort",
-            ] {
-                let boundary =
-                    fork_reply_boundary(&workbench, &runner, &context, &source, text).await;
-                let completed = match boundary {
-                    ForkGroupBoundary::Begin { continuation, .. } => {
-                        runner
-                            .resume_fork_group(
-                                context.clone(),
-                                continuation,
-                                crate::ForkGroupId(7),
-                                "group".into(),
-                                vec!["branch".into()],
-                            )
-                            .await
-                    }
-                    ForkGroupBoundary::Commit { continuation, .. }
-                    | ForkGroupBoundary::Abort { continuation, .. } => {
-                        runner.resume_fork_unit(context.clone(), continuation).await
-                    }
-                    _ => panic!("unexpected fork boundary"),
-                }
-                .expect("the declared answer shape resumes its exact continuation");
-                assert!(
-                    matches!(completed, ResidentOutcome::Completed { .. }),
-                    "{text}"
-                );
-            }
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn forks_refusal_resumes_the_declared_left_answer() {
-        with_test_compiler_owner(async {
-            let (machines, context, source, _root) = fork_reply_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-            let runner = ResidentActorRunner::new(machines, source.clone());
-            let boundary = fork_reply_boundary(
-                &workbench,
-                &runner,
-                &context,
-                &source,
-                "Contracts.forksRefusal",
-            )
-            .await;
-            let ForkGroupBoundary::Begin { continuation, .. } = boundary else {
-                panic!("expected a fallible begin request");
-            };
-            let completed = runner
-                .resume_fork_failure(context, continuation, "admission refused".into())
-                .await
-                .expect("the fallible fork answer remains an in-band Left");
-            assert!(matches!(completed, ResidentOutcome::Completed { .. }));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn actor_fork_refusal_consumes_once_and_keeps_prior_group_admission() {
-        with_test_compiler_owner(async {
-            let (machines, context, source, _root) = fork_reply_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-            let runner = ResidentActorRunner::new(machines, source.clone());
-            let first = fork_reply_boundary(
-                &workbench,
-                &runner,
-                &context,
-                &source,
-                "Contracts.actorTwoBegins",
-            )
-            .await;
-            let ForkGroupBoundary::Begin {
-                continuation,
-                group,
-                branches,
-                ..
-            } = first
-            else {
-                panic!("first begin")
-            };
-            let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-            let (admitted, reservations) = groups
-                .begin(
-                    context.actor,
-                    crate::ActorPath::parse(&group).unwrap(),
-                    branches
-                        .into_iter()
-                        .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
-                        .collect(),
-                    Some(1),
-                )
-                .expect("first external group admission commits");
-            let next = runner
-                .resume_fork_group(
-                    context.clone(),
-                    continuation,
-                    admitted,
-                    group,
-                    reservations
-                        .into_iter()
-                        .map(|reservation| reservation.allocated.to_string())
-                        .collect(),
-                )
-                .await
-                .expect("first admission reaches the second request");
-            let ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                continuation,
-                group,
-                branches,
-                ..
-            }) = runner
-                .capture_boundary(context.clone(), next, context.placement.resource_scope)
-                .await
-                .unwrap()
-            else {
-                panic!("second begin")
-            };
-            let refusal = groups
-                .begin(
-                    context.actor,
-                    crate::ActorPath::parse(&group).unwrap(),
-                    branches
-                        .into_iter()
-                        .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
-                        .collect(),
-                    Some(1),
-                )
-                .expect_err("the earlier admission exhausts the coordinator descendant budget");
-            assert!(matches!(
-                refusal,
-                crate::ForkGroupError::DescendantBudgetExceeded {
-                    coordinator,
-                    requested: 1,
-                    active: 1,
-                    maximum: 1,
-                } if coordinator == context.actor
-            ));
-            let retry = ForkContinuation::actor(continuation.hole.clone());
-            let id = continuation.hole.cont_id().to_owned();
-            let failure = runner
-                .resume_fork_failure(context.clone(), continuation, refusal.to_string())
-                .await;
-            assert!(matches!(
-                failure,
-                Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(_)))
-            ));
-            runner
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    assert!(!session.parked_holes().contains(&id.as_str()));
-                    Ok(())
-                })
-                .await
-                .unwrap();
-            let retried = runner
-                .resume_fork_failure(context.clone(), retry, "repeated refusal".into())
-                .await;
-            assert!(matches!(
-                retried,
-                Err(ResidentActorWorkbenchError::Resident(
-                    ResidentError::WrongContinuation { .. }
-                ))
-            ));
-            assert!(
-                groups.completion_boundary(admitted, context.actor).is_ok(),
-                "the earlier external admission survives fragment failure"
-            );
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
         with_test_compiler_owner(answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner()).await;
@@ -21997,13 +20952,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .expect("capture independently owned parent Haskell environment");
         let retained_scope = retained.scope();
-        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let admissions = crate::ActorAdmissionRegistry::new();
         let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
             "thread".into(),
             "unfinished-parent".into(),
             "unfinished-parent".into(),
         );
-        let token = groups.capture_checkpoint_with_retained_scope(
+        let token = admissions.capture_checkpoint_with_retained_scope(
             "real Haskell context".into(),
             context.actor,
             crate::ActorCapabilities::default(),
@@ -22017,36 +20972,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             retained,
             crate::ActorPersistencePolicy::Ephemeral,
         );
-        groups
+        admissions
             .settle_checkpoint(&token, context.placement.session, true)
             .expect("Haskell checkpoint answer delivered");
-        let (group, paths) = groups
-            .begin(
-                context.actor,
-                crate::ActorPath::parse("captured/work").unwrap(),
-                vec![
-                    crate::ActorPathSegment::new("first").unwrap(),
-                    crate::ActorPathSegment::new("second").unwrap(),
-                ],
-                None,
-            )
-            .unwrap();
-        let mut claims = paths.iter().map(|path| {
-            groups
-                .claim_with_checkpoint(
-                    group,
-                    context.actor,
-                    &path.allocated,
-                    Some((&token, context.placement.session)),
-                )
-                .expect("child path and checkpoint admitted before parent completion")
-                .checkpoint
-                .unwrap()
-                .0
-        });
-        let first = claims.next().unwrap();
-        let second = claims.next().unwrap();
-        drop(claims);
+        let first = admissions
+            .claim_spawn(context.actor, context.placement.session, Some(&token), None)
+            .expect("first child and checkpoint admitted before parent completion")
+            .checkpoint
+            .unwrap()
+            .0;
+        let second = admissions
+            .claim_spawn(context.actor, context.placement.session, Some(&token), None)
+            .expect("second child and checkpoint admitted before parent completion")
+            .checkpoint
+            .unwrap()
+            .0;
         let (release_first, first_ready) = tokio::sync::oneshot::channel();
         let (release_second, second_ready) = tokio::sync::oneshot::channel();
         let delayed_child = |admitted: crate::lineage::CheckpointLease,
@@ -22132,23 +21072,23 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .await
                 .expect("failed private parent releases its unpublishable scope");
             drop(failing_workbench);
-            assert!(groups
+            assert!(admissions
                 .settle_checkpoints(context.actor, &boundary, false)
                 .is_empty());
-            groups.retire_actor(context.actor);
-            let retired = groups
+            admissions.retire_actor(context.actor);
+            let retired = admissions
                 .release_checkpoint(&token, context.placement.session)
                 .expect("release token while both children await workspace admission");
             runner
                 .retire_checkpoint_scopes(context.placement.session, retired.into_iter().collect())
                 .await
                 .expect("original captured scope retires before remint");
-            groups
+            admissions
                 .confirm_checkpoint_release(&token, context.placement.session, captured_scope)
                 .expect("original scope retirement acknowledged");
-            assert!(groups.retains_session(context.placement.session));
+            assert!(admissions.retains_session(context.placement.session));
             assert!(matches!(
-                groups.preview_checkpoint(&token, context.placement.session),
+                admissions.preview_checkpoint(&token, context.placement.session),
                 Err(crate::CheckpointRefusal::ReleasedCheckpoint)
             ));
             release_first.send(()).unwrap();
@@ -22160,7 +21100,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             retire_original,
         );
         drop(first_lease);
-        assert!(groups.retains_session(context.placement.session));
+        assert!(admissions.retains_session(context.placement.session));
         workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
@@ -22181,7 +21121,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .expect("runtime owner observes surviving capture");
         drop(second_lease);
-        assert!(!groups.retains_session(context.placement.session));
+        assert!(!admissions.retains_session(context.placement.session));
         workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -22261,8 +21201,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .capture_context_scope(context.clone())
             .await
             .expect("captured scope");
-        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-        let token = groups.capture_checkpoint(
+        let admissions = crate::ActorAdmissionRegistry::new();
+        let token = admissions.capture_checkpoint(
             "retryable release".into(),
             context.actor,
             crate::ActorCapabilities::default(),
@@ -22277,7 +21217,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 "call".into(),
             ),
         );
-        groups
+        admissions
             .settle_checkpoint(&token, context.placement.session, true)
             .expect("capture published");
         let removed = machines
@@ -22287,7 +21227,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .expect("machine was registered");
         assert_eq!(
-            groups.release_checkpoint(&token, context.placement.session),
+            admissions.release_checkpoint(&token, context.placement.session),
             Ok(Some(scope))
         );
         assert!(runner
@@ -22295,19 +21235,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .is_err());
         assert_eq!(
-            groups.pending_release_scopes(context.placement.session),
+            admissions.pending_release_scopes(context.placement.session),
             vec![(token.clone(), scope)]
         );
-        assert!(groups.retains_session(context.placement.session));
+        assert!(admissions.retains_session(context.placement.session));
         assert_eq!(
-            groups.checkpoint(&token, context.placement.session).err(),
+            admissions
+                .checkpoint(&token, context.placement.session)
+                .err(),
             Some(crate::CheckpointRefusal::ReleasedCheckpoint)
         );
         let tidepool_runtime::session::Slot::Idle(machine) = removed else {
             panic!("fixture machine was idle");
         };
         machines.insert_idle(context.placement.session, machine);
-        let retry = groups
+        let retry = admissions
             .release_checkpoint(&token, context.placement.session)
             .expect("idempotent retry");
         assert_eq!(retry, Some(scope));
@@ -22315,15 +21257,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .retire_checkpoint_scopes(context.placement.session, vec![scope])
             .await
             .expect("retry retires exact scope");
-        groups
+        admissions
             .confirm_checkpoint_release(&token, context.placement.session, scope)
             .expect("cleanup acknowledged");
-        assert!(groups
+        assert!(admissions
             .pending_release_scopes(context.placement.session)
             .is_empty());
-        assert!(!groups.retains_session(context.placement.session));
+        assert!(!admissions.retains_session(context.placement.session));
         assert_eq!(
-            groups.release_checkpoint(&token, context.placement.session),
+            admissions.release_checkpoint(&token, context.placement.session),
             Ok(None)
         );
     }
