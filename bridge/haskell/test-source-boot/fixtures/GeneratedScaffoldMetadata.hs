@@ -1,3 +1,3 @@
 module CellCheck where
 import Prelude
-__result = TidepoolResume.settle (pure 42)
+__result = GeneratedScaffoldHomeSupport.answer

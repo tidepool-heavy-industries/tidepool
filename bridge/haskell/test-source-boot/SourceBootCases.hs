@@ -59,7 +59,11 @@ import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hscEPS)
-import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..), unitEnv_insert, unitEnv_delete, ue_currentHomeUnitEnv)
+import GHC.Driver.Env.Types (hsc_unit_env)
+import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..), unitEnv_insert, unitEnv_delete, ue_currentHomeUnitEnv, ue_units)
+import GHC.Unit.Info (PackageName(..))
+import GHC.Unit.State (lookupPackageName)
+import GHC.Data.FastString (fsLit)
 import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(eps_PIT, eps_inst_env))
 import GHC.Unit.Module.Env (lookupModuleEnv, extendModuleEnv)
 import GHC.Iface.Load (loadInterface, WhereFrom(ImportBySystem))
@@ -1189,12 +1193,9 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
 activationPreviewOriginalOrphanScope :: IO ()
 activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
   parserFlags <- defaultParserDynFlags
-  let supportDirectory = work </> "Tidepool/Internal"
-      target = work </> "Expr.hs"
+  let target = work </> "Expr.hs"
       originalTarget = ("main","ExecutionSealedQuoter")
       sibling = ("main","GeneratedScaffoldOrphanSibling")
-  createDirectoryIfMissing True supportDirectory
-  copyFile "lib/Tidepool/Internal/Resume.hs" (supportDirectory </> "Resume.hs")
   forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
     ,"GeneratedScaffoldOrphanSibling.hs","GeneratedScaffoldOrphanCapture.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
@@ -1260,16 +1261,14 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
 generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   parserFlags <- defaultParserDynFlags
-  let supportDirectory = work </> "Tidepool/Internal"
-      supportPath = supportDirectory </> "Resume.hs"
+  let supportPath = work </> "GeneratedScaffoldHomeSupport.hs"
       capturePath = work </> "GeneratedScaffoldCapture.hs"
       target = work </> "Expr.hs"
       includes = [work]
       originalOwners = filter (/= "GeneratedScaffoldCapture") . preparedNames
-  createDirectoryIfMissing True supportDirectory
-  copyFile "lib/Tidepool/Internal/Resume.hs" supportPath
+  copyFile "test-source-boot/fixtures/GeneratedScaffoldHomeSupport.hs" supportPath
   copyFile "test-source-boot/fixtures/GeneratedScaffoldCapture.hs" capturePath
-  copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
+  copyFile "test-source-boot/fixtures/GeneratedScaffoldHomeExpr.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing capturePath includes Nothing
   originalFixture <- capturePreparedFixture work original
@@ -1278,7 +1277,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   protected <- readFile target
   recipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
-      supportOwner = ("main","Tidepool.Internal.Resume")
+      supportOwner = ("main","GeneratedScaffoldHomeSupport")
       requireHiddenSource label = requireOriginalSourceRejection label (ExecutionSourceUnavailable supportOwner)
       neighborDiagnostic scopePath = do
         retained <- readExactScope scopePath >>= either fail pure
@@ -1294,16 +1293,16 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $
       fail "generated scaffold lost its actual settled result"
     -- Native custody alone does not admit this authored import. Only the
-    -- protected scaffold occurrence above may use the hidden Resume owner.
+    -- protected scaffold occurrence above may use the hidden home owner.
     general <- try (void (compile (PreparedProducts Nothing) Set.empty GeneralCompile
       (Just hidden) target [] Nothing)) :: IO (Either InputRejection ())
     case general of
       Left (OriginalSourceSelectionRejected
-          (ExecutionSourceUnavailable ("main", "Tidepool.Internal.Resume"))) ->
+          (ExecutionSourceUnavailable ("main", "GeneratedScaffoldHomeSupport"))) ->
         putStrLn "scaffold general-purpose import refused missing current-source authority"
       Left reason -> fail ("scaffold general-purpose import had another input refusal: " ++ show reason)
       Right () -> fail "scaffold general-purpose import acquired hidden source authority"
-    let extra = unlines (take 5 (lines protected) ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
+    let extra = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHomeSupport"] ++ drop 5 (lines protected))
     writeFile target extra
     duplicate <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] []) protected extra target "Expr" >>= either fail pure
     requireHiddenSource "additional authored hidden import" $
@@ -1334,20 +1333,20 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
           == Set.fromList (originalOwners original)) $
       fail "scaffold capture changed lexical authority or original native inventory"
     supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces admittedScope
-        , exactUnit artifact == "main", exactModule artifact == "Tidepool.Internal.Resume"] of
+        , exactUnit artifact == "main", exactModule artifact == "GeneratedScaffoldHomeSupport"] of
       [artifact] -> pure artifact
       _ -> fail "template interface fixture lacks its exact captured owner"
     let templateInterface = CheckedTemplateInterface (exactUnit supportInterface)
           (exactModule supportInterface) (exactSha256 supportInterface) []
         withTemplate = unlines (take 5 (lines protected)
-          ++ ["import Tidepool.Internal.Resume hiding (resumeLifted)", init preambleImportMarker] ++ drop 5 (lines protected))
+          ++ ["import GeneratedScaffoldHomeSupport hiding (irrelevant)", init preambleImportMarker] ++ drop 5 (lines protected))
     writeFile target withTemplate
     let templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
         templateImports = CheckedTemplateImports templateRoot [templateInterface]
     capturedTemplate <- generatedScaffoldRecipe parserFlags templateImports withTemplate withTemplate target "Expr"
       >>= either fail pure
     let capturedPurpose = GeneratedScaffoldCompile capturedTemplate (CheckedItemCompile [] Nothing [])
-        protectedImport = "import Tidepool.Internal.Resume hiding (resumeLifted)"
+        protectedImport = "import GeneratedScaffoldHomeSupport hiding (irrelevant)"
     duplicateProtected <- either fail pure
       (replaceTemplateMarker preambleImportMarker (protectedImport ++ "\n" ++ preambleImportMarker) withTemplate)
     writeFile target duplicateProtected
@@ -1368,7 +1367,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     unless (case missingDuplicateRecipe of Left _ -> True; Right _ -> False) $
       fail "a missing protected duplicate retained its occurrence authority"
     let changedRestriction = T.unpack
-          (T.replace "hiding (resumeLifted)" "hiding (settle)" (T.pack withTemplate))
+          (T.replace "hiding (irrelevant)" "hiding (answer)" (T.pack withTemplate))
     changedRestrictionRecipe <- generatedScaffoldRecipe parserFlags templateImports
       withTemplate changedRestriction target "Expr"
     unless (case changedRestrictionRecipe of Left _ -> True; Right _ -> False) $
@@ -1416,7 +1415,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       "checked template graph interface seal changed" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile wrongSeal GeneralCompile)
         (Just hidden) target [] Nothing
-    let secondImport = "import qualified Tidepool.Internal.Resume as AuthoredSecond"
+    let secondImport = "import qualified GeneratedScaffoldHomeSupport as AuthoredSecond"
     authoredExtra <- either fail pure
       (replaceTemplateMarker preambleImportMarker (secondImport ++ "\n" ++ preambleImportMarker) duplicateProtected)
     writeFile target authoredExtra
@@ -1427,7 +1426,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         (GeneratedScaffoldCompile secondRecipe (CheckedItemCompile [] Nothing []))
         (Just hidden) target [] Nothing
     let qualifiedTemplate = unlines (take 5 (lines protected)
-          ++ ["import qualified Tidepool.Internal.Resume as CapturedTemplate"] ++ drop 5 (lines protected))
+          ++ ["import qualified GeneratedScaffoldHomeSupport as CapturedTemplate"] ++ drop 5 (lines protected))
     writeFile target qualifiedTemplate
     qualifiedRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedTemplate qualifiedTemplate target "Expr"
       >>= either fail pure
@@ -1464,13 +1463,18 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose malformedScope)
         (Just hidden) target [] Nothing
     supportText <- BSC.unpack <$> BS.readFile supportPath
-    let incompleteExports = unlines [if line == "  , resumeLifted" then "" else line | line <- lines supportText]
+    let incompleteExports = unlines
+          [ if line == "module GeneratedScaffoldHomeSupport (answer) where"
+              then "module GeneratedScaffoldHomeSupport () where"
+              else line
+          | line <- lines supportText
+          ]
     writeFile supportPath incompleteExports
     missingExport <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing capturePath [] Nothing
     missingExportFixture <- capturePreparedFixture work missingExport
     missingExportPath <- writeGenuineCandidateNativeScope [] (originalOwners missingExport) work missingExportFixture
-    requireSourceSelectionInput "missing actual resumeLifted export"
+    requireSourceSelectionInput "missing actual home-support export"
       "generated scaffold support has another export owner" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just missingExportPath}) target [] Nothing
@@ -1506,7 +1510,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       compile CheckedEnvironment Set.empty GeneralCompile (Just hidden) metadataPath [] Nothing
     case metadata of
       Left diagnostics | any (\diagnostic -> sourceDiagnosticAt metadataPath "Not in scope" diagnostic
-          && "TidepoolResume.settle" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+          && "GeneratedScaffoldHomeSupport.answer" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
       Left diagnostics -> fail ("authored metadata alias had another source failure: " ++ show diagnostics)
       Right _ -> fail "authored metadata acquired the generated scaffold alias"
     -- A current source implementation uses ordinary source admission, not the
@@ -1514,7 +1518,41 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     cold <- compile (PreparedProducts Nothing) Set.empty purpose Nothing target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult cold))) $
       fail "generated cold source scaffold failed ordinary support admission"
-  putStrLn "generated scaffold: exact hidden support, settled result, ordinary/cold scope, binding CellProgram; duplicate/helper/source-drift/native/export/hidden-orphan/family/metadata refusals passed"
+    selectedResumeUnit <- maybe (fail "pinned tidepool-resume package unit is unavailable") pure
+      (lookupPackageName (ue_units (hsc_unit_env (prHscEnv (pprPipelineResult cold))))
+        (PackageName (fsLit "tidepool-resume")))
+    packageOwner <- findImportedModule (prHscEnv (pprPipelineResult cold))
+      (mkModuleName "Tidepool.Internal.Resume") (OtherPkg selectedResumeUnit) >>= \case
+        Found _ owner | moduleUnit owner == selectedResumeUnit -> pure owner
+        _ -> fail "pinned resume package selected another owner"
+    let packageTarget = work </> "ResumePackageExpr.hs"
+        packageImport = "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume"
+        packageSource = unlines
+          [ "{-# LANGUAGE DataKinds, PackageImports #-}"
+          , "module ResumePackageExpr where"
+          , "import Control.Monad.Freer (Eff)"
+          , packageImport
+          , "__result :: Int"
+          , "__result = case TidepoolResume.settle (pure 42 :: Eff '[] Int) of"
+          , "  TidepoolResume.Done value -> value"
+          , "  TidepoolResume.Suspended _ _ -> error \"unexpected effect\""
+          , "__prepared = TidepoolResume.settle (pure __result :: Eff '[] Int)"
+          , "__resume q value = TidepoolResume.settle (TidepoolResume.resumeLifted q value)"
+          ]
+        shadowDirectory = work </> "Tidepool" </> "Internal"
+        shadowPath = shadowDirectory </> "Resume.hs"
+    createDirectoryIfMissing True shadowDirectory
+    writeFile shadowPath "module Tidepool.Internal.Resume where\nshadow = error \"home source shadow selected\"\n"
+    writeFile packageTarget packageSource
+    packageResult <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing packageTarget [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult packageResult))) $
+      fail "pinned resume package failed settle recovery with a current source shadow present"
+    let packageRoots = concatMap packageInterfaces (Map.elems (pprPackageImports packageResult))
+    unless (any (\root -> packageModule root == "Tidepool.Internal.Resume"
+        && packageUnit root == unitIdString selectedResumeUnit) packageRoots
+        && moduleUnit packageOwner == selectedResumeUnit) $
+      fail "resume compilation did not retain evidence for the selected exact package unit"
+  putStrLn "generated scaffold home protection and pinned resume package: settled result, exact package owner, source-shadow isolation, and protected import refusal checks passed"
 
 -- Native and lexical roots share one immutable compiler capture. The witness
 -- is retained only as canonical interface/Core custody in the emitted scope.
