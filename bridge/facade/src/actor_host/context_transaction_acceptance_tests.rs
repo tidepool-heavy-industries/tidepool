@@ -8,6 +8,7 @@ use harness::{
     transport::{ResponsesRequest, ResponsesTurn, TransportError},
 };
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 const CELL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -16,6 +17,7 @@ const SECRET: &str = "resident-context-acceptance-secret-32-bytes";
 struct RequestedRound {
     request: ResponsesRequest,
     reply: oneshot::Sender<ResponsesTurn>,
+    provider_calls: Arc<AtomicUsize>,
 }
 
 impl RequestedRound {
@@ -88,14 +90,22 @@ impl RequestedRound {
     }
 }
 
-struct ScriptedProvider(mpsc::UnboundedSender<RequestedRound>);
+struct ScriptedProvider {
+    requests: mpsc::UnboundedSender<RequestedRound>,
+    calls: Arc<AtomicUsize>,
+}
 
 #[async_trait]
 impl ResponsesTransport for ScriptedProvider {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let (reply, completed) = oneshot::channel();
-        self.0
-            .send(RequestedRound { request, reply })
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests
+            .send(RequestedRound {
+                request,
+                reply,
+                provider_calls: Arc::clone(&self.calls),
+            })
             .expect("acceptance observer remains alive");
         Ok(completed
             .await
@@ -471,7 +481,10 @@ async fn start_with_spec_and_model(
 ) {
     let (files, settings) = settings();
     let (requests, rounds) = mpsc::unbounded_channel();
-    let transport: Arc<dyn ResponsesTransport> = Arc::new(ScriptedProvider(requests));
+    let transport: Arc<dyn ResponsesTransport> = Arc::new(ScriptedProvider {
+        requests,
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
     let fixture = HostedTestRuntime::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
@@ -625,18 +638,30 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
 }
 
 fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
+    user_text_occurrences(request, expected) != 0
+}
+
+fn user_text_occurrences(request: &ResponsesRequest, expected: &str) -> usize {
     // Match the authored line in flat or structured provider message bodies.
-    let has_line = |text: &Value| {
-        text.as_str()
-            .is_some_and(|text| text.lines().any(|line| line == expected))
+    let count_lines = |text: &Value| {
+        text.as_str().map_or(0, |text| {
+            text.lines().filter(|line| *line == expected).count()
+        })
     };
-    request.input.iter().any(|item| {
-        item.0["role"] == "user"
-            && (has_line(&item.0["content"])
-                || item.0["content"]
-                    .as_array()
-                    .is_some_and(|parts| parts.iter().any(|part| has_line(&part["text"]))))
-    })
+    request
+        .input
+        .iter()
+        .filter(|item| item.0["role"] == "user")
+        .map(|item| {
+            count_lines(&item.0["content"])
+                + item.0["content"].as_array().map_or(0, |parts| {
+                    parts
+                        .iter()
+                        .map(|part| count_lines(&part["text"]))
+                        .sum::<usize>()
+                })
+        })
+        .sum()
 }
 
 fn root_context_state(fixture: &HostedTestRuntime) -> harness::context::ContextRequestState {
@@ -663,6 +688,96 @@ fn root_context_state(fixture: &HostedTestRuntime) -> harness::context::ContextR
             },
         )
         .unwrap()
+}
+
+#[tokio::test]
+async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_request() {
+    const SEED: &str = "fresh-idle-context-seed";
+    const INPUT: &str = "explicit-idle-child-request";
+    let (_files, mut fixture, mut rounds) = start().await;
+    let initial = next_round(&mut rounds).await;
+    assert!(initial.is_root());
+    initial.cell(
+        "fresh-idle-spawn",
+        include_str!("fixtures/context_acceptance_idle_spawn.hs"),
+    );
+    let installed = next_round_with_state(&mut rounds, &mut fixture).await;
+    assert!(
+        installed.is_root(),
+        "spawn activated a provider before the first request"
+    );
+    let output = successful_output(&installed.request, "fresh-idle-spawn");
+    assert!(test_campaign::explicit_display_text(&output).contains("installed-idle"));
+    let root = fixture.context.actor.identity();
+    let graph = fixture.context.forest.inspect_host_graph();
+    let children = graph
+        .iter()
+        .filter(|node| node.model_actor && node.creator == Some(root))
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 1, "{graph:?}");
+    let child = children[0];
+    assert!(child.terminal.is_none());
+    assert_eq!(child.workbench, exomonad_actor::ActorWorkbenchPosture::Idle);
+    assert!(child.active_requests.is_empty());
+    assert!(child.queued_requests.is_empty());
+    assert!(
+        child.provider_turn.is_none(),
+        "idle spawn inferred: {child:?}"
+    );
+    assert_eq!(child.context_parent, None);
+    let binding = fixture
+        .context
+        .binding(child.actor)
+        .expect("spawn has attached its provider");
+    let conversation = binding
+        .conversation()
+        .expect("spawn has installed its conversation");
+    let child_path = conversation.identity().actor.clone();
+    let installation = fixture.context.observer.installation(child.actor).await;
+    assert!(installation
+        .tools
+        .iter()
+        .any(|tool| tool.name() == "haskell_sync"));
+    // The real spawn call has completed and its installation is observable;
+    // the only provider invocations so far are the two root rounds we hold.
+    assert_eq!(installed.provider_calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        rounds.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    installed.cell(
+        "fresh-idle-activate",
+        include_str!("fixtures/context_acceptance_idle_request.hs"),
+    );
+    let activated = next_round_with_state(&mut rounds, &mut fixture).await;
+    assert!(
+        !activated.is_root(),
+        "parent must await the typed child response"
+    );
+    assert!(activated
+        .request
+        .session_id
+        .contains(&format!(":{}:", child_path.0)));
+    assert_eq!(user_text_occurrences(&activated.request, SEED), 1);
+    assert!(!has_user_text(&activated.request, "parent-original"));
+    let child_session = activated.request.session_id.clone();
+    activated.cell("fresh-idle-reply", "respond (sessionInput :: Text)");
+    let (completed, replied) = root_and_child_rounds(&mut rounds, &mut fixture, None).await;
+    assert_eq!(replied.request.session_id, child_session);
+    assert_eq!(
+        retained_output(&replied.request, "fresh-idle-reply")["status"],
+        "replied"
+    );
+    assert_eq!(user_text_occurrences(&replied.request, SEED), 1);
+    let output = successful_output(&completed.request, "fresh-idle-activate");
+    assert_eq!(
+        output["items"].as_array().unwrap().last().unwrap()["output"],
+        INPUT
+    );
+    replied.finish();
+    completed.finish();
+    fixture.stop().await.unwrap();
 }
 
 #[tokio::test]
