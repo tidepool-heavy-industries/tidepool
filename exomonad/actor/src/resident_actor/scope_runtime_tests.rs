@@ -23,6 +23,7 @@ struct ControlledBackend {
     started: tokio::sync::Semaphore,
     finish: tokio::sync::Semaphore,
     initial_cleanup_unknown: bool,
+    job: Mutex<Option<String>>,
 }
 
 impl ControlledBackend {
@@ -34,6 +35,7 @@ impl ControlledBackend {
             started: tokio::sync::Semaphore::new(0),
             finish: tokio::sync::Semaphore::new(0),
             initial_cleanup_unknown,
+            job: Mutex::new(None),
         })
     }
 
@@ -46,11 +48,15 @@ impl ControlledBackend {
 impl CommandBackend for ControlledBackend {
     fn execute<'a>(
         &'a self,
-        _: &'a str,
+        id: &'a str,
         _: CommandSpec,
         phase: tokio::sync::watch::Sender<CommandStatus>,
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
+            assert!(
+                self.job.lock().replace(id.to_owned()).is_none(),
+                "external execution is admitted once"
+            );
             self.executions.fetch_add(1, Ordering::SeqCst);
             phase.send_replace(CommandStatus::CommandRunning);
             self.started.add_permits(1);
@@ -120,6 +126,7 @@ impl ScopeFixture {
             tidepool_mcp::agent_tools_decl(),
             tidepool_mcp::agent_launch_decl(),
             tidepool_mcp::agent_control_decl(),
+            tidepool_mcp::agent_inspection_decl(),
             tidepool_mcp::agent_session_decl(),
             tidepool_mcp::actor_decl(),
             tidepool_mcp::actor_kernel_decl(),
@@ -144,6 +151,7 @@ impl ScopeFixture {
             "qualified Tidepool.Actors.Spawn as Spawn",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
             "Tidepool.Agent.Reply (Replies)",
+            "qualified Tidepool.Agent.Reply as Reply",
             "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref.Internal as AgentRef",
             "qualified Tidepool.Effects.Core as Core",
@@ -188,6 +196,7 @@ impl ScopeFixture {
                     crate::ActorEffectKey::Actor,
                     crate::ActorEffectKey::AgentLaunch,
                     crate::ActorEffectKey::AgentControl,
+                    crate::ActorEffectKey::AgentInspection,
                     crate::ActorEffectKey::ResourceScopes,
                     crate::ActorEffectKey::Replies,
                     crate::ActorEffectKey::Commands,
@@ -351,6 +360,62 @@ impl ScopeFixture {
         ));
     }
 
+    fn assert_scope_membership(
+        &self,
+        owner: ActorRef,
+        child: ActorRef,
+        backend: &ControlledBackend,
+    ) {
+        let roots = self
+            .forest
+            .environment
+            .actors
+            .lock()
+            .get(&owner)
+            .unwrap()
+            .workbench_executions
+            .lock()
+            .invocation_work();
+        let scope = roots
+            .iter()
+            .flat_map(|root| root.scopes())
+            .find(|scope| scope.owns_worker(child))
+            .expect("actual child cleanup belongs to its lexical scope");
+        let token = scope.scope_token().unwrap();
+        let job = backend
+            .job
+            .lock()
+            .clone()
+            .expect("actual native command identity");
+        assert_eq!(
+            self.forest
+                .environment
+                .commands
+                .cleanup_owner(owner, &job)
+                .unwrap(),
+            ResourceCleanupOwner::Scope(token)
+        );
+        let request = self
+            .forest
+            .environment
+            .requests
+            .status_for(owner)
+            .unavailable_responses
+            .into_iter()
+            .find_map(|(request, _, failure)| {
+                matches!(failure, ResponseFailure::Cancelled).then_some(request)
+            })
+            .expect("actual cancelled scoped request");
+        assert_eq!(
+            self.forest
+                .environment
+                .requests
+                .request_cleanup_owner(owner, request)
+                .unwrap(),
+            ResourceCleanupOwner::Scope(token)
+        );
+    }
+
     async fn finish(self) {
         assert!(
             self.backends.is_empty(),
@@ -413,6 +478,7 @@ async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_wit
     assert!(survivor.terminal().get().is_none());
     fixture.assert_request_cancelled_without_target_retirement(parent.identity());
     normal.assert_executed_once();
+    fixture.assert_scope_membership(parent.identity(), owned.identity(), &normal);
 
     // Use the installed child tool after the body realm and owner have closed.
     // No hosted model inference participates in this retained closure call.
@@ -473,6 +539,11 @@ async fn public_scope_body_failure_closes_real_resources_with_independent_cleanu
     fixture.assert_request_cancelled_without_target_retirement(parent.identity());
     fixture.assert_closed_owner_cleanup(parent.identity());
     backend.assert_executed_once();
+    fixture.assert_scope_membership(
+        parent.identity(),
+        fixture.child("scope-failed-child").identity(),
+        &backend,
+    );
     fixture.finish().await;
 }
 
@@ -512,5 +583,10 @@ async fn public_scope_outer_cancellation_retains_real_cleanup_without_resuming_b
     fixture.assert_request_cancelled_without_target_retirement(parent.identity());
     fixture.assert_closed_owner_cleanup(parent.identity());
     backend.assert_executed_once();
+    fixture.assert_scope_membership(
+        parent.identity(),
+        fixture.child("scope-cancelled-child").identity(),
+        &backend,
+    );
     fixture.finish().await;
 }

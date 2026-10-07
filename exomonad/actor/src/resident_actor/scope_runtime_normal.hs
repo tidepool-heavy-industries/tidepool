@@ -1,6 +1,6 @@
 do
   outcome <- Scope.withScope $ \scope -> do
-    _ <- admitScoped scope "scope-owned-child"
+    owned <- admitScoped scope "scope-owned-child"
     spawned <- spawnScoped scope "scope-retained-child"
     survivor <- case spawned of
       Left _ -> error "retained child admission refused"
@@ -8,9 +8,16 @@ do
     retained <- Agents.retainAgent survivor Core.ActorOwned
     case retained of
       Left _ -> error "actor retention refused"
-      Right () -> pure (scope, survivor)
+      Right () -> pure (scope, survivor, owned)
   case (Scope.scopeBody outcome, Scope.scopeCleanup outcome) of
-    (Right (escaped, _), Right ()) -> do
+    (Right (escaped, _, (owned, pending, job)), Right ()) -> do
+      childState <- Agents.observeAgent owned
+      requestState <- Reply.pollResponse pending
+      commandState <- Cmd.status job
+      case (Agents.observedState childState, requestState, commandState) of
+        (Agents.AgentCancelled _, Reply.ResponseUnavailable Reply.ResponseCancelled, Cmd.CommandFinished result)
+          | Cmd.commandCleanup result == Cmd.CommandClean -> pure ()
+        _ -> error "resources outlived their lexical scope"
       child <- spawnScoped escaped "scope-closed-child"
       command <- Cmd.tryStartWith (Core.InScope escaped) (Cmd.argv ["scope-closed-command"])
       request <- Agents.request @Int scopeTarget ()
