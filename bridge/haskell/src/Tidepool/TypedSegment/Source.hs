@@ -9,12 +9,15 @@ import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
 import GHC (ParsedModule (..))
+import GHC.Driver.DynFlags (DynFlags)
+import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc)
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan)
-import GHC.Utils.Outputable (defaultSDocContext, ppr, showSDocOneLine)
+import GHC.Unit.Module.ModSummary (ms_hspp_opts)
+import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
 
 rewriteParsedSegmentRoot :: TypedSegmentPlan -> ParsedModule -> IO ParsedModule
@@ -29,7 +32,7 @@ rewriteParsedSegmentRoot plan parsed = case rewriteModule of
     rewriteModule
       | length generatedNames /= length (nub generatedNames) = Left InvalidReservedNames
       | not (null collisions) = Left InvalidReservedNames
-      | otherwise = case rewriteRoot plan source of
+      | otherwise = case rewriteRoot (ms_hspp_opts (pm_mod_summary parsed)) plan source of
           Left failure -> Left failure
           Right (source', 1) -> Right source'
           Right _ -> Left UnprovedRootAbstraction
@@ -44,10 +47,11 @@ parsedNames :: Data source => source -> [String]
 parsedNames = everything (++) (mkQ [] (\name -> [occNameString (rdrNameOcc name)] :: [String]))
 
 rewriteRoot
-  :: TypedSegmentPlan
+  :: DynFlags
+  -> TypedSegmentPlan
   -> Located (HsModule GhcPs)
   -> Either TypedSegmentFailure (Located (HsModule GhcPs), Int)
-rewriteRoot plan (L moduleLocation hsModule) = do
+rewriteRoot flags plan (L moduleLocation hsModule) = do
   (declarations, matches) <- foldl rewriteDeclaration (Right ([], 0)) (hsmodDecls hsModule)
   pure (L moduleLocation (hsModule { hsmodDecls = reverse declarations }), matches)
   where
@@ -69,7 +73,7 @@ rewriteRoot plan (L moduleLocation hsModule) = do
             let rhs = unLoc locatedRhs
             case (rhs, grhssLocalBinds (m_grhss match)) of
               (GRHS rhsExtension [] (L _ (HsDo _ (DoExpr Nothing) statements)), EmptyLocalBinds _) -> do
-                body <- rewriteStatements plan (unLoc statements)
+                body <- rewriteStatements flags plan (unLoc statements)
                 let rhs' = GRHS rhsExtension [] body
                     grhss' = (m_grhss match) { grhssGRHSs = [L (getLoc locatedRhs) rhs'] }
                     match' = match { m_grhss = grhss' }
@@ -83,10 +87,11 @@ rewriteRoot plan (L moduleLocation hsModule) = do
     rewriteBinding _ = Left UnprovedRootAbstraction
 
 rewriteStatements
-  :: TypedSegmentPlan
+  :: DynFlags
+  -> TypedSegmentPlan
   -> [ExprLStmt GhcPs]
   -> Either TypedSegmentFailure (LHsExpr GhcPs)
-rewriteStatements plan statements = case reverse statements of
+rewriteStatements flags plan statements = case reverse statements of
   [] -> Left UnprovedRootAbstraction
   terminal : reversedItems -> do
     final <- terminalExpression terminal
@@ -108,7 +113,7 @@ rewriteStatements plan statements = case reverse statements of
     lowerItems [] final = Right final
     lowerItems ((item, statement) : rest) final = do
       continuation <- lowerItems rest final
-      lowerItem item statement continuation
+      lowerItem flags item statement continuation
 
 consecutiveOrdinals :: [Int] -> Bool
 consecutiveOrdinals [] = True
@@ -117,17 +122,18 @@ consecutiveOrdinals (first : second : rest) =
   second == first + 1 && consecutiveOrdinals (second : rest)
 
 lowerItem
-  :: TypedItemPlan
+  :: DynFlags
+  -> TypedItemPlan
   -> ExprLStmt GhcPs
   -> LHsExpr GhcPs
   -> Either TypedSegmentFailure (LHsExpr GhcPs)
-lowerItem item (L _ statement) continuation =
+lowerItem flags item (L _ statement) continuation =
   case plannedItemBody item of
     ActionItem step probe marker expectedBinders -> case statement of
       BindStmt _ pattern rhs
         | binderNames pattern == expectedBinders ->
             Right (segmentBind (wrapActionRhs step probe rhs)
-              (lazyLambda marker (patternCase marker pattern continuation)))
+              (lazyLambda marker (patternCase flags marker pattern continuation)))
       _ -> Left (UnprovedItemSequence (plannedItemOrdinal item))
     LetItem marker expectedBinders -> case statement of
       LetStmt _ local
@@ -160,14 +166,15 @@ lazyLambda name = mkHsLam (noLocA [lazyVariablePattern name])
 lazyVariablePattern :: String -> LPat GhcPs
 lazyVariablePattern name = noLocA (LazyPat noAnn (nlVarPat (unqualifiedName name)))
 
-patternCase :: String -> LPat GhcPs -> LHsExpr GhcPs -> LHsExpr GhcPs
-patternCase valueName originalPattern continuation = noLocA
+patternCase :: DynFlags -> String -> LPat GhcPs -> LHsExpr GhcPs -> LHsExpr GhcPs
+patternCase flags valueName originalPattern continuation = noLocA
   (HsCase noAnn (variable valueName) alternatives)
   where
     sourceLoc = getLocA originalPattern
     failedPattern = L (getLoc originalPattern) (WildPat noExtField)
-    message = "Pattern match failure in do expression at "
-      ++ showSDocOneLine defaultSDocContext (ppr sourceLoc)
+    message = showPpr flags
+      (text "Pattern match failure in" <+> pprHsDoFlavour (DoExpr Nothing)
+        <+> text "at" <+> ppr sourceLoc)
     failure = mkHsApps (qualifiedVariable "segmentFail")
       [noLocA (HsLit noExtField (mkHsString message))]
     alternatives = mkMatchGroup (Generated OtherExpansion SkipPmc)

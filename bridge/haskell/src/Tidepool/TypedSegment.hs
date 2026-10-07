@@ -110,7 +110,6 @@ data SegmentOperations = SegmentOperations
   , segmentSettleId :: Id
   , segmentSettleVariables :: [TyVar]
   , segmentSettleValueVariable :: TyVar
-  , segmentSettleRowVariable :: TyVar
   , segmentResumeId :: Id
   }
 
@@ -175,16 +174,16 @@ resolveSegmentOperations environment admitted = do
                 , inputConstructor == constructor
                 , Just settleRowVariable <- getTyVar_maybe settleRow
                 , Just settleValueVariable <- getTyVar_maybe settleValue
-                , Just (settled, [resultRow, resultValue]) <- splitTyConApp_maybe settleResult
+                , Just (settled, [settledRow, settledValue]) <- splitTyConApp_maybe settleResult
                 , nameModule_maybe (tyConName settled) == Just owner
                 , occNameString (nameOccName (tyConName settled)) == "Settled"
-                , eqType settleRow resultRow, eqType settleValue resultValue
+                , eqType settleRow settledRow, eqType settleValue settledValue
                 , null settlePredicates, null resumePredicates
                 , sameVariables settleVariables [settleRowVariable, settleValueVariable] ->
                     pure (SegmentOperations pureId pureVariables valueVariable
                       bindId bindVariables inputVariable resultVariable
                       failId failVariables failRowVariable constructor
-                      settleId settleVariables settleValueVariable settleRowVariable resumeId)
+                      settleId settleVariables settleValueVariable resumeId)
               _ -> throwIO UnprovedSegmentOperations
     _ -> throwIO UnprovedSegmentOperations
   where
