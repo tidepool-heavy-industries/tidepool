@@ -95,7 +95,7 @@ mod workspace;
 mod workspace_admission_tests;
 pub mod workspace_cleanup;
 
-pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
+pub(crate) use workspace::initialize_helper_draft;
 use workspace::{ActiveWorkspace, PreparedWorkspace};
 #[cfg(test)]
 mod fresh_child_tests;

@@ -716,7 +716,8 @@ impl FrozenWorkspace {
 
     fn validate_toolset_coverage(&self, coverage: &[PreparedToolsetCoverage]) -> Result<()> {
         coverage_entries(coverage)?;
-        let expected = exomonad_actor::ActorCapabilities::default().effect_keys();
+        let capabilities = exomonad_actor::ActorCapabilities::default();
+        let expected = capabilities.effect_keys();
         if coverage[0].requested_effects != expected {
             return Err(
                 "prepared root toolset differs from this build's requested effect row".into(),
