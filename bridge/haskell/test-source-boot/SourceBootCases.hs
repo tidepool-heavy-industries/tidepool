@@ -1406,6 +1406,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     aliasRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedSource changedAlias target "Expr"
     unless (case aliasRecipe of Left _ -> True; Right _ -> False) $
       fail "changed qualified import alias retained protected template authority"
+    writeFile target protectedSource
     wrongSeal <- generatedScaffoldRecipe parserFlags
       (CheckedTemplateImports templateRoot [templateInterface {templateInterfaceSha256=replicate 64 'f'}])
       protectedSource protectedSource target "Expr" >>= either fail pure
