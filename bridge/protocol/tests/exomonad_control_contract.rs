@@ -1,8 +1,9 @@
-//! Independent ABI pins for Exomonad control and fork configuration.
+//! Independent ABI pins for Exomonad control and agent admission.
 use tidepool_protocol::effects::{
     agent_control::agent_control, agent_inspection::agent_inspection,
+    agent_launch::agent_launch,
 };
-use tidepool_protocol::hs::HsType;
+use tidepool_protocol::{hs::HsType, schema::RustBinding};
 
 #[test]
 fn usage_observation_has_one_shared_record_and_distinct_history_endpoints() {
@@ -103,77 +104,180 @@ fn usage_summaries_have_provider_scope_completeness_and_shared_inspection_fields
 }
 
 #[test]
-fn fork_options_are_optional_at_the_existing_launch_boundary() {
-    let forks = tidepool_protocol::effects::forks::forks();
-    let launch = forks
+fn spawn_uses_typed_context_workspace_and_live_spec_with_optional_configuration() {
+    let effect = agent_launch();
+    assert!(effect.validate().is_ok());
+    let spawn = effect
         .verbs
         .iter()
-        .find(|verb| verb.ctor == "ForksStartWith")
+        .find(|verb| verb.ctor == "AgentLaunchSpawnWith")
         .unwrap();
-    let argument = |name| launch.args.iter().find(|arg| arg.name == name).unwrap();
+    let argument = |name| spawn.args.iter().find(|arg| arg.name == name).unwrap();
+    assert_eq!(
+        spawn.args.iter().map(|arg| arg.name).collect::<Vec<_>>(),
+        [
+            "context",
+            "install",
+            "workspace",
+            "effects",
+            "label",
+            "model",
+            "effort",
+            "instructions",
+            "lifetime",
+            "limits",
+        ]
+    );
+    assert_eq!(argument("context").ty, HsType::Named("SpawnContextWire"));
+    assert_eq!(argument("workspace").ty, HsType::Named("SpawnWorkspaceWire"));
+    assert_eq!(
+        argument("effects").ty,
+        HsType::list(HsType::Named("ActorEffectKey"))
+    );
+    assert_eq!(
+        argument("install").ty,
+        HsType::func(
+            HsType::Int,
+            HsType::app(
+                HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
+                HsType::Unit,
+            ),
+        )
+    );
+    assert_eq!(argument("install").rust, RustBinding::HaskellValue);
+    assert_eq!(
+        argument("label").ty,
+        HsType::maybe(HsType::Text)
+    );
+    assert_eq!(
+        argument("model").ty,
+        HsType::maybe(HsType::Named("Model"))
+    );
     assert_eq!(
         argument("effort").ty,
         HsType::maybe(HsType::Named("ForkEffort"))
     );
     assert_eq!(
-        argument("budget").ty,
+        argument("instructions").ty,
+        HsType::maybe(HsType::Text)
+    );
+    assert_eq!(
+        argument("limits").ty,
         HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int]))
     );
-    for name in ["unboundLabel", "checkpoint", "instructions"] {
-        assert_eq!(argument(name).ty, HsType::maybe(HsType::Text));
-    }
     assert_eq!(argument("lifetime").ty, HsType::Named("WorkerLifetime"));
-    // Preserve the entry closure's position: the actor capture owner claims
-    // its live custody by this field, independently of configuration decoding.
-    assert_eq!(launch.args[1].name, "entry");
+    assert_eq!(
+        spawn.ret,
+        HsType::either(
+            HsType::Named("SpawnErrorWire"),
+            HsType::Tuple(vec![
+                HsType::Int,
+                HsType::Int,
+                HsType::maybe(HsType::Named("WorktreeHandle")),
+            ]),
+        )
+    );
+    let errors = effect
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "SpawnErrorWire")
+        .unwrap();
+    let tidepool_protocol::schema::TypeShape::Sum { variants } = &errors.shape else {
+        panic!("spawn error is a typed sum")
+    };
+    assert_eq!(
+        variants.iter().map(|variant| variant.ctor).collect::<Vec<_>>(),
+        ["SpawnRefused", "SpawnPartialFailure"]
+    );
+    let tidepool_protocol::schema::VariantFields::Positional(refused) = &variants[0].fields else {
+        panic!("spawn refusal carries a reason")
+    };
+    assert_eq!(refused, &[HsType::Text]);
+    let tidepool_protocol::schema::VariantFields::Positional(partial) = &variants[1].fields else {
+        panic!("partial spawn failure carries retained resources and cleanup")
+    };
+    assert_eq!(
+        partial,
+        &[
+            HsType::Named("SpawnRetainedResourcesWire"),
+            HsType::Named("SpawnCleanup"),
+            HsType::Text,
+        ]
+    );
 }
 
 #[test]
-fn cleanup_execution_carries_exact_incarnations_and_activity_revisions() {
+fn agent_control_uses_exact_incarnation_and_typed_retention_and_stop_results() {
     let control = agent_control();
-    let execute = control
+    assert!(control.validate().is_ok());
+    let retain = control
         .verbs
         .iter()
-        .find(|verb| verb.ctor == "AgentControlExecuteCleanupWith")
+        .find(|verb| verb.ctor == "AgentControlRetainWith")
         .unwrap();
     assert_eq!(
-        execute
+        retain
             .args
             .iter()
             .map(|arg| arg.ty.clone())
             .collect::<Vec<_>>(),
         vec![
-            HsType::Int,
-            HsType::list(HsType::Tuple(vec![HsType::Int, HsType::Int, HsType::Int])),
+            HsType::Tuple(vec![HsType::Int, HsType::Int]),
+            HsType::Named("WorkerLifetime"),
         ]
     );
-    assert_eq!(execute.ret, HsType::Named("CleanupReceipt"));
-    assert!(!control
-        .verbs
+    assert_eq!(
+        retain.ret,
+        HsType::either(HsType::Named("AgentRetentionError"), HsType::Unit)
+    );
+    let retention_error = control
+        .type_defs
         .iter()
-        .any(|verb| verb.ret == HsType::Named("CleanupPlan")));
-    let inspection = agent_inspection();
-    let plan = inspection
-        .verbs
-        .iter()
-        .find(|verb| verb.ctor == "AgentInspectCleanupWith")
+        .find(|ty| ty.name == "AgentRetentionError")
         .unwrap();
-    assert_eq!(plan.ret, HsType::Named("CleanupPlan"));
+    let tidepool_protocol::schema::TypeShape::Sum { variants } = &retention_error.shape else {
+        panic!("retention refusal is a typed sum")
+    };
+    assert_eq!(
+        variants.iter().map(|variant| variant.ctor).collect::<Vec<_>>(),
+        [
+            "AgentRetainUnavailable",
+            "AgentRetainUnauthorized",
+            "AgentRetainOwnerUnavailable",
+            "AgentRetainOwnerClosed",
+        ]
+    );
+    let stop = control
+        .verbs
+        .iter()
+        .find(|verb| verb.ctor == "AgentControlStopWith")
+        .unwrap();
+    assert_eq!(
+        stop.args[0].ty,
+        HsType::Tuple(vec![HsType::Int, HsType::Int])
+    );
+    assert_eq!(stop.ret, HsType::Named("AgentStopControlOutcome"));
+    assert!(!control.verbs.iter().any(|verb| {
+        verb.ctor.contains("Cleanup") || verb.ret == HsType::Named("CleanupPlan")
+    }));
 }
 
 #[test]
-fn group_inspection_uses_an_identity_and_can_report_unavailability() {
+fn agent_inspection_uses_an_exact_actor_incarnation() {
     let inspection = agent_inspection();
-    let group = inspection
+    let inspect = inspection
         .verbs
         .iter()
-        .find(|verb| verb.ctor == "AgentGroupListWith")
+        .find(|verb| verb.ctor == "AgentInspectWith")
         .unwrap();
-    assert_eq!(group.args.len(), 1);
-    assert_eq!(group.args[0].ty, HsType::Int);
+    assert_eq!(inspect.args.len(), 1);
     assert_eq!(
-        group.ret,
-        HsType::maybe(HsType::list(HsType::Named("AgentRosterEntry")))
+        inspect.args[0].ty,
+        HsType::Tuple(vec![HsType::Int, HsType::Int])
+    );
+    assert_eq!(
+        inspect.ret,
+        HsType::maybe(HsType::Named("AgentRosterEntry"))
     );
 }
 
