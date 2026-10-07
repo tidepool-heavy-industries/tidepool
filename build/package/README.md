@@ -253,11 +253,16 @@ compiler. It refuses a different compiler mode or parallel test execution. One
 executed passing test means that twenty sequentially admitted children completed
 their actual native replies and the parent verified twenty typed answers; it is
 not a claim of twenty concurrent children. The scenario requires twenty unique
-actors and installation scopes, typed `DeploymentOriginal` acquisition matching
-the frozen workspace's completed inventory, unchanged external-quoter execution
-bytes after its input changes from 41 to 42, and zero compiler requests during
-child setup. Partial progress and per-child rows retain observed counts on
-failure. The existing hosted outcome records scenario and cleanup separately;
+actors and installation scopes. The root's typed `DeploymentOriginal` acquisition
+must match the frozen workspace's completed inventory. Children reuse one actual
+supplied spec, have explicit live installation origin without a source-prepared
+acquisition receipt, and return typed answers of 41 through its native probe.
+External-quoter execution bytes must remain unchanged from preparation before
+its input changes from 41 to 42 through the parent's public spec import, every
+child installation and every native reply. Each child setup and its attributed
+compiled installer phase must submit zero compiler requests. Partial progress
+and per-child rows retain observed counts on failure. The existing hosted
+outcome records scenario and cleanup separately;
 scenario completion alone does not establish confirmed host cleanup.
 
 First preparation is reported separately. Setup P95 below one second remains
