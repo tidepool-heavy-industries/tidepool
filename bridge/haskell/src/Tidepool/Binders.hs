@@ -758,7 +758,9 @@ refineExecutableSourceItems flags item
             terminal : reversed
               | length reversed > 1 && isSyntheticTerminal terminal ->
                   traverse (refine parsedState) (reverse reversed)
-            terminal : [_] | isSyntheticTerminal terminal -> unchanged
+            terminal : [authored] | isSyntheticTerminal terminal ->
+              Right [(item, classifyWithFlagsExactFormUsing flags source
+                (Just (POk parsedState authored)))]
             _ -> parseFailure
         _ -> parseFailure
       PFailed _ -> parseFailure
