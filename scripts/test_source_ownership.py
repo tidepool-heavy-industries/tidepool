@@ -7,6 +7,12 @@ The named Cargo unit-test target owns these module and embedded fixture bytes.
 import re
 
 TEST_ONLY_SOURCES = {
+    'exomonad-node': frozenset({
+        'exomonad/node/src/inbox/history_properties.rs',
+    }),
+    'exomonad-worktree': frozenset({
+        'exomonad/worktree/src/journal_properties.rs',
+    }),
     'exomonad-tool': frozenset({
         'exomonad/tool/src/surface/properties.rs',
     }),

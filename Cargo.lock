@@ -1123,6 +1123,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "parking_lot",
+ "proptest",
  "reqwest 0.13.4",
  "rustix",
  "serde",
@@ -1152,6 +1153,7 @@ dependencies = [
  "camino",
  "exomonad-node",
  "parking_lot",
+ "proptest",
  "rustix",
  "serde",
  "serde_json",
@@ -3633,6 +3635,7 @@ dependencies = [
  "ignore",
  "libc",
  "parking_lot",
+ "proptest",
  "regex",
  "reqwest 0.13.4",
  "serde_json",
