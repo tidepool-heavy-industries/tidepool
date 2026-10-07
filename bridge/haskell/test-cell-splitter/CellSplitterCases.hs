@@ -2493,6 +2493,13 @@ semicolonStatementRefinement flags = do
     (map cellAnalysisSource coordinates)
   assertEqual "GHC tab columns in original source" [1, 17]
     (map (cellStartColumn . cellAnalysisSpan) coordinates)
+  indented <- analyze "\n  pure \"a\"; pure \"b\""
+  assertEqual "indented statements preserve exact authored token slices"
+    ["pure \"a\"", "pure \"b\""] (map cellAnalysisSource indented)
+  assertEqual "leading blank line remains in authored coordinates" [2, 2]
+    (map (cellStartLine . cellAnalysisSpan) indented)
+  assertEqual "non-column-one original items preserve parser columns" [3, 13]
+    (map (cellStartColumn . cellAnalysisSpan) indented)
   comments <- analyze "pure (17 :: Int); {- not; a; statement -} pure (19 :: Int) -- trailing; comment"
   assertEqual "comment semicolons do not become statements" [KExpr, KExpr]
     (map (sbKind . cellAnalysisVerdict) comments)
