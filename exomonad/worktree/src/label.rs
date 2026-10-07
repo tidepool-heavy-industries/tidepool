@@ -109,10 +109,9 @@ mod tests {
 
     use proptest::prelude::*;
     use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
-    use tidepool_atomic_write::DirectoryAnchor;
 
     use crate::create::EXOMONAD_BRANCH_PREFIX;
-    use crate::{GitCli, WorktreeRegistry};
+    use crate::GitCli;
 
     /// `(input, agent_expected, branch_expected)`. These outputs participate
     /// in durable identifiers and are compatibility-sensitive.
@@ -289,23 +288,23 @@ mod tests {
     }
 
     #[test]
-    fn generated_managed_branch_refs_are_valid_git_refs_and_keep_minted_identity() {
+    fn generated_branch_label_suffixes_are_valid_git_refs() {
         let git = GitCli::new();
         let repository = tempfile::tempdir().expect("temporary repository");
         git.init_repository(repository.path(), &["--quiet"])
             .expect("initialize Git oracle repository");
 
-        let storage = tempfile::tempdir().expect("temporary registry storage");
-        let anchor = DirectoryAnchor::open_existing(storage.path()).expect("storage anchor");
-        let registry = WorktreeRegistry::open(&anchor, "registry").expect("open registry");
-        let id = registry.mint_id().expect("mint worktree identity");
-
         let coverage = RefCell::new(GeneratedCoverage::default());
-        let config = property_config(concat!(
+        let test_name = concat!(
             module_path!(),
-            "::generated_managed_branch_refs_are_valid_git_refs_and_keep_minted_identity"
-        ));
+            "::generated_branch_label_suffixes_are_valid_git_refs"
+        );
+        let mut config = proptest::test_runner::contextualize_config(property_config(test_name));
+        config.source_file = Some(file!());
+        config.test_name = Some(test_name);
         let configured_fresh_cases = config.cases;
+        let configured_max_shrink_iters = config.max_shrink_iters;
+        let configuration = format!("{config:?}");
         let result = TestRunner::new(config).run(&branch_label_inputs(), |raw| {
             let label = sanitize_branch_label(&raw);
             coverage.borrow_mut().observe(&raw, &label);
@@ -314,11 +313,10 @@ mod tests {
             prop_assert!(!label.is_empty(), "fallback must keep the label nonempty");
             prop_assert!(label.len() <= 200, "label exceeded its byte cap: {}", label.len());
 
-            let branch = format!("{EXOMONAD_BRANCH_PREFIX}/{label}-{}", id.as_str());
-            prop_assert!(
-                branch.ends_with(&format!("-{}", id.as_str())),
-                "managed branch must retain its minted worktree identity"
-            );
+            // A fixed valid ID-shaped suffix exercises the consumer's branch
+            // component budget; minting and retained identity are covered by
+            // the real WorktreeManager creation test in worktree_core.
+            let branch = format!("{EXOMONAD_BRANCH_PREFIX}/{label}-generated-id");
             let full_ref = format!("refs/heads/{branch}");
             let checked = git.read(repository.path(), &["check-ref-format", &full_ref]);
             prop_assert!(
@@ -328,8 +326,8 @@ mod tests {
             Ok(())
         });
         eprintln!(
-            "worktree label configured fresh cases: {configured_fresh_cases}; generated callback coverage: {:#?}",
-            coverage.borrow()
+            "worktree label campaign: configured fresh cases={configured_fresh_cases}, max shrink iterations={configured_max_shrink_iters}, config={configuration}; callback coverage={:#?}",
+            coverage.borrow(),
         );
         result.unwrap();
     }
