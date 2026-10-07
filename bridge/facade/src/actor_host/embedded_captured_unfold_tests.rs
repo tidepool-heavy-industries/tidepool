@@ -244,7 +244,8 @@ impl CapturedHostTransport {
                 1 => vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"captured-scope-setup", "name":"haskell",
                     "input":match self.scenario {
-                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
+                        HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => format!("{}\n{}\n{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_shutdown_command_refusal.hs"), include_str!("embedded_shutdown_gate_setup.hs")),
+                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
                         HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => format!("{}\n{}\n{}", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_nominal_join_setup.hs")),
                     }
                 }))],
@@ -383,7 +384,7 @@ impl CapturedHostTransport {
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":match self.scenario {
                             HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) if ordinal == 0 => "display (error \"HOSTED_INTENTIONAL_CHILD_FAILURE\" :: Int)",
-                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => "_ <- Cmd.run (Cmd.argv [\"sleep\", \"300\"])\nrespond capturedGetter",
+                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => include_str!("embedded_shutdown_parked_child.hs"),
                             HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => "respond (m2MakeReply sessionInput)",
                             HostedScenario::Captured(CapturedScenario::FailureAfterReplies) if ordinal >= 2 => include_str!("embedded_captured_child_reuse_nominal.hs"),
                             _ => "respond capturedGetter",
@@ -898,8 +899,14 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     )
     .await
     .expect("production embedded host starts");
-    let check_shutdown_parked =
-        scenario == HostedScenario::Captured(CapturedScenario::CancelWhileParked);
+    let check_shutdown_parked = matches!(
+        scenario,
+        HostedScenario::Captured(
+            CapturedScenario::CancelWhileParked
+                | CapturedScenario::ShutdownAfterChildFailure
+                | CapturedScenario::CoordinatorFailureAfterChildFailure
+        )
+    );
     let forest_after_shutdown = Arc::clone(&host.context.forest);
     let runtime_after_shutdown = Arc::clone(&host.runtime);
     let observer_after_shutdown = host.context.observer.clone();
@@ -916,6 +923,12 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 .take()
                 .expect("scripted Responses transport");
             let campaign = host.context.clone();
+            if matches!(scenario, HostedScenario::Captured(
+                CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure
+            )) {
+                assert!(campaign.config.command_resources.is_none(),
+                    "the command refusal control requires a host without command resource authority");
+            }
             let actor = campaign.actor.identity();
             let runtime = Arc::clone(&host.runtime);
             let address = host.address;
@@ -1184,6 +1197,12 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         observations.tick().await;
                     }
                 }).await.expect("the other exact native call parks before host teardown");
+                let graph = campaign.forest.inspect_host_graph();
+                let gate = graph.iter().find(|node| node.label == "embedded-shutdown-park-gate")
+                    .expect("the real owned gate actor is installed");
+                assert!(gate.terminal.is_none(), "gate must remain live before host teardown: {gate:?}");
+                assert!(!gate.model_actor, "the gate is a record actor, not a provider branch");
+                eprintln!("[captured-engine] exact sibling parks on owned actor gate {:?}", gate.actor);
                 assert!(runtime.store().claims_for_operation(&transport.operation(&root_origin, PENDING_CALL))
                     .unwrap().iter().any(|claim| claim.state == harness::store::ClaimState::Pending));
                 assert!(matches!(scheduler.wait(&failed).await.unwrap(), JobOutput::Completed(Err(_))));
@@ -1197,7 +1216,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     panic!("{INTENTIONAL_COORDINATOR_FAILURE}");
                 }
                 // Returning invokes production teardown with one failed child,
-                // an active child command, and the parent's outstanding join.
+                // an active child awaiting the owned gate, and the parent's outstanding join.
                 return;
             }
             if scenario == CapturedScenario::CancelWhileParked {
@@ -1858,14 +1877,20 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 Some(exomonad_actor::ResourceRelease::Released),
             );
         }
-        assert!(forest_after_shutdown
-            .inspect_host_graph()
-            .iter()
-            .all(|node| {
-                node.terminal.is_some()
-                    && node.active_requests.is_empty()
-                    && node.queued_requests.is_empty()
-            }));
+        let graph = forest_after_shutdown.inspect_host_graph();
+        assert_eq!(
+            graph
+                .iter()
+                .filter(|node| node.label == "embedded-shutdown-park-gate")
+                .count(),
+            1,
+            "the owned gate retains its exact terminal cleanup observation"
+        );
+        assert!(graph.iter().all(|node| {
+            node.terminal.is_some()
+                && node.active_requests.is_empty()
+                && node.queued_requests.is_empty()
+        }));
     }
     if check_shutdown_parked {
         assert_eq!(
