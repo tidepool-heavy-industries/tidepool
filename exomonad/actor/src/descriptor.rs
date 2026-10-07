@@ -172,7 +172,12 @@ impl ActorDescriptor {
     /// Root identity follows ancestry, independently of available effects.
     #[must_use]
     pub fn is_root(&self) -> bool {
-        self.creator.is_none() && self.supervisor_parent.is_none() && self.context_parent.is_none()
+        self.creator.is_none()
+            && self.supervisor_parent.is_none()
+            && self.context_parent.is_none()
+            && self.actor_path.as_ref().is_some_and(
+                |path| matches!(path.segments(), [segment] if segment.as_str() == "root"),
+            )
     }
 
     #[must_use]
@@ -322,7 +327,7 @@ impl ActorDescriptor {
             effect_policy: self.effect_policy,
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
-            haskell_effects_alias: self.role.haskell_effects_type(),
+            haskell_effects_alias: self.capabilities.haskell_effects_type(),
             source_layer: self.source_layer.clone(),
         }
     }

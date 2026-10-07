@@ -916,6 +916,7 @@ fn contains_durable_root_admission(records: &[exomonad_actor::DurableActorRecord
         record.admission.creator.is_none()
             && record.admission.supervisor_parent.is_none()
             && record.admission.context_parent.is_none()
+            && record.admission.actor_path.as_deref() == Some("root")
     })
 }
 
