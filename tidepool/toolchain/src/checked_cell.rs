@@ -4244,6 +4244,240 @@ fn failure(error: impl std::fmt::Display) -> CompileError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn checked_target_demands_wrapper_dependency_separately_from_authored_entry() {
+        use super::*;
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, NativeArtifactDemand, NativeGroupKey,
+        };
+        use crate::certified_products::{
+            self, AcceptedGlobal, PackageInterfaceValidation, ReceiptImportOwner,
+        };
+        use tidepool_repr::execution_schema::{
+            testing, GlobalDecl, Group, ModuleVersion, RuntimeRep,
+        };
+        let products = ["Authored", "Wrapper"]
+            .iter()
+            .map(|module| {
+                let native = certified_products::fixture_finalized_product(
+                    certified_products::tests::original_groups_fixture(
+                        module,
+                        vec![(8, vec![]), (12, vec![])],
+                        7,
+                        &BTreeMap::new(),
+                    ),
+                    [1; 32],
+                );
+                certified_products::tests::recovered_witness_fixtures(&[native])
+                    .remove(0)
+                    .product
+            })
+            .collect::<Vec<_>>();
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = testing::identity("Authored", "entry_8");
+        let wrapper_binder = testing::identity("Wrapper", "entry_8");
+        wire.globals = vec![GlobalDecl {
+            identity: wrapper_binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }];
+        let target = testing::prepare(wire).unwrap();
+        let plans = vec![CheckedTypedSegmentPlan {
+            digest: hex(&[2; 32]),
+            root: "authored_origin".into(),
+            items: vec![CheckedTypedSegmentItem {
+                ordinal: 0,
+                entry: "entry_8".into(),
+                generation: 1,
+                body: CheckedTypedSegmentBody::Let {
+                    marker: "marker".into(),
+                    captures: vec![],
+                },
+            }],
+        }];
+        let request = hex(&[3; 32]);
+        let admission = [4; 32];
+        let source = "authored fixture source";
+        let directory = tempfile::tempdir().unwrap();
+        let identity =
+            |occurrence: &str| array([text("fixture"), text("Authored"), text(occurrence)]);
+        let receipt = array([
+            text("TPEXACTITEM"),
+            text("2"),
+            text(&request),
+            text(hex(&admission)),
+            text(hex(&admission)),
+            Value::Integer(0.into()),
+            text(hash(source.as_bytes())),
+            text("tidepool-checked-recipe-2"),
+            array([
+                text(&plans[0].digest),
+                identity(&plans[0].root),
+                identity("entry_8"),
+                Value::Integer(8.into()),
+            ]),
+        ]);
+        let mut receipt_bytes = Vec::new();
+        ciborium::ser::into_writer(&receipt, &mut receipt_bytes).unwrap();
+        std::fs::write(directory.path().join("checked-item.cbor"), receipt_bytes).unwrap();
+        let entry = CheckedTypedEntry::issue_program_item(
+            directory.path(),
+            &request,
+            admission,
+            &plans,
+            0,
+            source,
+            &target,
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "Authored".into(),
+            },
+            &products,
+            [1; 32],
+        )
+        .unwrap();
+        let accepted = vec![AcceptedGlobal {
+            identity: wrapper_binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: "fixture".into(),
+                module: "Wrapper".into(),
+                module_version: Some(products[1].owner().module_version.clone()),
+                original_ordinal: 8,
+                binder: wrapper_binder,
+            },
+        }];
+        let mut validation = PackageInterfaceValidation::default();
+        let imports = certified_products::certify_target_available_owners_with_validation(
+            &target,
+            &accepted,
+            &products,
+            &[],
+            &BTreeMap::new(),
+            &mut validation,
+        )
+        .unwrap();
+        let entries = products
+            .iter()
+            .cloned()
+            .map(|product| {
+                Arc::new(
+                    ArtifactEntry::original_with_validation([1; 32], product, &mut validation)
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let baseline = inventory
+            .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &BTreeSet::new())
+            .unwrap();
+        let authored_only = inventory
+            .admit_shared_with_demand(
+                &baseline,
+                entries.clone(),
+                NativeArtifactDemand::VerifiedGroupRoot(&entry),
+            )
+            .unwrap();
+        let authored_groups =
+            crate::declaration_context::certify_artifact_view_groups_with_validation(
+                &authored_only,
+                &[],
+                &[],
+                &mut validation,
+            )
+            .unwrap();
+        assert_eq!(authored_groups.len(), 1);
+        assert!(certified_products::certify_target_owners(
+            &target,
+            &accepted,
+            &authored_groups,
+            &BTreeMap::new()
+        )
+        .is_err());
+        let complete = inventory
+            .admit_shared_with_demand(
+                &baseline,
+                entries.clone(),
+                NativeArtifactDemand::VerifiedTarget {
+                    entry: &entry,
+                    imports: &imports,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            complete.selected_native_groups(),
+            BTreeSet::from([
+                entry.native_group_key(),
+                NativeGroupKey {
+                    artifact: entries[1].descriptor.id,
+                    original_ordinal: 8
+                },
+            ])
+        );
+        assert_eq!(complete.artifact_ids(), baseline.artifact_ids());
+        let groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
+            &complete,
+            &[],
+            &[],
+            &mut validation,
+        )
+        .unwrap();
+        certified_products::certify_target_owners(&target, &accepted, &groups, &BTreeMap::new())
+            .unwrap();
+        for mutation in 0..4 {
+            let mut invalid = accepted.clone();
+            let ReceiptImportOwner::Source {
+                module,
+                module_version,
+                original_ordinal,
+                binder,
+                ..
+            } = &mut invalid[0].owner
+            else {
+                unreachable!()
+            };
+            match mutation {
+                0 => *module_version = Some(ModuleVersion([9; 32])),
+                1 => *module = "WrongOwner".into(),
+                2 => *original_ordinal = 99,
+                3 => {
+                    *original_ordinal = 12;
+                    *binder = testing::identity("Wrapper", "entry_12");
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                certified_products::certify_target_available_owners_with_validation(
+                    &target,
+                    &invalid,
+                    &products,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation
+                )
+                .is_err()
+            );
+        }
+        let missing_inventory = ArtifactInventory::default();
+        assert!(missing_inventory
+            .admit_shared_with_demand(
+                &missing_inventory.empty_view(),
+                vec![entries[0].clone()],
+                NativeArtifactDemand::VerifiedTarget {
+                    entry: &entry,
+                    imports: &imports
+                }
+            )
+            .is_err());
+    }
+
+    #[test]
     fn observation_migration_refuses_unversioned_and_import_bearing_rows() {
         use super::*;
         let payload = Value::Array(vec![

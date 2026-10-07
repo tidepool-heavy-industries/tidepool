@@ -2638,7 +2638,10 @@ fn seal_turn_outputs_with_validation(
     let package_closure =
         merge_package_closure_with_validation(&receipt.packages, offer.exact.as_ref(), validation)?;
     enum TargetDemand {
-        Checked(crate::checked_cell::CheckedTypedEntry),
+        Checked {
+            entry: crate::checked_cell::CheckedTypedEntry,
+            imports: Vec<certified_products::PendingImportOwner>,
+        },
         Ordinary(Vec<certified_products::PendingImportOwner>),
     }
     let target_demand = match typed_item {
@@ -2646,7 +2649,7 @@ fn seal_turn_outputs_with_validation(
             let admission = exact.as_ref().ok_or_else(|| {
                 CompileError::ExtractFailed("typed entry lacks exact source admission".into())
             })?;
-            TargetDemand::Checked(crate::checked_cell::CheckedTypedEntry::issue_program_item(
+            let entry = crate::checked_cell::CheckedTypedEntry::issue_program_item(
                 output_dir,
                 &admission.request.request_sha256,
                 admission_digest,
@@ -2660,7 +2663,17 @@ fn seal_turn_outputs_with_validation(
                     &offer.producer,
                 )
                 .sha256(),
-            )?)
+            )?;
+            let imports = certified_products::certify_target_available_owners_with_validation(
+                prepared,
+                accepted,
+                &certified.recovery_products,
+                &certified.groups,
+                &package_closure,
+                validation,
+            )
+            .map_err(compiler_evidence_failure)?;
+            TargetDemand::Checked { entry, imports }
         }
         None => TargetDemand::Ordinary(
             certified_products::certify_target_available_owners_with_validation(
@@ -2675,8 +2688,8 @@ fn seal_turn_outputs_with_validation(
         ),
     };
     let demand = match &target_demand {
-        TargetDemand::Checked(entry) => {
-            crate::artifact_inventory::NativeArtifactDemand::VerifiedGroupRoot(entry)
+        TargetDemand::Checked { entry, imports } => {
+            crate::artifact_inventory::NativeArtifactDemand::VerifiedTarget { entry, imports }
         }
         TargetDemand::Ordinary(imports) => {
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(imports)
@@ -2696,7 +2709,7 @@ fn seal_turn_outputs_with_validation(
             validation,
         )?;
     let typed_entry = match target_demand {
-        TargetDemand::Checked(entry) => Some(entry),
+        TargetDemand::Checked { entry, .. } => Some(entry),
         TargetDemand::Ordinary(_) => None,
     };
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(

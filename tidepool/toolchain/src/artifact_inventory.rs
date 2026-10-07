@@ -63,9 +63,52 @@ pub struct NativeGroupKey {
 pub(crate) enum NativeArtifactDemand<'a> {
     AllGroups,
     VerifiedGroupRoot(&'a crate::checked_cell::CheckedTypedEntry),
+    /// A checked authored entry and its same compiled executable wrapper have
+    /// distinct native dependencies. Neither implies whole-carrier demand.
+    VerifiedTarget {
+        entry: &'a crate::checked_cell::CheckedTypedEntry,
+        imports: &'a [crate::certified_products::PendingImportOwner],
+    },
     /// Existing target certification issued these imports against authenticated
     /// original membership. Only new products receive whole-module demand.
     CertifiedTargetImports(&'a [crate::certified_products::PendingImportOwner]),
+}
+
+/// Target imports were issued by the existing target certifier; check exact
+/// original membership again before turning source references into graph roots.
+fn certified_target_source_groups(
+    entries: &[Arc<ArtifactEntry>],
+    imports: &[crate::certified_products::PendingImportOwner],
+) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
+    let mut groups = BTreeSet::new();
+    for import in imports {
+        let crate::certified_products::PendingImportOwner::Source {
+            owner,
+            original_ordinal,
+            binder,
+        } = import
+        else {
+            continue;
+        };
+        let mut originals = entries.iter().filter(|entry| {
+            matches!(&entry.payload, ArtifactPayload::Original(product)
+            if product.owner() == owner
+                && crate::certified_products::authenticates_original_native_entry(
+                    product, *original_ordinal, binder,
+                ))
+        });
+        let original = originals
+            .next()
+            .ok_or_else(|| failure("certified target native membership"))?;
+        if originals.next().is_some() {
+            return Err(failure("certified target native membership"));
+        }
+        groups.insert(NativeGroupKey {
+            artifact: original.descriptor.id,
+            original_ordinal: *original_ordinal,
+        });
+    }
+    Ok(groups)
 }
 
 /// Copying a retained closure preserves its issuing view's root intent. Full
@@ -1131,6 +1174,11 @@ impl ArtifactInventory {
             NativeArtifactDemand::VerifiedGroupRoot(root) => {
                 BTreeSet::from([root.native_group_key()])
             }
+            NativeArtifactDemand::VerifiedTarget { entry, imports } => {
+                let mut groups = certified_target_source_groups(&entries, imports)?;
+                groups.insert(entry.native_group_key());
+                groups
+            }
             NativeArtifactDemand::CertifiedTargetImports(imports) => {
                 let inherited = parent.artifact_ids().into_iter().collect::<BTreeSet<_>>();
                 let mut groups = entries
@@ -1146,28 +1194,7 @@ impl ArtifactInventory {
                             })
                     })
                     .collect::<BTreeSet<_>>();
-                for import in imports {
-                    let crate::certified_products::PendingImportOwner::Source {
-                        owner,
-                        original_ordinal,
-                        binder,
-                    } = import
-                    else {
-                        continue;
-                    };
-                    let originals = entries.iter().filter(|entry| {
-                        matches!(&entry.payload, ArtifactPayload::Original(product)
-                            if product.owner() == owner
-                                && crate::certified_products::authenticates_original_native_entry(product, *original_ordinal, binder))
-                    }).collect::<Vec<_>>();
-                    if originals.len() != 1 {
-                        return Err(failure("certified target native membership"));
-                    }
-                    groups.insert(NativeGroupKey {
-                        artifact: originals[0].descriptor.id,
-                        original_ordinal: *original_ordinal,
-                    });
-                }
+                groups.extend(certified_target_source_groups(&entries, imports)?);
                 groups
             }
         };
