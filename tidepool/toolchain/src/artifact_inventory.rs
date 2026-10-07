@@ -17,6 +17,9 @@ use crate::CompileError;
 #[cfg(test)]
 mod properties;
 
+mod compiler_projection;
+pub use compiler_projection::{CompilerInputProjection, CompilerInputRole, TargetNativeSelection};
+
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
