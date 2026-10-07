@@ -69,6 +69,7 @@ enum Op {
     Remove(usize),
     RemoveStart(usize),
     Admit { region: usize, point: u8 },
+    AdmitInterior { region: usize, object: usize },
     Overlaps { region: usize, point: u8 },
 }
 
@@ -79,6 +80,8 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
             (0..REGIONS).prop_map(Op::Remove),
             (0..REGIONS).prop_map(Op::RemoveStart),
             (0..REGIONS, 0u8..5).prop_map(|(region, point)| Op::Admit { region, point }),
+            (0..REGIONS, 0..MAX_OBJECTS)
+                .prop_map(|(region, object)| Op::AdmitInterior { region, object }),
             (0..REGIONS, 0u8..7).prop_map(|(region, point)| Op::Overlaps { region, point }),
         ],
         0..100,
@@ -110,8 +113,14 @@ struct Coverage {
     remove_start_miss: usize,
     admit_hit: usize,
     admit_miss: usize,
+    admit_interior: usize,
     overlap_true: usize,
     overlap_false: usize,
+    empty_states: usize,
+    single_region_states: usize,
+    multiple_region_states: usize,
+    max_regions: usize,
+    insert_before_existing: usize,
 }
 
 impl Coverage {
@@ -125,8 +134,23 @@ impl Coverage {
         self.remove_start_miss += other.remove_start_miss;
         self.admit_hit += other.admit_hit;
         self.admit_miss += other.admit_miss;
+        self.admit_interior += other.admit_interior;
         self.overlap_true += other.overlap_true;
         self.overlap_false += other.overlap_false;
+        self.empty_states += other.empty_states;
+        self.single_region_states += other.single_region_states;
+        self.multiple_region_states += other.multiple_region_states;
+        self.max_regions = self.max_regions.max(other.max_regions);
+        self.insert_before_existing += other.insert_before_existing;
+    }
+
+    fn observe_state(&mut self, regions: usize) {
+        self.max_regions = self.max_regions.max(regions);
+        match regions {
+            0 => self.empty_states += 1,
+            1 => self.single_region_states += 1,
+            _ => self.multiple_region_states += 1,
+        }
     }
 }
 
@@ -188,6 +212,7 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
     let mut active = Vec::<usize>::new();
     let metrics = StaticLookupMetrics::new("static-region-property");
     let mut coverage = Coverage::default();
+    coverage.observe_state(active.len());
 
     for op in history {
         match *op {
@@ -202,6 +227,12 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
                     prop_assert_eq!(result.unwrap(), false);
                     coverage.insert_duplicate += 1;
                 } else {
+                    if active
+                        .iter()
+                        .any(|&active_id| pool[active_id].start > region.start)
+                    {
+                        coverage.insert_before_existing += 1;
+                    }
                     prop_assert_eq!(result.unwrap(), true);
                     active.push(id);
                     coverage.insert_new += 1;
@@ -262,6 +293,27 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
                     coverage.admit_miss += 1;
                 }
             }
+            Op::AdmitInterior { region, object } => {
+                let fact = &pool[region];
+                if fact.objects != 0 {
+                    let object = object % fact.objects;
+                    let address = fact.start + object * OBJECT_BYTES + 8;
+                    prop_assert!(address >= fact.start && address < fact.start + fact.bytes);
+                    prop_assert!((address - fact.start) % OBJECT_BYTES != 0);
+                    prop_assert!(model_admit(&pool, &active, address).is_none());
+                    if !active.contains(&region) {
+                        prop_assert!(catalog.admit(address, &metrics).unwrap().is_none());
+                    } else {
+                        let actual = catalog.admit(address, &metrics);
+                        prop_assert!(matches!(
+                            actual,
+                            Err(DescriptorTraceError::InvalidManagedPointer { address: bad })
+                                if bad == address
+                        ));
+                        coverage.admit_interior += 1;
+                    }
+                }
+            }
             Op::Overlaps { region, point } => {
                 let address = slot_address(&pool[region], point);
                 let expected = model_overlap(&pool, &active, address);
@@ -276,6 +328,7 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
         }
         prop_assert_eq!(catalog.len(), active.len());
         prop_assert_eq!(catalog.is_empty(), active.is_empty());
+        coverage.observe_state(active.len());
         for fact in &pool {
             for object in 0..fact.objects {
                 let encoded = (fact.start + object * OBJECT_BYTES) | fact.tag;
@@ -339,6 +392,10 @@ fn targeted_history_reaches_catalog_transitions_and_boundaries() {
             region: 1,
             point: 3,
         },
+        Op::AdmitInterior {
+            region: 1,
+            object: 0,
+        },
         Op::Admit {
             region: 2,
             point: 0,
@@ -380,8 +437,13 @@ fn targeted_history_reaches_catalog_transitions_and_boundaries() {
     assert!(coverage.remove_start_miss >= 1);
     assert!(coverage.admit_hit >= 2);
     assert!(coverage.admit_miss >= 2);
+    assert!(coverage.admit_interior >= 1);
     assert!(coverage.overlap_true >= 1);
     assert!(coverage.overlap_false >= 1);
+    assert!(coverage.empty_states > 0);
+    assert!(coverage.single_region_states > 0);
+    assert!(coverage.multiple_region_states > 0);
+    assert!(coverage.max_regions >= 2);
 }
 
 #[test]
@@ -407,6 +469,10 @@ fn deterministic_generated_histories_reach_catalog_outcomes() {
     assert!(coverage.remove_start_miss > 0);
     assert!(coverage.admit_hit > 0);
     assert!(coverage.admit_miss > 0);
+    assert!(coverage.admit_interior > 0);
     assert!(coverage.overlap_true > 0);
     assert!(coverage.overlap_false > 0);
+    assert!(coverage.empty_states > 0);
+    assert!(coverage.single_region_states > 0);
+    assert!(coverage.multiple_region_states > 0);
 }
