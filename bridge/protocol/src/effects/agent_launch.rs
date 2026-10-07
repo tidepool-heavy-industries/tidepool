@@ -1,9 +1,9 @@
-//! Fresh-context actor launch capability for the interactive facade.
+//! Independent idle subagent admission and compiled installation replacement.
 
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef, TypeShape, VariantFields, Verb, WireDerives};
 
-/// Launch a new persistent actor without inheriting the caller's provider context.
+/// Admit an idle persistent actor with explicit context, directory and tools.
 #[must_use]
 pub fn agent_launch() -> Effect {
     Effect {
@@ -13,23 +13,13 @@ pub fn agent_launch() -> Effect {
         handler_module: "agent_launch",
         req_enum: "AgentLaunchReq",
         decl_fn: "agent_launch_decl",
-        description: &["Private fresh-agent launch substrate used by the Exomonad facade."],
+        description: &["Independent idle subagent admission with compiled tools and explicit context, workspace and cleanup ownership."],
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
         extra_imports: &[],
         type_defs: spawn_types(),
         external_types: &[
-            crate::schema::ExternalType {
-                haskell_name: "ActorLaunchRole",
-                rust_wire: "crate::ActorLaunchRoleWire",
-                core_module: None,
-            },
-            crate::schema::ExternalType {
-                haskell_name: "ActorEffectProfile",
-                rust_wire: "crate::ActorEffectProfileWire",
-                core_module: None,
-            },
             crate::schema::ExternalType { haskell_name: "ActorEffectKey", rust_wire: "crate::ActorEffectKeyWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "Model", rust_wire: "crate::Model", core_module: None },
             crate::schema::ExternalType { haskell_name: "ForkEffort", rust_wire: "crate::ForkEffort", core_module: None },
@@ -48,8 +38,8 @@ pub fn agent_launch() -> Effect {
                 ctor: "AgentLaunchSpawnWith",
                 method: "agent_launch_spawn_with",
                 args: vec![
-                    installer_arg(),
                     external_arg("context", "SpawnContextWire"),
+                    installer_arg(),
                     external_arg("workspace", "SpawnWorkspaceWire"),
                     Arg { name: "effects", ty: HsType::list(HsType::Named("ActorEffectKey")), rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>") },
                     optional_arg("label", HsType::Text, RustBinding::Derived),
@@ -82,77 +72,6 @@ pub fn agent_launch() -> Effect {
         handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
-}
-
-pub(crate) fn launch_args(forked: bool) -> Vec<Arg> {
-    let mut args = vec![
-        Arg {
-            name: "label",
-            ty: HsType::Text,
-            rust: RustBinding::Derived,
-        },
-        Arg {
-            name: "entry",
-            ty: HsType::func(
-                HsType::Int,
-                HsType::app(
-                    HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
-                    HsType::Unit,
-                ),
-            ),
-            rust: RustBinding::HaskellValue,
-        },
-        // What this launch is, as data, alongside the opaque `entry` above.
-        // `Just label` means the entry is exactly the stdlib's
-        // `agentDefinitionUnbound label` (see `startForkedAgent` /
-        // `Tidepool.Actors.Internal.Agent`) with no other captured runtime
-        // binding beyond this text label; `Nothing` covers every other
-        // launch shape (a bespoke `ActorDefinition`, an inline model-authored
-        // body, ...), whose `entry` may close over arbitrary live state and
-        // must keep running on the launching session. Rust decides per-child
-        // session eligibility from this field, not by inspecting `entry`.
-        Arg {
-            name: "unboundLabel",
-            ty: HsType::maybe(HsType::Text),
-            rust: RustBinding::Derived,
-        },
-    ];
-    if forked {
-        args.push(Arg {
-            name: "forkGroup",
-            ty: HsType::Int,
-            rust: RustBinding::Derived,
-        });
-    }
-    args.extend([
-        Arg {
-            name: "role",
-            ty: HsType::Named("ActorLaunchRole"),
-            rust: RustBinding::External,
-        },
-        Arg {
-            name: "profile",
-            ty: HsType::Named("ActorEffectProfile"),
-            rust: RustBinding::External,
-        },
-        Arg {
-            name: "launchWorktrees",
-            ty: HsType::List(Box::new(HsType::Text)),
-            rust: RustBinding::Derived,
-        },
-    ]);
-    if !forked {
-        args.push(Arg {
-            name: "lifetime",
-            ty: HsType::Named("WorkerLifetime"),
-            rust: RustBinding::External,
-        });
-    }
-    args
-}
-
-pub(crate) fn launched_actor_type() -> HsType {
-    HsType::Tuple(vec![HsType::Int, HsType::Int, HsType::Text])
 }
 
 

@@ -41,86 +41,18 @@ pub fn agent_control() -> Effect {
                     "AgentStoppedReleasing: stopped; release had not settled and a notice follows.",
                 ],
             ),
-            sum(
-                "CleanupActorState",
-                vec![
-                    variant("CleanupActorRunning", vec![]),
-                    variant("CleanupActorTerminal", vec![]),
-                ],
-                &[],
-            ),
-            record(
-                "CleanupActorPlan",
-                vec![
-                    field("cleanupActorId", HsType::Int),
-                    field("cleanupActorIncarnation", HsType::Int),
-                    field("cleanupActorLabel", HsType::Text),
-                    field("cleanupActorState", HsType::Named("CleanupActorState")),
-                    field("cleanupActorRevision", HsType::Int),
-                ],
-                &[],
-            ),
-            record(
-                "CleanupPlan",
-                vec![
-                    field("cleanupPlanGroup", HsType::Int),
-                    field(
-                        "cleanupPlanActors",
-                        HsType::list(HsType::Named("CleanupActorPlan")),
-                    ),
-                    field("cleanupPlanPendingResponses", HsType::list(HsType::Int)),
-                    field("cleanupPlanPendingWatches", HsType::list(HsType::Int)),
-                    field("cleanupPlanRefusal", HsType::maybe(HsType::Text)),
-                ],
-                &["A read-only, deepest-first campaign cleanup projection."],
-            ),
-            sum(
-                "CleanupStepReceipt",
-                vec![
-                    variant("CleanupForgotResponses", vec![HsType::list(HsType::Int)]),
-                    variant("CleanupForgotWatches", vec![HsType::list(HsType::Int)]),
-                    variant(
-                        "CleanupStoppedActor",
-                        vec![
-                            HsType::Int,
-                            HsType::Int,
-                            HsType::Named("AgentStopControlOutcome"),
-                        ],
-                    ),
-                    variant("CleanupForgotActor", vec![HsType::Int, HsType::Int]),
-                    variant(
-                        "CleanupActorRetained",
-                        vec![
-                            HsType::Int,
-                            HsType::Int,
-                            HsType::list(HsType::Int),
-                            HsType::list(HsType::Int),
-                        ],
-                    ),
-                    variant("CleanupGroupRetired", vec![HsType::Int]),
-                    variant(
-                        "CleanupActorOutputPending",
-                        vec![HsType::Int, HsType::Int, HsType::Int],
-                    ),
-                    variant("CleanupBlocked", vec![HsType::Text]),
-                    variant("CleanupStalePlan", vec![]),
-                ],
-                &[],
-            ),
-            record(
-                "CleanupReceipt",
-                vec![
-                    field("cleanupReceiptPlan", HsType::Named("CleanupPlan")),
-                    field(
-                        "cleanupReceiptSteps",
-                        HsType::list(HsType::Named("CleanupStepReceipt")),
-                    ),
-                    field("cleanupReceiptComplete", HsType::Bool),
-                ],
-                &["Refusal-bearing receipt for one idempotent cleanup attempt."],
-            ),
+            sum("AgentRetentionError", vec![
+                variant("AgentRetainUnavailable", vec![]),
+                variant("AgentRetainUnauthorized", vec![]),
+                variant("AgentRetainOwnerUnavailable", vec![]),
+                variant("AgentRetainOwnerClosed", vec![]),
+            ], &["Refusal to transfer an actor's cleanup ownership."]),
         ],
-        external_types: &[],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "WorkerLifetime",
+            rust_wire: "crate::WorkerLifetime",
+            core_module: None,
+        }],
         errors: None,
         verbs: vec![
             Verb {
@@ -136,25 +68,13 @@ pub fn agent_control() -> Effect {
                 handling: HandlingClass::Actor,
             },
             Verb {
-                ctor: "AgentControlExecuteCleanupWith",
-                method: "agent_control_execute_cleanup_with",
+                ctor: "AgentControlRetainWith",
+                method: "agent_control_retain_with",
                 args: vec![
-                    Arg {
-                        name: "group",
-                        ty: HsType::Int,
-                        rust: RustBinding::Path("i64"),
-                    },
-                    Arg {
-                        name: "inspected",
-                        ty: HsType::list(HsType::Tuple(vec![
-                            HsType::Int,
-                            HsType::Int,
-                            HsType::Int,
-                        ])),
-                        rust: RustBinding::Path("Vec<(i64, i64, i64)>"),
-                    },
+                    Arg { name: "actor", ty: HsType::Tuple(vec![HsType::Int, HsType::Int]), rust: RustBinding::Derived },
+                    Arg { name: "lifetime", ty: HsType::Named("WorkerLifetime"), rust: RustBinding::External },
                 ],
-                ret: HsType::Named("CleanupReceipt"),
+                ret: HsType::either(HsType::Named("AgentRetentionError"), HsType::Unit),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
@@ -185,31 +105,5 @@ fn sum(name: &'static str, variants: Vec<SumVariant>, doc: &'static [&'static st
         derives: NO_WIRE,
         domain: None,
         doc,
-    }
-}
-
-fn record(
-    name: &'static str,
-    fields: Vec<crate::schema::RecordField>,
-    doc: &'static [&'static str],
-) -> TypeDef {
-    TypeDef {
-        name,
-        wire_rust: None,
-        haskell_module: None,
-        shape: TypeShape::Record { fields },
-        json: JsonInstance::None,
-        derives: NO_WIRE,
-        domain: None,
-        doc,
-    }
-}
-
-fn field(name: &'static str, ty: HsType) -> crate::schema::RecordField {
-    crate::schema::RecordField {
-        hs_name: name,
-        rust_name: name,
-        ty,
-        doc: &[],
     }
 }
