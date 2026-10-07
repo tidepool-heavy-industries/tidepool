@@ -249,7 +249,7 @@ parents decide how to respond rather than relying on automatic restarts.
   output, and input/PTY support. A systemd slice bounds the whole run.
 
 The [actor guide](exomonad/examples/workspace/.exomonad/skills/exomonad-define-actors/SKILL.md)
-and [coordination skill](exomonad/examples/workspace/.exomonad/skills/exomonad-coordinate/SKILL.md)
+and [coordination skill](exomonad/examples/workspace/.exomonad/skills/exomonad-agent-work/SKILL.md)
 show how to compose these pieces. The same substrate supports one agent with
 powerful cells, semantic background actors, or a tree of coding workers.
 

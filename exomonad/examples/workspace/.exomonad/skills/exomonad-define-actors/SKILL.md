@@ -43,7 +43,8 @@ joiner <- R.start joinDefinition
 let endpoints = R.client joiner
 R.send (sourceReady endpoints) "abc123"
 R.send (checksReady endpoints) 4
-R.call (joined endpoints) ()
+joinedResult <- R.call (joined endpoints) ()
+display joinedResult
 ```
 
 `State s` appears exactly once. Its definition field is the initial value; handler
@@ -64,7 +65,8 @@ let resultDefinition = coordinationActor "candidate-results" Results
       , resultCount = \() -> gets length
       }
 results <- R.start resultDefinition
-R.call (resultCount (R.client results)) ()
+count <- R.call (resultCount (R.client results)) ()
+display count
 ```
 
 This block assumes `worker :: Request (Outcome Candidate)` from the current
@@ -145,7 +147,8 @@ tallyDefinition = R.definition "tally" (Actor.Selected knownEffects) Tally
       }
 tally <- R.start tallyDefinition
 R.send (noted (R.client tally)) "first finding"
-R.call (noteCount (R.client tally)) ()
+count <- R.call (noteCount (R.client tally)) ()
+display count
 ```
 
 Agent workspace attachment is selected when the agent is spawned. `SameDir`
