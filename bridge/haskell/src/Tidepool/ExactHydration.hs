@@ -84,6 +84,7 @@ import GHC.Unit.Module.Location
   , ml_hs_file, ml_hi_file, ml_dyn_hi_file, ml_obj_file, ml_dyn_obj_file, ml_hie_file )
 import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.SourceFile (HscSource(..))
+import GHC.Types.SourceText (sl_fs)
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
 import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine, mkRealSrcLoc)
 import GHC.Types.Avail (availNames)
@@ -111,7 +112,7 @@ import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.ResumePackage (resolveResumeInterface)
-import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
+import GHC.Unit.Types (unitString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
@@ -519,7 +520,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           then ["segmentPure", "segmentBind", "segmentFail", "settle", "resumeLifted"] else ["settle","resumeLifted"]))
         (Left "generated scaffold support has another export owner")
       imported <- case [name | (OtherPkg package,name) <- ms_textual_imps summary
-          , package == moduleUnit owner, unLoc name == moduleName owner
+          , RealUnit (Definite package) == moduleUnit owner, unLoc name == moduleName owner
           , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == line; _ -> False] of
         [name] -> Right name
         _ -> Left "generated scaffold package import occurrence differs from its protected recipe"
@@ -530,7 +531,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
       unless (ideclQualified declaration == QualifiedPre
           && fmap unLoc (ideclAs declaration) == Just (generatedScaffoldQualifier purpose)
           && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
-          && case ideclPkgQual declaration of RawPkgQual package -> package == fsLit "tidepool-resume"; _ -> False)
+          && case ideclPkgQual declaration of RawPkgQual package -> sl_fs package == fsLit "tidepool-resume"; _ -> False)
         (Left "generated scaffold parsed import differs from its protected shape")
       -- This remains an ordinary external import. Package witnesses and the
       -- defining fat interface own its type and executable body evidence.

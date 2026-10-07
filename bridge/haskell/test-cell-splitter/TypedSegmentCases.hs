@@ -16,7 +16,7 @@ import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Module (moduleUnit)
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Types (unitIdString, GenUnit(RealUnit), Definite(Definite))
 import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Name (getOccString, nameModule_maybe)
@@ -92,9 +92,9 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
             (lookupPackageName (ue_units (hsc_unit_env environment)) (PackageName (fsLit "tidepool-resume")))
           let roots = concatMap packageInterfaces (Map.elems (pprPackageImports prepared))
           unless (any (\root -> packageModule root == "Tidepool.Internal.Resume"
-              && packageUnit root == unitString selected) roots
+              && packageUnit root == unitIdString selected) roots
               && all (\modul -> moduleName (pmModule modul) /= mkModuleName "Tidepool.Internal.Resume"
-                || moduleUnit (pmModule modul) == selected) (pprModules prepared))
+                || moduleUnit (pmModule modul) == RealUnit (Definite selected)) (pprModules prepared))
             (fail (name ++ ": compiler support escaped its exact external package unit"))
           let segment = preparedSegmentCaptures products
               issued = bindersOfBinds (TypedSegment.typedSegmentRoots segment)

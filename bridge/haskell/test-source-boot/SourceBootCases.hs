@@ -98,7 +98,7 @@ import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types, md_insts)
 import GHC.Unit.Module.ModGuts (cg_binds)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..), GenUnit(RealUnit), Definite(Definite))
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, removeDirectoryRecursive
@@ -1316,11 +1316,11 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         (PackageName (fsLit "tidepool-resume")))
     packageOwner <- findImportedModule (prHscEnv (pprPipelineResult admitted))
       (mkModuleName "Tidepool.Internal.Resume") (OtherPkg selectedResumeUnit) >>= \case
-        Found _ owner | moduleUnit owner == selectedResumeUnit -> pure owner
+        Found _ owner | moduleUnit owner == RealUnit (Definite selectedResumeUnit) -> pure owner
         _ -> fail "pinned resume package selected another owner"
     unless (any (\root -> packageModule root == "Tidepool.Internal.Resume"
-        && packageUnit root == unitString selectedResumeUnit) packageRoots
-        && moduleUnit packageOwner == selectedResumeUnit
+        && packageUnit root == unitIdString selectedResumeUnit) packageRoots
+        && moduleUnit packageOwner == RealUnit (Definite selectedResumeUnit)
         && Map.notMember (mkModuleName "Tidepool.Internal.Resume") (pprFinalizedModules admitted)) $
       fail "generated scaffold used a Resume home owner instead of the pinned package"
     let compiledModules = pprModules admitted

@@ -13,6 +13,7 @@ import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.Module (mkModuleName, moduleUnit)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.State (lookupPackageName)
+import GHC.Unit.Types (GenUnit(RealUnit), Definite(Definite))
 import Tidepool.FatIface (readExactInterface)
 
 resolveResumeInterface :: HscEnv -> IO (Either String ModIface)
@@ -23,7 +24,7 @@ resolveResumeInterface environment = case lookupPackageName
     found <- findImportedModule environment (mkModuleName "Tidepool.Internal.Resume") (OtherPkg selected)
     case found of
       Found _ owner
-        | moduleUnit owner == selected
+        | moduleUnit owner == RealUnit (Definite selected)
         , not (isHomeUnit (hsc_home_unit environment) (moduleUnit owner)) -> do
             loaded <- readExactInterface environment owner
             pure $ case loaded of

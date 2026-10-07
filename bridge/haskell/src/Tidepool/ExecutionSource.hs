@@ -91,10 +91,10 @@ executionSourceInheritedOwners references originals = do
         Just reference | executionRefIdentity reference == original ->
           Right (Just (executionRefGraph reference))
         _ -> Left (ExecutionSourceConflicting key)
-      let owner = ExecutionSourceOwner original False graph
+      let retainedOwner = ExecutionSourceOwner original False graph
       case Map.lookup key selected of
-        Nothing -> Right (Map.insert key owner selected)
-        Just previous | previous == owner -> Right selected
+        Nothing -> Right (Map.insert key retainedOwner selected)
+        Just previous | previous == retainedOwner -> Right selected
         _ -> Left (ExecutionSourceConflicting key)
 
 data ExecutionSourceGraph = ExecutionSourceGraph
