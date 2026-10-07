@@ -5145,11 +5145,14 @@ where
                 .capabilities()
                 .preview_child(descriptor.capabilities().clone(), descriptor.fork_budget())
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            let capabilities = if let Some(lease) = &checkpoint_lease {
-                lease
-                    .issuer_capabilities
-                    .preview_child(capabilities, descriptor.fork_budget())
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+            let capabilities = if spawn.is_none() {
+                match &checkpoint_lease {
+                    Some(lease) => lease
+                        .issuer_capabilities
+                        .preview_child(capabilities, descriptor.fork_budget())
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                    None => capabilities,
+                }
             } else {
                 capabilities
             };

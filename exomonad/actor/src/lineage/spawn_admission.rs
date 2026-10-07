@@ -12,10 +12,13 @@ pub enum SpawnAdmissionOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
 pub enum SpawnCleanupOutcome {
+    #[haskell(module = "Tidepool.Effects.Core", name = "SpawnCleanupNotNeeded")]
     NotNeeded,
+    #[haskell(module = "Tidepool.Effects.Core", name = "SpawnCleanupConfirmed")]
     Confirmed,
+    #[haskell(module = "Tidepool.Effects.Core", name = "SpawnCleanupUnconfirmed")]
     Unconfirmed(String),
 }
 
@@ -199,20 +202,17 @@ impl SpawnAdmission {
         let Some(record) = state.spawns.get(&self.id) else {
             return crate::start::SpawnError::SpawnRefused(detail);
         };
-        match record.child {
-            Some(child) => crate::start::SpawnError::SpawnPartiallyStarted(
+        let resources = match (record.child, record.workspace.clone()) {
+            (Some(child), workspace) => crate::start::SpawnRetainedResources::SpawnRetainedActor(
                 (child.id.0 as i64, child.incarnation.0 as i64),
-                record.workspace.clone(),
-                match &record.cleanup {
-                    SpawnCleanupOutcome::Unconfirmed(cleanup) => {
-                        format!("{detail}; cleanup unconfirmed: {cleanup}")
-                    }
-                    SpawnCleanupOutcome::Confirmed => format!("{detail}; actor cleanup confirmed"),
-                    SpawnCleanupOutcome::NotNeeded => detail,
-                },
+                workspace,
             ),
-            None => crate::start::SpawnError::SpawnRefused(detail),
-        }
+            (None, Some(workspace)) => {
+                crate::start::SpawnRetainedResources::SpawnRetainedWorkspace(workspace)
+            }
+            (None, None) => return crate::start::SpawnError::SpawnRefused(detail),
+        };
+        crate::start::SpawnError::SpawnPartialFailure(resources, record.cleanup.clone(), detail)
     }
 
     /// Called after the provider attachment owner acknowledged the exact
@@ -462,11 +462,60 @@ mod tests {
         );
         assert!(matches!(
             failed.authority.error("pre_start journal refused".into()),
-            crate::start::SpawnError::SpawnPartiallyStarted((2, 1), None, _)
+            crate::start::SpawnError::SpawnPartialFailure(
+                crate::start::SpawnRetainedResources::SpawnRetainedActor((2, 1), None),
+                _,
+                _,
+            )
         ));
         registry
             .claim_spawn(owner, SessionId(1), None, Some(1))
             .unwrap();
         assert!(!registry.state.lock().active.contains(&child));
+    }
+    #[test]
+    fn each_later_startup_failure_preserves_prepared_workspace_without_an_actor() {
+        use tidepool_bridge_effects::{
+            WtGitOid, WtWorktreeHandle, WtWorktreeId, WtWorktreeReceipt,
+        };
+        for stage in [
+            "source admission",
+            "child session provision",
+            "custody transfer",
+            "kernel admission",
+        ] {
+            let registry = ForkGroupRegistry::new(ActorLineageRegistry::default());
+            let owner = ActorRef::first(crate::ActorId(1));
+            let claim = registry
+                .claim_spawn(owner, SessionId(1), None, None)
+                .unwrap();
+            let workspace = WtWorktreeHandle {
+                handle_receipt: WtWorktreeReceipt {
+                    tree_id: WtWorktreeId {
+                        raw: "retained-backing".into(),
+                    },
+                    cwd: "/retained-backing".into(),
+                    branch: None,
+                    source_head: WtGitOid {
+                        raw: "0123456789012345678901234567890123456789".into(),
+                    },
+                    snapshot_ref: None,
+                    created_at: 0,
+                },
+            };
+            claim.authority.retain_workspace(workspace.clone());
+            claim.authority.fail(stage.into());
+            match claim.authority.error(stage.into()) {
+                crate::start::SpawnError::SpawnPartialFailure(
+                    crate::start::SpawnRetainedResources::SpawnRetainedWorkspace(retained),
+                    SpawnCleanupOutcome::NotNeeded,
+                    detail,
+                ) => {
+                    assert_eq!(retained, workspace);
+                    assert_eq!(detail, stage);
+                }
+                _ => panic!("partial workspace identity was discarded at {stage}"),
+            }
+        }
     }
 }

@@ -108,7 +108,7 @@ pub use kernel::{
 pub use lineage::{
     ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
     ForkGroupCleanupOutcome, ForkGroupError, ForkGroupGate, ForkGroupId, ForkGroupPhase,
-    ForkGroupPublication, ForkGroupRegistry, SpawnAdmission, SpawnAdmissionOutcome,
+    ForkGroupPublication, ForkGroupRegistry, SpawnAdmission, SpawnAdmissionOutcome, SpawnCleanupOutcome,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,
@@ -177,7 +177,7 @@ pub use runtime_observation::{
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
     ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart,
-    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime, SpawnContextWire, SpawnError,
+    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime, SpawnContextWire, SpawnError, SpawnRetainedResources,
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,

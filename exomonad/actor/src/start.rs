@@ -82,13 +82,24 @@ pub enum SpawnContextWire {
 }
 
 #[derive(Debug, Clone, tidepool_bridge_derive::ToHaskell)]
+pub enum SpawnRetainedResources {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpawnRetainedWorkspace(tidepool_bridge_effects::WtWorktreeHandle),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    SpawnRetainedActor(
+        (i64, i64),
+        Option<tidepool_bridge_effects::WtWorktreeHandle>,
+    ),
+}
+
+#[derive(Debug, Clone, tidepool_bridge_derive::ToHaskell)]
 pub enum SpawnError {
     #[haskell(module = "Tidepool.Effects.Core")]
     SpawnRefused(String),
     #[haskell(module = "Tidepool.Effects.Core")]
-    SpawnPartiallyStarted(
-        (i64, i64),
-        Option<tidepool_bridge_effects::WtWorktreeHandle>,
+    SpawnPartialFailure(
+        SpawnRetainedResources,
+        crate::lineage::SpawnCleanupOutcome,
         String,
     ),
 }
