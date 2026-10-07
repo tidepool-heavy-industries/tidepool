@@ -186,6 +186,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
+import Tidepool.OriginalProductRoots (reconcileOriginalProducts, unrecoveredExactProducts)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
 import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmYieldSites, pmSiteRejections)
 import Tidepool.FatIface (readExactInterface)
@@ -203,7 +204,8 @@ import Tidepool.ExactScope
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
-  , originalGroupFromCandidate, normalizeInterfaceEvidence
+  , originalGroupFromCandidate, originalGroupFromProjected, normalizeInterfaceEvidence
+  , canonicalProofMatchesOwner
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
@@ -2876,6 +2878,109 @@ originalGraphClosureProperties = do
             ++ ", expected=" ++ show (expectedGroups,expectedModules)
             ++ ", actual=" ++ show (actualGroups,actualModules))
 
+originalReconciliationChecks
+  :: ExactScope -> [(String, String, [ExactOriginalGroup])] -> IO ()
+originalReconciliationChecks scope recovered = do
+  let owner = ("main", "ProjectionOwner")
+      provider = ("main", "ProjectionUnavailableProvider")
+      proofs = scopeModuleInterfaceProofs scope
+      productOwner value = (originalUnit value, originalModule value)
+      reconcile selected evidence rows = reconcileOriginalProducts (Just selected) evidence rows
+      requireRefused selected evidence rows = case reconcile selected evidence rows of
+        Left _ -> pure ()
+        Right _ -> fail "altered canonical original reconciliation was accepted"
+      fullGroups key = case [groups | (unit,name,groups) <- recovered, (unit,name) == key] of
+        [groups] -> pure groups
+        _ -> fail "reconciliation fixture lost its unique emitted native owner"
+      nativeProduct key = case filter ((== key) . productOwner) (scopeProducts scope) of
+        [value] -> pure value
+        _ -> fail "reconciliation fixture lost its unique genuine scope product"
+      normalizedGroups = sortOn originalOrdinal . map (\group -> group
+        {originalGlobals=Set.toAscList (Set.fromList (originalGlobals group))})
+  full <- fullGroups owner
+  snapshot <- nativeProduct owner
+  unless (normalizedGroups full == normalizedGroups (originalGroups snapshot)
+      && length full > 1) $
+    fail "genuine native scope differs from the complete emitted original groups"
+  selected <- case filter (not . null . originalGlobals) full of
+    group : _ -> pure group
+    [] -> fail "reconciliation fixture needs a genuine native reference"
+  (reference,required,remaining) <- case originalGlobals selected of
+    (reference,required) : remaining -> pure (reference,required,remaining)
+    [] -> fail "selected native group lost its reference"
+  let admitted = snapshot {originalGroups=[selected]}
+      selectedScope = scope {scopeProducts=
+        [if productOwner value == owner then admitted else value | value <- scopeProducts scope]}
+      row groups = [(fst owner,snd owner,groups)]
+      remainingProducts = filter ((/= owner) . productOwner) (scopeProducts selectedScope)
+      replaceSelected changed =
+        [if originalOrdinal group == originalOrdinal selected then changed else group | group <- full]
+  unchanged <- either fail pure (reconcile selectedScope proofs [])
+  unless (unrecoveredExactProducts unchanged == scopeProducts selectedScope) $
+    fail "absent recovery changed the genuine selected product inventory"
+  accepted <- either fail pure (reconcile selectedScope proofs (row full))
+  unless (not (null remainingProducts) && unrecoveredExactProducts accepted == remainingProducts) $
+    fail "canonical full recovery failed to replace only its selected original owner"
+  let normalized = selected {originalGlobals=
+        reverse (originalGlobals selected) ++ [(reference,required)]}
+  normalizedResult <- either fail pure
+    (reconcile selectedScope proofs (row (replaceSelected normalized)))
+  unless (unrecoveredExactProducts normalizedResult == remainingProducts) $
+    fail "native reference set normalization changed canonical reconciliation"
+  requireRefused selectedScope (Map.delete owner proofs) (row full)
+  borrowed <- maybe (fail "genuine provider canonical proof is absent") pure (Map.lookup provider proofs)
+  requireRefused selectedScope (Map.insert owner borrowed proofs) (row full)
+  let changedProducer = selectedScope {scopeProducerSha256=
+        case scopeProducerSha256 selectedScope of
+          '0':rest -> '1':rest
+          _:rest -> '0':rest
+          [] -> "0"}
+  requireRefused changedProducer proofs (row full)
+  genuine <- maybe (fail "genuine original canonical proof is absent") pure (Map.lookup owner proofs)
+  unless (canonicalProofMatchesOwner (scopeProducerSha256 selectedScope) owner genuine
+      && not (canonicalProofMatchesOwner (scopeProducerSha256 changedProducer) owner genuine)) $
+    fail "canonical proof producer binding lost its positive or altered-producer control"
+  -- Admitted scope inputs cannot rekey a proof under another sealed owner.
+  -- Calibrate the expected-owner predicate directly; moved products below
+  -- separately exercise reconciliation's absent admitted owner boundary.
+  forM_ [("other-unit",snd owner),(fst owner,"OtherOriginal")] $ \changedOwner -> do
+    when (canonicalProofMatchesOwner (scopeProducerSha256 selectedScope) changedOwner genuine) $
+      fail "canonical proof accepted another expected unit or module"
+    let moved = admitted {originalUnit=fst changedOwner,originalModule=snd changedOwner}
+        movedScope = selectedScope {scopeProducts=
+          [if productOwner value == owner then moved else value | value <- scopeProducts selectedScope]}
+    requireRefused movedScope (Map.insert changedOwner genuine proofs)
+      [(fst changedOwner,snd changedOwner,full)]
+  requireRefused selectedScope proofs
+    (row (filter ((/= originalOrdinal selected) . originalOrdinal) full))
+  let absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
+  requireRefused selectedScope proofs
+    (row (replaceSelected (selected {originalOrdinal=absentOrdinal})))
+  requireRefused selectedScope proofs
+    (row (replaceSelected (selected {originalBinders=[]})))
+  let changedReference = reference {symbolOccurrence=symbolOccurrence reference <> "_changed"}
+  requireRefused selectedScope proofs
+    (row (replaceSelected (selected {originalGlobals=(changedReference,required):remaining})))
+  requireRefused selectedScope proofs
+    (row (replaceSelected (selected {originalGlobals=(reference,not required):remaining})))
+  requireRefused selectedScope proofs (row full ++ row full)
+  requireRefused selectedScope proofs (row (selected:full))
+  providerProduct <- nativeProduct provider
+  providerGroups <- fullGroups provider
+  providerGroup <- case originalGroups providerProduct of
+    group : _ -> pure group
+    [] -> fail "genuine provider has no admitted native group"
+  let conflictingProvider =
+        [if originalOrdinal group == originalOrdinal providerGroup
+          then group {originalBinders=[]} else group | group <- providerGroups]
+      orderedScope = selectedScope {scopeProducts=admitted:providerProduct:
+        filter ((/= provider) . productOwner) remainingProducts}
+  requireRefused orderedScope proofs
+    (row full ++ [(fst provider,snd provider,conflictingProvider)])
+  retry <- either fail pure (reconcile selectedScope proofs (row full))
+  unless (unrecoveredExactProducts retry == unrecoveredExactProducts accepted) $
+    fail "refused reconciliation changed a later genuine retry"
+
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
   originalGraphClosureProperties
@@ -3111,6 +3216,13 @@ originalProjectionProducts = withScratch $ \work -> do
   -- Repeated native/display demand consumes the same completed canonical
   -- bodies, not just a projection of the original frontend result.
   capturedFixture <- capturePreparedFixture work paired
+  nativeScopePath <- writeGenuineCandidateNativeScope
+    ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"]
+    ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"] work capturedFixture
+  nativeScope <- readExactScope nativeScopePath >>= either fail pure
+  originalReconciliationChecks nativeScope
+    [(unitString (moduleUnit owner),moduleNameString (moduleName owner),map originalGroupFromProjected groups)
+      | (owner,Right groups) <- preparedModuleProductOutcomes completeProducts]
   capturedScopePath <- writeGenuineCandidateLexicalScope []
     ["ProjectionOwner","ProjectionUnavailableProvider","ProjectionIndependent"] work capturedFixture
   capturedScope <- readExactScope capturedScopePath >>= either fail pure

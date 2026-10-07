@@ -50,7 +50,9 @@ import Tidepool.ExecutionSchema
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ExactScope
   ( ExactScope(..), scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
-  , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256 )
+  , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256, originalGroupFromProjected )
+import Tidepool.OriginalProductRoots
+  ( ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
@@ -137,17 +139,21 @@ encodeCertifiedProducts
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
 encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes =
-  fmap (fmap fst) (encodeCertifiedProductsWithOriginals Map.empty Map.empty env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes)
+  case reconcileOriginalProducts exact Map.empty
+      [(T.unpack unit,T.unpack name,map originalGroupFromProjected groups) | (unit,name,_,groups) <- fresh] of
+    Left reason -> pure (Left reason)
+    Right reconciled -> fmap (fmap fst) (encodeCertifiedProductsWithOriginals Map.empty Map.empty reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes)
 
 encodeCertifiedProductsWithOriginals
   :: Map.Map (String,String) CanonicalInterfaceProof
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
+  -> ReconciledOriginalProducts
   -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String))
-encodeCertifiedProductsWithOriginals retained emittedSeals env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedProductsWithOriginals retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -213,7 +219,7 @@ encodeCertifiedProductsWithOriginals retained emittedSeals env sourceRecipe inte
       admittedBinders =
         [ (binder, (T.pack (originalUnit product), T.pack (originalModule product),
                     Just (T.pack (originalVersion product)), originalOrdinal group))
-        | scope <- maybe [] pure exact, product <- scopeProducts scope
+        | product <- unrecoveredExactProducts reconciled
         , group <- originalGroups product, binder <- originalBinders group ]
       binders = admittedBinders ++
         [ (binder, (productUnit product, productModule product,
