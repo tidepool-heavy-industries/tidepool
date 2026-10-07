@@ -1039,49 +1039,6 @@ pub trait KernelBehavior: Send + 'static {
         ))
     }
 
-    /// Start an admitted child with its final inherited scope.
-    fn release_fork<'a>(
-        &'a mut self,
-        _context: &'a KernelContext,
-        _release: crate::ForkChildRelease,
-    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async {
-            Err(KernelBehaviorError {
-                detail: "actor has no deferred fork".into(),
-                diagnostic: None,
-            })
-        })
-    }
-
-    /// Capture one admitted child release. The default transfers the original
-    /// behavior to its existing serial driver; resident initialization replaces
-    /// this with tasks that retain their own inputs.
-    fn dispatch_release_fork(
-        &mut self,
-        _context: &KernelContext,
-        release: crate::ForkChildRelease,
-    ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError>
-    where
-        Self: Sized,
-    {
-        Ok(OwnedActorTask::serial(
-            move |mut behavior: Self, context| {
-                Box::pin(async move {
-                    let result = behavior
-                        .release_fork(&context, release)
-                        .await
-                        .map_err(|error| KernelInvocationFailure::Failed {
-                            receipts: Vec::new(),
-                            actor: context.identity(),
-                            detail: error.detail,
-                            diagnostic: error.diagnostic,
-                        });
-                    (behavior, OwnedActorCompletion::new(move |_| result))
-                })
-            },
-        ))
-    }
-
     fn resume<'a>(
         &'a mut self,
         _context: &'a KernelContext,
@@ -1358,25 +1315,6 @@ impl PendingActorTask {
 
 struct PendingKernel {
     step: crate::WorkbenchStepKey,
-    operation: KernelTaskOperation,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum KernelTaskOperation {
-    ReleaseFork,
-    Resume,
-}
-
-async fn fail_kernel_operation<B: KernelBehavior>(
-    myself: &RactorRef<KernelMessage>,
-    state: &mut LocalActorState<B>,
-    operation: KernelTaskOperation,
-    error: KernelBehaviorError,
-) {
-    match operation {
-        KernelTaskOperation::ReleaseFork => fail_actor_with_error(myself, state, error).await,
-        KernelTaskOperation::Resume => fail_handler_with_error(myself, state, error).await,
-    }
 }
 
 #[cfg(test)]
@@ -2078,23 +2016,6 @@ where
             | KernelMessage::ToolAborted { .. }) => {
                 apply_hosted_settlement(state, settlement).await;
             }
-            KernelMessage::ReleaseFork { release } => {
-                if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                    return Ok(());
-                }
-                if release.child() != state.context.identity() {
-                    tracing::warn!(actor = %state.context.identity(), release = ?release, "foreign child release refused");
-                    return Ok(());
-                }
-                start_kernel_task(
-                    &myself,
-                    state,
-                    KernelTaskOperation::ReleaseFork,
-                    |behavior, context| behavior.dispatch_release_fork(context, release),
-                )
-                .await;
-                return Ok(());
-            }
             KernelMessage::Workbench {
                 invocation,
                 control,
@@ -2133,12 +2054,9 @@ where
                 }
             }
             KernelMessage::Resume { kind } => {
-                start_kernel_task(
-                    &myself,
-                    state,
-                    KernelTaskOperation::Resume,
-                    |behavior, context| behavior.dispatch_resume(context, kind),
-                )
+                start_kernel_task(&myself, state, |behavior, context| {
+                    behavior.dispatch_resume(context, kind)
+                })
                 .await;
                 return Ok(());
             }
@@ -2586,7 +2504,6 @@ fn start_tool<B: KernelBehavior>(
 async fn start_kernel_task<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    operation: KernelTaskOperation,
     dispatch: impl FnOnce(&mut B, &KernelContext) -> Result<OwnedActorTask<B, ()>, KernelBehaviorError>,
 ) {
     let Some(generation) = state.next_task_generation.checked_add(1) else {
@@ -2600,7 +2517,6 @@ async fn start_kernel_task<B: KernelBehavior>(
     );
     let pending = PendingActorTask::Kernel(PendingKernel {
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, None),
-        operation,
     });
     let key = pending.generation();
     state.pending_tasks.insert(key, pending);
@@ -2610,8 +2526,8 @@ async fn start_kernel_task<B: KernelBehavior>(
         Ok(Ok(task)) => spawn_actor_task(myself, state, generation, task),
         Ok(Err(error)) => {
             state.pending_tasks.remove(&generation);
-            fail_kernel_operation(myself, state, operation, {
-                let detail = format!("{operation:?} dispatch failed: {error}");
+            fail_handler_with_error(myself, state, {
+                let detail = format!("Resume dispatch failed: {error}");
                 error.context(detail)
             })
             .await;
@@ -2625,7 +2541,7 @@ async fn start_kernel_task<B: KernelBehavior>(
                 myself,
                 state,
                 pending,
-                format!("{operation:?} dispatch panicked; cleanup is unconfirmed"),
+                "Resume dispatch panicked; cleanup is unconfirmed".into(),
             );
         }
     }
@@ -2882,11 +2798,10 @@ async fn complete_actor_task<B: KernelBehavior>(
                 }
                 Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
                 Err(TaskApplyFailure::Invocation(error)) => {
-                    let detail = format!("{:?} failed: {error}", pending.operation);
-                    fail_kernel_operation(
+                    let detail = format!("Resume failed: {error}");
+                    fail_handler_with_error(
                         myself,
                         state,
-                        pending.operation,
                         error.into_behavior_error().context(detail),
                     )
                     .await;
@@ -3766,13 +3681,29 @@ mod tests {
             })
         }
 
-        fn dispatch_release_fork(
+        fn dispatch_resume(
             &mut self,
-            context: &KernelContext,
-            release: crate::ForkChildRelease,
+            _context: &KernelContext,
+            kind: crate::kernel::KernelResume,
         ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError> {
-            let probe = self.kernel_probe.clone().expect("configured kernel probe");
-            assert_eq!(release.child(), context.identity());
+            assert_eq!(kind, crate::kernel::KernelResume::ContinueProgram);
+            let Some(probe) = self.kernel_probe.clone() else {
+                return Ok(OwnedActorTask::serial(
+                    move |mut behavior: Self, context| {
+                        Box::pin(async move {
+                            let result = behavior.resume(&context).await.map_err(|error| {
+                                KernelInvocationFailure::Failed {
+                                    receipts: Vec::new(),
+                                    actor: context.identity(),
+                                    detail: error.detail,
+                                    diagnostic: error.diagnostic,
+                                }
+                            });
+                            (behavior, OwnedActorCompletion::new(move |_| result))
+                        })
+                    },
+                ));
+            };
             let abandoned = Arc::clone(&probe.abandoned);
             Ok(OwnedActorTask::new(Box::pin(async move {
                 probe.first.0.notify_one();
@@ -4284,18 +4215,17 @@ mod tests {
         }
     }
 
-    fn send_kernel_release(actor: &LocalActorRef) -> tidepool_runtime::session::PersistentSession {
-        let (release, _, machine) =
-            crate::resident_actor::child_initialization::scheduler_fixture(actor.identity());
+    fn send_kernel_resume(actor: &LocalActorRef) {
         actor
             .address()
-            .send_message(KernelMessage::ReleaseFork { release })
-            .expect("release child");
-        machine
+            .send_message(KernelMessage::Resume {
+                kind: crate::kernel::KernelResume::ContinueProgram,
+            })
+            .expect("resume kernel continuation");
     }
 
     #[tokio::test]
-    async fn hosted_tools_queued_during_child_initialization_settle_without_receiver() {
+    async fn hosted_tools_queued_during_kernel_continuation_settle_without_receiver() {
         struct UnavailableCapture;
         impl crate::HostedCheckpointCapture for UnavailableCapture {
             fn capture(
@@ -4313,7 +4243,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         let (plain_tx, mut plain_rx) = oneshot::channel();
         let (captured_tx, mut captured_rx) = oneshot::channel();
@@ -4346,7 +4276,7 @@ mod tests {
                 reply: following_tx.into(),
             })
             .unwrap();
-        // The seal acknowledges all preceding deliveries while initialization
+        // The seal acknowledges all preceding deliveries while the continuation
         // remains exclusive. Their admission is rechecked when it finishes.
         actor.seal_hosted_work().await.unwrap();
         assert!(matches!(
@@ -4394,7 +4324,7 @@ mod tests {
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
-                summary: "tool initialization queue checked".into(),
+                summary: "tool continuation queue checked".into(),
                 diagnostic: None,
             })
             .await
@@ -4408,7 +4338,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         let mut workbench = send_workbench(&actor);
         probe.first.1.notify_one();
@@ -4471,7 +4401,7 @@ mod tests {
         let probe = kernel_probe(true);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         probe.first.1.notify_one();
         probe.next.0.notified().await;
@@ -4494,7 +4424,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         probe.first.1.notify_one();
         probe.next.0.notified().await;
@@ -4504,7 +4434,7 @@ mod tests {
             stopping
                 .shutdown(ActorTerminal {
                     kind: ActorExitKind::Cancelled,
-                    summary: "stop during child initialization".into(),
+                    summary: "stop during kernel continuation".into(),
                     diagnostic: None,
                 })
                 .await

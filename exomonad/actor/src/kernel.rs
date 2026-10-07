@@ -439,9 +439,6 @@ pub enum KernelMessage {
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
-    ReleaseFork {
-        release: crate::ForkChildRelease,
-    },
     /// Drain one mailbox request retained while the resident behavior was
     /// parked on an external interaction rather than on `receive`.
     DrainMailbox,
@@ -485,7 +482,6 @@ impl KernelMessage {
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
             Self::ToolAborted { .. } => "ToolAborted",
-            Self::ReleaseFork { .. } => "ReleaseFork",
             Self::DrainMailbox => "DrainMailbox",
             Self::Resume { .. } => "Resume",
             Self::ExternalApplicationFailed { .. } => "ExternalApplicationFailed",
@@ -559,9 +555,6 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_tuple("ToolAborted")
                 .field(boundary)
                 .finish(),
-            Self::ReleaseFork { release } => {
-                formatter.debug_tuple("ReleaseFork").field(release).finish()
-            }
             Self::DrainMailbox => formatter.write_str("DrainMailbox"),
             Self::Resume { kind } => formatter.debug_tuple("Resume").field(kind).finish(),
             Self::ExternalApplicationFailed { failure, .. } => formatter
