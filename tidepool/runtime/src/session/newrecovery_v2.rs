@@ -19,8 +19,8 @@ mod snapshots;
 use snapshots::{GraphEncoding, GraphRead};
 pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate};
 
-const VERSION: u32 = 6;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v6";
+const VERSION: u32 = 7;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v7";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -135,6 +135,9 @@ pub(crate) struct RecoveryNode {
     pub lexical_roots: Vec<ExactModuleIdentity>,
     pub lexical: Vec<ExactLexicalNode>,
     pub artifact_refs: Vec<ArtifactId>,
+    /// Exact admitted native-group closure, independently of full-product
+    /// custody. Required even when empty; older records cannot infer it.
+    pub native_groups: Vec<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
     pub exports: Vec<RecoveryExport>,
     pub retracts: Vec<RecoverySymbolIdentity>,
     /// GHC-normalized import specifications introduced by this turn. These
@@ -760,11 +763,11 @@ pub(crate) fn read_v2_bytes(
     {
         return Err(at(
             path,
-            "v6 recovery graph lacks the supported paired-public-v6 schema",
+            "v7 recovery graph lacks the supported paired-public-v7 schema",
         ));
     }
     let graph: RecoveryGraph = serde_json::from_value(value)
-        .map_err(|e| at(path, format!("invalid v6 recovery graph: {e}")))?;
+        .map_err(|e| at(path, format!("invalid v7 recovery graph: {e}")))?;
     graph.validate().map_err(|mut error| {
         error.path = Some(path.to_path_buf());
         error
@@ -1092,6 +1095,8 @@ fn normalize_node(node: &mut RecoveryNode) {
     }
     node.artifact_refs.sort();
     node.artifact_refs.dedup();
+    node.native_groups.sort();
+    node.native_groups.dedup();
 }
 
 impl RecoveryGraphWire {
@@ -1478,6 +1483,22 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
     }
     for node in graph.nodes() {
         let node_artifacts = node.artifact_refs.iter().copied().collect::<BTreeSet<_>>();
+        let mut native_groups = BTreeSet::new();
+        for group in &node.native_groups {
+            if !native_groups.insert(*group) {
+                return Err(error("duplicate recovered native group selection"));
+            }
+            if !node_artifacts.contains(&group.artifact)
+                || !matches!(
+                    artifacts.get(&group.artifact),
+                    Some(RecoveryArtifactClosure::Home(_))
+                )
+            {
+                return Err(error(
+                    "recovered native group lacks its exact original carrier",
+                ));
+            }
+        }
         if node
             .artifact_refs
             .iter()
@@ -1631,7 +1652,7 @@ fn checksum_with_encoded_bytes(graph: &impl GraphRead) -> Result<(String, u64), 
         checksum: "",
     })
     .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v6\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v7\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok((
         blake3::hash(&domain).to_hex().to_string(),
@@ -2084,8 +2105,12 @@ mod tests {
             materialize_certified_products, CertifiedRecoveryProduct,
         };
 
-        static PRODUCTS: OnceLock<([u8; 32], Vec<CertifiedRecoveryProduct>)> = OnceLock::new();
-        let (producer, products) = PRODUCTS.get_or_init(|| {
+        static PRODUCTS: OnceLock<(
+            [u8; 32],
+            Vec<CertifiedRecoveryProduct>,
+            Vec<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
+        )> = OnceLock::new();
+        let (producer, products, native_groups) = PRODUCTS.get_or_init(|| {
             tidepool_testing::eval_harness::require_extract();
             let compiled = tidepool_toolchain::artifacts::compile_targets(
                 include_str!("fixtures/recovery-control.hs"),
@@ -2105,13 +2130,18 @@ mod tests {
                 })
                 .expect("compiler-certified Lib artifact descriptor")
                 .producer_sha256;
+            let native_groups = compiled
+                .artifact_view
+                .selected_native_groups()
+                .into_iter()
+                .collect();
             let products = compiled
                 .recovery_products
                 .into_iter()
                 .filter(|product| product.owner().unit == "main" && product.owner().module == "Lib")
                 .collect::<Vec<_>>();
             assert_eq!(products.len(), 1, "compiler-issued Lib native product");
-            (producer, products)
+            (producer, products, native_groups)
         });
         let mut materialized = materialize_certified_products(root, *producer, products)
             .expect("materialize compiler-issued recovery control");
@@ -2119,6 +2149,7 @@ mod tests {
         // compile_targets produces a source original, not an authored session
         // generation. The graph selects it as an implementation of a join.
         graph.nodes[0].kind = RecoveryNodeKind::Join;
+        graph.nodes[0].native_groups = native_groups.clone();
         graph.seal().unwrap();
         assert!(snapshot(&graph)
             .validate_artifact_files(root)
@@ -2128,6 +2159,340 @@ mod tests {
             .capture_inventory(root)
             .expect("compiler-issued recovery inventory");
         graph
+    }
+
+    struct CompiledGroupSelection {
+        producer: [u8; 32],
+        products: Vec<tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct>,
+        late: tidepool_toolchain::artifact_inventory::NativeGroupKey,
+        late_closure: BTreeSet<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
+        zero_edge: tidepool_toolchain::artifact_inventory::NativeGroupKey,
+    }
+
+    fn compiled_group_selection(
+        root: &Path,
+    ) -> (RecoveryGraphWire, &'static CompiledGroupSelection) {
+        use std::sync::OnceLock;
+        use tidepool_toolchain::artifact_inventory::{ArtifactKind, NativeGroupKey};
+        static FIXTURE: OnceLock<CompiledGroupSelection> = OnceLock::new();
+        let fixture = FIXTURE.get_or_init(|| {
+            tidepool_testing::eval_harness::require_extract();
+            let compiled = tidepool_toolchain::artifacts::compile_targets(
+                include_str!("fixtures/recovery-group-selection.hs"),
+                &["early", "late", "isolated"],
+                &[],
+                |_, _, _| {},
+            )
+            .expect("production compilation of independent native groups");
+            let descriptors = compiled.artifact_view.descriptors();
+            let original = descriptors
+                .iter()
+                .find(|row| {
+                    row.kind == ArtifactKind::OriginalModule
+                        && row.owner.unit == "main"
+                        && row.owner.module == "Lib"
+                })
+                .expect("actual original Lib carrier");
+            let issued_root = |name: &str| {
+                let matches = compiled
+                    .certified_groups
+                    .iter()
+                    .filter(|group| {
+                        group.owner().unit == "main"
+                            && group.owner().module == "Lib"
+                            && group
+                                .group()
+                                .binders()
+                                .iter()
+                                .any(|binder| binder.occurrence == name)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "one actual original binder for {name}");
+                NativeGroupKey {
+                    artifact: original.id,
+                    original_ordinal: matches[0].group().original_ordinal(),
+                }
+            };
+            let edges = compiled
+                .artifact_view
+                .dependencies()
+                .into_iter()
+                .filter_map(|(from, to, edge)| match edge {
+                    ArtifactDependency::NativeGroup {
+                        dependent_ordinal,
+                        required_ordinal,
+                    } => Some((
+                        NativeGroupKey {
+                            artifact: from,
+                            original_ordinal: dependent_ordinal,
+                        },
+                        NativeGroupKey {
+                            artifact: to,
+                            original_ordinal: required_ordinal,
+                        },
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            // Independent fixed point over compiler-issued group relations; the
+            // recovery primitive under test does not construct this expectation.
+            let closure = |root| {
+                let mut selected = BTreeSet::from([root]);
+                loop {
+                    let before = selected.len();
+                    for (from, to) in &edges {
+                        if selected.contains(from) {
+                            selected.insert(*to);
+                        }
+                    }
+                    if selected.len() == before {
+                        return selected;
+                    }
+                }
+            };
+            let late = issued_root("late");
+            let late_closure = closure(late);
+            assert!(
+                late_closure.is_superset(&closure(issued_root("early"))),
+                "late genuinely retains the earlier original group"
+            );
+            assert!(
+                late_closure.len() > 1,
+                "missing dependency control must be non-vacuous"
+            );
+            let zero_edge = closure(issued_root("isolated"))
+                .into_iter()
+                .find(|group| {
+                    !late_closure.contains(group) && !edges.iter().any(|(from, _)| from == group)
+                })
+                .expect("independent closed zero-edge original group");
+            let products = compiled
+                .recovery_products
+                .into_iter()
+                .filter(|product| product.owner().unit == "main" && product.owner().module == "Lib")
+                .collect::<Vec<_>>();
+            assert_eq!(products.len(), 1, "full compiler-issued Lib product");
+            CompiledGroupSelection {
+                producer: original.producer_sha256,
+                products,
+                late,
+                late_closure,
+                zero_edge,
+            }
+        });
+        let mut materialized =
+            tidepool_toolchain::recovery_artifacts::materialize_certified_products(
+                root,
+                fixture.producer,
+                &fixture.products,
+            )
+            .unwrap();
+        let mut wire = graph_with_home(materialized.pop().unwrap());
+        wire.nodes[0].kind = RecoveryNodeKind::Join;
+        wire.nodes[0].exports[0].identity = identity("late");
+        wire.nodes[0].native_groups = fixture.late_closure.iter().copied().collect();
+        wire.seal().unwrap();
+        (wire, fixture)
+    }
+
+    #[test]
+    fn v7_partial_native_group_selection_roundtrips_and_retains_zero_edge_groups() {
+        let root = tempfile::tempdir().unwrap();
+        let (wire, fixture) = compiled_group_selection(root.path());
+        let baseline = snapshot(&wire);
+        let inventory = baseline.capture_inventory(root.path()).unwrap();
+        let node = baseline.node(Generation(1)).unwrap();
+        let restored = inventory
+            .context(
+                &node.artifact_refs,
+                &node.native_groups,
+                node.lexical.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.artifact_view().selected_native_groups(),
+            fixture.late_closure
+        );
+        assert!(!restored
+            .artifact_view()
+            .selected_native_groups()
+            .contains(&fixture.zero_edge));
+        assert_eq!(
+            restored.artifact_view().interface_dependencies().len(),
+            1,
+            "group-to-carrier custody is not an interface dependency"
+        );
+        let bytes = serde_json::to_vec(&baseline).unwrap();
+        let decoded: RecoveryGraph = serde_json::from_slice(&bytes).unwrap();
+        let decoded_node = decoded.node(Generation(1)).unwrap();
+        assert_eq!(decoded_node.native_groups, node.native_groups);
+        let recovered = decoded
+            .capture_inventory(root.path())
+            .unwrap()
+            .context(
+                &decoded_node.artifact_refs,
+                &decoded_node.native_groups,
+                decoded_node.lexical.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.artifact_view().selected_native_groups(),
+            fixture.late_closure
+        );
+
+        let mut extended = wire.clone();
+        extended.nodes[0].native_groups.push(fixture.zero_edge);
+        extended.seal().unwrap();
+        let extended = snapshot(&extended);
+        let added = extended.node(Generation(1)).unwrap();
+        let extended_context = inventory
+            .context(
+                &added.artifact_refs,
+                &added.native_groups,
+                added.lexical.clone(),
+            )
+            .unwrap();
+        let mut expected = fixture.late_closure.clone();
+        expected.insert(fixture.zero_edge);
+        assert_eq!(
+            extended_context.artifact_view().selected_native_groups(),
+            expected
+        );
+        assert_eq!(
+            baseline.artifacts().collect::<Vec<_>>(),
+            extended.artifacts().collect::<Vec<_>>(),
+            "registering one more existing group stores no new product bytes"
+        );
+        assert_eq!(
+            restored.artifact_view().interface_dependencies(),
+            extended_context.artifact_view().interface_dependencies()
+        );
+        assert_ne!(
+            restored.semantic_sha256(),
+            extended_context.semantic_sha256(),
+            "zero-edge group selection is independently bound in context identity"
+        );
+        assert_ne!(baseline.checksum(), extended.checksum());
+        let mut private_wire = extended.wire_for_test();
+        private_wire.public_surfaces.clear();
+        private_wire.nodes.retain(|node| node.id == Generation(1));
+        private_wire.seal().unwrap();
+        let manifest = root.path().join("declarations.json");
+        assert!(matches!(
+            stage_v2(&manifest, root.path(), snapshot(&private_wire))
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let mut session = crate::session::SessionLib::open(
+            crate::session::SessionId(41),
+            root.path().join("session"),
+            crate::session::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        session.attach_recovery_graph_v2(&manifest).unwrap();
+        assert!(
+            session.current_declarations().is_empty(),
+            "private custody stays private"
+        );
+        session.reserve_join_generation_durable().unwrap();
+        let reopened = read_v2(&manifest, root.path()).unwrap().unwrap();
+        assert_eq!(
+            reopened.graph.node(Generation(1)).unwrap().native_groups,
+            expected.into_iter().collect::<Vec<_>>(),
+            "later publication retains partial and zero-edge group custody"
+        );
+    }
+
+    #[test]
+    fn v7_native_group_selection_refuses_missing_altered_and_unauthenticated_facts() {
+        use tidepool_toolchain::artifact_inventory::NativeGroupKey;
+        let root = tempfile::tempdir().unwrap();
+        let (wire, fixture) = compiled_group_selection(root.path());
+        let baseline = snapshot(&wire);
+        let inventory = baseline.capture_inventory(root.path()).unwrap();
+        let node = baseline.node(Generation(1)).unwrap();
+        assert!(
+            inventory
+                .context(
+                    &node.artifact_refs,
+                    &node.native_groups,
+                    node.lexical.clone()
+                )
+                .is_ok(),
+            "real positive before every refusal"
+        );
+        let missing = node
+            .native_groups
+            .iter()
+            .copied()
+            .filter(|key| key == &fixture.late)
+            .collect::<Vec<_>>();
+        assert!(inventory
+            .context(&node.artifact_refs, &missing, node.lexical.clone())
+            .is_err());
+        let mut unknown = node.native_groups.clone();
+        unknown.push(NativeGroupKey {
+            artifact: fixture.late.artifact,
+            original_ordinal: u32::MAX,
+        });
+        assert!(inventory
+            .context(&node.artifact_refs, &unknown, node.lexical.clone())
+            .is_err());
+        let mut duplicate = node.native_groups.clone();
+        duplicate.push(fixture.late);
+        assert!(inventory
+            .context(&node.artifact_refs, &duplicate, node.lexical.clone())
+            .is_err());
+        let mut outside = node.native_groups.clone();
+        outside.push(NativeGroupKey {
+            artifact: ArtifactId([0; 32]),
+            original_ordinal: 0,
+        });
+        assert!(inventory
+            .context(&node.artifact_refs, &outside, node.lexical.clone())
+            .is_err());
+        let mut altered = wire.clone();
+        altered.nodes[0].native_groups.push(fixture.zero_edge);
+        assert!(
+            RecoveryGraph::from_wire(altered).is_err(),
+            "checksum binds exact selection"
+        );
+        let manifest = root.path().join("declarations.json");
+        let mut missing_field = serde_json::to_value(&baseline).unwrap();
+        missing_field["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_groups");
+        let bytes = serde_json::to_vec(&missing_field).unwrap();
+        fs::write(&manifest, &bytes).unwrap();
+        assert!(
+            read_v2(&manifest, root.path()).is_err(),
+            "V7 never infers AllGroups"
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        let mut old = serde_json::to_value(&baseline).unwrap();
+        old["version"] = serde_json::json!(VERSION - 1);
+        let bytes = serde_json::to_vec(&old).unwrap();
+        fs::write(&manifest, &bytes).unwrap();
+        assert_eq!(
+            read_v2(&manifest, root.path()).err().unwrap().kind,
+            RecoveryErrorKind::Format(RecoveryRefusal::UnsupportedOldFormat {
+                version: u64::from(VERSION - 1)
+            })
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        // Selection omits an isolated body, but never weakens full-byte product
+        // authentication. Corruption anywhere in that full product still refuses.
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
+            unreachable!()
+        };
+        fs::write(
+            root.path().join(&home.product_path),
+            b"corrupt unused original body",
+        )
+        .unwrap();
+        assert!(baseline.capture_inventory(root.path()).is_err());
     }
 
     fn graph_with_home(materialized: RecoveryArtifactRef) -> RecoveryGraphWire {
@@ -2160,6 +2525,7 @@ mod tests {
                     lexical_roots: vec![],
                     lexical: vec![],
                     artifact_refs: vec![key],
+                    native_groups: vec![],
                     exports: vec![export.clone()],
                     retracts: vec![],
                     workbench_imports: vec!["qualified Data.Map.Strict as Map".into()],
@@ -2175,6 +2541,7 @@ mod tests {
                     lexical_roots: vec![],
                     lexical: vec![],
                     artifact_refs: vec![],
+                    native_groups: vec![],
                     exports: vec![export],
                     retracts: vec![],
                     workbench_imports: vec!["Data.Proxy (Proxy (..))".into()],
@@ -2993,7 +3360,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_manifest_refuses_persisted_native_relation_rows() {
+    fn v7_manifest_refuses_persisted_native_relation_rows() {
         let baseline = fixture();
         let original = home_artifact(&baseline).artifact_id();
         for dependency in [
@@ -3328,9 +3695,11 @@ mod tests {
     fn old_recovery_formats_are_refused_without_rewriting_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("declarations.json");
+        let current = serde_json::to_value(snapshot(&compiled_fixture(dir.path()))).unwrap();
         for version in 1..u64::from(VERSION) {
-            let bytes =
-                format!("{{ \"version\" : {version}, \"retained\" : [1, 2, 3] }}\n").into_bytes();
+            let mut record = current.clone();
+            record["version"] = serde_json::json!(version);
+            let bytes = serde_json::to_vec(&record).unwrap();
             fs::write(&manifest, &bytes).unwrap();
 
             let error = read_v2(&manifest, dir.path()).err().unwrap();
@@ -3387,6 +3756,7 @@ mod tests {
         let product_path = home.product_path.clone();
         let canonical = RecoveryArtifactClosure::ModuleInterface(interface.clone());
         wire.nodes[0].artifact_refs = vec![canonical.artifact_id()];
+        wire.nodes[0].native_groups.clear();
         wire.artifacts = vec![canonical];
         wire.artifact_dependencies.clear();
         wire.seal().unwrap();
@@ -3764,7 +4134,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_checksum_covers_lexical_roots_and_edges() {
+    fn v7_checksum_covers_lexical_roots_and_edges() {
         let root = module("main", "Lib");
         let other = module("main", "Other");
         let mut graph = fixture();
@@ -3980,7 +4350,7 @@ mod tests {
         let mut unsigned = graph.clone();
         unsigned.checksum.clear();
         let bytes = serde_json::to_vec(&unsigned).unwrap();
-        let mut domain = b"tidepool-recovery-graph-v6\0".to_vec();
+        let mut domain = b"tidepool-recovery-graph-v7\0".to_vec();
         domain.extend_from_slice(&bytes);
         assert_eq!(
             checksum(&graph).unwrap(),
@@ -4150,6 +4520,7 @@ mod tests {
         let mut graph = compiled_fixture(dir.path());
         graph.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
+        graph.nodes[1].native_groups = graph.nodes[0].native_groups.clone();
         graph.seal().unwrap();
         let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
@@ -4177,6 +4548,7 @@ mod tests {
         let mut graph = compiled_fixture(dir.path());
         graph.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
+        graph.nodes[1].native_groups = graph.nodes[0].native_groups.clone();
         graph.seal().unwrap();
         let manifest_path = dir.path().join("recovery.json");
         match stage_v2(&manifest_path, dir.path(), snapshot(&graph))

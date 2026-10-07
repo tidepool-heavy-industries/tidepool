@@ -304,7 +304,11 @@ impl SessionLib {
         }
         let mut contexts = BTreeMap::new();
         for node in graph.nodes() {
-            let context = Arc::new(inventory.context(&node.artifact_refs, node.lexical.clone())?);
+            let context = Arc::new(inventory.context(
+                &node.artifact_refs,
+                &node.native_groups,
+                node.lexical.clone(),
+            )?);
             validate_recovery_native_markers(node, &context).map_err(invalid)?;
             contexts.insert(node.id, context);
         }
@@ -442,14 +446,10 @@ pub(super) fn validate_recovery_native_markers(
     node: &recovery::RecoveryNode,
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
 ) -> Result<(), String> {
-    let roots = match node.kind {
-        recovery::RecoveryNodeKind::Authored => vec![
-            tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
-                context
-                    .authored_native_root(node.id.0)
-                    .map_err(|error| error.to_string())?,
-            ),
-        ],
+    let artifacts = match node.kind {
+        recovery::RecoveryNodeKind::Authored => BTreeSet::from([context
+            .authored_native_root(node.id.0)
+            .map_err(|error| error.to_string())?]),
         recovery::RecoveryNodeKind::Join => {
             let owners = node
                 .exports
@@ -471,14 +471,11 @@ pub(super) fn validate_recovery_native_markers(
                         == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
                         && owners.contains(&descriptor.owner)
                 })
-                .map(|descriptor| {
-                    tidepool_toolchain::artifact_inventory::NativeRequirementRoot::AllGroups(
-                        descriptor.id,
-                    )
-                })
-                .collect::<Vec<_>>()
+                .map(|descriptor| descriptor.id)
+                .collect::<BTreeSet<_>>()
         }
     };
+    let roots = selected_native_roots(context.artifact_view(), &artifacts);
     let expected =
         certified_native_dependencies(context, &roots).map_err(|error| error.to_string())?;
     let expected = expected.into_iter().collect::<BTreeSet<_>>();

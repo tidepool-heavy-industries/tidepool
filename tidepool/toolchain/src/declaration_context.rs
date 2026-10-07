@@ -450,10 +450,7 @@ fn encode_scope_manifest(
 pub struct RecoveredArtifactInventory {
     producer: [u8; 32],
     entries: BTreeMap<crate::artifact_inventory::ArtifactId, Arc<ArtifactEntry>>,
-    originals: BTreeMap<
-        crate::artifact_inventory::ArtifactId,
-        crate::certified_products::RecoveryOriginalRequirements,
-    >,
+    recorded_inventory: bool,
     interfaces: Vec<(
         crate::artifact_inventory::ArtifactId,
         crate::artifact_inventory::ArtifactId,
@@ -606,7 +603,6 @@ impl RecoveredArtifactInventory {
             &mut validation,
         )
         .map_err(failure)?;
-        let mut original_requirements = BTreeMap::new();
         for original in certified {
             context.admit_producer(original.producer_sha256)?;
             let product = original.product;
@@ -619,7 +615,6 @@ impl RecoveredArtifactInventory {
                 product,
                 &mut validation,
             )?;
-            original_requirements.insert(entry.descriptor.id, requirements);
             entries.push(entry);
         }
         for (reference, artifact) in joins.iter().zip(verified_joins) {
@@ -702,14 +697,40 @@ impl RecoveredArtifactInventory {
         Ok(Self {
             producer: context.producer,
             entries,
-            originals: original_requirements,
+            recorded_inventory: inventory.is_some(),
             interfaces,
         })
     }
 
+    /// Restore persisted selection only after full products were authenticated.
+    /// The raw keys grant no checked-entry or live binding authority.
     pub fn context(
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
+        groups: &[crate::artifact_inventory::NativeGroupKey],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        let selected = groups.iter().copied().collect::<BTreeSet<_>>();
+        if selected.len() != groups.len() {
+            return Err(failure("duplicate recovered native group selection"));
+        }
+        self.context_with_selection(ids, Some(&selected), lexical)
+    }
+
+    /// Standalone callers explicitly request every authenticated original group.
+    /// Durable V7 restoration always uses `context` with its recorded selection.
+    pub fn context_all_groups(
+        &self,
+        ids: &[crate::artifact_inventory::ArtifactId],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        self.context_with_selection(ids, None, lexical)
+    }
+
+    fn context_with_selection(
+        &self,
+        ids: &[crate::artifact_inventory::ArtifactId],
+        groups: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<ExactDeclarationContext, CompileError> {
         let selected = ids.iter().copied().collect::<BTreeSet<_>>();
@@ -725,50 +746,50 @@ impl RecoveredArtifactInventory {
                     .ok_or_else(|| failure("missing recovered artifact selection"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut owners = BTreeMap::new();
-        for entry in &entries {
-            let owner = entry.descriptor.owner.clone();
-            if matches!(entry.payload, ArtifactPayload::Original(_)) || !owners.contains_key(&owner)
-            {
-                owners.insert(owner, entry);
-            }
-        }
         for (from, to, _) in &self.interfaces {
             if selected.contains(from) && !selected.contains(to) {
                 return Err(failure("recovered interface closure is incomplete"));
             }
         }
-        for id in ids {
-            if let Some(original) = self.originals.get(id) {
-                for required in &original.sources {
-                    let entry = owners
-                        .get(&identity(&required.unit, &required.module))
-                        .ok_or_else(|| failure("native dependency artifact is missing"))?;
-                    let ArtifactPayload::Original(product) = &entry.payload else {
-                        return Err(failure("native source requires an original product"));
-                    };
-                    if product.owner() != required {
-                        return Err(failure(
-                            "native source owner differs from original certification",
-                        ));
-                    }
-                }
-                if original
-                    .packages
-                    .iter()
-                    .any(|owner| owners.contains_key(owner))
-                {
-                    return Err(failure("home owner downgraded to package"));
-                }
-            }
-        }
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
+        let restored = match groups {
+            Some(groups) => inventory.admit_recovery_selection(&empty, entries, groups)?,
+            None => inventory.admit_shared(&empty, entries)?,
+        };
+        if restored
+            .descriptors()
+            .iter()
+            .map(|row| row.id)
+            .collect::<BTreeSet<_>>()
+            != selected
+        {
+            return Err(failure(
+                "recovered artifact closure differs from recorded selection",
+            ));
+        }
+        if self.recorded_inventory {
+            let expected = self
+                .interfaces
+                .iter()
+                .filter(|(from, _, _)| selected.contains(from))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let actual = restored
+                .interface_dependencies()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            if actual != expected {
+                return Err(failure(
+                    "recovered interface facts differ from recorded selection",
+                ));
+            }
+        }
         let context = ExactDeclarationContext {
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             template_imports: None,
-            inventory: inventory.admit_shared(&empty, entries)?,
+            inventory: restored,
             lexical,
         };
         context.normalize()?;
@@ -3162,15 +3183,21 @@ impl ExactDeclarationContext {
             crate::artifact_inventory::ArtifactId,
             crate::artifact_inventory::ArtifactDependency,
         )],
+        native_groups: &[crate::artifact_inventory::NativeGroupKey],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        Self::capture_recovery_inputs(
+        let inventory = RecoveredArtifactInventory::capture_inputs(
             root,
             products,
             module_interfaces,
             joins,
             values,
             Some((descriptors, dependencies)),
+        )
+        .map_err(failure)?;
+        inventory.context(
+            &inventory.entries.keys().copied().collect::<Vec<_>>(),
+            native_groups,
             lexical,
         )
     }
@@ -3199,7 +3226,7 @@ impl ExactDeclarationContext {
             inventory,
         )
         .map_err(failure)?;
-        inventory.context(
+        inventory.context_all_groups(
             &inventory.entries.keys().copied().collect::<Vec<_>>(),
             lexical,
         )
