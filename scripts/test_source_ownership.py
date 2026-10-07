@@ -20,6 +20,7 @@ TEST_ONLY_SOURCES = {
     }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/embedded_agent_spec_tests.rs',
+        'bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs',
         'bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs',
         'bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs',
         'bridge/facade/src/exomonad/workspace/source_capture_tests.rs',
