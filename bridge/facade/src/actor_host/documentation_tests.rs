@@ -2794,6 +2794,14 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects() {
+    let repository = recipe_workspace(Some(&["Project.QuantitiesChecks.workspaceProfile"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
     let work = repository
