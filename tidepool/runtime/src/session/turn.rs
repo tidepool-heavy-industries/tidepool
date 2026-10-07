@@ -2622,7 +2622,7 @@ fn compile_cell_program_admitted_receipt_controls(
 enum CellProgramAudit<'a> {
     None,
     Receipts,
-    WorkCounts(Option<usize>),
+    WorkCounts(Option<scaling_tests::SegmentWorkShape>),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
 
@@ -2743,7 +2743,7 @@ fn compile_cell_program_admitted_work_controls(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
     templates: &[TurnTemplate],
-    expected_items: Option<usize>,
+    expected_shape: Option<scaling_tests::SegmentWorkShape>,
 ) -> Result<
     (
         CellCheck,
@@ -2755,7 +2755,7 @@ fn compile_cell_program_admitted_work_controls(
         req,
         admission,
         templates,
-        CellProgramAudit::WorkCounts(expected_items),
+        CellProgramAudit::WorkCounts(expected_shape),
     )
 }
 
@@ -2877,8 +2877,8 @@ fn compile_cell_program_admitted_inner(
         audit_current_native_emission(&program, scratch.path(), old_owners);
     }
     #[cfg(test)]
-    if let CellProgramAudit::WorkCounts(expected_items) = audit {
-        scaling_tests::assert_compiler_work(&program, &run.output.stderr, expected_items);
+    if let CellProgramAudit::WorkCounts(expected_shape) = audit {
+        scaling_tests::assert_compiler_work(&program, &run.output.stderr, expected_shape);
     }
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
