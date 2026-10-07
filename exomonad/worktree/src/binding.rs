@@ -469,7 +469,7 @@ impl BindingTable {
         let mut active_agents = std::collections::BTreeSet::new();
         for entry in &bindings {
             if entry.binding.state() == BindingState::Active
-                && !active_agents.insert(entry.binding.agent())
+                && !active_agents.insert(entry.binding.agent().clone())
             {
                 return Err(storage_failure(
                     root,
