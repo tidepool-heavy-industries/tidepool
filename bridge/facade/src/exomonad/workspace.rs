@@ -150,8 +150,55 @@ pub(crate) enum WorkspacePreparation {
     Completed {
         original: uuid::Uuid,
         revision: String,
-        entries: BTreeMap<String, uuid::Uuid>,
+        coverage: Vec<PreparedToolsetCoverage>,
     },
+}
+
+/// The required profile and the exact specialization its producer completed.
+/// These records are the primary inventory; recipe selections are derived.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedToolsetCoverage {
+    pub(crate) profile: super::PreparationProfile,
+    pub(crate) requested_effects: Vec<exomonad_actor::ActorEffectKey>,
+    pub(crate) effective_effects: Vec<exomonad_actor::ActorEffectKey>,
+    pub(crate) recipe: String,
+    pub(crate) original: uuid::Uuid,
+}
+
+fn coverage_entries(
+    coverage: &[PreparedToolsetCoverage],
+) -> Result<BTreeMap<String, uuid::Uuid>> {
+    if coverage.is_empty() {
+        return Err("completed workspace has no prepared toolset coverage".into());
+    }
+    let mut selected = BTreeMap::new();
+    for (index, entry) in coverage.iter().enumerate() {
+        if entry.recipe.len() != 64
+            || !entry.recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || entry.original.is_nil()
+        {
+            return Err("prepared toolset coverage has an invalid original selection".into());
+        }
+        if coverage[..index]
+            .iter()
+            .any(|previous| previous.profile == entry.profile)
+        {
+            return Err("prepared toolset coverage repeats a profile".into());
+        }
+        if let Some(previous) = coverage[..index]
+            .iter()
+            .find(|previous| previous.recipe == entry.recipe)
+        {
+            if previous.original != entry.original
+                || previous.effective_effects != entry.effective_effects
+            {
+                return Err("prepared profiles sharing a recipe select different originals or effect rows".into());
+            }
+        }
+        selected.insert(entry.recipe.clone(), entry.original);
+    }
+    Ok(selected)
 }
 
 /// A run-local reference to an independently retained immutable deployment.
@@ -286,10 +333,10 @@ impl FrozenWorkspace {
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            let mut frozen: Self = serde_json::from_value(selection)?;
-            if frozen.version != 5 {
-                return Err("unsupported frozen workspace format; start a new run".into());
+            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(6) {
+                return Err("unsupported frozen workspace format; prepare a new deployment and start a new run".into());
             }
+            let mut frozen: Self = serde_json::from_value(selection)?;
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
                     "frozen workspace library differs from this build; start a new swarm".into(),
@@ -377,18 +424,18 @@ impl FrozenWorkspace {
                 return Err("frozen workspace orchestration differs from this build".into());
             }
             if let Some(WorkspacePreparation::Completed {
-                revision, entries, ..
+                revision, ..
             }) = &frozen.preparation
             {
                 if revision.len() != 64
                     || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    || entries.is_empty()
                 {
                     return Err(
                         "completed workspace preparation lacks its original revision or entries"
                             .into(),
                     );
                 }
+                frozen.validate_prepared_toolset_promises()?;
                 if deployment_files(&directory)? != frozen.files {
                     return Err("prepared workspace deployment inventory changed".into());
                 }
@@ -550,7 +597,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 5,
+            version: 6,
             identity,
             include,
             modules: config.haskell.modules,
@@ -651,24 +698,24 @@ impl FrozenWorkspace {
         &mut self,
         directory: &tidepool_atomic_write::DirectoryAnchor,
         revision: String,
-        entries: BTreeMap<String, uuid::Uuid>,
+        coverage: Vec<PreparedToolsetCoverage>,
     ) -> Result<()> {
         let Some(WorkspacePreparation::Preparing { original }) = &self.preparation else {
             return Err("only an admitted workspace preparation can complete".into());
         };
-        if entries.is_empty()
-            || revision.len() != 64
+        if revision.len() != 64
             || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(
                 "workspace preparation must settle original native entries and revision".into(),
             );
         }
+        self.validate_toolset_coverage(&coverage)?;
         self.files = deployment_files(&directory.path().join("workspace"))?;
         self.preparation = Some(WorkspacePreparation::Completed {
             original: *original,
             revision,
-            entries,
+            coverage,
         });
         self.write_selection(directory.path())?;
         self.prepared_deployment = Some(std::sync::Arc::new(
@@ -687,7 +734,70 @@ impl FrozenWorkspace {
         ) {
             return Err("only a completed workspace preparation can be sealed".into());
         }
+        self.validate_prepared_toolset_promises()?;
         seal_prepared_directory(directory.path())
+    }
+
+    pub(crate) fn prepared_toolset_coverage(&self) -> Option<&[PreparedToolsetCoverage]> {
+        match &self.preparation {
+            Some(WorkspacePreparation::Completed { coverage, .. }) => Some(coverage),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn completed_entry_selections(&self) -> Result<BTreeMap<String, uuid::Uuid>> {
+        coverage_entries(
+            self.prepared_toolset_coverage()
+                .ok_or("workspace toolset preparation is incomplete")?,
+        )
+    }
+
+    fn validate_toolset_coverage(&self, coverage: &[PreparedToolsetCoverage]) -> Result<()> {
+        coverage_entries(coverage)?;
+        let config = self.config()?;
+        let expected = config.preparation.selected_profiles(config.research)?;
+        if expected.len() != coverage.len() {
+            return Err("prepared workspace does not cover all configured toolset profiles".into());
+        }
+        for profile in expected {
+            let entry = coverage
+                .iter()
+                .find(|entry| entry.profile == profile.profile)
+                .ok_or("prepared workspace is missing a configured toolset profile")?;
+            if entry.requested_effects != profile.requested_effects {
+                return Err("prepared toolset profile differs from this build's requested effect row".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_prepared_toolset_promises(&self) -> Result<()> {
+        self.validate_toolset_coverage(
+            self.prepared_toolset_coverage()
+                .ok_or("workspace toolset preparation is incomplete")?,
+        )
+    }
+
+    /// Check every promised specialization against actual assembled support
+    /// before actor startup can interpret an absent recipe as uncovered work.
+    pub(crate) fn validate_prepared_toolset_recipes(
+        &self,
+        workbench: &exomonad_actor::ActorWorkbenchSource,
+        source: &exomonad_actor::CheckpointSourceLayer,
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+    ) -> Result<()> {
+        self.validate_prepared_toolset_promises()?;
+        for entry in self.prepared_toolset_coverage().expect("promises validated") {
+            let actual = workbench.source_toolset_recipe(
+                source,
+                &entry.requested_effects,
+                supported_effects,
+            )?;
+            if actual.effective_effects != entry.effective_effects || actual.recipe != entry.recipe {
+                return Err("prepared toolset recipe differs from actual host source or interpreter support; prepare a new deployment".into());
+            }
+        }
+        Ok(())
     }
 
     fn write_selection(&self, directory: &Path) -> Result<()> {
@@ -1921,7 +2031,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 5);
+        assert_eq!(selection["version"], 6);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();

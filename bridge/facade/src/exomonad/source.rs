@@ -911,14 +911,14 @@ impl ExomonadSourceReload {
             preparation,
         };
         let entry_storage = match &frozen.preparation {
-            Some(super::workspace::WorkspacePreparation::Completed { entries, .. }) => {
+            Some(super::workspace::WorkspacePreparation::Completed { .. }) => {
                 let deployment = frozen
                     .prepared_deployment
                     .as_ref()
                     .ok_or("completed workspace has no acquired immutable deployment owner")?;
                 exomonad_actor::SourceEntryStorage::CompletedOriginal {
                     directory: deployment.path().join("workspace/entries"),
-                    selections: entries.clone(),
+                    selections: frozen.completed_entry_selections()?,
                 }
             }
             _ => fresh_entry_storage.clone(),
