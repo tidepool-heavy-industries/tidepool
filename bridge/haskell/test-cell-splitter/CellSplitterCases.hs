@@ -49,7 +49,6 @@ import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
 import GHC.Data.FastString (mkFastString, unpackFS)
 import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.SourceError (SourceError)
-import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource
   ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
@@ -2062,28 +2061,6 @@ interfaceMeasurementDiagnostics = bracket temporary removeDirectoryRecursive $ \
       removeFile path
       createDirectory path
       pure path
-
--- | Precedent: 379da60e6 ("labels: one validator, and a rejection that
--- teaches the label/path distinction") extended 'renderNameError' so a
--- fork-group path pasted where 'batch'\/'subgroup' expect one kebab label
--- names the mistake and shows the fix, instead of leaving a bare
--- 'InvalidKebabName' constructor for the model to puzzle out. This pins that
--- rendering directly (no compile needed: 'renderNameError' is pure), and
--- keeps the plain-kebab rendering for a non-path rejection unchanged.
-renderNameErrorTeachesGroupPaths :: IO ()
-renderNameErrorTeachesGroupPaths = do
-  let pathRejection = renderNameError (InvalidKebabName "correction-20260924/core-execution")
-  assertContains "group-path rejection names the offending path"
-    "\"correction-20260924/core-execution\"" (Text.unpack pathRejection)
-  assertContains "group-path rejection says it is a path, not a label"
-    "is a path, not a label" (Text.unpack pathRejection)
-  assertContains "group-path rejection points at subgroup's relative contract"
-    "`subgroup` is already relative to your own path" (Text.unpack pathRejection)
-  assertContains "group-path rejection shows how to build a two-segment path"
-    "`batch campaign group`" (Text.unpack pathRejection)
-  assertEqual "a non-path invalid label keeps the plain kebab rule"
-    "label \"Bad Label\" is not kebab-case: lowercase ASCII letters, digits and single hyphens only, not starting or ending with a hyphen"
-    (Text.unpack (renderNameError (InvalidKebabName "Bad Label")))
 
 -- | GHC's own "Ambiguous occurrence" diagnostic already names each candidate,
 -- but not in a form a model can paste back as a fix, and it never says what

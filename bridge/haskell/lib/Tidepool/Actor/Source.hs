@@ -27,7 +27,7 @@ import Tidepool.Agent.Reply.Internal
   , RawResponseObservation (..)
   , Replies (..)
   , RequestId (..)
-  , Response (..)
+  , Request (..)
   , ResponseFailure
   , ResponseResult
   , readResponse
@@ -43,7 +43,7 @@ data Source (protocol :: Type -> Type) where
     -> (ProgressState progress -> protocol ())
     -> Source protocol
   SettlementSource
-    :: Response result
+    :: Request result
     -> (Either ResponseFailure (ResponseResult result) -> protocol ())
     -> Source protocol
   LifecycleSource
@@ -67,7 +67,7 @@ progressSourceSited
 progressSourceSited = ProgressSource
 
 settlementSource
-  :: Response result
+  :: Request result
   -> (Either ResponseFailure (ResponseResult result) -> protocol ())
   -> Source protocol
 settlementSource = SettlementSource
@@ -95,7 +95,7 @@ installSource (CommandSource (Job job) project) =
 installSource (ProgressSource site (Progress (RequestId request)) project) =
   send (ActorInstallProgressSourceWith request
     (sourceEntry (ObserveProgressWith site request) project))
-installSource (SettlementSource response@(Response (RequestId request) _ _ _) project) =
+installSource (SettlementSource response@(Request (RequestId request) _ _) project) =
   send (ActorInstallSettlementSourceWith request
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
 installSource (LifecycleSource (ActorRef actor incarnation _) project) =
@@ -111,7 +111,7 @@ attachSource owner (CommandSource (Job job) project) =
 attachSource owner (ProgressSource site (Progress (RequestId request)) project) =
   send @(ActorLocal protocol) (ActorLocalAttachProgressSourceWith (owner, request)
     (sourceEntry (ObserveProgressWith site request) project))
-attachSource owner (SettlementSource response@(Response (RequestId request) _ _ _) project) =
+attachSource owner (SettlementSource response@(Request (RequestId request) _ _) project) =
   send @(ActorLocal protocol) (ActorLocalAttachSettlementSourceWith (owner, request)
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
 attachSource owner (LifecycleSource (ActorRef actor incarnation _) project) =
@@ -129,7 +129,7 @@ sourceEntry input project _ = do
   send (ActorReplyWith 0 (project event))
 
 settledResponse
-  :: Response result
+  :: Request result
   -> RawResponseObservation
   -> Either ResponseFailure (ResponseResult result)
 settledResponse response RawResponseReady = case readResponse response of

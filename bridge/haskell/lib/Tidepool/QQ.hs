@@ -7,7 +7,6 @@
 --                  position) and structural diff matching (pattern position).
 -- @[uri|...|]@   — validated 'Data.Text.Text' literal (an http(s) URI),
 --                  checked at compile time.
--- @[label|...|]@ — validated assignment 'Label' literal.
 --
 -- Quoters do parsing and validation at COMPILE time (inside the splice
 -- evaluator) and expand to plain Core over 'Data.Text.Text' and the
@@ -19,11 +18,9 @@ module Tidepool.QQ
   , j
   , patch
   , uri
-  , label
   ) where
 
 import Tidepool.QQ.Fmt (fmt)
 import Tidepool.QQ.Json (j)
-import Tidepool.QQ.Label (label)
 import Tidepool.QQ.Patch (patch)
 import Tidepool.QQ.Validate (uri)

@@ -9,7 +9,11 @@
 -- | Engine-private representation of persistent-agent requests and replies.
 module Tidepool.Agent.Reply.Internal
   ( RequestId (..)
-  , Response (..)
+  , Request (..)
+  , RequestOptions (..)
+  , defaultRequestOptions
+  , RequestError (..)
+  , SettlementReporting (..)
   , Reply (..)
   , RequestScope (..)
   , RequestScopeError (..)
@@ -49,15 +53,13 @@ module Tidepool.Agent.Reply.Internal
   , fillResponse
   , responseRequestId
   , responseActor
-  , responseAdmission
-  , withResponseAdmission
   , replyRequestId
   , readResponse
   , attemptReply
   , reply
   , pollResponse
   , cancelRequest
-  , detachRequest
+  , retainRequest
   , abandonResponse
   , forgetResponse
   , pollReply
@@ -73,9 +75,7 @@ import qualified Data.Text as Text
 import Data.Void (Void)
 import Prelude
 import Tidepool.Duration (Duration)
-import Tidepool.Agent.Assignment (Label, SettlementReporting (..), labelText)
 import Tidepool.Agent.Ref (AgentRef, agentAddressText)
-import Tidepool.Agent.Launch (ActorPath (..), AdmissionReceipt, allocatedPath)
 import Tidepool.Inspection.Display (Display (..), WorkbenchDisplay (workbenchReplyDisplay), opaqueHandle)
 
 import Tidepool.Internal.ExitCell
@@ -85,7 +85,8 @@ import Tidepool.Internal.ExitCell
   , readExitCell
   )
 import Tidepool.Effects.Core
-  ( GitOid
+  ( WorkerLifetime (..)
+  , GitOid
   , SubmissionObservation
   , WorktreeError
   , WorktreeReceipt
@@ -97,21 +98,37 @@ newtype RequestId = RequestId Int
   deriving (Show, Eq, Ord)
 
 
-data Response result where
-  Response :: RequestId -> AgentRef -> Maybe AdmissionReceipt -> ExitCell pending (ResponseResult result) -> Response result
+-- | One singular request-control identity and its retained typed result cell.
+data Request result where
+  Request :: RequestId -> AgentRef -> ExitCell pending (ResponseResult result) -> Request result
 
-instance Show (Response result) where
-  show (Response request actor admission _) =
-    "Response { request = " <> show request <> ", actor = " <> show actor
-      <> maybe "" (\receipt -> ", path = " <> show (allocatedPath receipt)) admission <> " }"
+instance Show (Request result) where
+  show (Request request actor _) =
+    "Request { request = " <> show request <> ", actor = " <> show actor <> " }"
 
--- | The owner's handle, as the workbench shows it: which request, which
--- actor, and where that actor runs. 'Show' keeps the constructor form.
-instance Display (Response result) where
-  displayTree (Response (RequestId request) actor admission _) =
-    opaqueHandle $
-      "response to request " <> tshow request <> " from agent " <> agentAddressText actor
-        <> maybe "" (\receipt -> let ActorPath path = allocatedPath receipt in ", path " <> path) admission
+instance Display (Request result) where
+  displayTree (Request (RequestId request) actor _) =
+    opaqueHandle ("request " <> tshow request <> " to agent " <> agentAddressText actor)
+
+data SettlementReporting = NotifyOwner | Silent
+  deriving (Show, Eq)
+
+data RequestOptions = RequestOptions
+  { requestLabel :: Maybe Text
+  , requestGuidance :: Maybe Text
+  , requestDeadline :: Maybe Duration
+  , requestReporting :: SettlementReporting
+  , requestLifetime :: WorkerLifetime
+  }
+  deriving (Show, Eq)
+
+defaultRequestOptions :: RequestOptions
+defaultRequestOptions = RequestOptions Nothing Nothing Nothing NotifyOwner ActorOwned
+
+data RequestError
+  = RequestReservationRejected ReplyError
+  | RequestSubmissionRejected ReplyError
+  deriving (Show, Eq)
 
 newtype Reply (result :: Type) = Reply RequestId
   deriving (Show, Eq)
@@ -197,7 +214,7 @@ data RequestUpdateState
   | UpdateNotPresented Text
   deriving (Show, Eq)
 
-updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)
+updateRequest :: Member Replies effs => Request result -> Text -> Eff effs (Either ReplyError RequestUpdate)
 updateRequest response message = do
   let request@(RequestId raw) = responseRequestId response
   result <- send (UpdateRequestWith raw message)
@@ -208,7 +225,8 @@ pollRequestUpdate (RequestUpdate (RequestId request) sequence) =
   send (ObserveRequestUpdateWith request sequence)
 
 data ReplyError
-  = ReplyStale
+  = ReplyInvalidReadiness
+  | ReplyStale
   | ReplyAlreadySettled
   | ReplyUnauthorized
   | ReplyWrongIncarnation
@@ -315,21 +333,19 @@ data RawReplyObservation
 
 data Replies a where
   CurrentRequestWith :: RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Replies (RequestScope input result)
-  ReserveRequestWith :: Text -> (Int, Int) -> Bool -> Replies Int
-  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies ()
+  ReserveRequestWith :: Maybe Text -> (Int, Int) -> Bool -> WorkerLifetime -> Replies (Either RequestError Int)
+  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies (Either RequestError ())
   -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
   -- 'replyPreviewCharBudget'), carried alongside the live value so the
   -- settlement notice the reply produces can show readable text -- 'Text'
   -- fields included -- without the host forcing a packed byte array through
   -- a non-forcing heap walk. Rendering runs on the Haskell side, where the
-  -- 'WorkbenchDisplay' instance a reply type already needs (the same
-  -- constraint 'Tidepool.Actors.Unfold.Branch' demands of a child's input)
-  -- can read it.
+  -- 'WorkbenchDisplay' instance a reply type already needs can read it.
   AttemptReplyWith :: Int -> result -> Text -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Text -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
   CancelRequestWith :: Int -> Replies CancelRequestOutcome
-  DetachRequestWith :: Int -> Replies (Either ReplyError ())
+  RetainRequestWith :: Int -> WorkerLifetime -> Replies (Either ReplyError ())
   AbandonResponseWith :: Int -> Replies AbandonOutcome
   ForgetResponseWith :: Int -> Replies ForgetResponseOutcome
   ObserveReplyWith :: Int -> Replies RawReplyObservation
@@ -377,12 +393,12 @@ pollProgressSited
   => RequestSite '[progress] (ProgressState progress) -> Progress progress -> Eff effs (ProgressState progress)
 pollProgressSited site (Progress (RequestId request)) = send (ObserveProgressWith site request)
 
-reserveRequest :: Member Replies effs => Label -> (Int, Int) -> SettlementReporting -> Eff effs RequestId
-reserveRequest label target reporting =
-  -- Keep validation on the Haskell side of request admission. The effect
-  -- bridge does not currently force every payload field before dispatch.
-  labelText label `seq`
-    RequestId <$> send (ReserveRequestWith (labelText label) target (reporting == NotifyOwner))
+reserveRequest
+  :: Member Replies effs
+  => Maybe Text -> (Int, Int) -> SettlementReporting -> WorkerLifetime
+  -> Eff effs (Either RequestError RequestId)
+reserveRequest label target reporting lifetime =
+  fmap (fmap RequestId) (send (ReserveRequestWith label target (reporting == NotifyOwner) lifetime))
 
 submitRequest
   :: Member Replies effs
@@ -390,34 +406,28 @@ submitRequest
   -> (Int, Int)
   -> request
   -> Maybe Duration
-  -> Eff effs ()
+  -> Eff effs (Either RequestError ())
 submitRequest (RequestId request) target requestPayload deadline =
   send (SubmitRequestWith request requestPayload target deadline)
 
-newRequestHandles :: pending -> RequestId -> AgentRef -> (Response result, Reply result)
+newRequestHandles :: pending -> RequestId -> AgentRef -> (Request result, Reply result)
 newRequestHandles pending request actor =
-  (Response request actor Nothing (newExitCell pending), Reply request)
+  (Request request actor (newExitCell pending), Reply request)
 
-fillResponse :: Response result -> ResponseResult result -> ()
-fillResponse (Response _ _ _ cell) = fillExitCell cell
+fillResponse :: Request result -> ResponseResult result -> ()
+fillResponse (Request _ _ cell) = fillExitCell cell
 
-responseRequestId :: Response result -> RequestId
-responseRequestId (Response request _ _ _) = request
+responseRequestId :: Request result -> RequestId
+responseRequestId (Request request _ _) = request
 
-responseActor :: Response result -> AgentRef
-responseActor (Response _ actor _ _) = actor
-
-responseAdmission :: Response result -> Maybe AdmissionReceipt
-responseAdmission (Response _ _ admission _) = admission
-
-withResponseAdmission :: AdmissionReceipt -> Response result -> Response result
-withResponseAdmission admission (Response request actor _ cell) = Response request actor (Just admission) cell
+responseActor :: Request result -> AgentRef
+responseActor (Request _ actor _) = actor
 
 replyRequestId :: Reply result -> RequestId
 replyRequestId (Reply request) = request
 
-readResponse :: Response result -> Maybe (ResponseResult result)
-readResponse (Response _ _ _ cell) = readExitCell () cell
+readResponse :: Request result -> Maybe (ResponseResult result)
+readResponse (Request _ _ cell) = readExitCell () cell
 
 -- | Character budget for the rendered reply 'reply' and 'attemptReply'
 -- carry alongside the live value. Twice the settlement notice's byte budget
@@ -443,9 +453,9 @@ reply (Reply (RequestId request)) result =
 
 pollResponse
   :: Member Replies effs
-  => Response result
+  => Request result
   -> Eff effs (ResponseState result)
-pollResponse response@(Response (RequestId request) _ _ _) = do
+pollResponse response@(Request (RequestId request) _ _) = do
   observation <- send (ObserveResponseWith request)
   pure $ case observation of
     RawResponsePending progress -> ResponsePending progress
@@ -461,29 +471,29 @@ pollResponse response@(Response (RequestId request) _ _ _) = do
 
 cancelRequest
   :: Member Replies effs
-  => Response result
+  => Request result
   -> Eff effs CancelRequestOutcome
-cancelRequest (Response (RequestId request) _ _ _) = send (CancelRequestWith request)
+cancelRequest (Request (RequestId request) _ _) = send (CancelRequestWith request)
 
--- | Keep this invocation's request alive under the actor after the cell ends.
--- Detachment preserves the response and does not alter the target's lifetime.
-detachRequest
+-- | Transfer cleanup ownership without changing the target actor lifetime.
+retainRequest
   :: Member Replies effs
-  => Response result
+  => Request result
+  -> WorkerLifetime
   -> Eff effs (Either ReplyError ())
-detachRequest (Response (RequestId request) _ _ _) = send (DetachRequestWith request)
+retainRequest (Request (RequestId request) _ _) lifetime = send (RetainRequestWith request lifetime)
 
 abandonResponse
   :: Member Replies effs
-  => Response result
+  => Request result
   -> Eff effs AbandonOutcome
-abandonResponse (Response (RequestId request) _ _ _) = send (AbandonResponseWith request)
+abandonResponse (Request (RequestId request) _ _) = send (AbandonResponseWith request)
 
 forgetResponse
   :: Member Replies effs
-  => Response result
+  => Request result
   -> Eff effs ForgetResponseOutcome
-forgetResponse (Response (RequestId request) _ _ _) = send (ForgetResponseWith request)
+forgetResponse (Request (RequestId request) _ _) = send (ForgetResponseWith request)
 
 pollReply :: Member Replies effs => Reply result -> Eff effs ReplyState
 pollReply (Reply (RequestId request)) = do

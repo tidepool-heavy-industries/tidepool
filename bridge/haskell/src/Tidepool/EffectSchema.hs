@@ -134,11 +134,8 @@ sitedVerbs =
   , (verb "pollProgress" "Tidepool.Agent.Reply.Internal"
       "pollProgressSited" "Tidepool.Agent.Reply.Internal" False [0]
       DeliverHostAnswer SelectedAnswer) { vsAnswerSource = EffectResult }
-  , verb "awaitProgressAfter" "Tidepool.Agent.Watch.Internal"
-      "awaitProgressAfterSited" "Tidepool.Agent.Watch.Internal" False [0]
-      DeliverHostAnswer ProgressStateEvidence
-  , verb "awaitAnyProgress" "Tidepool.Agent.Watch.Internal"
-      "awaitAnyProgressSited" "Tidepool.Agent.Watch.Internal" False [0]
+  , verb "after" "Tidepool.Agent.Watch.Internal"
+      "afterSited" "Tidepool.Agent.Watch.Internal" False [0]
       DeliverHostAnswer ProgressStateEvidence
   , verb "progressSource" "Tidepool.Actor.Source"
       "progressSourceSited" "Tidepool.Actor.Source" False [0]

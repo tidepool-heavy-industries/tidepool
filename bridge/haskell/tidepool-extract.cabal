@@ -146,22 +146,6 @@ library tidepool-extract-internal
   default-extensions: OverloadedStrings
   ghc-options:      -Wall -Werror=missing-fields
 
--- Exposes only the model-facing name-error vocabulary ('renderNameError' and
--- friends) to host-side tests, without adding the rest of 'lib/Tidepool' (the
--- eval stdlib, a runtime GHC include path — see the note above
--- 'tidepool-extract-bin') as a host hs-source-dir, which would collide on
--- module names ('Tidepool.Introspection' exists both here and under 'src/')
--- with 'tidepool-extract-internal' proper.
-library assignment-internal
-  hs-source-dirs:   lib
-  exposed-modules:  Tidepool.Agent.Assignment.Internal
-  build-depends:
-    base >= 4.20 && < 5,
-    text
-  default-language: GHC2024
-  default-extensions: OverloadedStrings
-  ghc-options:      -Wall -Werror=missing-fields
-
 flag test-tools
   description: Build child-process helpers and the corpus compiler action for local test compatibility
   default: False
@@ -201,7 +185,6 @@ test-suite cell-splitter-test
     containers,
     filepath,
     text,
-    assignment-internal,
     tidepool-extract-internal,
     unix,
     syb
@@ -749,10 +732,9 @@ test-suite model-turn-test
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
     Tidepool.Agent.Ref
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
@@ -880,7 +862,7 @@ test-suite automation-helper-contract
     Tidepool.Actors.Internal.ExomonadDriver
     Tidepool.Actors.Observe
     Tidepool.Actors.Role
-    Tidepool.Actors.Unfold
+    Tidepool.Actors.Spawn
     Tidepool.Actors.Worktree
     Tidepool.Aeson
     Tidepool.Aeson.FromJSON
@@ -889,9 +871,8 @@ test-suite automation-helper-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Launch
+    Tidepool.Scope
     Tidepool.Agent.Ref
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
@@ -921,7 +902,6 @@ test-suite automation-helper-contract
     Tidepool.Prelude
     Tidepool.QQ.Bash
     Tidepool.QQ.Fmt.Runtime
-    Tidepool.QQ.Label
     Tidepool.QQ.Validate
     Tidepool.Records
     Tidepool.Records.Bridged
@@ -952,9 +932,8 @@ test-suite browser-scenario-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Launch
+    Tidepool.Scope
     Tidepool.Agent.Ref
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
@@ -1007,10 +986,9 @@ test-suite command-tools-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
     Tidepool.Agent.Ref
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
@@ -1063,10 +1041,9 @@ test-suite tool-profiles-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
     Tidepool.Agent.Ref
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal

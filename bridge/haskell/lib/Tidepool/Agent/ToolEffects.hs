@@ -71,6 +71,7 @@ type family AsyncEffects (effects :: [Type -> Type]) :: Constraint where
 
 actorEffectName :: ActorEffectKey -> Text
 actorEffectName key = case key of
+  EffectResourceScopes -> "ResourceScopes"
   EffectReplies -> "Replies"
   EffectWatches -> "Watches"
   EffectForks -> "Forks"

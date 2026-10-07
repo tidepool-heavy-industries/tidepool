@@ -54,7 +54,8 @@ import qualified Tidepool.Actor.Source as Source
 import Tidepool.Command.Types (Job)
 import Tidepool.Effects.Core (CommandResult)
 import Tidepool.Agent.Reply.Internal
-  ( Progress, ProgressState, Response, ResponseFailure, ResponseResult )
+  ( Progress, ProgressState, ResponseFailure, ResponseResult )
+import qualified Tidepool.Agent.Reply.Internal as AgentReply
 import Tidepool.Effects.Core (Actor, ActorLocal, ActorInputOrigin (..))
 import qualified Tidepool.Effects.Core as Core
 import qualified Tidepool.Internal.ActorRef as Internal
@@ -157,7 +158,7 @@ command job = EventSource (\receive -> [Source.commandSource job receive])
 progress :: Progress p -> EventSource (ProgressState p)
 progress handle = EventSource (\receive -> [Actor.progressSource handle receive])
 
-settlement :: Response r -> EventSource (Either ResponseFailure (ResponseResult r))
+settlement :: AgentReply.Request r -> EventSource (Either ResponseFailure (ResponseResult r))
 settlement handle = EventSource (\receive -> [Actor.settlementSource handle receive])
 
 lifecycle :: ActorHandle api -> EventSource Actor.ActorLifecycle
@@ -417,7 +418,7 @@ forwardingExit (Forwarding ref) = Actor.pollExit ref
 
 forwardResult
   :: Member Actor effects
-  => Response value
+  => AgentReply.Request value
   -> Send (Either ResponseFailure (ResponseResult value))
   -> Eff effects (Forwarding value)
 forwardResult response endpoint = Forwarding <$> Actor.startActor

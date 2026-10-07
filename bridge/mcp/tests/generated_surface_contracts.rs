@@ -64,7 +64,12 @@ fn core_authored_and_spec_consumers_compile() {
 fn authored_private_constructor_and_forged_request_site_are_refused_after_valid_control() {
     let surface = Surface::new();
     surface.control();
-    for fixture in ["PrivateConstructor.hs", "ForgedRequestSite.hs"] {
+    for fixture in [
+        "PrivateConstructor.hs",
+        "ForgedRequestSite.hs",
+        "ForgedWorkspaceHandle.hs",
+        "ForgedContextCheckpoint.hs",
+    ] {
         let refused = surface.compile(fixture, false);
         assert!(
             !refused.status.success(),

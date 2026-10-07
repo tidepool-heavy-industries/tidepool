@@ -1,168 +1,67 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | Private construction and protocols for persistent Exomonad agents.
+-- | Persistent-agent requests, observation and supervisor controls.
 module Tidepool.Actors.Internal.Agent
-  ( AgentLaunchSpec
-  , AgentRef
-  , Response
-  , codingAgent
-  , readonlyAgent
-  , readonlyWorktreeAgent
-  , scaffoldingAgent
-  , integrationAgent
-  , withAgentLifetime
-  , startAgent
-  , startForkedAgent
-  , roleCode
+  ( AgentRef
+  , Request
   , request
   , requestSited
-  , Assignment (..)
-  , Label
-  , SettlementReporting (..)
-  , Duration
-  , milliseconds
-  , seconds
-  , minutes
-  , assignment
-  , labelFromText
-  , requestActivatedSited
   , requestWithProgress
   , requestWithProgressSited
   , requestWithProgressInto
   , requestWithProgressIntoSited
-  , AgentState (..)
-  , AgentObservation (..)
-  , agentIdentity
-  , agentBoundWorktree
-  , observeAgent
-  , lookupAgent
-  , AgentSummary (..)
-  , agentSummary
-  , listAgents
-  , listAgentsFull
-  , findAgentsByLabel
-  , AgentForgetOutcome (..)
-  , forgetAgent
-  , StopOutcome (..)
-  , stopAgent
-  , sendMessage
-  , parentAgent
-  , pollNotification
-  , NotificationReceipt
-  , NotificationError (..)
-  , NotificationState (..)
+  , RequestOptions (..)
+  , defaultRequestOptions
+  , RequestError (..)
+  , SettlementReporting (..)
+  , Duration, milliseconds, seconds, minutes
+  , AgentState (..), AgentObservation (..)
+  , agentIdentity, agentBoundWorktree, observeAgent, lookupAgent
+  , AgentSummary (..), agentSummary, listAgents, listAgentsFull, findAgentsByLabel
+  , AgentForgetOutcome (..), forgetAgent
+  , StopOutcome (..), stopAgent
+  , AgentRetentionError (..), retainAgent
+  , sendMessage, parentAgent, pollNotification
+  , NotificationReceipt, NotificationError (..), NotificationState (..)
   ) where
 
-import Control.Monad.Freer (Eff, Member, raise, send)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
-import Tidepool.Internal.RequestSite (RequestSite)
 import qualified Data.Text as Text
 import Prelude
-
 import qualified Tidepool.Actor as Actor
-import qualified Tidepool.Actor.Internal as ActorInternal
-import Tidepool.Actor.Source (installSource)
-import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch, Forks)
 import Tidepool.Agent.Reply.Internal
-  ( Progress (..)
-  , responseRequestId
-  , Replies
-  , RequestId (..)
-  , Response
-  , fillResponse
-  , newRequestHandles
-  , reserveRequest
-  , detachRequest
-  , replyRequestId
-  , submitRequest
-  , ResponseResult (..)
-  , ExecutionReceipt (..)
-  , WorktreeEvidence (..)
+  ( Request, RequestOptions (..), defaultRequestOptions, RequestError (..)
+  , SettlementReporting (..), Progress (..), responseRequestId
+  , Replies, RequestId (..), fillResponse, newRequestHandles, reserveRequest
+  , replyRequestId, submitRequest, abandonResponse
+  , ResponseResult (..), ExecutionReceipt (..), WorktreeEvidence (..)
   )
 import Tidepool.Agent.Ref
-  ( AgentRef (..)
-  , AgentProtocol (..)
-  , agentIdentity
-  , agentBoundWorktree
-  , internalAgentRef
-  )
-import Tidepool.Agent.Assignment
-  ( Assignment (..), Label, SettlementReporting (..)
-  , assignment, labelFromText, labelText
-  )
+  ( AgentRef (..), AgentProtocol (..), agentIdentity, agentBoundWorktree, internalAgentRef )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
+import Tidepool.Agent.Session (requestSessionSited)
 import Tidepool.Inspection
-  ( Display (..), DisplayRoot (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
-import Tidepool.Agent.Session
-  ( ActivationMetadata (..)
-  , emptyActivationMetadata
-  , attachAgent
-  , requestSessionSited
-  )
+  ( Display (..), DisplayRoot (..), DisplayTree (..), PageDisplay (..)
+  , opaqueHandle, pageWithContinuation )
 import Tidepool.Effects.Core
-  ( ActorContextInfo (..)
-  , ActorEffectKey
-  , ForkEffort
-  , ForkContext
-  , Model
-  , WorkerLifetime (..)
-  , ActorEffectProfile (..)
-  , ActorKernel (..)
-  , ActorLaunchRole (..)
-  , AgentControl (..)
-  , Notifications (..)
-  , NotificationError (..)
-  , NotificationState (..)
-  , AgentStopControlOutcome (..)
-  , AgentInspection (..)
-  , AgentLaunch (..)
-  , AgentDisposition (..)
-  , AgentRosterEntry (..)
-  , AgentRosterState (..)
-  , Forks (..)
-  , WorktreeHandle (..)
-  , WorktreeReceipt (..)
-  , WorktreeSpec
-  , DirtyPolicy
-  )
+  ( AgentControl (..), AgentInspection (..), Notifications (..)
+  , NotificationError (..), NotificationState (..), AgentStopControlOutcome (..)
+  , WorkerLifetime, AgentRetentionError (..)
+  , AgentDisposition (..), AgentRosterEntry (..), AgentRosterState (..)
+  , WorktreeHandle (..), WorktreeReceipt (..) )
 import qualified Tidepool.Effects.Core as Core
-import Tidepool.Internal.ExitCell (fillExitCell, newExitCell)
-import Tidepool.Duration
-  ( Duration
-  , milliseconds
-  , minutes
-  , seconds
-  )
-import Tidepool.Worktree
-  ( observeSubmission
-  , renderBranchName
-  , withWorktree
-  , worktreeHead
-  , worktreeId
-  )
-
-data AgentLaunchSpec = AgentLaunchSpec
-  { agentLifetime :: WorkerLifetime
-  , agentKind :: AgentKind
-  }
-  deriving (Show, Eq)
-
-data AgentKind
-  = CodingAgent WorktreeHandle
-  | ReadonlyAgent Text
-  | ReadonlyWorktreeAgent WorktreeHandle
-  | ScaffoldingAgent WorktreeHandle
-  | IntegrationAgent WorktreeHandle
-  deriving (Show, Eq)
+import Tidepool.Internal.ActorRef (actorAddress)
+import Tidepool.Internal.RequestSite (RequestSite)
+import Tidepool.Duration (Duration, milliseconds, minutes, seconds)
+import Tidepool.Worktree (observeSubmission, worktreeHead, worktreeId)
 
 -- | Repeatable lifecycle observation of one exact actor incarnation.
 data AgentState
@@ -278,227 +177,97 @@ forgetAgent (AgentRef target _) = do
     Core.AgentForgetUnavailable -> AgentForgetUnavailable
     Core.AgentForgetOutputPending displays -> AgentForgetOutputPending displays
 
--- | Configure a coding agent around one managed worktree.
-codingAgent :: WorktreeHandle -> AgentLaunchSpec
-codingAgent = AgentLaunchSpec InvocationOwned . CodingAgent
-
--- | Configure an agent that shares the host checkout read-only.
-readonlyAgent :: Text -> AgentLaunchSpec
-readonlyAgent = AgentLaunchSpec InvocationOwned . ReadonlyAgent
-
-readonlyWorktreeAgent :: WorktreeHandle -> AgentLaunchSpec
-readonlyWorktreeAgent = AgentLaunchSpec InvocationOwned . ReadonlyWorktreeAgent
-
-scaffoldingAgent :: WorktreeHandle -> AgentLaunchSpec
-scaffoldingAgent = AgentLaunchSpec InvocationOwned . ScaffoldingAgent
-
-integrationAgent :: WorktreeHandle -> AgentLaunchSpec
-integrationAgent = AgentLaunchSpec InvocationOwned . IntegrationAgent
-
--- | Choose an explicit owner when the agent must outlive its launch invocation.
-withAgentLifetime :: WorkerLifetime -> AgentLaunchSpec -> AgentLaunchSpec
-withAgentLifetime lifetime spec = spec { agentLifetime = lifetime }
-
--- | Start one Codex identity. By default, unfinished work ends with the
--- launching invocation; 'withAgentLifetime' selects a persistent owner.
-startAgent :: Member AgentLaunch effs => AgentLaunchSpec -> Eff effs AgentRef
-startAgent spec = do
-  actor <- launchFreshActor (agentLifetime spec) (agentDefinition (agentKind spec)) ()
-  pure (AgentRef actor (agentWorktree (agentKind spec)))
-
--- | Start an agent by forking the caller's active provider and Haskell
--- snapshots. Public Exomonad code reaches this through the applicative unfold DSL.
-startForkedAgent
-  :: Member Forks effs
-  => Actor.LaunchRole
-  -> Int
-  -> Text
-  -> Maybe WorktreeSpec
-  -> DirtyPolicy
-  -> [ActorEffectKey]
-  -> Maybe ForkEffort
-  -> Maybe (Int, Int)
-  -> Maybe Model
-  -> ForkContext
-  -> Maybe Text
-  -> Maybe Text
-  -> WorkerLifetime
-  -> Eff effs (Either Text (AgentRef, Text, WorktreeHandle))
-startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort budget model context checkpoint instructions lifetime = do
-  launched <- launchForkedActor
-    launchRole
-    forkGroup
-    (agentDefinitionUnbound actorLabel)
-    ()
-    worktreeSpec
-    dirtyPolicy
-    effectKeys
-    effort
-    budget
-    model
-    context
-    checkpoint
-    instructions
-    lifetime
-    (Just actorLabel)
-  pure $ case launched of
-    Left failure -> Left failure
-    Right (actor, allocatedPath, tree) ->
-      Right (AgentRef actor (Just tree), allocatedPath, tree)
-
--- | Submit a typed request and return its independently awaitable reply.
+-- | Admit a request with raw typed input and one singular control handle.
 {-# OPAQUE request #-}
 request
-  :: forall result input effs
-   . Member Replies effs
-  => AgentRef
-  -> Assignment input
-  -> Eff effs (Response result)
+  :: forall result input effs. Member Replies effs
+  => AgentRef -> input -> RequestOptions
+  -> Eff effs (Either RequestError (Request result))
 request = requestSited (error "request: extractor must assign a typed site")
 
--- Extractor substrate. The caller's input and result monotypes are attached
--- to this site and reused by the target's external-agent session.
 {-# OPAQUE requestSited #-}
 requestSited
-  :: forall result input effs
-   . Member Replies effs
-  => RequestSite '[input] result
-  -> AgentRef
-  -> Assignment input
-  -> Eff effs (Response result)
-requestSited site (AgentRef target targetWorktree) options =
-  requestConfiguredSited site target targetWorktree options emptyActivationMetadata (const (pure ()))
+  :: forall result input effs. Member Replies effs
+  => RequestSite '[input] result -> AgentRef -> input -> RequestOptions
+  -> Eff effs (Either RequestError (Request result))
+requestSited site agent input options =
+  requestConfiguredSited site agent input options (const (pure ()))
 
 {-# OPAQUE requestWithProgress #-}
 requestWithProgress
-  :: forall progress result input effs
-   . Member Replies effs
-  => AgentRef
-  -> Assignment input
-  -> Eff effs (Response result, Progress progress)
+  :: forall progress result input effs. Member Replies effs
+  => AgentRef -> input -> RequestOptions
+  -> Eff effs (Either RequestError (Request result, Progress progress))
 requestWithProgress = requestWithProgressSited
   (error "requestWithProgress: extractor must assign a typed site")
 
 {-# OPAQUE requestWithProgressSited #-}
 requestWithProgressSited
-  :: forall progress result input effs
-   . Member Replies effs
-  => RequestSite '[input, progress] result
-  -> AgentRef
-  -> Assignment input
-  -> Eff effs (Response result, Progress progress)
-requestWithProgressSited site (AgentRef target targetWorktree) options = do
-  response <- requestConfiguredSited site target targetWorktree options emptyActivationMetadata (const (pure ()))
-  pure (response, Progress (responseRequestId response))
+  :: forall progress result input effs. Member Replies effs
+  => RequestSite '[input, progress] result -> AgentRef -> input -> RequestOptions
+  -> Eff effs (Either RequestError (Request result, Progress progress))
+requestWithProgressSited site agent input options =
+  requestWithProgressIntoSited site agent input options (const (pure ()))
 
--- | Retain the exact typed handles before admitting work. The callback should
--- transfer them to an owned mailbox or install their result route. If it fails,
--- no request is submitted; once admission happens its handles are already held
--- independently of the submitting handler's next state checkpoint.
+-- | Retain both exact typed handles before publishing a request. If retaining
+-- fails, admission has not occurred; its selected owner cleans the reservation.
 {-# OPAQUE requestWithProgressInto #-}
 requestWithProgressInto
   :: forall progress result input effs. Member Replies effs
-  => AgentRef
-  -> Assignment input
-  -> ((Response result, Progress progress) -> Eff effs ())
-  -> Eff effs (Response result, Progress progress)
+  => AgentRef -> input -> RequestOptions
+  -> ((Request result, Progress progress) -> Eff effs ())
+  -> Eff effs (Either RequestError (Request result, Progress progress))
 requestWithProgressInto = requestWithProgressIntoSited
   (error "requestWithProgressInto: extractor must assign a typed site")
 
 {-# OPAQUE requestWithProgressIntoSited #-}
 requestWithProgressIntoSited
   :: forall progress result input effs. Member Replies effs
-  => RequestSite '[input, progress] result
-  -> AgentRef
-  -> Assignment input
-  -> ((Response result, Progress progress) -> Eff effs ())
-  -> Eff effs (Response result, Progress progress)
-requestWithProgressIntoSited site (AgentRef target targetWorktree) options retain = do
+  => RequestSite '[input, progress] result -> AgentRef -> input -> RequestOptions
+  -> ((Request result, Progress progress) -> Eff effs ())
+  -> Eff effs (Either RequestError (Request result, Progress progress))
+requestWithProgressIntoSited site agent input options retain = do
   let handles response = (response, Progress (responseRequestId response))
-  response <- requestConfiguredSited site target targetWorktree
-    options emptyActivationMetadata (retain . handles)
-  pure (handles response)
-
-{-# OPAQUE requestActivatedSited #-}
-requestActivatedSited
-  :: forall result input extra effs
-   . Member Replies effs
-  => RequestSite (input ': extra) result
-  -> AgentRef
-  -> Assignment input
-  -> ActivationMetadata
-  -> Eff effs (Response result)
-requestActivatedSited site (AgentRef target targetWorktree) options metadata =
-  requestConfiguredSited
-    site
-    target
-    targetWorktree
-    options
-    metadata
-    (const (pure ()))
+  submitted <- requestConfiguredSited site agent input options (retain . handles)
+  pure (handles <$> submitted)
 
 requestConfiguredSited
-  :: forall result input extra effs
-   . Member Replies effs
-  => RequestSite (input ': extra) result
-  -> Actor.ActorRef AgentProtocol ()
-  -> Maybe WorktreeHandle
-  -> Assignment input
-  -> ActivationMetadata
-  -> (Response result -> Eff effs ())
-  -> Eff effs (Response result)
-requestConfiguredSited site target targetWorktree options metadata retain = do
-  requestId <- reserveRequest (assignmentLabel options) (actorAddress target) (report options)
-  let requestInput = input options
-      requestDeadline = deadline options
-      (response, reply) = newRequestHandles requestInput requestId (AgentRef target targetWorktree)
-  retain response
-  case activationRequestLifetime metadata of
-    InvocationOwned -> pure ()
-    lifetime -> do
-      detached <- detachRequest response
-      case detached of
-        Left failure -> error
-          ("initial " <> show lifetime <> " request detachment refused: " <> show failure)
-        Right () -> pure ()
-  submitRequest
-    requestId
-    (actorAddress target)
-    (RunRequest (runRequest (actorAddress target) targetWorktree response reply))
-    requestDeadline
-  pure response
+  :: forall result input extra effs. Member Replies effs
+  => RequestSite (input ': extra) result -> AgentRef -> input -> RequestOptions
+  -> (Request result -> Eff effs ())
+  -> Eff effs (Either RequestError (Request result))
+requestConfiguredSited site agent@(AgentRef target targetWorktree) input options retain = do
+  reserved <- reserveRequest (requestLabel options) (actorAddress target)
+    (requestReporting options) (requestLifetime options)
+  case reserved of
+    Left failure -> pure (Left failure)
+    Right requestId -> do
+      let (response, replyHandle) = newRequestHandles input requestId agent
+      retain response
+      admitted <- submitRequest requestId (actorAddress target)
+        (RunRequest (runRequest targetWorktree response replyHandle)) (requestDeadline options)
+      case admitted of
+        Left failure -> do
+          _ <- abandonResponse response
+          pure (Left failure)
+        Right () -> pure (Right response)
   where
-    runRequest (targetActorId, targetIncarnation) targetTree response replyHandle = do
-      let requestId = case replyRequestId replyHandle of
-            RequestId value -> value
-      start <- case targetTree of
-        Nothing -> pure Nothing
-        Just tree -> Just <$> worktreeHead tree
-      result <-
-        requestSessionSited @result @input
-          site requestId (Just (activationGuidance (labelText (assignmentLabel options)) (guidance options)))
-          metadata (input options)
-      evidence <- case (targetTree, start) of
+    runRequest tree response replyHandle = do
+      let requestId = case replyRequestId replyHandle of RequestId value -> value
+          (actorId, incarnation) = actorAddress target
+      start <- traverse worktreeHead tree
+      result <- requestSessionSited @result @input site requestId (requestGuidance options) input
+      evidence <- case (tree, start) of
         (Nothing, _) -> pure NoBoundWorktree
-        (Just tree, Just startHead) -> do
-          observed <- observeSubmission (worktreeId tree)
+        (Just worktree, Just startHead) -> do
+          observed <- observeSubmission (worktreeId worktree)
           pure $ case observed of
             Left failure -> WorktreeObservationFailed failure
-            Right submission -> WorktreeObserved (handleReceipt tree) startHead submission
+            Right submission -> WorktreeObserved (handleReceipt worktree) startHead submission
         (Just _, Nothing) -> error "bound worktree was not sampled"
-      let execution = ExecutionReceipt
-            { executionRequest = RequestId requestId
-            , executionActorId = targetActorId
-            , executionActorIncarnation = targetIncarnation
-            }
+      let execution = ExecutionReceipt (RequestId requestId) actorId incarnation
       case fillResponse response (ResponseResult result execution evidence) of
         () -> pure ()
-
-activationGuidance :: Text -> Maybe Text -> Text
-activationGuidance label Nothing =
-  label
-activationGuidance label (Just guidance) =
-  label <> "\n" <> guidance
 
 -- | Observable result of asking one exact actor incarnation to retire.
 --
@@ -537,219 +306,11 @@ stopAgent (AgentRef target _) = do
     AgentStopUnauthorized -> StopUnauthorized
     AgentStopFailed detail -> StopFailed detail
 
--- | Applying an already-launched actor's continuation is repeated identically
--- for both launch shapes (fresh and forked): install the shutdown hook, run
--- initialization, attach declared sources, announce readiness, run behavior,
--- publish the exit. It cannot be ONE shared polymorphic function:
--- 'Actor.ActorDefinition's effect row is existentially hidden inside the
--- value, so a caller-visible @effs@ in a standalone signature can never be
--- proven equal to it (GHC: "Couldn't match type 'effs' with 'ActorKernel :
--- actorEffs'"). Each copy instead lets type inference pin its own @effs@ to
--- the ONE existential its own local 'Actor.ActorDefinition' pattern match
--- reveals. Keep the two copies byte-identical in shape; a change to one is a
--- change to both.
-launchFreshActor
-  :: forall effs startup api exit
-   . Member AgentLaunch effs
-  => WorkerLifetime
-  -> Actor.ActorDefinition startup api exit
-  -> startup
-  -> Eff effs (Actor.ActorRef api exit)
-launchFreshActor lifetime definition@Actor.ActorDefinition
-  { Actor.label = actorLabel
-  , Actor.effectProfile = profile
-  , Actor.initialization = startupAction
-  , Actor.behavior = install
-  , Actor.onShutdown = shutdownAction
-  } startup = do
-  let cell = newExitCell startup
-      shutdownEntry reasonCode =
-        raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
-      entry _ = do
-        send (ActorInstallShutdownWith 0 shutdownEntry)
-        initial <- raiseActorKernel (startupAction startup)
-        mapM_ installSource (ActorInternal.actorSources definition)
-        send ActorReadyWith
-        result <- raiseActorKernel (install startup initial)
-        case fillExitCell cell result of
-          () -> pure ()
-  (actorId, incarnation, _) <- send
-    (AgentLaunchWith
-      actorLabel
-      entry
-      -- Every `ActorDefinition` reaching this function is caller-supplied
-      -- (`startAgent`'s generated definition), so `entry` may close over
-      -- arbitrary live state beyond `actorLabel` and is never eligible for
-      -- its own child session (see `launchForkedActor`'s `unboundLabel`,
-      -- below, and exomonad-actor's `child_session_eligibility`).
-      Nothing
-      ActorInheritedRole
-      (profileCode profile)
-      (ActorInternal.actorLaunchWorktrees definition)
-      lifetime)
-  pure (ActorInternal.ActorRef actorId incarnation cell)
-
-launchForkedActor
-  :: forall effs startup api exit
-   . Member Forks effs
-  => Actor.LaunchRole
-  -> Int
-  -> Actor.ActorDefinition startup api exit
-  -> startup
-  -> Maybe WorktreeSpec
-  -> DirtyPolicy
-  -> [ActorEffectKey]
-  -> Maybe ForkEffort
-  -> Maybe (Int, Int)
-  -> Maybe Model
-  -> ForkContext
-  -> Maybe Text
-  -> Maybe Text
-  -> WorkerLifetime
-  -- | 'Just' exactly when 'definition' is 'agentDefinitionUnbound' applied to
-  -- this same label and 'startup' is '()' — i.e. this call is
-  -- 'startForkedAgent''s. That is the only shape whose 'entry' the engine can
-  -- rebuild from data (the label) alone; every other caller of this function
-  -- must pass 'Nothing' so its captured 'entry' keeps running on the
-  -- launching session.
-  -> Maybe Text
-  -> Eff effs (Either Text (Actor.ActorRef api exit, Text, WorktreeHandle))
-launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
-  { Actor.label = actorLabel
-  , Actor.effectProfile = profile
-  , Actor.initialization = startupAction
-  , Actor.behavior = install
-  , Actor.onShutdown = shutdownAction
-  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context checkpoint instructions lifetime unboundLabel = do
-  let cell = newExitCell startup
-      shutdownEntry reasonCode =
-        raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
-      entry _ = do
-        send (ActorInstallShutdownWith 0 shutdownEntry)
-        initial <- raiseActorKernel (startupAction startup)
-        mapM_ installSource (ActorInternal.actorSources definition)
-        send ActorReadyWith
-        result <- raiseActorKernel (install startup initial)
-        case fillExitCell cell result of
-          () -> pure ()
-  launched <- send
-    (ForksStartWith
-      actorLabel
-      entry
-      unboundLabel
-      forkGroup
-      (roleCode launchRole)
-      (profileCode profile)
-      (ActorInternal.actorLaunchWorktrees definition)
-      worktreeSpec
-      dirtyPolicy
-      effectKeys
-      effort
-      budget
-      model
-      context
-      checkpoint
-      instructions
-      lifetime)
-  pure $ case launched of
-    Left failure -> Left failure
-    Right ((actorId, incarnation, allocatedPath), tree) ->
-      Right (ActorInternal.ActorRef actorId incarnation cell, allocatedPath, tree)
-
-inspectAgent
-  :: Member AgentInspection effs
-  => Actor.ActorRef api exit
-  -> Eff effs (Maybe AgentRosterEntry)
-inspectAgent (ActorInternal.ActorRef actorId incarnation _) =
-  send (AgentInspectWith (actorId, incarnation))
-
-profileCode :: Actor.EffectProfile protocol effs -> ActorEffectProfile
-profileCode = ActorInternal.profileCode
-
-roleCode :: Actor.LaunchRole -> ActorLaunchRole
-roleCode Actor.RootRole = ActorRootRole
-roleCode Actor.ResearchRole = ActorResearchRole
-roleCode Actor.CodingRole = ActorCodingRole
-roleCode Actor.ScaffoldingRole = ActorScaffoldingRole
-roleCode Actor.IntegrationRole = ActorIntegrationRole
-roleCode Actor.InheritedRole = ActorInheritedRole
-
-decodeShutdownReason :: Int -> Actor.ShutdownReason
-decodeShutdownReason 0 = Actor.ShutdownCompleted
-decodeShutdownReason 1 = Actor.ShutdownFailed
-decodeShutdownReason _ = Actor.ShutdownCancelled
-
-raiseActorKernel :: Eff effs a -> Eff (ActorKernel ': effs) a
-raiseActorKernel = raise
-
-agentWorktree :: AgentKind -> Maybe WorktreeHandle
-agentWorktree (CodingAgent tree) = Just tree
-agentWorktree (ReadonlyAgent _) = Nothing
-agentWorktree (ReadonlyWorktreeAgent tree) = Just tree
-agentWorktree (ScaffoldingAgent tree) = Just tree
-agentWorktree (IntegrationAgent tree) = Just tree
-
-agentDefinition :: AgentKind -> Actor.ActorDefinition () AgentProtocol ()
-agentDefinition spec = agentDefinitionNamed (agentLabel spec) spec
-
-agentDefinitionNamed :: Text -> AgentKind -> Actor.ActorDefinition () AgentProtocol ()
-agentDefinitionNamed actorLabel spec = attachWorktree spec (agentDefinitionUnbound actorLabel)
-
-agentDefinitionUnbound :: Text -> Actor.ActorDefinition () AgentProtocol ()
-agentDefinitionUnbound actorLabel = definition
-  where
-    definition =
-      Actor.ActorDefinition
-        { Actor.label = actorLabel
-        , Actor.effectProfile = Actor.ReadOnly
-        , Actor.initialization = \() -> attachAgent Nothing
-        , Actor.behavior = \() () -> agentLoop
-        , Actor.onShutdown = const (pure ())
-        }
-
-agentLoop :: Eff (Actor.ReadOnlyEffects AgentProtocol) ()
-agentLoop = do
-  continue <- Actor.receive handle
-  if continue then agentLoop else pure ()
-  where
-    handle
-      :: forall result
-       . AgentProtocol result
-      -> Eff (Actor.ReadOnlyEffects AgentProtocol) (result, Bool)
-    handle (RunRequest action) = action >> pure ((), True)
-
-actorAddress :: Actor.ActorRef protocol exit -> (Int, Int)
-actorAddress (ActorInternal.ActorRef actorId incarnation _) =
-  (actorId, incarnation)
-
-agentLabel :: AgentKind -> Text
-agentLabel (CodingAgent tree) =
-  "coding/" <> renderBranchName (branch (handleReceipt tree))
-agentLabel (ReadonlyAgent label) = label
-agentLabel (ReadonlyWorktreeAgent tree) =
-  "research/" <> renderBranchName (branch (handleReceipt tree))
-agentLabel (ScaffoldingAgent tree) =
-  "scaffolding/" <> renderBranchName (branch (handleReceipt tree))
-agentLabel (IntegrationAgent tree) =
-  "integration/" <> renderBranchName (branch (handleReceipt tree))
-
-attachWorktree
-  :: AgentKind
-  -> Actor.ActorDefinition () AgentProtocol ()
-  -> Actor.ActorDefinition () AgentProtocol ()
-attachWorktree (CodingAgent tree) = withWorktree tree
-attachWorktree (ReadonlyAgent _) = id
-attachWorktree (ReadonlyWorktreeAgent tree) = withWorktree tree
-attachWorktree (ScaffoldingAgent tree) = withWorktree tree
-attachWorktree (IntegrationAgent tree) = withWorktree tree
-
-agentRole :: AgentKind -> Actor.LaunchRole
-agentRole (ReadonlyAgent _) = Actor.ResearchRole
-agentRole (ReadonlyWorktreeAgent _) = Actor.ResearchRole
-agentRole (CodingAgent _) = Actor.CodingRole
-agentRole (ScaffoldingAgent _) = Actor.ScaffoldingRole
-agentRole (IntegrationAgent _) = Actor.IntegrationRole
-
+-- | Transfer one exact actor's cleanup ownership atomically against closure.
+retainAgent
+  :: Member AgentControl effects
+  => AgentRef -> WorkerLifetime -> Eff effects (Either AgentRetentionError ())
+retainAgent agent lifetime = send (AgentControlRetainWith (agentIdentity agent) lifetime)
 
 -- | Observation locator only. Rust checks the caller and exact inbox row.
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))

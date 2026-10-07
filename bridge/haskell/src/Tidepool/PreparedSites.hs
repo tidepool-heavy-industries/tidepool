@@ -152,7 +152,7 @@ data SiteAuthority = SiteAuthority
 -- These keys describe the resolver's closed authority vocabulary. A Name in
 -- a dependency query is the original GHC identity, not a printed spelling.
 data ProgressAuthority
-  = ReportProgress | PollProgress | AwaitProgressAfter | AwaitAnyProgress | ProgressSource
+  = ReportProgress | PollProgress | AwaitProgressAfter | ProgressSource
   deriving (Eq, Ord)
 
 data AuthorityDeclaration
@@ -289,14 +289,13 @@ authorityDeclarations = [RequestCarrier, ResponseWrapper, ProgressWrapper, Reply
   WatchConstructors] ++ map ProgressHelper progressAuthorities ++ [InstallSource, AttachSource]
 
 progressAuthorities :: [ProgressAuthority]
-progressAuthorities = [ReportProgress, PollProgress, AwaitProgressAfter, AwaitAnyProgress, ProgressSource]
+progressAuthorities = [ReportProgress, PollProgress, AwaitProgressAfter, ProgressSource]
 
 progressVerb :: ProgressAuthority -> String
 progressVerb role = case role of
   ReportProgress -> "reportRequestProgress"
   PollProgress -> "pollProgress"
-  AwaitProgressAfter -> "awaitProgressAfter"
-  AwaitAnyProgress -> "awaitAnyProgress"
+  AwaitProgressAfter -> "after"
   ProgressSource -> "progressSource"
 
 rawProgressOccurrences :: [String]
