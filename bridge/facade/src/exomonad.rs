@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 pub(crate) const STATUS_VERSION: u32 = 5;
 const PREVIOUS_STATUS_VERSION: u32 = 4;
@@ -75,8 +75,7 @@ pub struct InitOptions {
     pub preflight: PreflightMode,
 }
 
-/// Prepare one immutable source deployment for reuse by fresh runs. Required
-/// root and explicitly configured preparation roles use actual host support.
+/// Prepare one immutable source deployment for reuse by fresh runs.
 pub struct PrepareOptions {
     pub workspace: Option<PathBuf>,
     pub directory: PathBuf,
@@ -236,11 +235,7 @@ pub(crate) struct ExomonadConfig {
     pub(crate) resources: exomonad_node::command_resources::CommandResourcePolicy,
     pub(crate) defaults: ExomonadAgentDefaults,
     #[serde(default)]
-    pub(crate) research: exomonad_actor::ResearchPolicy,
-    #[serde(default)]
     pub(crate) models: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    pub(crate) preparation: PreparationConfig,
     #[serde(default)]
     pub(crate) haskell: workspace::HaskellConfig,
     #[serde(default)]
@@ -262,90 +257,12 @@ pub(crate) fn write_fixture_project_config(
             model: model.into(),
             effort: ExomonadEffort::default(),
         },
-        research: exomonad_actor::ResearchPolicy::default(),
         models: std::collections::BTreeMap::new(),
-        preparation: PreparationConfig::default(),
         haskell: workspace::HaskellConfig::default(),
         prompts: workspace::PromptConfig::default(),
     };
     configure(&mut config);
     write_fixture_config(authored, &config);
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PreparationConfig {
-    #[serde(default)]
-    pub(crate) roles: Vec<exomonad_actor::ActorRole>,
-}
-
-/// A configured concrete public request, or the root's actual host grants.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(tag = "kind", content = "profile", rename_all = "snake_case")]
-pub(crate) enum PreparationProfile {
-    Root,
-    Public(exomonad_tool::PublicActorProfile),
-}
-
-impl PreparationProfile {
-    pub(crate) fn effective_role(
-        &self,
-        policy: exomonad_actor::ResearchPolicy,
-    ) -> exomonad_actor::EffectiveRole {
-        match self {
-            Self::Root => exomonad_actor::EffectiveRole::root(),
-            Self::Public(profile) => exomonad_actor::EffectiveRole::public_profile(*profile),
-        }
-        .with_research_policy(policy)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SelectedPreparationProfile {
-    pub(crate) profile: PreparationProfile,
-    pub(crate) requested_effects: Vec<exomonad_tool::ActorEffectKey>,
-}
-
-impl PreparationConfig {
-    pub(crate) fn selected_profiles(
-        &self,
-        policy: exomonad_actor::ResearchPolicy,
-    ) -> Result<Vec<SelectedPreparationProfile>, Box<dyn std::error::Error>> {
-        use exomonad_actor::ActorRole;
-        use exomonad_tool::PublicActorProfile;
-        let mut profiles = vec![PreparationProfile::Root];
-        for role in &self.roles {
-            let profile = PreparationProfile::Public(match role {
-                ActorRole::Root => continue,
-                ActorRole::Research => PublicActorProfile::Research,
-                ActorRole::Coding => PublicActorProfile::Coding,
-                ActorRole::Scaffolding => PublicActorProfile::Scaffolding,
-                ActorRole::Integration => PublicActorProfile::Integration,
-                ActorRole::Inherited => return Err(runtime_error(
-                    "preparation.roles requires a concrete role; inherited has no standalone effect row",
-                )),
-            });
-            if !profiles.contains(&profile) {
-                profiles.push(profile);
-            }
-        }
-        profiles
-            .into_iter()
-            .map(|profile| {
-                let role = profile.effective_role(policy);
-                if !role.respects_role_ceiling() {
-                    return Err(runtime_error(
-                        "public preparation profile exceeds its role ceiling",
-                    ));
-                }
-                Ok(SelectedPreparationProfile {
-                    profile,
-                    requested_effects: role.effect_keys().to_vec(),
-                })
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -791,7 +708,6 @@ fn parse_project_config(
         ))
     })?;
     config.launch.validate()?;
-    config.preparation.selected_profiles(config.research)?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
         runtime_error(format!(
@@ -1019,7 +935,9 @@ async fn enter_workspace_budget(
 
 #[derive(Debug, thiserror::Error)]
 enum PreparationDirectoryError {
-    #[error("preparation destination must name an absolute child directory without parent components: {directory:?}")]
+    #[error(
+        "preparation destination must name an absolute child directory without parent components: {directory:?}"
+    )]
     InvalidDestination { directory: PathBuf },
     #[error("preparation parent must already exist and be accessible: {parent:?}: {source}")]
     ParentUnavailable {
@@ -1027,7 +945,9 @@ enum PreparationDirectoryError {
         #[source]
         source: tidepool_atomic_write::WriteError,
     },
-    #[error("could not durably establish preparation directory {directory:?} below its existing parent {parent:?}: {source}")]
+    #[error(
+        "could not durably establish preparation directory {directory:?} below its existing parent {parent:?}: {source}"
+    )]
     ChildEstablishment {
         parent: PathBuf,
         directory: PathBuf,
@@ -1762,7 +1682,6 @@ async fn run_host(
         &serde_json::to_vec_pretty(&limits)?,
     )?;
     let haskell_root = workspace_inputs.runtime_actors().to_path_buf();
-    let research_policy = configuration.research;
     if host_generation > 1 {
         let mut status = RunStatus::new(
             &options.run_id,
@@ -1820,7 +1739,6 @@ async fn run_host(
             tmux_session: options.session.clone(),
             model: options.agent.model.clone(),
             effort: options.agent.effort.into(),
-            research_policy,
             workspace_inputs: Some(workspace_inputs),
             pane_environment: pane_environment(),
             jev: None,
@@ -2671,11 +2589,13 @@ mod tests {
         assert!(!state.exists(), "scope admission does not create storage");
         let directory = boundary.child(relative).unwrap();
         assert_eq!(directory.path(), state.canonicalize().unwrap());
-        assert!(directory
-            .child("exomonad/runs/new-run")
-            .unwrap()
-            .path()
-            .is_dir());
+        assert!(
+            directory
+                .child("exomonad/runs/new-run")
+                .unwrap()
+                .path()
+                .is_dir()
+        );
     }
 
     #[test]
@@ -2722,10 +2642,12 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(std::process::Command::new(selected)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new(selected)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
@@ -2815,11 +2737,13 @@ mod tests {
             "listen = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
         ).unwrap();
         assert!(config.session_secret_file.is_none());
-        assert!(config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("tailscale0"));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tailscale0")
+        );
     }
 
     #[test]
@@ -2838,10 +2762,12 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
-            "{config}public_origin_scheme = 'ftp'\n"
-        ))
-        .is_err());
+        assert!(
+            toml::from_str::<EmbeddedLaunchConfig>(&format!(
+                "{config}public_origin_scheme = 'ftp'\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2851,11 +2777,13 @@ mod tests {
                 "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("tailscale0"));
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("tailscale0")
+            );
         }
     }
 
@@ -2897,10 +2825,12 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.effort, effort);
         }
-        assert!(toml::from_str::<ExomonadConfig>(
-            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-        )
-        .is_err());
+        assert!(
+            toml::from_str::<ExomonadConfig>(
+                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+            )
+            .is_err()
+        );
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3420,124 +3350,22 @@ mod tests {
     }
 
     #[test]
-    fn preparation_config_selects_root_then_only_named_concrete_roles() {
+    fn retired_research_and_preparation_config_is_denied() {
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join(EXOMONAD_CONFIG);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let base = "[defaults]\nmodel = \"test-model\"\neffort = \"low\"\n";
-        for (configured, expected) in [
-            ("", vec![exomonad_actor::ActorRole::Root]),
-            (
-                "[preparation]\nroles = [\"coding\", \"root\", \"research\", \"coding\"]\n",
-                vec![
-                    exomonad_actor::ActorRole::Root,
-                    exomonad_actor::ActorRole::Coding,
-                    exomonad_actor::ActorRole::Research,
-                ],
-            ),
+        for retired in [
+            "[preparation]\nroles = ['research']\n",
+            "[research]\nmaximum_depth = 3\n",
         ] {
-            std::fs::write(&path, format!("{base}{configured}")).unwrap();
-            let config = read_project_config(workspace.path()).unwrap().0;
-            let selected = config
-                .preparation
-                .selected_profiles(config.research)
-                .unwrap();
-            assert_eq!(
-                selected
-                    .iter()
-                    .map(|selected| selected.profile.effective_role(config.research).role())
-                    .collect::<Vec<_>>(),
-                expected
+            std::fs::write(&path, format!("{base}{retired}")).unwrap();
+            assert!(
+                read_project_config(workspace.path())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid Exomonad configuration")
             );
-        }
-        for role in ["inherited", "administrator"] {
-            std::fs::write(
-                &path,
-                format!("{base}[preparation]\nroles = [\"{role}\"]\n"),
-            )
-            .unwrap();
-            assert!(read_project_config(workspace.path()).is_err());
-        }
-    }
-
-    #[test]
-    fn preparation_roles_select_public_requests_and_preserve_logical_profiles() {
-        use exomonad_actor::{ActorEffectKey, ActorRole, EffectiveRole, ResearchPolicy};
-        use exomonad_tool::PublicActorProfile;
-        let config = PreparationConfig {
-            roles: vec![
-                ActorRole::Research,
-                ActorRole::Coding,
-                ActorRole::Scaffolding,
-                ActorRole::Research,
-            ],
-        };
-        let selected = config.selected_profiles(ResearchPolicy::default()).unwrap();
-        assert_eq!(
-            selected
-                .iter()
-                .map(|selected| selected.profile.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                PreparationProfile::Root,
-                PreparationProfile::Public(PublicActorProfile::Research),
-                PreparationProfile::Public(PublicActorProfile::Coding),
-                PreparationProfile::Public(PublicActorProfile::Scaffolding),
-            ]
-        );
-        assert_eq!(
-            selected[0].requested_effects,
-            EffectiveRole::root().effect_keys()
-        );
-        assert_eq!(
-            selected[1].requested_effects,
-            PublicActorProfile::Research.effect_keys()
-        );
-        assert!(!selected[1]
-            .requested_effects
-            .contains(&ActorEffectKey::Sleep));
-        assert!(EffectiveRole::research()
-            .effect_keys()
-            .contains(&ActorEffectKey::Sleep));
-        assert_eq!(selected[2].requested_effects, selected[3].requested_effects);
-        assert!(selected.iter().all(|selected| selected.profile
-            != PreparationProfile::Public(PublicActorProfile::ResearchLeaf)));
-    }
-
-    #[test]
-    fn research_policy_is_optional_configured_and_validated_at_load() {
-        let workspace = tempfile::tempdir().unwrap();
-        let path = workspace.path().join(EXOMONAD_CONFIG);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let base = "[defaults]\nmodel = \"test-model\"\neffort = \"low\"\n";
-        std::fs::write(&path, base).unwrap();
-        assert_eq!(
-            read_project_config(workspace.path()).unwrap().0.research,
-            exomonad_actor::ResearchPolicy::default()
-        );
-        std::fs::write(
-            &path,
-            format!("{base}\n[research]\nmaximum_depth = 3\nmaximum_active_children = 2\n"),
-        )
-        .unwrap();
-        assert_eq!(
-            read_project_config(workspace.path()).unwrap().0.research,
-            exomonad_actor::ResearchPolicy {
-                maximum_depth: 3,
-                maximum_active_children: Some(2),
-                default_depth: 1
-            }
-        );
-        for invalid in [
-            "maximum_depth = -1",
-            "maximum_active_children = 65536",
-            "depth = 3",
-        ] {
-            std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
-            assert!(read_project_config(workspace.path())
-                .unwrap_err()
-                .to_string()
-                .contains("invalid Exomonad configuration"));
         }
     }
 
@@ -3559,10 +3387,12 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(read_project_config(repo.path())
-            .unwrap_err()
-            .to_string()
-            .contains("contains tracked source"));
+        assert!(
+            read_project_config(repo.path())
+                .unwrap_err()
+                .to_string()
+                .contains("contains tracked source")
+        );
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -3884,10 +3714,12 @@ mod tests {
             "session": "exomonad-work",
             "phase": {"state": "awaiting_input", "root_actor": root_actor},
         });
-        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported Exomonad run status version 3"));
+        assert!(
+            decode_run_status(&serde_json::to_vec(&old).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported Exomonad run status version 3")
+        );
     }
 
     #[test]
@@ -4083,23 +3915,31 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--workers", "2"]));
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--workers", "2"])
+        );
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
+        );
         for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
-            assert!(toml::from_str::<ExomonadConfig>(&format!(
-                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-            ))
-            .is_err());
+            assert!(
+                toml::from_str::<ExomonadConfig>(&format!(
+                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+                ))
+                .is_err()
+            );
         }
-        assert!(!launch
-            .environment
-            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
+        assert!(
+            !launch
+                .environment
+                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        );
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
