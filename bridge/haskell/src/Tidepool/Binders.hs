@@ -873,9 +873,9 @@ renderDeclarationForTemplate template source = do
   where
     moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 
--- | Fill the runtime-authored whole-cell checking template. The template owns
--- imports, the exact effect row, and expression admissibility; this function
--- only places GHC-classified source and compiler-reserved pin aliases.
+-- | Fill the runtime-authored whole-cell template. The template owns imports,
+-- the exact effect row, and expression admissibility; this function places
+-- GHC-classified source and reserves the parsed rewrite's item names.
 --
 -- The two literal placeholders are intentionally the entire template
 -- vocabulary. Missing or duplicate placeholders are rejected by the worker
