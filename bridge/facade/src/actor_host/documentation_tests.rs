@@ -2057,10 +2057,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 async fn candidate_reports_preserve_admissions_receipts_and_observation_failures() {
     let campaign = workspace_campaign_with(|authored| {
         crate::exomonad::edit_fixture_project_config(authored, |project| {
-            project.haskell.modules = vec![
-                "Project.Work".into(),
-                "Project.WorkflowExamplesChecks".into(),
-            ];
+            project.haskell.modules = vec!["Project.Work".into()];
         });
     })
     .await;
