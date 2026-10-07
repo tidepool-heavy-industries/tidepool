@@ -147,7 +147,7 @@ lowerItem operations flags item (L _ statement) continuation =
     ObservationItem probe observation -> case statement of
       BodyStmt _ rhs _ _ ->
         let checkerCall = mkHsApp (lazyLambda probe
-              (mkHsApp (unqualifiedVariable "__tidepoolCellExpression") (variable probe))) rhs
+              (mkHsApp (unqualifiedVariable "__tidepoolCellExpression") (variable probe))) (mkLHsPar rhs)
             unitContinuation = lazyLambda (observation ++ "_unit") continuation
         in Right (segmentBind operations checkerCall unitContinuation)
       _ -> Left (UnprovedItemSequence (plannedItemOrdinal item))
@@ -161,7 +161,7 @@ localBinderNames = map (occNameString . rdrNameOcc) . collectLocalBinders CollNo
 wrapActionRhs :: String -> String -> LHsExpr GhcPs -> LHsExpr GhcPs
 wrapActionRhs step probe rhs = identity step (identity probe rhs)
   where
-    identity name expression = mkHsApp (lazyLambda name (variable name)) expression
+    identity name expression = mkHsApp (lazyLambda name (variable name)) (mkLHsPar expression)
 
 lazyLambda :: String -> LHsExpr GhcPs -> LHsExpr GhcPs
 lazyLambda name = mkHsLam (noLocA [lazyVariablePattern name])
@@ -184,7 +184,10 @@ patternCase operations flags valueName originalPattern continuation = noLocA
       (noLocA [mkHsCaseAlt originalPattern continuation, mkHsCaseAlt failedPattern failure])
 
 segmentBind :: GeneratedSegmentOperations -> LHsExpr GhcPs -> LHsExpr GhcPs -> LHsExpr GhcPs
-segmentBind operations action continuation = mkHsApps (qualifiedVariable operations "segmentBind") [action, continuation]
+-- GHC's parsed-expression printer preserves grouping through HsPar nodes.
+-- Generated applications must retain those nodes around argument expressions.
+segmentBind operations action continuation = mkHsApps (qualifiedVariable operations "segmentBind")
+  [mkLHsPar action, mkLHsPar continuation]
 
 segmentPureUnit :: GeneratedSegmentOperations -> LHsExpr GhcPs
 segmentPureUnit operations = mkHsApp (qualifiedVariable operations "segmentPure") unitExpression
