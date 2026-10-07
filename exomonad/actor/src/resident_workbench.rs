@@ -3960,6 +3960,8 @@ pub enum ResidentActorWorkbenchError {
     },
     #[error("actor retired before machine admission: {0:?}")]
     RetiredBeforeAdmission(crate::ActorTerminal),
+    #[error("resident invocation cancelled")]
+    InvocationCancelled,
     #[error(transparent)]
     CompileView(#[from] ActorCompileViewError),
     #[error("resident machine checkout failed: {0}")]
@@ -4071,6 +4073,7 @@ impl ResidentActorWorkbenchError {
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
+            Self::InvocationCancelled => None,
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(activation_compile_diagnostic(error)),
