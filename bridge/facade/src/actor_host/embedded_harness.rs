@@ -249,12 +249,13 @@ impl EmbeddedHarnessRuntime {
                 "embedded checkpoint child belongs to another admitted run/actor".into(),
             ));
         }
-        let gate = installation.fork_gate.as_ref().ok_or_else(|| {
-            EmbeddedError::Binding("embedded checkpoint child has no admitted fork gate".into())
-        })?;
-        let publication = gate
-            .publication()
-            .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
+        let publication = if installation.spawn_admission.is_some() {
+            exomonad_actor::ForkGroupPublication::Captured
+        } else {
+            installation.fork_gate.as_ref().ok_or_else(|| {
+                EmbeddedError::Binding("checkpoint child has no admitted authority".into())
+            })?.publication().map_err(|error| EmbeddedError::Binding(error.to_string()))?
+        };
         if let Some(lease) = &installation.checkpoint {
             if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer)
             {

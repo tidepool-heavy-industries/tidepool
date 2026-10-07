@@ -286,6 +286,7 @@ where
         let crate::start::CapturedChildLaunch {
             lifetime: _,
             mut descriptor,
+            spawn: _,
             entry,
             launch_worktrees,
             fork_workspace,

@@ -14,6 +14,7 @@ pub(super) struct ChildLaunchContinuation {
     pub invocation_work: Option<Arc<InvocationWork>>,
     pub parent_hole: ResidentHole,
     pub fork_reply: ForkReply,
+    pub spawn_reply: bool,
     pub fork_group: Option<crate::ForkGroupId>,
     pub original_placement: crate::ActorPlacement,
 }
@@ -21,6 +22,7 @@ pub(super) struct ChildLaunchContinuation {
 pub(super) struct ChildLaunchAdmission {
     pub child: crate::start::CapturedChildLaunch,
     pub checkpoint_admission: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
+    pub spawn_admission: Option<crate::SpawnAdmission>,
     pub inherited_host_attachment: Option<HostedCheckpointAttachment>,
     pub inherited_source: Option<crate::CheckpointSourceLayer>,
     pub retained_checkpoint_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
@@ -49,6 +51,7 @@ pub(super) struct ChildLaunchResume {
     context: ActorSessionContext,
     parent_hole: ResidentHole,
     fork_reply: ForkReply,
+    spawn_reply: bool,
     fork_group: Option<crate::ForkGroupId>,
     invocation_work: Option<Arc<InvocationWork>>,
     original_placement: crate::ActorPlacement,
@@ -81,13 +84,14 @@ where
         let ChildLaunchAdmission {
             child,
             checkpoint_admission,
+            spawn_admission,
             inherited_host_attachment,
             inherited_source,
             retained_checkpoint_scope,
             child_session_startup,
             invocation_work,
         } = admission?;
-        let crate::start::CapturedChildLaunch { lifetime, mut descriptor, entry, mut launch_worktrees, fork_workspace, seed } = child;
+        let crate::start::CapturedChildLaunch { lifetime, mut descriptor, spawn, entry, mut launch_worktrees, fork_workspace, seed } = child;
         let fork_group = descriptor.fork_group();
         let checkpoint_lease = checkpoint_admission.as_ref().map(|(lease, _)| lease.clone());
         let root_admission = environment.root_admission_closed.clone();
@@ -102,7 +106,15 @@ where
         } else {
             None
         };
-            let prepared_workspace = if let Some(seed) = fork_workspace {
+            let prepared_workspace = if let Some(definition) = &spawn {
+                let admission = environment.fork_workspaces.as_ref().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol("workspace admission is unavailable".into())
+                })?;
+                let prepared = admission.prepare(context.actor, definition.workspace.clone(), crate::WorkspaceAccess::ReadWrite)
+                    .await.map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                launch_worktrees = vec![prepared.handle().handle_receipt.tree_id.raw.clone()];
+                Some(prepared)
+            } else if let Some(seed) = fork_workspace {
                 let admission = environment.fork_workspaces.clone().ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         "context-fork workspace admission is not installed".into(),
@@ -246,12 +258,20 @@ where
             let bound_worktrees = launch_worktrees.clone();
             let descriptor_scope = descriptor.placement().lexical_scope;
             let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
-            let mut behavior = ResidentKernelBehavior::child(
-                descriptor,
-                environment.clone(),
-                entry,
-                launch_worktrees,
-            );
+            let mut behavior = if let Some(definition) = spawn {
+                let mut behavior = ResidentKernelBehavior::with_boot(
+                    descriptor, environment.clone(), ResidentBoot::Workbench, launch_worktrees,
+                );
+                behavior.explicit_installer = Some(Arc::new(entry));
+                behavior.spawn_admission = spawn_admission.clone();
+                behavior.fresh_context_seed = match definition.context {
+                    crate::start::SpawnContextWire::FreshSpawn(prompt) => Some(prompt),
+                    crate::start::SpawnContextWire::CapturedSpawn(_) => None,
+                };
+                behavior
+            } else {
+                ResidentKernelBehavior::child(descriptor, environment.clone(), entry, launch_worktrees)
+            };
             behavior.admitted_checkpoint = checkpoint_admission.clone();
             behavior.inherited_host_attachment = inherited_host_attachment;
             behavior.prepared_workspace = prepared_workspace;
@@ -278,6 +298,7 @@ where
             let child = match child_result {
                 Ok(child) => child,
                 Err(error) => {
+                    if let Some(admission) = &spawn_admission { admission.fail(error.to_string()); }
                     if checkpoint_lease.is_some() {
                         if let Err(cleanup) = environment
                             .runner
@@ -295,6 +316,14 @@ where
                     ));
                 }
             };
+            if let Some(admission) = &spawn_admission {
+                if let Err(detail) = admission.wait_ready().await {
+                    let _ = child.shutdown(ActorTerminal {
+                        kind: ActorExitKind::Cancelled, summary: "spawn attachment failed".into(), diagnostic: None,
+                    }).await;
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
+                }
+            }
             Ok(LaunchedChild {
                 actor: child, allocated_label, admitted_worktree, checkpoint_descriptor,
                 checkpoint_admission, inherited_source, source_layers, helper_branch, bound_worktrees,
@@ -432,6 +461,7 @@ where
         context: continuation.context,
         parent_hole: continuation.parent_hole,
         fork_reply: continuation.fork_reply,
+        spawn_reply: continuation.spawn_reply,
         fork_group: continuation.fork_group,
         invocation_work: continuation.invocation_work,
         original_placement: continuation.original_placement,
@@ -453,6 +483,7 @@ where
         context,
         parent_hole,
         fork_reply,
+        spawn_reply,
         fork_group,
         invocation_work,
         original_placement,
@@ -486,6 +517,12 @@ where
         {
             tracing::warn!(%cleanup, "failed launch scope cleanup was retained");
         }
+    }
+    if spawn_reply {
+        let result = result.map(|(child, _, workspace)| (
+            child.identity().id.0 as i64, child.identity().incarnation.0 as i64, workspace,
+        )).map_err(|error| crate::start::SpawnError::SpawnRefused(error.to_string()));
+        return environment.runner.resume_spawn_parent(context, parent_hole, result).await;
     }
     let (child, allocated_label, admitted_worktree) = match result {
         Ok(started) => started,

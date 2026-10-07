@@ -327,21 +327,16 @@ pub(super) async fn attach_checkpoint_actor(
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
-    let gate = installation
-        .fork_gate
-        .as_ref()
-        .ok_or("embedded checkpoint child requires its admitted fork gate")?;
-    gate.wait_committed()
-        .await
-        .map_err(|error| error.to_string())?;
-    if gate.publication().map_err(|error| error.to_string())?
-        == exomonad_actor::ForkGroupPublication::Deferred
-    {
-        if let Some(lease) = &installation.checkpoint {
-            lease
-                .wait_published()
-                .await
-                .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+    if installation.spawn_admission.is_none() {
+        let gate = installation.fork_gate.as_ref()
+            .ok_or("embedded checkpoint child requires admitted authority")?;
+        gate.wait_committed().await.map_err(|error| error.to_string())?;
+        if gate.publication().map_err(|error| error.to_string())?
+            == exomonad_actor::ForkGroupPublication::Deferred {
+            if let Some(lease) = &installation.checkpoint {
+                lease.wait_published().await
+                    .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+            }
         }
     }
     let captured = installation
@@ -392,13 +387,11 @@ pub(super) async fn attach_selected_actor(
     if installation.checkpoint.is_some() || installation.context_parent.is_some() {
         return Err("selected embedded child requires explicit fresh context".into());
     }
-    let gate = installation
-        .fork_gate
-        .as_ref()
-        .ok_or("selected embedded child requires its admitted fork gate")?;
-    gate.wait_committed()
-        .await
-        .map_err(|error| error.to_string())?;
+    if installation.spawn_admission.is_none() {
+        let gate = installation.fork_gate.as_ref()
+            .ok_or("selected embedded child requires admitted authority")?;
+        gate.wait_committed().await.map_err(|error| error.to_string())?;
+    }
     let actor = installation.actor.identity();
     let run = super::runtime_namespace(run_root);
     if parent.identity().run != run {
@@ -418,6 +411,11 @@ pub(super) async fn attach_selected_actor(
             Some(&parent.identity().actor),
         )
         .map_err(|error| error.to_string())?;
+    if let Some(prompt) = installation.fresh_context_seed.as_deref() {
+        embedded.conversation.seed_context(
+            &format!("spawn-context:{}:{}", actor.id.0, actor.incarnation.0), prompt,
+        ).map_err(|error| error.to_string())?;
+    }
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation

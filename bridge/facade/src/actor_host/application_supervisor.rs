@@ -460,6 +460,7 @@ pub(super) async fn run_interactive_applications(
                                         if let Some(gate) = installation.fork_gate.as_ref() {
                                             gate.mark_failed().ok();
                                         }
+                                        if let Some(admission) = &installation.spawn_admission { admission.fail(error.clone()); }
                                         tracing::warn!(?actor, %error, "selected provider ancestry refused");
                                         if let Err(failure) = apply_application_failure(installation.actor.clone(), ExternalApplicationFailure {
                                             class: ExternalApplicationFailureClass::ToolHostStartup,
@@ -556,10 +557,12 @@ pub(super) async fn run_interactive_applications(
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {
+                                        if let Some(admission) = &installation.spawn_admission { admission.fail(error.to_string()); }
                                         tracing::warn!(?actor, %error, "embedded child queue admission refused");
                                         continue;
                                     }
                                 };
+                                let spawn_admission = installation.spawn_admission.clone();
                                 let fork_gate = installation.fork_gate.clone();
                                 let committed_gate = fork_gate.clone();
                                 let runtime = Arc::clone(&service.runtime);
@@ -616,6 +619,9 @@ pub(super) async fn run_interactive_applications(
                                             }
                                             _ = embedded.cancellation_rx.changed() => return Ok(()),
                                         }
+                                        if let Some(admission) = &spawn_admission {
+                                            admission.acknowledge(actor)?;
+                                        }
                                         let _provider_attachment = provider_attachment;
                                         #[cfg(test)]
                                         let result = if let Some(transport) = test_transport {
@@ -641,6 +647,12 @@ pub(super) async fn run_interactive_applications(
                                         ).await;
                                         result
                                     }.await;
+                                    if let Some(admission) = &spawn_admission {
+                                        match &result {
+                                            Err(error) => admission.fail(error.to_string()),
+                                            Ok(()) => admission.fail("actor attachment cancelled before readiness".into()),
+                                        }
+                                    }
                                     (actor, local_actor, result)
                                 });
                                 update_embedded_state(&application_owners, actor, |state| {

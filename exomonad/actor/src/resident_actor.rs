@@ -144,6 +144,8 @@ pub struct LocalResidentInstallation {
     pub label: String,
     pub policy: Arc<dyn ResidentToolEndpoint>,
     pub initial_user_message: Option<String>,
+    pub fresh_context_seed: Option<String>,
+    pub spawn_admission: Option<crate::SpawnAdmission>,
     pub launch_worktrees: Vec<String>,
     pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     pub effective_role: crate::EffectiveRole,
@@ -2673,6 +2675,9 @@ pub struct ResidentKernelBehavior<H, O> {
     descriptor: ActorDescriptor,
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
+    explicit_installer: Option<Arc<RootCustody>>,
+    fresh_context_seed: Option<String>,
+    spawn_admission: Option<crate::SpawnAdmission>,
     root_startup: Option<(crate::RootStartupIntent, Arc<Mutex<RootStartupState>>)>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
@@ -3590,6 +3595,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             descriptor,
             environment,
             boot: Some(boot),
+            explicit_installer: None,
+            fresh_context_seed: None,
+            spawn_admission: None,
             root_startup: None,
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
@@ -4026,6 +4034,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        if let Some(admission) = &self.spawn_admission { admission.fail(terminal.summary.clone()); }
         publish_retired(&self.environment, actor, terminal);
     }
 
@@ -4777,6 +4786,7 @@ where
         self.workbench_executions.lock().release_all_fork_sources();
         self.pending_fork_publications.clear();
         self.descriptor.source_imports().release_capture();
+        self.explicit_installer.take();
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();
@@ -4951,6 +4961,7 @@ where
         } else {
             ForkReply::Actor
         };
+        let spawn_reply = child.spawn.is_some();
         let fork_group = child.descriptor.fork_group();
         let original_placement = child.descriptor.placement();
         let invocation_work = effect_owner.invocation_work();
@@ -4958,6 +4969,7 @@ where
             let crate::start::CapturedChildLaunch {
                 lifetime,
                 mut descriptor,
+                spawn,
                 entry,
                 launch_worktrees,
                 fork_workspace,
@@ -5084,6 +5096,22 @@ where
                 descriptor = descriptor.with_persistence_policy(policy);
             }
             let mut checkpoint_admission = None;
+            let mut spawn_admission = None;
+            if spawn.is_some() {
+                let claimed = self.environment.fork_groups.claim_spawn(
+                    context.actor, context.placement.session, descriptor.checkpoint_token(),
+                ).map_err(|refusal| ResidentActorWorkbenchError::ActorProtocol(
+                    format!("checkpoint refusal: {refusal:?}"),
+                ))?;
+                descriptor = descriptor.with_actor_path(claimed.path);
+                checkpoint_admission = claimed.checkpoint;
+                spawn_admission = Some(claimed.authority);
+                if let Some((lease, _)) = &checkpoint_admission {
+                    descriptor = descriptor.with_context_parent(lease.issuer)
+                        .with_fork_boundary(Some(lease.boundary.clone()));
+                }
+            }
+
             if let Some(group) = fork_group {
                 let requested = crate::ActorPath::parse(descriptor.label()).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
@@ -5104,7 +5132,7 @@ where
                     })?;
                 descriptor = descriptor.with_actor_path(claim.path);
                 checkpoint_admission = claim.checkpoint;
-            } else if descriptor.context_parent().is_some() {
+            } else if spawn.is_none() && descriptor.context_parent().is_some() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "context fork did not name an admission group".into(),
                 ));
@@ -5142,12 +5170,14 @@ where
                 child: crate::start::CapturedChildLaunch {
                     lifetime,
                     descriptor,
+                    spawn,
                     entry,
                     launch_worktrees,
                     fork_workspace,
                     seed,
                 },
                 checkpoint_admission,
+                spawn_admission,
                 inherited_host_attachment,
                 inherited_source,
                 retained_checkpoint_scope,
@@ -5163,6 +5193,7 @@ where
                 invocation_work,
                 parent_hole,
                 fork_reply,
+                spawn_reply,
                 fork_group,
                 original_placement,
             },
@@ -7693,6 +7724,8 @@ where
                             label: self.descriptor.label().to_owned(),
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
+                            fresh_context_seed: self.fresh_context_seed.clone(),
+                            spawn_admission: self.spawn_admission.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                             worktree_custody: self.worktree_custody.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
@@ -8282,6 +8315,8 @@ where
             label: self.descriptor.label().to_owned(),
             policy,
             initial_user_message,
+            fresh_context_seed: self.fresh_context_seed.clone(),
+            spawn_admission: self.spawn_admission.clone(),
             launch_worktrees: self.launch_worktrees.clone(),
             worktree_custody: self.worktree_custody.clone(),
             effective_role: self.descriptor.effective_role().clone(),
@@ -8865,6 +8900,12 @@ where
                 output: (),
                 terminal,
             });
+        }
+        if matches!(boot, ResidentBoot::Workbench) && self.explicit_installer.is_some() {
+            let installation = self.prepare_interactive_policy(kernel, context, None).await?;
+            self.commit_interactive_installation(kernel, context, installation)?;
+            self.set_standing(context.actor, ResidentStanding::Workbench);
+            return Ok(KernelStep::Continue(()));
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
@@ -12174,11 +12215,24 @@ where
                     displays: Default::default(),
                 },
             );
+            if let Some(admission) = &self.spawn_admission {
+                admission.bind(self.descriptor.creator().ok_or_else(|| Self::failure(
+                    "spawn has no creating actor",
+                ))?, context.actor).map_err(Self::failure)?;
+                if let Some(layers) = &self.environment.source_layers {
+                    if let Some((lease, _)) = &self.admitted_checkpoint {
+                        layers.bind_checkpoint_for(context.actor.into(), "", &lease.issuer_source_layer)
+                            .map_err(Self::failure)?;
+                    } else {
+                        layers.bind_for(context.actor.into(), "", &self.launch_worktrees);
+                    }
+                }
+            }
             if self.root_startup.is_some() {
                 // The original boot stays resident and opaque until durable application binding.
                 return Ok(KernelStep::Continue(()));
             }
-            if self.descriptor.fork_boundary().is_some() {
+            if self.descriptor.fork_boundary().is_some() && self.spawn_admission.is_none() {
                 let group = self
                     .descriptor
                     .fork_group()

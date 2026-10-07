@@ -424,7 +424,7 @@ impl ResidentActorStart {
         let mut descriptor = ActorDescriptor::new(label.unwrap_or_default(), crate::ActorPlacement {
             session: child_session, resource_scope: child_realm, lexical_scope,
         })
-        .with_effective_role(crate::EffectiveRole::coding().with_effect_keys(keys))
+        .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(keys))
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()))
@@ -587,7 +587,7 @@ impl ResidentActorStart {
             },
         )
         .with_profile(profile)
-        .with_effective_role(effective_role)
+        .with_capabilities(effective_role)
         .with_fork_effort(fork_effort)
         .with_model(model)
         .with_instructions(instructions)
@@ -775,7 +775,7 @@ impl ActorLaunchRoleWire {
         match self {
             ActorLaunchRoleWire::ActorRootRole => crate::EffectiveRole::root(),
             ActorLaunchRoleWire::ActorResearchRole => crate::EffectiveRole::research(),
-            ActorLaunchRoleWire::ActorCodingRole => crate::EffectiveRole::coding(),
+            ActorLaunchRoleWire::ActorCodingRole => crate::ActorCapabilities::default(),
             ActorLaunchRoleWire::ActorScaffoldingRole => {
                 crate::EffectiveRole::scaffolding(crate::DescendantBudget {
                     maximum_depth: 0,
@@ -787,7 +787,7 @@ impl ActorLaunchRoleWire {
                 if !has_worktree {
                     crate::EffectiveRole::research()
                 } else {
-                    crate::EffectiveRole::coding()
+                    crate::ActorCapabilities::default()
                 }
             }
         }

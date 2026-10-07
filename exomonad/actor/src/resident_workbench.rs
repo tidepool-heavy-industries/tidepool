@@ -3195,9 +3195,9 @@ impl ResidentRequest {
             Self::Introspection(
                 crate::generated::introspection::IntrospectionReq::IntrospectionTypeOfWith(..),
             ) => "structured type",
-            Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
+            Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
                 ..,
-            )) => "startAgent",
+            )) => "spawnSubagent",
             Self::Forks(crate::generated::forks::ForksReq::ForksBeginWith(..)) => {
                 "begin context-fork group"
             }
@@ -8314,30 +8314,15 @@ where
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
                     ResidentRequest::AgentLaunch(
-                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
-                            label,
-                            _,
-                            unbound_label,
-                            role,
-                            profile,
-                            worktrees,
-                            lifetime,
+                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
+                            _, spawn_context, workspace, effects, label, model, effort,
+                            instructions, lifetime, limits,
                         ),
-                    ) => crate::ResidentActorStart::capture_decoded(
-                        session,
-                        hole,
-                        crate::start::ActorStartRequest {
-                            label, role, profile, launch_worktrees: worktrees,
-                            fork_group: None, fork_workspace: None, effect_keys: None,
-                            fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
-                            checkpoint: None,
-                            lifetime,
-                            session_id: context.placement.session, parent_actor: context.actor,
-                            unbound_label,
-                        },
-                    )
-                    .map(ResidentActorBoundary::Start)
-                    .map_err(ResidentActorWorkbenchError::StartCapture),
+                    ) => crate::ResidentActorStart::capture_spawn(
+                        session, hole, spawn_context, workspace, effects, label, model,
+                        effort, instructions, lifetime, limits, context.placement.session, context.actor,
+                    ).map(ResidentActorBoundary::Start)
+                        .map_err(ResidentActorWorkbenchError::StartCapture),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksStartWith(
                         label,
                         _,
@@ -10632,6 +10617,17 @@ where
                 },
             )
             .await
+    }
+
+    pub(crate) async fn resume_spawn_parent(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        result: Result<(i64, i64, Option<tidepool_bridge_effects::WtWorktreeHandle>), crate::start::SpawnError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access.with_machine(context, move |session, _, _| {
+            session.resume_classified(hole, result).map_err(classify_resumption)
+        }).await
     }
 
     pub async fn resume_starting_parent(

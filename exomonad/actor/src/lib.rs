@@ -88,8 +88,9 @@ pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
 pub use fork_workspace::{
-    ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceAdmissionFuture,
-    ForkWorkspaceCustody, ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedForkWorkspace,
+    WorkspaceAdmission, WorkspaceAdmissionError, WorkspaceAdmissionFuture,
+    WorkspaceCustody, ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedWorkspaceAttachment,
+    SpawnWorkspaceWire, WorkspaceSelection,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
@@ -175,7 +176,7 @@ pub use runtime_observation::{
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
     ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart,
-    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime,
+    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime, SpawnContextWire, SpawnError,
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,
