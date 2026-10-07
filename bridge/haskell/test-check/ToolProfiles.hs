@@ -282,7 +282,7 @@ compileAt fixture source expectation = do
 presentationTests :: [TestTree]
 presentationTests =
   [ testCase (name ++ " requires presentation at construction") $
-      compileProfile name (Rejected ["match type", "Presented"])
+      compileProfile name (Rejected ["Couldn't match", "Presented"])
   | name <-
       [ "MissingCallPresentation", "MissingRawPresentation", "MissingNotifyPresentation"
       , "MissingSyncPresentation", "MissingSyncRawPresentation", "MissingSyncNotifyPresentation"
@@ -294,9 +294,9 @@ presentationTests =
   , policy <- ["Bounded", "Installed"]
   ] ++
   [ testCase "nested handler requires presentation at construction" $
-      compileProfile "MissingNestedPresentation" (Rejected ["match type", "Presented"])
+      compileProfile "MissingNestedPresentation" (Rejected ["Couldn't match", "Presented"])
   , testCase "renderer must consume the handler output type" $
-      compileProfile "WrongPresentationOutput" (Rejected ["match type", "Int", "Text"])
+      compileProfile "WrongPresentationOutput" (Rejected ["Couldn't match", "Int", "Text"])
   , testCase "presentation completion composes with generic helpers and bounded model turns" $
       compileProfile "GenericPresentedModel" Accepted
   ]
