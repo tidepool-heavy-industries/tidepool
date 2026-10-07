@@ -777,7 +777,7 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
-    let error = session.execute("zero_bang_let", "{-# LANGUAGE BangPatterns #-}\nrecord 1\nlet !_ = (error \"strict discarded let\" :: Int)\nrecord 2", 1).unwrap_err();
+    let error = session.execute("zero_bang_let", "{-# LANGUAGE BangPatterns #-}\nsegmentRecord 1\nlet !_ = (error \"strict discarded let\" :: Int)\nsegmentRecord 2", 1).unwrap_err();
     assert!(
         is_raised_exception(&error),
         "the native strict wildcard must actually force: {error:?}"
