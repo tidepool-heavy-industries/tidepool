@@ -155,7 +155,6 @@ impl ScopeFixture {
         ] {
             preamble = insert_preamble_imports(&preamble, import);
         }
-        let preamble = format!("{preamble}\ndata ScopePing = ScopePing {{ sentinel :: Int }} deriving (Generic, FromJSON, JsonSchema)\ndata ScopeTools mode = ScopeTools {{ ping :: mode :- Call ScopePing Int }} deriving Generic\n");
         let root = tempfile::tempdir().expect("session root");
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -202,6 +201,15 @@ impl ScopeFixture {
             )
             .await
             .expect("resident scope parent");
+        let declarations = self
+            .execute(
+                &parent,
+                include_str!("scope_runtime_declarations.hs"),
+                None,
+                None,
+            )
+            .await;
+        assert_committed(declarations);
         let setup = self
             .execute(&parent, include_str!("scope_runtime_setup.hs"), None, None)
             .await;
