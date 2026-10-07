@@ -1,7 +1,10 @@
 //! Compiler namespace choices and target demand are independent of custody.
 //! Expectations come from fixture facts and finite-set recomputation.
 use super::*;
-use crate::certified_products::{tests::original_groups_fixture, PendingImportOwner};
+use crate::certified_products::{
+    tests::{original_groups_fixture, recovered_witness_fixtures},
+    PendingImportOwner,
+};
 use crate::declaration_context::ExactDeclarationContext;
 use crate::declaration_join::ExactLexicalNode;
 use proptest::prelude::*;
@@ -45,19 +48,20 @@ impl Catalog {
     fn new(cross_version: bool, generations: [u64; MODULES * VERSIONS]) -> Self {
         let mut edges = BTreeMap::<RawGroup, BTreeSet<RawGroup>>::new();
         for version in 0..VERSIONS {
+            let helper_version = version ^ usize::from(cross_version);
             for module in 0..MODULES - 1 {
                 edges.insert(
                     (module, version, 3),
-                    BTreeSet::from([(module + 1, version, 3)]),
+                    BTreeSet::from([(module + 1, helper_version, 3)]),
                 );
                 edges.insert(
                     (module, version, 11),
-                    BTreeSet::from([(module + 1, version ^ usize::from(cross_version), 3)]),
+                    BTreeSet::from([(module + 1, helper_version, 3)]),
                 );
             }
-            // Both source islands share a helper SCC, while ordinal 29 stays
-            // empty. Module and ordinal alone cannot distinguish the islands.
-            edges.insert((2, version, 3), BTreeSet::from([(1, version, 3)]));
+            // Each source island has one helper version per module and a helper
+            // SCC. Module and ordinal alone cannot distinguish the islands.
+            edges.insert((2, version, 3), BTreeSet::from([(1, helper_version, 3)]));
         }
         let placeholders = (0..VERSIONS)
             .flat_map(|version| (0..MODULES).map(move |module| (module, version)))
@@ -164,9 +168,9 @@ impl Catalog {
                 "variants retain different original bodies"
             );
         }
-        let originals = finalized
+        let originals = recovered_witness_fixtures(&finalized)
             .into_iter()
-            .map(|p| Arc::new(ArtifactEntry::original(producer, p).unwrap()))
+            .map(|original| Arc::new(ArtifactEntry::original(producer, original.product).unwrap()))
             .collect();
         let capture = Arc::new(ArtifactEntry::canonical(
             crate::certified_products::fixture_module_interface(
@@ -545,6 +549,16 @@ fn selected_source_islands_require_the_exact_helper_variant() {
     assert_eq!(
         certify(&available, &selected).unwrap().len(),
         selected.len(),
+        "one selected source island uses its exact helper variant"
+    );
+    let both_islands = catalog
+        .closure([(0, 0, 11), (0, 1, 11)])
+        .into_iter()
+        .map(|group| catalog.key(group))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        certify(&available, &both_islands).unwrap().len(),
+        both_islands.len(),
         "both same-named helper variants may be retained across exact domains"
     );
     let mut wrong_selection = selected.clone();
