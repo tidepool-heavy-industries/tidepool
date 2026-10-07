@@ -175,7 +175,7 @@ workflowContracts = do
 
   let actorIdentityPair = (31, 2)
       admittedActor = Right (31, 2, Nothing)
-      requestRefusal = RequestInvalidDeadline "fixture refusal"
+      requestRefusal = RequestReservationRejected ReplyUnauthorized
       admissionsScript = initialScript
         { spawnResults =
             [ Left (Core.SpawnRefused "fixture spawn refusal")
@@ -204,7 +204,7 @@ workflowContracts = do
         candidateCheckpointRelease report == Left ReleasedCheckpoint
           && case candidateAdmissions report of
             [ CandidateSpawnRefused spawnTask (SpawnRefused "fixture spawn refusal")
-              , CandidateRequestRefused requestTask actor (RequestInvalidDeadline "fixture refusal")
+              , CandidateRequestRefused requestTask actor (RequestReservationRejected ReplyUnauthorized)
               , CandidateRequested requestTask' actor' request _
               ] -> spawnTask == first && requestTask == second && requestTask' == third
                 && agentIdentity actor == actorIdentityPair && agentIdentity actor' == (32, 1)
@@ -252,7 +252,7 @@ workflowContracts = do
     (case mixedObservation of
       CandidateObservationReady
         [ CandidateSpawnNotAdmitted spawnTask (SpawnRefused "fixture spawn refusal")
-        , CandidateRequestNotAdmitted requestTask retainedActor (RequestInvalidDeadline "fixture refusal")
+        , CandidateRequestNotAdmitted requestTask retainedActor (RequestReservationRejected ReplyUnauthorized)
         , CandidateResponseUnavailable failedIdentity failedActor (ResponseTargetFailed "terminal failure")
         , CandidateResponseReceived producedIdentity producedActor actualProduced
         , CandidateResponseReceived blockedIdentity blockedActor actualBlocked
