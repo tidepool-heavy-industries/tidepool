@@ -516,7 +516,8 @@ enum Settlement {
 #[derive(Debug, Clone)]
 enum ReceiptOp {
     Insert(u8, i16),
-    Detach(u8, i16),
+    Detach(u8, Request, u8, i16),
+    Observe,
     Remove(u8),
     Settle(u8, Settlement, Vec<u8>, u8),
 }
@@ -526,7 +527,7 @@ struct HeldReceiptModel {
     identity: u8,
     value: i16,
     holes: Vec<Hole>,
-    epoch: u64,
+    birth_operation: usize,
 }
 
 struct HeldReceipt {
@@ -544,6 +545,59 @@ struct ReceiptCoverage {
     stale_settlements: [usize; 3],
     stale_remove_events: usize,
     tombstone_evictions: usize,
+    replacements_while_running: usize,
+    stale_into_running: [usize; 3],
+    duplicate_checkout_holes: usize,
+    duplicate_settlement_holes: usize,
+    peak_held_receipts: usize,
+    observations: usize,
+}
+
+impl ReceiptCoverage {
+    fn accumulate(&mut self, other: &Self) {
+        self.detached += other.detached;
+        self.busy_handle_refusals += other.busy_handle_refusals;
+        self.missing_receipt_refusals += other.missing_receipt_refusals;
+        self.stale_remove_events += other.stale_remove_events;
+        self.tombstone_evictions += other.tombstone_evictions;
+        self.replacements_while_running += other.replacements_while_running;
+        self.duplicate_checkout_holes += other.duplicate_checkout_holes;
+        self.duplicate_settlement_holes += other.duplicate_settlement_holes;
+        self.peak_held_receipts = self.peak_held_receipts.max(other.peak_held_receipts);
+        self.observations += other.observations;
+        for (total, count) in self
+            .checkout_refusals
+            .iter_mut()
+            .zip(other.checkout_refusals)
+        {
+            *total += count;
+        }
+        for (total, count) in self.live_settlements.iter_mut().zip(other.live_settlements) {
+            *total += count;
+        }
+        for (total, count) in self
+            .stale_settlements
+            .iter_mut()
+            .zip(other.stale_settlements)
+        {
+            *total += count;
+        }
+        for (total, count) in self
+            .stale_into_running
+            .iter_mut()
+            .zip(other.stale_into_running)
+        {
+            *total += count;
+        }
+    }
+}
+
+fn request_strategy() -> impl Strategy<Value = Request> {
+    prop_oneof![
+        Just(Request::Run),
+        Just(Request::Resume),
+        Just(Request::Child)
+    ]
 }
 
 fn receipt_op_strategy() -> impl Strategy<Value = ReceiptOp> {
@@ -551,7 +605,9 @@ fn receipt_op_strategy() -> impl Strategy<Value = ReceiptOp> {
     let settlement = settlement_strategy();
     prop_oneof![
         3 => (0_u8..8, -4_i16..5).prop_map(|(i,v)| ReceiptOp::Insert(i,v)),
-        4 => (0_u8..2, -3_i16..4).prop_map(|(h,v)| ReceiptOp::Detach(h,v)),
+        4 => (0_u8..2, request_strategy(), 0_u8..HOLES as u8, -3_i16..4)
+            .prop_map(|(h,r,hole,v)| ReceiptOp::Detach(h,r,hole,v)),
+        1 => Just(ReceiptOp::Observe),
         3 => (0_u8..8).prop_map(ReceiptOp::Remove),
         5 => (0_u8..2, settlement, holes, 0_u8..8).prop_map(|(h,s,hs,r)| ReceiptOp::Settle(h,s,hs,r)),
     ]
@@ -582,20 +638,27 @@ fn next_settlement(settlement: Settlement) -> Settlement {
 }
 
 fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
+    replay_receipts_with_observation(ops, true)
+}
+
+fn replay_receipts_with_observation(ops: &[ReceiptOp], observe_each: bool) -> ReceiptCoverage {
     let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
     let drops = Arc::new(AtomicUsize::new(0));
     let mut model = Model::default();
-    let mut model_epochs = HashMap::<u8, u64>::new();
-    let mut next_epoch = 1_u64;
-    let mut model_receipts = (0..2)
+    // Incarnation identity is the insert's position in the input history. It
+    // does not depend on the registry's epoch counter or allocation results.
+    let mut model_births = HashMap::<u8, usize>::new();
+    let mut model_receipts = (0..4)
         .map(|_| None)
         .collect::<Vec<Option<HeldReceiptModel>>>();
-    let mut receipts = (0..2).map(|_| None).collect::<Vec<Option<HeldReceipt>>>();
+    let mut receipts = (0..4).map(|_| None).collect::<Vec<Option<HeldReceipt>>>();
     let mut coverage = ReceiptCoverage::default();
 
-    for op in ops {
+    for (operation_index, op) in ops.iter().enumerate() {
         match op {
             ReceiptOp::Insert(identity, value) => {
+                coverage.replacements_while_running +=
+                    usize::from(matches!(model.slots.get(&0), Some(ModelSlot::Running(_))));
                 if model
                     .slots
                     .insert(0, ModelSlot::Idle(*identity, *value))
@@ -605,8 +668,7 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
                 {
                     model.drops += 1;
                 }
-                model_epochs.insert(0, next_epoch);
-                next_epoch += 1;
+                model_births.insert(0, operation_index);
                 drop(reg.insert_idle(SessionId(0), machine(*identity, *value, &drops)));
             }
             ReceiptOp::Remove(reason) => {
@@ -623,20 +685,30 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
                         0,
                         format!("receipt-remove-{reason}"),
                     );
-                    model_epochs.remove(&0);
+                    model_births.remove(&0);
                 }
                 drop(reg.remove(SessionId(0), format!("receipt-remove-{reason}")));
             }
-            ReceiptOp::Detach(handle, delta) => {
+            ReceiptOp::Observe => {
+                check_state(&reg, &model, &drops);
+                coverage.observations += 1;
+            }
+            ReceiptOp::Detach(handle, request, hole, delta) => {
                 if model_receipts[*handle as usize].is_some() {
                     coverage.busy_handle_refusals += 1;
-                    check_state(&reg, &model, &drops);
+                    if observe_each {
+                        check_state(&reg, &model, &drops);
+                    }
                     continue;
                 }
-                match model_checkout(&model, 0, Request::Run, Hole(0)) {
+                match model_checkout(&model, 0, *request, Hole(*hole)) {
                     Err(expected) => {
                         coverage.checkout_refusals[refusal_index(&expected)] += 1;
-                        let actual = reg.checkout_run(SessionId(0));
+                        let actual = match request {
+                            Request::Run => reg.checkout_run(SessionId(0)),
+                            Request::Resume => reg.checkout_resume(SessionId(0), &Hole(*hole)),
+                            Request::Child => reg.checkout_child(SessionId(0)),
+                        };
                         let error = match actual {
                             Err(error) => error,
                             Ok(checkout) => {
@@ -647,8 +719,18 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
                         assert_eq!(actual_error(error), expected);
                     }
                     Ok((identity, value, holes)) => {
-                        let mut checkout =
-                            reg.checkout_run(SessionId(0)).expect("model admits detach");
+                        let mut checkout = match request {
+                            Request::Run => reg.checkout_run(SessionId(0)),
+                            Request::Resume => reg.checkout_resume(SessionId(0), &Hole(*hole)),
+                            Request::Child => reg.checkout_child(SessionId(0)),
+                        }
+                        .expect("model admits detach");
+                        assert_eq!(checkout.holes_at_checkout(), holes.as_slice());
+                        assert_eq!(
+                            (checkout.machine().identity, checkout.machine().value),
+                            (identity, value)
+                        );
+                        coverage.duplicate_checkout_holes += usize::from(has_duplicate(&holes));
                         checkout.machine().value += *delta;
                         let (machine, receipt) = checkout.into_parts();
                         model.slots.insert(0, ModelSlot::Running(holes.clone()));
@@ -656,26 +738,41 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
                             identity,
                             value: value + *delta,
                             holes,
-                            epoch: *model_epochs.get(&0).expect("live entry has epoch"),
+                            birth_operation: *model_births
+                                .get(&0)
+                                .expect("live entry has an insertion"),
                         });
                         receipts[*handle as usize] = Some(HeldReceipt { receipt, machine });
                         coverage.detached += 1;
+                        coverage.peak_held_receipts = coverage
+                            .peak_held_receipts
+                            .max(model_receipts.iter().filter(|held| held.is_some()).count());
                     }
                 }
             }
             ReceiptOp::Settle(handle, settlement, new_holes, reason) => {
                 let Some(held_model) = model_receipts[*handle as usize].take() else {
                     coverage.missing_receipt_refusals += 1;
-                    check_state(&reg, &model, &drops);
+                    if observe_each {
+                        check_state(&reg, &model, &drops);
+                    }
                     continue;
                 };
                 let held = receipts[*handle as usize]
                     .take()
                     .expect("model and real receipt handles agree");
-                let current = model_epochs.get(&0).copied() == Some(held_model.epoch);
+                let current = model_births.get(&0).copied() == Some(held_model.birth_operation);
+                assert_eq!(
+                    (held.machine.identity, held.machine.value),
+                    (held_model.identity, held_model.value)
+                );
+                if !current && matches!(model.slots.get(&0), Some(ModelSlot::Running(_))) {
+                    coverage.stale_into_running[settlement_index(*settlement)] += 1;
+                }
                 match settlement {
                     Settlement::Suspended => {
                         let holes = new_holes.iter().copied().map(Hole).collect::<Vec<_>>();
+                        coverage.duplicate_settlement_holes += usize::from(has_duplicate(&holes));
                         reg.settle_suspended(held.receipt, held.machine, holes.clone());
                         if current {
                             model.slots.insert(
@@ -719,7 +816,7 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
                                 0,
                                 format!("receipt-retire-{reason}"),
                             );
-                            model_epochs.remove(&0);
+                            model_births.remove(&0);
                             coverage.live_settlements[2] += 1;
                         } else {
                             coverage.stale_settlements[2] += 1;
@@ -728,8 +825,11 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
                 }
             }
         }
-        check_state(&reg, &model, &drops);
+        if observe_each {
+            check_state(&reg, &model, &drops);
+        }
     }
+    check_state(&reg, &model, &drops);
 
     // A generated prefix can leave receipts outstanding. Explicitly restore
     // each remaining one so the debug receipt guard never becomes cleanup.
@@ -738,7 +838,7 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
             let held_model = model_receipts[handle]
                 .take()
                 .expect("receipt model survives cleanup");
-            let current = model_epochs.get(&0).copied() == Some(held_model.epoch);
+            let current = model_births.get(&0).copied() == Some(held_model.birth_operation);
             reg.settle_suspended(held.receipt, held.machine, held_model.holes.clone());
             if current {
                 model.slots.insert(
@@ -759,6 +859,17 @@ fn replay_receipts(ops: &[ReceiptOp]) -> ReceiptCoverage {
         }
     }
     check_state(&reg, &model, &drops);
+    let retained = model
+        .slots
+        .values()
+        .filter(|slot| matches!(slot, ModelSlot::Idle(..) | ModelSlot::Suspended(..)))
+        .count();
+    drop(reg);
+    assert_eq!(
+        drops.load(AtomicOrdering::SeqCst),
+        model.drops + retained,
+        "registry shutdown releases every remaining machine exactly once"
+    );
     coverage
 }
 
@@ -766,18 +877,195 @@ fn delayed_receipt_history(stale: Settlement, suffix: &[ReceiptOp]) -> Vec<Recei
     let live = next_settlement(stale);
     let mut ops = vec![
         ReceiptOp::Insert(1, 10),
-        ReceiptOp::Detach(0, 2),
-        ReceiptOp::Detach(0, 1), // explicit occupied logical handle refusal
+        ReceiptOp::Detach(0, Request::Run, 0, 2),
+        ReceiptOp::Detach(0, Request::Run, 0, 1), // explicit occupied logical handle refusal
         ReceiptOp::Remove(1),
         ReceiptOp::Insert(2, 20),
         ReceiptOp::Settle(0, stale, vec![3, 1, 1], 2),
         ReceiptOp::Insert(3, 30),
-        ReceiptOp::Detach(1, -1),
+        ReceiptOp::Detach(1, Request::Run, 0, -1),
         ReceiptOp::Settle(1, live, vec![2, 2, 0], 3),
         ReceiptOp::Settle(1, live, vec![], 4), // explicit missing logical receipt
     ];
     ops.extend_from_slice(suffix);
     ops
+}
+
+#[derive(Debug, Clone)]
+struct ReplacementPattern {
+    stale: Settlement,
+    live: Settlement,
+    request: Request,
+    remove_first: bool,
+    stale_first: bool,
+    hole: u8,
+    value: i16,
+    delta: i16,
+}
+
+fn replacement_pattern_strategy() -> impl Strategy<Value = ReplacementPattern> {
+    (
+        settlement_strategy(),
+        settlement_strategy(),
+        request_strategy(),
+        any::<bool>(),
+        any::<bool>(),
+        0_u8..HOLES as u8,
+        -4_i16..5,
+        -3_i16..4,
+    )
+        .prop_map(
+            |(stale, live, request, remove_first, stale_first, hole, value, delta)| {
+                ReplacementPattern {
+                    stale,
+                    live,
+                    request,
+                    remove_first,
+                    stale_first,
+                    hole,
+                    value,
+                    delta,
+                }
+            },
+        )
+}
+
+fn replacement_receipt_history(
+    prefix: &[ReceiptOp],
+    pattern: &ReplacementPattern,
+    suffix: &[ReceiptOp],
+) -> Vec<ReceiptOp> {
+    // Random surroundings use handles 0 and 1. Reserved handles 2 and 3 keep
+    // the causal overlap valid even when shrinking removes prefix operations.
+    let holes = vec![pattern.hole, pattern.hole, (pattern.hole + 1) % HOLES as u8];
+    let mut ops = prefix.to_vec();
+    ops.extend([
+        ReceiptOp::Insert(1, pattern.value),
+        ReceiptOp::Detach(2, Request::Run, pattern.hole, 0),
+        ReceiptOp::Settle(2, Settlement::Suspended, holes.clone(), 0),
+        ReceiptOp::Detach(2, pattern.request, pattern.hole, pattern.delta),
+        ReceiptOp::Detach(2, Request::Run, pattern.hole, 0),
+        ReceiptOp::Detach(3, Request::Run, pattern.hole, 0),
+    ]);
+    if pattern.remove_first {
+        ops.push(ReceiptOp::Remove(0));
+    }
+    // Unequal payloads make stale overwrite observable independently of kind.
+    ops.extend([
+        ReceiptOp::Insert(2, pattern.value + 32),
+        ReceiptOp::Detach(3, Request::Run, pattern.hole, -pattern.delta),
+    ]);
+    let stale = ReceiptOp::Settle(2, pattern.stale, holes.clone(), 1);
+    let live = ReceiptOp::Settle(3, pattern.live, holes, 2);
+    if pattern.stale_first {
+        ops.extend([stale, ReceiptOp::Observe, live]);
+    } else {
+        ops.extend([live, ReceiptOp::Observe, stale]);
+    }
+    ops.extend([
+        ReceiptOp::Observe,
+        ReceiptOp::Settle(2, pattern.stale, vec![], 3),
+    ]);
+    ops.extend_from_slice(suffix);
+    ops
+}
+
+#[test]
+fn deterministic_support_covers_overlapping_replacement_receipts() {
+    for stale in [
+        Settlement::Suspended,
+        Settlement::Wedged,
+        Settlement::Retire,
+    ] {
+        for live in [
+            Settlement::Suspended,
+            Settlement::Wedged,
+            Settlement::Retire,
+        ] {
+            for request in [Request::Run, Request::Resume, Request::Child] {
+                for remove_first in [false, true] {
+                    for stale_first in [false, true] {
+                        for observe_each in [false, true] {
+                            let pattern = ReplacementPattern {
+                                stale,
+                                live,
+                                request,
+                                remove_first,
+                                stale_first,
+                                hole: 1,
+                                value: 10,
+                                delta: 2,
+                            };
+                            let coverage = replay_receipts_with_observation(
+                                &replacement_receipt_history(&[], &pattern, &[]),
+                                observe_each,
+                            );
+                            assert_eq!(
+                                coverage.stale_settlements[settlement_index(stale)],
+                                1,
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert!(
+                                coverage.live_settlements[settlement_index(live)] > 0,
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert_eq!(
+                                coverage.stale_into_running[settlement_index(stale)],
+                                usize::from(stale_first),
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert_eq!(
+                                coverage.replacements_while_running,
+                                usize::from(!remove_first),
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert_eq!(coverage.peak_held_receipts, 2, "{pattern:?} {coverage:?}");
+                            assert_eq!(
+                                coverage.duplicate_checkout_holes, 1,
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert_eq!(
+                                coverage.busy_handle_refusals, 1,
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert_eq!(
+                                coverage.missing_receipt_refusals, 1,
+                                "{pattern:?} {coverage:?}"
+                            );
+                            assert_eq!(
+                                coverage.checkout_refusals[0], 1,
+                                "{pattern:?} {coverage:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn deterministic_generated_receipt_distribution_reports_observed_coverage() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let histories = (
+        prop::collection::vec(receipt_op_strategy(), 0..12),
+        replacement_pattern_strategy(),
+        prop::collection::vec(receipt_op_strategy(), 0..12),
+        any::<bool>(),
+    );
+    let mut coverage = ReceiptCoverage::default();
+    for _ in 0..256 {
+        let (prefix, pattern, suffix, observe_each) =
+            histories.new_tree(&mut runner).unwrap().current();
+        let operations = replacement_receipt_history(&prefix, &pattern, &suffix);
+        coverage.accumulate(&replay_receipts_with_observation(&operations, observe_each));
+    }
+    // Partition support is proved by the exhaustive test above. These counts
+    // describe this fixed sample rather than imposing a random frequency gate.
+    eprintln!("registry deterministic generated receipt coverage: {coverage:?}");
 }
 
 #[test]
@@ -910,6 +1198,32 @@ proptest! {
         ops in prop::collection::vec(op_strategy(), 1..32)
     ) {
         let _coverage = replay(&ops);
+    }
+
+    #[test]
+    fn generated_overlapping_replacement_receipts_preserve_current_owner(
+        prefix in prop::collection::vec(receipt_op_strategy(), 0..12),
+        pattern in replacement_pattern_strategy(),
+        suffix in prop::collection::vec(receipt_op_strategy(), 0..12),
+        observe_each in any::<bool>(),
+    ) {
+        let operations = replacement_receipt_history(&prefix, &pattern, &suffix);
+        let coverage = replay_receipts_with_observation(&operations, observe_each);
+        prop_assert!(coverage.stale_settlements[settlement_index(pattern.stale)] >= 1, "{coverage:?}");
+        prop_assert!(coverage.live_settlements[settlement_index(pattern.live)] >= 1, "{coverage:?}");
+        prop_assert!(coverage.duplicate_checkout_holes >= 1, "{coverage:?}");
+        prop_assert!(coverage.peak_held_receipts >= 2, "{coverage:?}");
+        if pattern.stale_first {
+            prop_assert!(coverage.stale_into_running[settlement_index(pattern.stale)] >= 1, "{coverage:?}");
+        }
+    }
+
+    #[test]
+    fn generated_unstructured_receipts_match_logical_owner_history(
+        operations in prop::collection::vec(receipt_op_strategy(), 0..64),
+        observe_each in any::<bool>(),
+    ) {
+        let _coverage = replay_receipts_with_observation(&operations, observe_each);
     }
 
     #[test]
