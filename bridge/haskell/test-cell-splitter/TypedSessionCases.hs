@@ -5,6 +5,7 @@ import Control.Exception
 import Control.Monad (forM_, unless, void)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.ByteString as BS
+import GHC (getSessionDynFlags, runGhc)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Types.Fixity (Fixity(..), FixityDirection(..))
@@ -24,7 +25,12 @@ import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
 import System.IO.Error (isAlreadyExistsError)
 import System.Posix.Files (createSymbolicLink, readSymbolicLink)
-import Tidepool.Binders (BoundBinder(..), ValueTier(..))
+import Tidepool.Binders
+  ( BoundBinder(..), ValueTier(..), CellSplitError(..)
+  , analyzeCellWithFlags, analyzeOrderedCellWithFlags
+  , prepareTypedSegmentSource, preparedTypedSegmentPlan
+  , preparedTypedSegmentSource, preparedTypedSegmentOperations )
+import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), withResidentPipelineSelectedRequests
   , preparedSegmentCaptures )
@@ -37,7 +43,7 @@ import Tidepool.Session
 import Tidepool.SessionArtifacts
 import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TypedSegment
-  ( TypedSegment, TypedItemPlan(..), TypedItemBody(..), typedSegmentPlan
+  ( TypedSegment
   , typedSegmentItems, typedItemCaptures, typedCaptureIdentifier
   , typedCaptureType, typedCaptureFixity )
 
@@ -52,16 +58,38 @@ typedSessionHydrationPublicationChecks :: IO ()
 typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecursive $ \root -> do
   effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
   prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
-  source <- readFile "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs"
+  body <- readFile "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs"
+  libdir <- getLibdir
+  flags <- runGhc (Just libdir) getSessionDynFlags
   let target = root </> "TypedSessionCaptures.hs"
       includes = [root, effects, prelude]
-      owners = [SessionModule ValMod (Generation 701), SessionModule ValMod (Generation 702)]
+      firstOwner = SessionModule ValMod (Generation 701)
+      secondOwner = SessionModule ValMod (Generation 702)
+      owners = [firstOwner, secondOwner]
       liveRoot = root </> "live"
-  writeFile target source
-  plan <- either (fail . show) pure $ typedSegmentPlan (replicate 64 'a') "__typedSessionRoot"
-    [ TypedItemPlan 0 "__typedSessionEntry0" 701 (LetItem "__typedSessionMarker0" ["minus"])
-    , TypedItemPlan 1 "__typedSessionEntry1" 702 (LetItem "__typedSessionMarker1" ["answer"])
-    ]
+      template = unlines
+        [ "{-# LANGUAGE DataKinds #-}"
+        , "{{CELL_PRAGMAS}}"
+        , "module TypedSessionCaptures where"
+        , "import Control.Monad.Freer (Eff)"
+        , "import Tidepool.Effects.Core ()"
+        , "{{CELL_IMPORTS}}"
+        , "{{CELL_DECLS}}"
+        , "__tidepool_cell_check :: Eff '[] ()"
+        , "__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"
+        ]
+  -- The existing standalone parser admits this internal GHC fixture. The
+  -- resident ordered parser must still refuse local fixities across items.
+  ordered <- analyzeOrderedCellWithFlags flags template body
+  case ordered of
+    Left (CellUnsupportedLocalFixity _) -> pure ()
+    _ -> fail "Session component control changed the resident local-fixity boundary"
+  sourcePlan <- analyzeCellWithFlags flags template body >>= either (fail . show) pure
+  source <- either fail pure (prepareTypedSegmentSource template sourcePlan (replicate 64 'a')
+    [(0, 701, Nothing), (1, 702, Nothing)])
+  let plan = preparedTypedSegmentPlan source
+      operations = preparedTypedSegmentOperations source
+  writeFile target (preparedTypedSegmentSource source)
   withResidentPipelineSelectedRequests includes $ \runRequest -> do
     let acquire staging afterHydration = runRequest (pure ()) $ \compiler -> do
           observed <- newIORef Nothing
@@ -74,7 +102,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
                   typedSegmentSessionGlobals prepared, typedSegmentSessionInterfaces prepared)
           result <- compiler
             (WithTypedSegmentPreparation complete (PreparedSegmentProducts plan Nothing))
-            mempty (TypedSegmentCompile plan GeneralCompile) Nothing target includes Nothing
+            mempty (TypedSegmentCompile plan operations GeneralCompile) Nothing target includes Nothing
           case typedSegmentItems (preparedSegmentCaptures result) of
             [_, _] -> pure ()
             _ -> fail "Session control did not receive two compiler-issued items"
@@ -88,10 +116,10 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
     -- second file must be a decoder refusal, with no partial finder grant.
     let faultRoot = root </> "second-hydration-fault"
     copySnapshots faultRoot owners (typedSegmentSessionInterfaces prepared)
-    (firstHydrated, firstIds, _) <- injectSessionIfaceWithBindings faultRoot (head owners) initial
+    (firstHydrated, firstIds, _) <- injectSessionIfaceWithBindings faultRoot firstOwner initial
     unless (length firstIds == 1) (fail "first hydration prerequisite is empty")
-    BS.writeFile (sessionHiPath faultRoot (owners !! 1)) (BS.pack [0, 1, 2])
-    refused <- try (void (injectSessionIfaceWithBindings faultRoot (owners !! 1) firstHydrated))
+    BS.writeFile (sessionHiPath faultRoot secondOwner) (BS.pack [0, 1, 2])
+    refused <- try (void (injectSessionIfaceWithBindings faultRoot secondOwner firstHydrated))
       :: IO (Either IOException ())
     case refused of Left _ -> pure (); Right _ -> fail "corrupt second interface hydrated"
     forM_ owners (assertNoStagingFinder initial faultRoot)
@@ -115,8 +143,12 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
 
     -- An unrelated real thin interface is already present. Neither a
     -- receipt refusal nor cancellation may remove or overwrite it.
+    answerCapture <- case [capture | item <- typedSegmentItems typed
+      , capture <- typedItemCaptures item, occurrence (typedCaptureIdentifier capture) == "answer"] of
+      [capture] -> pure capture
+      _ -> fail "positive capture inventory has no unique answer"
     let prior = SessionModule ValMod (Generation 690)
-        answerType = typedCaptureType (head (typedItemCaptures (typedSegmentItems typed !! 1)))
+        answerType = typedCaptureType answerCapture
         priorPath = sessionHiPath liveRoot prior
     priorIface <- mkThinSessionIface initial prior [(mkVarOcc "priorAnswer", answerType)]
     writeSessionIface initial liveRoot prior priorIface
@@ -144,20 +176,23 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
     -- A colliding valid original output is refused without deleting its
     -- bytes or writing another member of the batch.
     let collisionRoot = root </> "collision"
-    copySnapshots collisionRoot [head owners] [head (typedSegmentSessionInterfaces retryPrepared)]
-    collisionBytes <- mapM BS.readFile (bindingPaths collisionRoot (head owners))
+    firstSnapshot <- case typedSegmentSessionInterfaces retryPrepared of
+      first : _ -> pure first
+      _ -> fail "retry has no first capture snapshot"
+    copySnapshots collisionRoot [firstOwner] [firstSnapshot]
+    collisionBytes <- mapM BS.readFile (bindingPaths collisionRoot firstOwner)
     collision <- try (withTypedSegmentSessionPublication collisionRoot retryPrepared (pure ()))
       :: IO (Either IOException ())
     case collision of Left _ -> pure (); Right _ -> fail "existing generation was overwritten"
-    unchanged <- mapM BS.readFile (bindingPaths collisionRoot (head owners))
+    unchanged <- mapM BS.readFile (bindingPaths collisionRoot firstOwner)
     unless (unchanged == collisionBytes) (fail "collision refusal altered the previous generation")
-    assertAbsent collisionRoot [owners !! 1]
+    assertAbsent collisionRoot [secondOwner]
 
     -- A dangling directory entry is absent to the existence preflight but
     -- refuses the exclusive link for the second owner. The first owner's
     -- links must roll back, and the preexisting entry remains untouched.
     let writeFaultRoot = root </> "second-publication-write"
-        blockedPath = sessionHiPath writeFaultRoot (owners !! 1)
+        blockedPath = sessionHiPath writeFaultRoot secondOwner
         missingTarget = writeFaultRoot </> "absent-interface"
     createDirectoryIfMissing True (takeDirectory blockedPath)
     createSymbolicLink missingTarget blockedPath
@@ -166,12 +201,12 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
     case writeRefused of
       Left failure | isAlreadyExistsError failure -> pure ()
       _ -> fail "publication did not refuse at the second owner's exclusive link"
-    assertAbsent writeFaultRoot [head owners]
+    assertAbsent writeFaultRoot [firstOwner]
     retainedEntry <- pathIsSymbolicLink blockedPath
     unless retainedEntry (fail "rollback removed a preexisting directory entry")
     retainedTarget <- readSymbolicLink blockedPath
     unless (retainedTarget == missingTarget) (fail "rollback changed the preexisting link")
-    forM_ (tail (bindingPaths writeFaultRoot (owners !! 1))) $ \path -> do
+    forM_ [blockedPath ++ ".packages", blockedPath ++ ".requirements"] $ \path -> do
       exists <- doesPathExist path
       unless (not exists) (fail "second-owner refusal left partial sidecars")
 
@@ -190,12 +225,16 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
         _ -> fail "future request did not resolve the published interface root"
     forM_ owners $ \owner -> do
       (_, globals, _) <- injectSessionIfaceWithBindings liveRoot owner initial
-      unless (length globals == 1) (fail "published retry lost its actual global")
-      let expected = if owner == head owners then "minus" else "answer"
-          original = head [typedCaptureIdentifier capture
+      global <- case globals of
+        [actual] -> pure actual
+        _ -> fail "published retry lost its unique actual global"
+      let expected = if owner == firstOwner then "minus" else "answer"
+      original <- case [typedCaptureIdentifier capture
             | item <- typedSegmentItems retryTyped, capture <- typedItemCaptures item
-            , occurrence (typedCaptureIdentifier capture) == expected]
-      unless (eqType (idType original) (idType (head globals)))
+            , occurrence (typedCaptureIdentifier capture) == expected] of
+        [actual] -> pure actual
+        _ -> fail "published retry lost its unique original capture"
+      unless (eqType (idType original) (idType global))
         (fail "published retry changed its original capture type")
 
 verifyBatch :: [SessionModule] -> TypedSegment -> PreparedTypedSegmentBindings -> IO ()
