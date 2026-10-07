@@ -57,11 +57,20 @@ fn resolve<H, O>(
     Ok(mounted)
 }
 fn admitted<T>(
+    control: Option<&Arc<crate::WorkbenchExecutionControl>>,
     work: &InvocationWork,
     operation: impl FnOnce() -> Result<T, FormCause>,
 ) -> Result<T, FormCause> {
-    work.with_admission(operation)
-        .map_err(|_| FormCause::FormClosed)?
+    let admission = || {
+        work.with_admission(operation)
+            .map_err(|_| FormCause::FormClosed)?
+    };
+    match control {
+        Some(control) => control
+            .admit_interaction(admission)
+            .ok_or(FormCause::FormClosed)?,
+        None => admission(),
+    }
 }
 
 pub(super) fn service<H, O>(
@@ -70,6 +79,7 @@ pub(super) fn service<H, O>(
     context: ActorSessionContext,
     work: Option<Arc<InvocationWork>>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    interaction_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     continuation: ResidentHole,
     operation: FormOperation,
     publication: crate::FormPublication,
@@ -93,9 +103,17 @@ where
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
                     let mount = uuid::Uuid::new_v4().to_string();
                     let cleanup = FormCleanup::new(context.actor, mount.clone(), host.clone());
-                    work.admit_form(cleanup.clone(), || {
-                        host.open(&publication, &mount, &descriptor)
-                    })?;
+                    let open = || {
+                        work.admit_form(cleanup.clone(), || {
+                            host.open(&publication, &mount, &descriptor)
+                        })
+                    };
+                    match interaction_control.as_ref() {
+                        Some(control) => control
+                            .admit_interaction(open)
+                            .ok_or(FormCause::FormClosed)??,
+                        None => open()?,
+                    }
                     let mounted = Arc::new(MountedForm {
                         cleanup: cleanup.clone(),
                         session: context.placement.session,
@@ -132,7 +150,7 @@ where
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
                     loop {
                         if mounted.cleanup.is_closed() { return Err(FormCause::FormClosed); }
-                        if let Some(attempt) = admitted(work, || mounted.cleanup.host.attempt(context.actor, &mounted.cleanup.mount))? { return Ok(attempt); }
+                        if let Some(attempt) = admitted(interaction_control.as_ref(), work, || mounted.cleanup.host.attempt(context.actor, &mounted.cleanup.mount))? { return Ok(attempt); }
                         tokio::select! {
                             biased;
                             _ = retirement.wait_requested_shutdown() => { control.request_cancellation(); return Err(FormCause::FormClosed); }
@@ -141,7 +159,11 @@ where
                         }
                     }
                 }.await;
-                if control.cancellation_requested() {
+                if !control.claim_expiry()
+                    && control
+                        .native_cancel()
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
                     let (outcome, consumed) = environment
                         .runner
                         .abort_live(
@@ -169,7 +191,7 @@ where
                         return Err(FormCause::FormClosed);
                     }
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
-                    admitted(work, || {
+                    admitted(interaction_control.as_ref(), work, || {
                         mounted.cleanup.host.reject(
                             context.actor,
                             &mounted.cleanup.mount,
@@ -190,7 +212,7 @@ where
                         return Err(FormCause::FormClosed);
                     }
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
-                    admitted(work, || {
+                    admitted(interaction_control.as_ref(), work, || {
                         let result = mounted.cleanup.host.commit(
                             context.actor,
                             &mounted.cleanup.mount,

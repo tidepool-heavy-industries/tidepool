@@ -3324,6 +3324,14 @@ impl CurrentEffectOwner<'_> {
         }
     }
 
+    fn interaction_control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
+        match self {
+            Self::Scoped { base, .. } => base.interaction_control(),
+            Self::Workbench(execution) => execution.control.clone(),
+            Self::Actor { control, .. } => control.clone(),
+        }
+    }
+
     fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
             Self::Scoped { base, .. } => base.control(),
@@ -5352,6 +5360,7 @@ where
             .unwrap_or_else(|| environment.runner.application_workbench());
         let control = effect_owner.control();
         let ephemeral_work = effect_owner.ephemeral_work();
+        let interaction_control = effect_owner.interaction_control();
         let operation: futures_util::future::BoxFuture<
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
@@ -5366,6 +5375,7 @@ where
                 context,
                 ephemeral_work,
                 control,
+                interaction_control,
                 continuation,
                 operation,
                 publication,
@@ -5393,7 +5403,16 @@ where
                             "rich display has no host".into(),
                         )
                     })?;
-                    host.display(&publication, slot, &view).map_err(|cause| {
+                    let publish = || host.display(&publication, slot, &view);
+                    let result = match interaction_control.as_ref() {
+                        Some(control) => control.admit_interaction(publish).ok_or_else(|| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "rich display cancelled before publication".into(),
+                            )
+                        })?,
+                        None => publish(),
+                    };
+                    result.map_err(|cause| {
                         ResidentActorWorkbenchError::ActorProtocol(format!(
                             "rich display: {cause:?}"
                         ))

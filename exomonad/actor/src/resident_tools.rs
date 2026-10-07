@@ -434,6 +434,21 @@ impl WorkbenchExecutionControl {
         (claimed, publication)
     }
 
+    /// Human interaction publication shares the original cell cancellation
+    /// cutoff. A winning durable operation is retained even if cancellation
+    /// subsequently prevents its Haskell continuation from running.
+    pub(crate) fn admit_interaction<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+        let terminal = self.cell_terminal.lock();
+        if terminal.is_some()
+            || self
+                .native_cancel
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(operation())
+    }
+
     pub(crate) fn request_cancellation(&self) -> bool {
         self.admit_cancellation().0
     }
@@ -1928,6 +1943,37 @@ mod tests {
         let decision = sibling.publication_decision();
         assert!(!decision.claim_commit().unwrap().published());
         assert_eq!(decision.phase(), PublicationPhase::Published);
+    }
+
+    #[test]
+    fn human_interaction_commit_and_cancellation_share_original_cutoff() {
+        let control = WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let finish = Arc::new(std::sync::Barrier::new(2));
+        let committing = {
+            let control = control.clone();
+            let entered = entered.clone();
+            let finish = finish.clone();
+            std::thread::spawn(move || {
+                control.admit_interaction(|| {
+                    entered.wait();
+                    finish.wait();
+                    "durably answered"
+                })
+            })
+        };
+        entered.wait();
+        let cancelling = {
+            let control = control.clone();
+            std::thread::spawn(move || control.request_cancellation())
+        };
+        finish.wait();
+        assert_eq!(committing.join().unwrap(), Some("durably answered"));
+        assert!(cancelling.join().unwrap());
+        assert!(control
+            .admit_interaction(|| panic!("cancelled owner must not commit a later answer"))
+            .is_none());
     }
 
     #[tokio::test]
