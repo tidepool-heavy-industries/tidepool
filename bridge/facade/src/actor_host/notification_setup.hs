@@ -1,3 +1,4 @@
-worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "notification-recipient"))
-let requestName = [label|notification-original|]
-answer <- do { issued <- request @Text worker (assignment requestName ("original assignment" :: Text)); Right () <- detachRequest issued; pure issued }
+import qualified Tidepool.Agent.Contract as A
+Right workerCapture <- checkpoint "typed worker fixture"
+Right worker <- spawnSubagent (ForkCtx workerCapture) SameDir ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "notification-recipient" })
+Right answer <- request @Text worker ("original assignment" :: Text) defaultRequestOptions

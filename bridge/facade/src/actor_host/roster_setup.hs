@@ -1,6 +1,6 @@
-first <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "roster-first"))
-second <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "roster-second"))
-let firstLabel = [label|roster-first-request|]
-let secondLabel = [label|roster-second-request|]
-firstAnswer <- do { issued <- request @Int first (assignment firstLabel (10 :: Int)); Right () <- detachRequest issued; pure issued }
-secondAnswer <- do { issued <- request @Int second (assignment secondLabel (20 :: Int)); Right () <- detachRequest issued; pure issued }
+import qualified Tidepool.Agent.Contract as A
+Right workerCapture <- checkpoint "typed worker fixture"
+Right first <- spawnSubagent (ForkCtx workerCapture) SameDir ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "roster-first" })
+Right second <- spawnSubagent (ForkCtx workerCapture) SameDir ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "roster-second" })
+Right firstAnswer <- request @Int first (10 :: Int) defaultRequestOptions
+Right secondAnswer <- request @Int second (20 :: Int) defaultRequestOptions

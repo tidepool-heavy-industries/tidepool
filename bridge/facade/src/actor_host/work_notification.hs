@@ -1,8 +1,9 @@
+import qualified Tidepool.Agent.Contract as A
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
-let requestName = [label|router-notification|]
-worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "progress-source"))
-(response, progress) <- do { issued <- requestWithProgress @WorkProgress @Text worker (assignment requestName ("publish a decision" :: Text)); Right () <- detachRequest (fst issued); pure issued }
+Right workerCapture <- checkpoint "typed worker fixture"
+Right worker <- spawnSubagent (ForkCtx workerCapture) SameDir ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "progress-source" })
+Right (response, progress) <- requestWithProgress @WorkProgress @Text worker ("publish a decision" :: Text) defaultRequestOptions
 let owner = me
 let sources = [("source", response, progress)]
-collector <- followWork sources (notifyWork owner (workMessage id))
+Right collector <- followWork sources (notifyWork owner (workMessage id))

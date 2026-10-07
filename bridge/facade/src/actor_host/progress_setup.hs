@@ -1,10 +1,11 @@
+import qualified Tidepool.Agent.Contract as A
 data ProgressNote = ProgressNote Int (Int -> Int)
-worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "progress-worker"))
-let progressLabel = [label|progress-request|]
-(answer, updates) <- do { issued <- requestWithProgress @ProgressNote @Int worker (assignment progressLabel (10 :: Int)); Right () <- detachRequest (fst issued); pure issued }
-let progressWatchLabel = "progress-update" :: WatchLabel
-observedUpdate <- watch progressWatchLabel (awaitProgressAfter updates (ProgressCursor 0))
-let combinedLabel = "progress-and-answer" :: WatchLabel
-combined <- watch combinedLabel ((,) <$> awaitProgressAfter updates (ProgressCursor 0) <*> awaitValue answer)
-let secondLabel = "second-cursor" :: WatchLabel
-secondCursor <- watch secondLabel (awaitProgressAfter updates (ProgressCursor 1))
+Right workerCapture <- checkpoint "typed worker fixture"
+Right worker <- spawnSubagent (ForkCtx workerCapture) SameDir ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "progress-worker" })
+Right (answer, updates) <- requestWithProgress @ProgressNote @Int worker (10 :: Int) defaultRequestOptions
+let progressWatchLabel = Just "progress-update"
+observedUpdate <- watch progressWatchLabel (after updates (ProgressCursor 0))
+let combinedLabel = Just "progress-and-answer"
+combined <- watch combinedLabel ((,) <$> after updates (ProgressCursor 0) <*> result answer)
+let secondLabel = Just "second-cursor"
+secondCursor <- watch secondLabel (after updates (ProgressCursor 1))

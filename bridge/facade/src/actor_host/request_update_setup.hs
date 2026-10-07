@@ -1,3 +1,4 @@
-worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "tabs-worker"))
-let tabsLabel = [label|tabs|]
-answer <- do { issued <- request @Int worker (assignment tabsLabel (10 :: Int)); Right () <- detachRequest issued; pure issued }
+import qualified Tidepool.Agent.Contract as A
+Right workerCapture <- checkpoint "typed worker fixture"
+Right worker <- spawnSubagent (ForkCtx workerCapture) SameDir ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "tabs-worker" })
+Right answer <- request @Int worker (10 :: Int) defaultRequestOptions
