@@ -149,9 +149,6 @@ impl CaptureFixture {
         );
         let preamble =
             insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
-        let preamble = format!(
-            "{preamble}\ndata CaptureRead = CaptureRead deriving (Generic, FromJSON, JsonSchema)\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call CaptureRead Int, haskell :: mode :- HaskellCell '[] }} deriving Generic\n"
-        );
         let root = tempfile::tempdir().expect("session root");
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -187,14 +184,23 @@ impl CaptureFixture {
     }
 
     async fn parent(&self, label: &str) -> LocalActorRef {
-        self.forest
+        let parent = self
+            .forest
             .new_workbench(
                 label.into(),
                 crate::ActorCapabilities::default()
                     .with_effect_keys(vec![crate::ActorEffectKey::AgentLaunch]),
             )
             .await
-            .expect("capture fixture parent")
+            .expect("capture fixture parent");
+        assert_committed(
+            &run_cell(
+                parent.clone(),
+                include_str!("capture_workspace_declarations.hs").into(),
+            )
+            .await,
+        );
+        parent
     }
 
     async fn checkpoint(
