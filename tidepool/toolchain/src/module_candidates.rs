@@ -2868,6 +2868,8 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 
     #[test]
     #[ignore = "requires retained Core record input and fresh output directory"]
@@ -5249,6 +5251,383 @@ pub(crate) mod tests {
             .collect();
         assert!(
             select_records(b"endpoint", &[root.path().into()], scratch.path(), records).is_none()
+        );
+    }
+
+    const QUERY_OWNER_COUNT: usize = 4;
+
+    #[derive(Clone, Debug)]
+    enum CatalogOp {
+        Offer(u8, u8),
+        Remove(u8),
+        Query(u8),
+    }
+
+    fn catalog_operation() -> impl Strategy<Value = CatalogOp> {
+        prop_oneof![
+            3 => (0u8..QUERY_OWNER_COUNT as u8, 0u8..2)
+                .prop_map(|(owner, revision)| CatalogOp::Offer(owner, revision)),
+            2 => (0u8..QUERY_OWNER_COUNT as u8).prop_map(CatalogOp::Remove),
+            3 => (0u8..(1 << QUERY_OWNER_COUNT)).prop_map(CatalogOp::Query),
+        ]
+    }
+
+    fn catalog_history() -> impl Strategy<Value = Vec<CatalogOp>> {
+        prop_oneof![
+            prop::collection::vec(catalog_operation(), 1..25),
+            targeted_catalog_history(),
+        ]
+    }
+
+    fn targeted_catalog_history() -> impl Strategy<Value = Vec<CatalogOp>> {
+        (
+            prop::collection::vec(catalog_operation(), 0..5),
+            prop::collection::vec(catalog_operation(), 0..5),
+        )
+            .prop_map(|(mut prefix, suffix)| {
+                prefix.extend([
+                    CatalogOp::Offer(0, 0),
+                    CatalogOp::Query(0b0001), // warm the same root before replacement
+                    CatalogOp::Offer(0, 1),   // same path and size, new source identity
+                    CatalogOp::Query(0b0001),
+                    CatalogOp::Offer(0, 1), // identical reoffer
+                    CatalogOp::Remove(0),
+                    CatalogOp::Query(0b0001), // deleted source leaves no query result
+                    CatalogOp::Offer(0, 0),   // recreate and publish the original version
+                    CatalogOp::Query(0b0001),
+                    CatalogOp::Offer(2, 0),
+                    CatalogOp::Query(0b0101), // sparse roots return a sparse owner set
+                    CatalogOp::Remove(1),
+                    CatalogOp::Query(0b0010), // absent root remains empty
+                    CatalogOp::Offer(1, 0),
+                    CatalogOp::Query(0b0011),
+                ]);
+                prefix.extend(suffix);
+                prefix
+            })
+    }
+
+    fn query_source(module: &str, revision: u8) -> Vec<u8> {
+        format!("module {module} where\n-- revision {revision:02}\n").into_bytes()
+    }
+
+    fn query_fixture_record(root: &Path, module: &str, revision: u8) -> Record {
+        let source = root.join(format!("{module}.hs"));
+        fs::write(&source, query_source(module, revision)).unwrap();
+        let interface = format!("u:{module}").into_bytes();
+        let module_interface = write_record(
+            root,
+            &source,
+            "u",
+            module,
+            &interface,
+            product_bytes("u", module, &interface),
+        );
+        let mut record = fs::read_dir(fixture_record_dir(root))
+            .unwrap()
+            .map(|entry| read_record_path(&entry.unwrap().path()).unwrap())
+            .find(|record| record.module == module)
+            .unwrap();
+        assert_eq!(record.module_interface.as_ref(), Some(&module_interface));
+        record.module_interface_proof = Some(
+            crate::recovery_artifacts::recover_module_interface(
+                fixture_record_dir(root).parent().unwrap(),
+                record.module_interface.as_ref().unwrap(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap(),
+        );
+        record
+    }
+
+    fn publish_query_fixture(record: &Record) {
+        let certified = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            computed_owner(record),
+            record.interface.clone(),
+            record.products.clone(),
+            record.package_imports.clone(),
+            record.original_certification.clone(),
+        )
+        .with_source_sha256(parse_sha(&record.source_sha256).unwrap())
+        .with_module_interface(record.module_interface_proof.as_ref().unwrap().clone())
+        .unwrap();
+        let parsed = crate::certified_products::ParsedModuleProducts::decode(
+            &record.products,
+            &package_bundle(&record.unit, &record.module, &record.interface),
+        )
+        .unwrap();
+        let (_, prepared) = prepare_publication(
+            &record.endpoint,
+            &record.include,
+            &record.evidence,
+            parsed,
+            &record.target_source,
+            CandidateVersionOrigin::Ordinary,
+            &[certified],
+        );
+        assert_eq!(prepared.records.len(), 1);
+        publish_prepared(prepared);
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct CatalogCoverage {
+        offers: usize,
+        replacements: usize,
+        identical_reoffers: usize,
+        removes: usize,
+        absent_removes: usize,
+        reoffers_after_remove: usize,
+        queries: usize,
+        sparse_queries: usize,
+        empty_queries: usize,
+        warm_mutations: usize,
+    }
+
+    impl CatalogCoverage {
+        fn accumulate(&mut self, other: Self) {
+            self.offers += other.offers;
+            self.replacements += other.replacements;
+            self.identical_reoffers += other.identical_reoffers;
+            self.removes += other.removes;
+            self.absent_removes += other.absent_removes;
+            self.reoffers_after_remove += other.reoffers_after_remove;
+            self.queries += other.queries;
+            self.sparse_queries += other.sparse_queries;
+            self.empty_queries += other.empty_queries;
+            self.warm_mutations += other.warm_mutations;
+        }
+    }
+
+    fn catalog_config() -> Config {
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 64;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        config
+    }
+
+    fn query_catalog(
+        roots: &[tempfile::TempDir],
+        variants: &[Vec<Record>],
+        model: &[(usize, u8)],
+        mask: u8,
+    ) -> Result<(), TestCaseError> {
+        // Candidate discovery is advisory. The fixture pool is valid, unique,
+        // and below the offer budgets; final product admission is outside this
+        // query oracle.
+        let include = roots
+            .iter()
+            .enumerate()
+            .filter(|(owner, _)| mask & (1u8 << *owner) != 0)
+            .map(|(_, root)| root.path().to_path_buf())
+            .collect::<Vec<_>>();
+        let offer = ordinary_records_with_limits(
+            b"endpoint",
+            &include,
+            true,
+            CacheOfferLimits {
+                owners: CANDIDATE_LIMIT,
+                payload_bytes: PAYLOAD_LIMIT as u64,
+            },
+        )
+        .expect("active temporary root shards are readable");
+        prop_assert_eq!(offer.diagnostics.total(), 0);
+
+        let mut expected = model
+            .iter()
+            .filter(|(owner, _)| mask & (1u8 << *owner) != 0)
+            .map(|(owner, revision)| &variants[*owner][*revision as usize])
+            .collect::<Vec<_>>();
+        expected
+            .sort_by(|left, right| (&left.unit, &left.module).cmp(&(&right.unit, &right.module)));
+        let mut actual = offer.records.iter().collect::<Vec<_>>();
+        actual.sort_by(|left, right| (&left.unit, &left.module).cmp(&(&right.unit, &right.module)));
+        prop_assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            prop_assert_eq!(
+                (&actual.unit, &actual.module),
+                (&expected.unit, &expected.module)
+            );
+            prop_assert_eq!(&actual.source, &expected.source);
+            prop_assert_eq!(&actual.source_sha256, &expected.source_sha256);
+            prop_assert_eq!(&actual.interface, &expected.interface);
+            prop_assert_eq!(&actual.products, &expected.products);
+        }
+        Ok(())
+    }
+
+    fn replay_catalog_history(
+        cache: &Path,
+        roots: &[tempfile::TempDir],
+        variants: &[Vec<Record>],
+        ops: &[CatalogOp],
+    ) -> Result<CatalogCoverage, TestCaseError> {
+        fs::remove_dir_all(cache).unwrap();
+        fs::create_dir_all(cache).unwrap();
+        for (owner, root) in roots.iter().enumerate() {
+            let source = root.path().join(format!("CacheOwner{owner}.hs"));
+            if source.exists() {
+                fs::remove_file(source).unwrap();
+            }
+        }
+
+        let mut model = Vec::<(usize, u8)>::new();
+        let mut ever_offered = [false; QUERY_OWNER_COUNT];
+        let mut covered = CatalogCoverage::default();
+        let mut previous_was_query = false;
+        for op in ops {
+            let observation_mask = match *op {
+                CatalogOp::Offer(owner, revision) => {
+                    let owner = owner as usize;
+                    let revision = revision as usize;
+                    if previous_was_query {
+                        covered.warm_mutations += 1;
+                    }
+                    match model.iter_mut().find(|(existing, _)| *existing == owner) {
+                        Some((_, current)) if *current as usize == revision => {
+                            covered.identical_reoffers += 1;
+                        }
+                        Some((_, current)) => {
+                            covered.replacements += 1;
+                            *current = revision as u8;
+                        }
+                        None => {
+                            if ever_offered[owner] {
+                                covered.reoffers_after_remove += 1;
+                            }
+                            model.push((owner, revision as u8));
+                        }
+                    }
+                    let record = &variants[owner][revision];
+                    fs::write(&record.source, query_source(&record.module, revision as u8))
+                        .unwrap();
+                    publish_query_fixture(record);
+                    ever_offered[owner] = true;
+                    covered.offers += 1;
+                    1 << owner
+                }
+                CatalogOp::Remove(owner) => {
+                    let owner = owner as usize;
+                    if previous_was_query {
+                        covered.warm_mutations += 1;
+                    }
+                    let position = model.iter().position(|(existing, _)| *existing == owner);
+                    if let Some(position) = position {
+                        model.remove(position);
+                        covered.removes += 1;
+                    } else {
+                        covered.absent_removes += 1;
+                    }
+                    let source = roots[owner].path().join(format!("CacheOwner{owner}.hs"));
+                    if source.exists() {
+                        fs::remove_file(source).unwrap();
+                    }
+                    1 << owner
+                }
+                CatalogOp::Query(mask) => {
+                    if mask.count_ones() < QUERY_OWNER_COUNT as u32 {
+                        covered.sparse_queries += 1;
+                    }
+                    if model.iter().all(|(owner, _)| mask & (1u8 << *owner) == 0) {
+                        covered.empty_queries += 1;
+                    }
+                    mask
+                }
+            };
+            query_catalog(roots, variants, &model, observation_mask)?;
+            if matches!(op, CatalogOp::Query(_)) {
+                covered.queries += 1;
+                previous_was_query = true;
+            } else {
+                previous_was_query = false;
+            }
+        }
+        Ok(covered)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generated_ordinary_catalog_queries_match_a_vec_full_scan() {
+        struct RestoreCache(Option<std::ffi::OsString>);
+        impl Drop for RestoreCache {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe {
+                        std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", value)
+                    },
+                    None => unsafe { std::env::remove_var("TIDEPOOL_COMPILE_CACHE_DIR") },
+                }
+            }
+        }
+
+        let cache = tempfile::tempdir().unwrap();
+        let roots = (0..QUERY_OWNER_COUNT)
+            .map(|_| tempfile::tempdir().unwrap())
+            .collect::<Vec<_>>();
+        let _restore = RestoreCache(std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR"));
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let variants = roots
+            .iter()
+            .enumerate()
+            .map(|(owner, root)| {
+                let module = format!("CacheOwner{owner}");
+                let records = (0..2)
+                    .map(|revision| query_fixture_record(root.path(), &module, revision))
+                    .collect::<Vec<_>>();
+                assert_eq!(records[0].source, records[1].source);
+                assert_eq!(
+                    fs::metadata(&records[0].source).unwrap().len(),
+                    query_source(&module, 0).len() as u64
+                );
+                assert_eq!(
+                    query_source(&module, 0).len(),
+                    query_source(&module, 1).len(),
+                    "same-key source revisions keep the source size"
+                );
+                assert_ne!(records[0].source_sha256, records[1].source_sha256);
+                records
+            })
+            .collect::<Vec<_>>();
+
+        let mut support_runner = TestRunner::deterministic();
+        let mut support = CatalogCoverage::default();
+        for _ in 0..8 {
+            let tree = targeted_catalog_history()
+                .new_tree(&mut support_runner)
+                .unwrap();
+            support.accumulate(
+                replay_catalog_history(cache.path(), &roots, &variants, &tree.current()).unwrap(),
+            );
+        }
+        assert!(support.replacements >= 8);
+        assert!(support.identical_reoffers >= 8);
+        assert!(support.removes >= 8);
+        assert!(support.reoffers_after_remove >= 8);
+        assert!(support.queries >= 32);
+        assert!(support.sparse_queries >= 16);
+        assert!(support.empty_queries >= 8);
+        assert!(support.warm_mutations >= 16);
+
+        let mut runner = TestRunner::new(catalog_config());
+        let mut observed = CatalogCoverage::default();
+        runner
+            .run(&catalog_history(), |ops| {
+                observed.accumulate(replay_catalog_history(
+                    cache.path(),
+                    &roots,
+                    &variants,
+                    &ops,
+                )?);
+                Ok(())
+            })
+            .unwrap();
+        eprintln!(
+            "ordinary candidate catalog observations: mixed={observed:?}, targeted={support:?}"
         );
     }
 }
