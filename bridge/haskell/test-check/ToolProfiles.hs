@@ -211,77 +211,26 @@ compileAt fixture source expectation = do
     Rejected fragments -> require (fixture ++ " rejects at its intended type boundary\n" ++ out ++ err)
       (status /= ExitSuccess && all (`isInfixOf` (out ++ err)) fragments)
 
-compileGenerated :: String -> [String] -> CompileExpectation -> IO ()
-compileGenerated fixture declarations expectation = do
-  let output = "profile-fixture-objects/" ++ fixture
-      source = output ++ "/Fixture.hs"
-  createDirectoryIfMissing True output
-  writeFile source $ unlines $
-    [ "{-# LANGUAGE DataKinds, DeriveGeneric, FlexibleContexts, OverloadedStrings, ScopedTypeVariables, TypeFamilies, TypeOperators #-}"
-    , "module Fixture where"
-    , "import Control.Monad.Freer (Eff)"
-    , "import Data.Text (Text)"
-    , "import GHC.Generics (Generic)"
-    , "import Tidepool.Agent.Contract"
-    , "import Tidepool.Effects.Core (ModelCall)"
-    , "import qualified Tidepool.Model as Model"
-    ] ++ declarations
-  compileAt fixture source expectation
-
 presentationTests :: [TestTree]
 presentationTests =
   [ testCase (name ++ " requires presentation at construction") $
-      compileGenerated name
-        [ "data Tools mode = Tools { probe :: mode :- " ++ endpoint ++ " } deriving Generic"
-        , "tools :: Tools (AsServerT (Eff '[]))"
-        , "tools = Tools (" ++ builder ++ ")"
-        ] (Rejected ["Presented"])
-  | (name, endpoint, builder) <-
-      [ ("MissingCallPresentation", "Call Text Text", "tool \"Echo\" pure")
-      , ("MissingRawPresentation", "RawCall Text", "rawTool \"Echo\" pure")
-      , ("MissingNotifyPresentation", "Notify Text", "notify \"Notice\" (const (pure ()))")
-      , ("MissingSyncPresentation", "Sync (Call Text Text)", "syncTool \"Echo\" pure")
-      , ("MissingSyncRawPresentation", "Sync (RawCall Text)", "syncRawTool \"Echo\" pure")
-      , ("MissingSyncNotifyPresentation", "Sync (Notify Text)", "syncNotify \"Notice\" (const (pure ()))")
+      compileProfile name (Rejected ["match type", "Presented"])
+  | name <-
+      [ "MissingCallPresentation", "MissingRawPresentation", "MissingNotifyPresentation"
+      , "MissingSyncPresentation", "MissingSyncRawPresentation", "MissingSyncNotifyPresentation"
       ]
   ] ++
   [ testCase (name ++ policy ++ " cannot bypass hosted presentation") $
-      compileGenerated (name ++ policy)
-        [ "data Tools mode = Tools { probe :: " ++ concrete ++ " } deriving Generic"
-        , "tools :: Tools (AsServerT (Eff '[]))"
-        , "tools = Tools (" ++ builder ++ ")"
-        , "invalid = " ++ compile ++ " tools"
-        ] (Rejected ["GCompileTools"])
-  | (name, concrete, builder) <-
-      [ ("ConcreteCall", "Tool (Eff '[]) Text Text", "tool \"Echo\" pure")
-      , ("ConcreteRaw", "RawTool (Eff '[]) Text", "rawTool \"Echo\" pure")
-      ]
-  , (policy, compile) <- [("Bounded", "compileTools"), ("Installed", "compileInstalledTools")]
+      compileProfile (name ++ policy) (Rejected ["GCompileTools"])
+  | name <- ["ConcreteCall", "ConcreteRaw"]
+  , policy <- ["Bounded", "Installed"]
   ] ++
   [ testCase "nested handler requires presentation at construction" $
-      compileGenerated "MissingNestedPresentation"
-        [ "data Inner mode = Inner { probe :: mode :- Call Text Text } deriving Generic"
-        , "data Outer mode = Outer { inner :: Inner mode } deriving Generic"
-        , "tools :: Outer (AsServerT (Eff '[]))"
-        , "tools = Outer (Inner (tool \"Echo\" pure))"
-        ] (Rejected ["Presented"])
+      compileProfile "MissingNestedPresentation" (Rejected ["match type", "Presented"])
   , testCase "renderer must consume the handler output type" $
-      compileGenerated "WrongPresentationOutput"
-        [ "data Tools mode = Tools { probe :: mode :- Call Text Text } deriving Generic"
-        , "tools :: Tools (AsServerT (Eff '[]))"
-        , "tools = Tools (presentWith (\\(_ :: Int) -> \"rendered\") (tool \"Echo\" pure))"
-        ] (Rejected ["Int", "Text"])
+      compileProfile "WrongPresentationOutput" (Rejected ["match type", "Int", "Text"])
   , testCase "presentation completion composes with generic helpers and bounded model turns" $
-      compileGenerated "GenericPresentedModel"
-        [ "data Inner mode = Inner { probe :: mode :- Call Text Text } deriving Generic"
-        , "data Outer mode = Outer { inner :: Inner mode } deriving Generic"
-        , "rendered :: PresentableTool handler => (ToolOutput handler -> Text) -> handler -> Presented handler"
-        , "rendered = presentWith"
-        , "tools :: Outer (AsServerT (Eff '[ModelCall]))"
-        , "tools = Outer (Inner (rendered id (tool \"Echo\" pure)))"
-        , "installed = compileInstalledTools tools"
-        , "bounded = Model.invokeModel (Model.textTurn (defaultSpec { specTools = tools }) \"instructions\") \"input\""
-        ] Accepted
+      compileProfile "GenericPresentedModel" Accepted
   ]
 
 tests :: TestTree
