@@ -273,46 +273,6 @@ impl SourceLayer {
         self.publish(pending)
     }
 
-    /// Seed a private layer from another layer's current immutable revision.
-    /// The source bytes may be shared by identity, but the new layer gets its
-    /// own active link so later publication by either owner cannot upgrade the
-    /// other. `roots` are the draft roots this branch will reload from.
-    pub(crate) fn inherit_active_from(
-        &self,
-        parent: &SourceLayer,
-        roots: &[PathBuf],
-    ) -> Result<SourceRevision> {
-        if let Some(active) = self.read_active()? {
-            return Ok(active);
-        }
-        let active = parent
-            .read_active()?
-            .ok_or("parent source layer has no active revision to inherit")?;
-        let parent_revision = parent.revisions().join(&active.identity);
-        let child_revision = self.revisions().join(&active.identity);
-        std::fs::create_dir_all(self.revisions())?;
-        if !child_revision.exists() {
-            let staged = self
-                .revisions()
-                .join(format!(".inherit-{}", uuid::Uuid::new_v4()));
-            copy_revision_tree(&parent_revision, &staged)?;
-            if let Err(error) = std::fs::rename(&staged, &child_revision) {
-                let _ = std::fs::remove_dir_all(&staged);
-                return Err(error.into());
-            }
-            tidepool_atomic_write::sync_parent_directory(&child_revision)?;
-        }
-        let pending = PendingRevision {
-            directory: child_revision,
-            source_roots: roots.to_vec(),
-            revision: SourceRevision {
-                generation: 0,
-                ..active
-            },
-        };
-        self.publish(pending)
-    }
-
     fn read_record(&self) -> Result<Option<ActiveRecord>> {
         let target = match std::fs::read_link(self.active_link()) {
             Ok(target) => target,
@@ -639,6 +599,7 @@ enum SourcePublishFailure {
     },
 }
 
+#[cfg(test)]
 fn copy_revision_tree(source: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
@@ -3806,57 +3767,6 @@ mod tests {
 
         // …and the run still loads, which is the tamper check passing.
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
-    }
-
-    #[test]
-    fn inherited_active_revision_is_a_private_branch_snapshot() {
-        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let roots = frozen.captured_source_roots().to_vec();
-        let parent = SourceLayer::new(run.path());
-        let first = parent.ensure_active(&frozen).unwrap();
-        std::fs::write(
-            project.path().join(".exomonad/Project/Work.hs"),
-            "module Project.Work where\nwork :: Int\nwork = 2\n",
-        )
-        .unwrap();
-        let parent_at_fork = parent
-            .publish(
-                parent
-                    .capture_from_workspace(&frozen, project.path())
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_ne!(first.identity, parent_at_fork.identity);
-
-        let child = SourceLayer {
-            directory: run.path().join("workspace/checkouts/child"),
-            retained_revision: Default::default(),
-        };
-        let inherited = child.inherit_active_from(&parent, &roots).unwrap();
-        assert_eq!(inherited.identity, parent_at_fork.identity);
-        assert_eq!(child.read_active().unwrap(), Some(inherited.clone()));
-        assert_ne!(child.active_link(), parent.active_link());
-
-        std::fs::write(
-            project.path().join(".exomonad/Project/Work.hs"),
-            "module Project.Work where\nwork :: Int\nwork = 3\n",
-        )
-        .unwrap();
-        let later_parent = parent
-            .publish(
-                parent
-                    .capture_from_workspace(&frozen, project.path())
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_ne!(later_parent.identity, inherited.identity);
-        assert_eq!(child.read_active().unwrap(), Some(inherited));
-        assert!(
-            std::fs::read_to_string(child.include_paths(1)[0].join("Project/Work.hs"))
-                .unwrap()
-                .contains("work = 2")
-        );
     }
 
     #[test]
