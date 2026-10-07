@@ -22,7 +22,7 @@ import Tidepool.Agent.Reply.Internal
   , RequestError (..), ReplyError (..), ResponseFailure (..)
   )
 import Tidepool.Agent.Watch.Internal
-  ( AwaitPlan (..), AwaitNode (..), AwaitDependency (..), AwaitDecision (..)
+  ( AwaitError (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), AwaitDecision (..)
   , RawWatchObservation (..), Watches (..), ForgetWatchOutcome (..)
   )
 import Tidepool.Effects.Core
