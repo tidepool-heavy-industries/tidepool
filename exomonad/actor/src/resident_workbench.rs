@@ -7412,8 +7412,8 @@ where
         Ok(Some(target))
     }
 
-    /// Establish the exact durable public surface before root readiness.
-    pub(crate) async fn bind_durable_root_public_owner(
+    /// Establish this exact actor scope before application readiness.
+    pub(crate) async fn initialize_durable_public_owner(
         &self,
         context: crate::ActorSessionContext,
         owner: tidepool_runtime::session::RecoveryPublicOwner,

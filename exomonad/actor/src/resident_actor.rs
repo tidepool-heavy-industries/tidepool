@@ -1631,7 +1631,7 @@ where
     }
 }
 
-fn settle_root_public_owner_record(
+fn settle_public_owner_record(
     record: &mut ResidentActorRecord,
     context: &ActorSessionContext,
     expected_owner: &tidepool_runtime::session::RecoveryPublicOwner,
@@ -1648,7 +1648,7 @@ fn settle_root_public_owner_record(
                 if owner.durable() == Some(expected_owner)))
     {
         return Err(ResidentActorWorkbenchError::ActorProtocol(
-            "root public settlement requires its original pending owner".into(),
+            "public settlement requires its original pending owner".into(),
         ));
     }
     match outcome {
@@ -5326,7 +5326,7 @@ where
                     actor_can_control(context.actor, target, &environment.actors.lock());
                 let installed = self.installed_tools.clone();
                 let installation_context = self.context(context.actor);
-                let allowed = descriptor.effective_role().effect_keys().to_vec();
+                let allowed = descriptor.capabilities().effect_keys().to_vec();
                 Box::pin(async move {
                     let result = if !authorized {
                         Err(crate::SpecReplacementError::Unauthorized)
@@ -10727,38 +10727,37 @@ where
             }
 
             if self.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
-                && self.descriptor.creator().is_none()
-                && self.descriptor.supervisor_parent().is_none()
-                && self.descriptor.context_parent().is_none()
-                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+                && (self.spawn_admission.is_some()
+                    || (self.descriptor.creator().is_none()
+                        && self.descriptor.supervisor_parent().is_none()
+                        && self.descriptor.context_parent().is_none()
+                        && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))))
             {
                 let owner = {
                     let records = self.environment.actors.lock();
                     let record = records.get(&context.actor).ok_or_else(|| {
-                        Self::failure("prepared root lost its original allocation")
+                        Self::failure("durable actor lost its original allocation")
                     })?;
                     match &record.public_owner {
                         ActorPublicOwnerPlane::DurablePending(owner) => owner.clone(),
                         _ => {
-                            return Err(Self::failure(
-                                "prepared durable root lost its pending owner",
-                            ));
+                            return Err(Self::failure("durable actor lost its pending owner"));
                         }
                     }
                 };
                 let (outcome, readiness) = self
                     .environment
                     .runner
-                    .bind_durable_root_public_owner(context.clone(), owner.clone())
+                    .initialize_durable_public_owner(context.clone(), owner.clone())
                     .await
                     .map_err(Self::workbench_failure)?
                     .into_parts();
                 {
                     let mut records = self.environment.actors.lock();
                     let record = records.get_mut(&context.actor).ok_or_else(|| {
-                        Self::failure("prepared root allocation retired before publication")
+                        Self::failure("durable actor allocation retired before publication")
                     })?;
-                    settle_root_public_owner_record(record, &context, &owner, &outcome, readiness)
+                    settle_public_owner_record(record, &context, &owner, &outcome, readiness)
                         .map_err(Self::workbench_failure)?;
                 }
                 match outcome {
@@ -10769,15 +10768,15 @@ where
                         ).await.map_err(Self::workbench_failure)?;
                         let mut records = self.environment.actors.lock();
                         let record = records.get_mut(&context.actor).ok_or_else(|| Self::failure(
-                            "prepared root allocation retired before confirmation",
+                            "durable actor allocation retired before confirmation",
                         ))?;
-                        settle_root_public_owner_record(record, &context, &owner,
+                        settle_public_owner_record(record, &context, &owner,
                             &tidepool_runtime::session::PublicManifestCommit::Durable,
                             Some(readiness),
                         ).map_err(Self::workbench_failure)?;
                     }
                     other => return Err(Self::failure(format!(
-                        "prepared root public owner was not published: {other:?}",
+                        "durable actor public owner was not published: {other:?}",
                     ))),
                 }
             }
@@ -10874,25 +10873,8 @@ where
                         (session == context.placement.session).then_some(scope)
                     })
                     .collect();
-                workbench_ledger::BoundaryAbortCleanup {
-                    children: Vec::new(),
-                    scopes,
-                }
+                workbench_ledger::BoundaryAbortCleanup { scopes }
             });
-            while let Some(child) = cleanup.children.last().copied() {
-                if let Some(child) = kernel.resolve(child) {
-                    child
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "enclosing tool output was aborted".into(),
-                            diagnostic: None,
-                        })
-                        .await
-                        .map_err(KernelInvocationFailure::into_behavior_error)?;
-                }
-                cleanup.children.pop();
-                owner.retain_cleanup(cleanup.clone());
-            }
             self.environment
                 .runner
                 .retire_context_scopes(context.clone(), cleanup.scopes.clone())
@@ -11304,7 +11286,7 @@ where
                 self.environment.clone(),
                 self.context(target),
                 self.installed_tools.clone(),
-                self.descriptor.effective_role().effect_keys().to_vec(),
+                self.descriptor.capabilities().effect_keys().to_vec(),
                 definition,
             )
             .await;
@@ -12633,7 +12615,7 @@ where
                 "root public allocation retired before confirmation".into(),
             )
         })?;
-        settle_root_public_owner_record(record, &context, placement.owner(), outcome, readiness)
+        settle_public_owner_record(record, &context, placement.owner(), outcome, readiness)
     }
 
     /// Confirm only directory durability of the original visible root owner.
@@ -12698,7 +12680,7 @@ where
         let (outcome, readiness) = self
             .environment
             .runner
-            .bind_durable_root_public_owner(context, placement.owner().clone())
+            .initialize_durable_public_owner(context, placement.owner().clone())
             .await?
             .into_parts();
         self.settle_root_public_owner(&placement, &outcome, readiness)?;
