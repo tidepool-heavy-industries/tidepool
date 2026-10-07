@@ -1068,7 +1068,7 @@ impl ExomonadSourceReload {
     /// Paths that may represent the completed deployment's original live
     /// source revision in an issued graph. Other deployment paths are never
     /// accepted by toolset projection.
-    fn prepared_run_revision(&self) -> Result<Option<(String, Vec<PathBuf>)>> {
+    fn prepared_run_revision(&self) -> Result<Option<RetainedRevision>> {
         let Some(directory) = self.frozen.prepared_source_revision()? else {
             return Ok(None);
         };
@@ -1077,13 +1077,34 @@ impl ExomonadSourceReload {
         let manifests = source_manifests(&directory, roots)?;
         let identity = source_revision(self.frozen.identity(), &manifests[..roots]);
         validate_revision_resource(&directory, roots, &identity.identity, &manifests)?;
-        Ok(Some((
-            identity.identity,
-            revision_include_paths(&directory, roots)
+        Ok(Some(RetainedRevision {
+            identity: identity.identity,
+            paths: revision_include_paths(&directory, roots)
                 .into_iter()
                 .map(std::fs::canonicalize)
                 .collect::<std::io::Result<Vec<_>>>()?,
-        )))
+            manifests: manifests.into(),
+        }))
+    }
+
+    /// The deployment's promised recipes belong to this original immutable
+    /// graph, even when a recovered run has accepted a newer source revision.
+    pub(crate) fn prepared_toolset_layer(&self) -> Result<exomonad_actor::CheckpointSourceLayer> {
+        let revision = self
+            .prepared_run_revision()?
+            .ok_or("source owner has no completed deployment revision")?;
+        let mut identities = vec![format!("run:{}", revision.identity)];
+        let mut include_paths = revision.paths;
+        let mut manifests = revision.manifests.iter().cloned().collect();
+        self.append_workspace_resources(&mut identities, &mut include_paths, &mut manifests)?;
+        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+            _root_owner: Arc::clone(&self.source_owner),
+            _prepared_owner: self.frozen.prepared_deployment.clone(),
+            identities,
+            include_paths,
+            manifests,
+            entries: self.entry_storage.clone(),
+        })))
     }
 
     fn pinned_checkpoint_graph(
@@ -1987,15 +2008,12 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         let mut manifests = Vec::new();
         for (path, manifest) in source.include_paths().iter().zip(source_manifests) {
             let owned_run_revision = path.starts_with(self.run_root.join("workspace/revisions"));
-            let owned_prepared_revision =
-                prepared_run_revision
-                    .as_ref()
-                    .is_some_and(|(identity, paths)| {
-                        run_identities
-                            .iter()
-                            .any(|run| run == &format!("run:{identity}"))
-                            && paths.contains(path)
-                    });
+            let owned_prepared_revision = prepared_run_revision.as_ref().is_some_and(|revision| {
+                run_identities
+                    .iter()
+                    .any(|run| run == &format!("run:{}", revision.identity))
+                    && revision.paths.contains(path)
+            });
             if owned_run_revision || owned_prepared_revision {
                 include_paths.push(path.clone());
                 manifests.push(manifest.clone());
@@ -2838,8 +2856,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn prepared_source_reference_transitions_to_a_run_owned_live_revision() {
+    #[tokio::test]
+    async fn prepared_source_reference_transitions_to_a_run_owned_live_revision() {
+        use exomonad_actor::ActorSourceLayers;
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
         let original_run = tempfile::tempdir().unwrap();
         let frozen = FrozenWorkspace::load(project.path(), original_run.path()).unwrap();
@@ -2912,6 +2931,127 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(live.paths[0].join("Project/Work.hs")).unwrap(),
             "module Project.Work where\nwork = 2\n"
+        );
+
+        // These selections exercise source/recipe observation only; no
+        // compiled entry or compiler authority is manufactured by this case.
+        let config = frozen.config().unwrap();
+        let profiles = config
+            .preparation
+            .selected_profiles(config.research)
+            .unwrap();
+        let original_selection = uuid::Uuid::new_v4();
+        let mut deployed = frozen.clone();
+        deployed.preparation = Some(super::super::workspace::WorkspacePreparation::Completed {
+            original: original_selection,
+            revision: original.identity.clone(),
+            coverage: profiles
+                .into_iter()
+                .map(|profile| super::super::workspace::PreparedToolsetCoverage {
+                    profile: profile.profile,
+                    requested_effects: profile.requested_effects,
+                    effective_effects: Vec::new(),
+                    recipe: "a".repeat(64),
+                    original: original_selection,
+                })
+                .collect(),
+        });
+        deployed.prepared_deployment = Some(Arc::new(
+            tidepool_atomic_write::DirectoryAnchor::open_existing(deployment.path()).unwrap(),
+        ));
+        let run = Arc::new(run);
+        let mut reload = ExomonadSourceReload::new_owned(
+            deployed,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new());
+        let requested = reload.frozen.prepared_toolset_coverage().unwrap()[0]
+            .requested_effects
+            .clone();
+        let preflight = reload.prepared_toolset_layer().unwrap();
+        let original_recipe = workbench
+            .source_toolset_recipe(&preflight, &requested, &[])
+            .unwrap();
+        let Some(super::super::workspace::WorkspacePreparation::Completed { coverage, .. }) =
+            &mut reload.frozen.preparation
+        else {
+            panic!("the source observation retains its original coverage");
+        };
+        coverage[0].recipe = original_recipe.recipe.clone();
+        reload.entry_storage = exomonad_actor::SourceEntryStorage::CompletedOriginal {
+            directory: reload.entry_storage.directory().to_path_buf(),
+            selections: reload.frozen.completed_entry_selections().unwrap(),
+        };
+        let preflight = reload.prepared_toolset_layer().unwrap();
+        let current = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
+        assert!(preflight
+            .identities()
+            .contains(&format!("run:{}", original.identity)));
+        assert!(current
+            .identities()
+            .contains(&format!("run:{}", updated.identity)));
+        assert_eq!(
+            preflight.include_paths()[..retained.paths.len()],
+            retained.paths
+        );
+        assert_eq!(current.include_paths()[..live.paths.len()], live.paths);
+        for (expected, actual) in retained
+            .manifests
+            .iter()
+            .zip(preflight.source_manifests().unwrap())
+        {
+            assert!(same_source_manifest(expected, actual));
+        }
+        reload
+            .frozen
+            .validate_prepared_toolset_recipes(&workbench, &preflight, &[])
+            .unwrap();
+        assert!(reload
+            .frozen
+            .validate_prepared_toolset_recipes(&workbench, &current, &[])
+            .is_err());
+        let current_recipe = workbench
+            .source_toolset_recipe(&current, &requested, &[])
+            .unwrap();
+        assert_ne!(current_recipe.recipe, original_recipe.recipe);
+        assert!(reload
+            .frozen
+            .completed_entry_selections()
+            .unwrap()
+            .contains_key(&original_recipe.recipe));
+        assert!(!reload
+            .frozen
+            .completed_entry_selections()
+            .unwrap()
+            .contains_key(&current_recipe.recipe));
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        assert!(matches!(
+            workbench
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    current.clone(),
+                    &requested,
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                )
+                .await,
+            Err(exomonad_actor::ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
+        ));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        let fresh = reload.fresh_toolset_layer_from(&current).unwrap();
+        assert_eq!(fresh.include_paths(), current.include_paths());
+        assert!(fresh.same_revision(&current));
+        assert!(matches!(
+            fresh.prepared_entries(),
+            Some(exomonad_actor::SourceEntryStorage::FreshCompilation { .. })
+        ));
+        assert_eq!(
+            reload.prepared_toolset_layer().unwrap().semantic_digest(),
+            preflight.semantic_digest()
         );
     }
 

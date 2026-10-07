@@ -15765,6 +15765,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert!(!retained.cleanup().unwrap().is_confirmed());
         release.send(()).unwrap();
         let prepared = remaining.await.unwrap().unwrap();
+        assert!(matches!(
+            prepared.acquisition(),
+            crate::ToolsetAcquisition::UnretainedCompilation { .. }
+        ));
         assert!(
             tidepool_extract_cmd::extract_spawn_count() > before,
             "the retained source task must execute the actual compiler"
@@ -15792,6 +15796,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&prepared.prepared, &cached.prepared));
+        assert_eq!(prepared.acquisition(), cached.acquisition());
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), after);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

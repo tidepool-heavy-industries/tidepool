@@ -2030,11 +2030,7 @@ async fn run_owned(
         let layers = source_layers.as_ref().ok_or_else(|| {
             runtime_error("prepared toolset validation requires its admitted source owner")
         })?;
-        let frozen = exomonad_actor::ActorSourceLayers::freeze_toolset_layer(
-            layers.as_ref(),
-            tidepool_repr::PrincipalId::SYSTEM,
-        )
-        .map_err(std::io::Error::other)?;
+        let frozen = layers.prepared_toolset_layer()?;
         inputs.validate_prepared_toolset_recipes(&workbench, &frozen, &supported)?;
     }
     forest.track_resource_release();

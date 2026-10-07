@@ -552,6 +552,15 @@ pub(crate) mod tests {
                     self.model.ready_order.contains(key),
                     expected.phase == ModelPhase::Ready
                 );
+                let outcome = task.outcome.lock();
+                match (expected.phase, outcome.as_ref()) {
+                    (ModelPhase::Pending, None) => {}
+                    (ModelPhase::Ready, Some(Ok(prepared))) => {
+                        assert!(Arc::ptr_eq(prepared, &self.ready));
+                        assert_eq!(prepared.acquisition, self.ready.acquisition);
+                    }
+                    _ => panic!("retained preparation outcome differs from modeled readiness"),
+                }
             }
         }
     }
@@ -584,6 +593,14 @@ pub(crate) mod tests {
                 .contains_key(&recipe("history-ready-0")),
             "successes beyond the bound retire the least recently used entry"
         );
+        for task in &issued[..4] {
+            let outcome = history.handles[task].1.outcome.lock();
+            let Some(Ok(prepared)) = outcome.as_ref() else {
+                panic!("an evicted lookup retains its admitted waiter's original result");
+            };
+            assert!(Arc::ptr_eq(prepared, &ready));
+            assert_eq!(prepared.acquisition, original_acquisition);
+        }
 
         // A failed owner retires only its task. A later failed settlement from
         // that old task must leave the replacement pending and cached.
@@ -664,8 +681,6 @@ pub(crate) mod tests {
             Err(PreparationFailure::Source(detail)) if detail == format!("history failure {waiter_task}")
         ));
         assert!(!history.model.entries.contains_key(&waiter_key));
-        assert_eq!(ready.acquisition, original_acquisition);
-        assert!(Arc::ptr_eq(&ready, &history.ready));
         history.assert_matches_model();
     }
 
