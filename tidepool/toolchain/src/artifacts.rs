@@ -718,7 +718,7 @@ fn immutable_candidates_in_context(
         );
     }
     let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
-        .with_originals(context.recovery_products())
+        .with_originals(context.compiler_original_products()?)
         .with_interface_seals(
             context
                 .artifact_view()
@@ -1915,7 +1915,17 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             &generated,
         )?;
-        request.admit_program_segment_support(context, &support, source_segment, produced_types)
+        request.admit_program_segment_support_with_selection(
+            context,
+            &support,
+            source_segment,
+            produced_types,
+            &output
+                .products
+                .as_ref()
+                .expect("program output was sealed")
+                .source_selection,
+        )
     }
 
     fn admit_program_value(
@@ -2245,6 +2255,8 @@ pub struct SealedTurnProducts {
     // items cannot enlarge an earlier item's original instance environment.
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
+    pub(crate) source_selection: certified_products::CertifiedSourceSelection,
+    pub target_native_selection: crate::artifact_inventory::TargetNativeSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
@@ -2669,6 +2681,7 @@ fn seal_turn_outputs_with_validation(
                 accepted,
                 &certified.recovery_products,
                 &certified.groups,
+                &certified.source_selection,
                 &package_closure,
                 validation,
             )
@@ -2681,6 +2694,7 @@ fn seal_turn_outputs_with_validation(
                 accepted,
                 &certified.recovery_products,
                 &certified.groups,
+                &certified.source_selection,
                 &package_closure,
                 validation,
             )
@@ -2725,10 +2739,13 @@ fn seal_turn_outputs_with_validation(
         prepared,
         accepted,
         &certified.groups,
+        &certified.source_selection,
         &package_closure,
         validation,
     )
     .map_err(compiler_evidence_failure)?;
+    let target_native_selection =
+        artifact_view.certified_target_native_selection(typed_entry.as_ref(), &pending_imports)?;
     let package_interfaces = certified_products::certify_target_package_interfaces_with_validation(
         prepared,
         &package_closure,
@@ -2789,6 +2806,7 @@ fn seal_turn_outputs_with_validation(
                 .as_ref()
                 .expect("checked output has exact source"),
             produced_types,
+            &certified.source_selection,
         )?;
         Some(match checked {
             NativeCheckedOffer::ActivationPreview(preview) => {
@@ -2875,6 +2893,8 @@ fn seal_turn_outputs_with_validation(
         pending_imports,
         recovery_products: certified.recovery_products,
         retained_core_products: certified.retained_core_products,
+        source_selection: certified.source_selection,
+        target_native_selection,
         package_interfaces,
     }))
 }
@@ -2910,6 +2930,7 @@ fn checked_output_context(
     artifacts: &crate::artifact_inventory::ArtifactView,
     source_admission: &crate::declaration_context::ExactSourceAdmission,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    selection: &certified_products::CertifiedSourceSelection,
 ) -> Result<
     (
         Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -2923,11 +2944,12 @@ fn checked_output_context(
     let generated = source_admission.generated_source_owner()?;
     let support = program_support_artifacts(artifacts, &generated)?;
     let mut request = exact.clone();
-    let context = request.admit_program_support(
+    let context = request.admit_program_support_with_selection(
         exact.context.clone(),
         &support,
         std::slice::from_ref(source_admission),
         produced_types,
+        selection,
     )?;
     Ok((context, request.program_source_lexical().to_vec()))
 }
@@ -3944,6 +3966,7 @@ fn compile_invocation_inner(
                 module_interfaces: Vec::new(),
                 value_interfaces: Vec::new(),
                 retained_core_products: Default::default(),
+                source_selection: Default::default(),
             }
         };
         let extra_products: Vec<_> = cached_receipts
@@ -4026,6 +4049,7 @@ fn compile_invocation_inner(
                         accepted,
                         &certified.recovery_products,
                         &certified.groups,
+                        &certified.source_selection,
                         &package_closure,
                         &mut validation,
                     )
@@ -4068,6 +4092,7 @@ fn compile_invocation_inner(
                     target.prepared.prepared(),
                     accepted,
                     &certified.groups,
+                    &certified.source_selection,
                     &package_closure,
                     &mut validation,
                 )
@@ -4896,8 +4921,10 @@ fn assemble_with_products(
     artifacts.module_products.extend(certified_cached);
     if let Some(evidence) = evidence {
         let protected: BTreeMap<_, _> = exact
+            .map(|request| request.compiler_original_products())
+            .transpose()?
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|request| request.context.recovery_products())
             .map(|product| {
                 (
                     (product.owner().unit.clone(), product.owner().module.clone()),
@@ -4905,20 +4932,19 @@ fn assemble_with_products(
                 )
             })
             .collect();
-        let mut protected_groups = BTreeMap::<_, BTreeMap<_, _>>::new();
+        let mut protected_groups = std::collections::HashMap::<_, BTreeMap<_, _>>::new();
         for group in exact.into_iter().flat_map(|request| request.groups.iter()) {
             protected_groups
-                .entry((group.owner().unit.as_str(), group.owner().module.as_str()))
+                .entry(group.owner())
                 .or_default()
                 .insert(group.group().original_ordinal(), group.group());
         }
         let mut emitted = std::collections::HashSet::new();
         for product in &artifacts.module_products {
-            let key = (product.unit.as_str(), product.module.as_str());
             let admitted = if let Some(original) =
                 protected.get(&(product.unit.clone(), product.module.clone()))
             {
-                let expected = protected_groups.get(&key);
+                let expected = protected_groups.get(original.owner());
                 product.interface == original.interface_bytes()
                     && product.groups.len() == expected.map_or(0, BTreeMap::len)
                     && product.groups.iter().all(|group| {

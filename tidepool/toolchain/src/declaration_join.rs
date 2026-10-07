@@ -162,6 +162,7 @@ fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), Comp
 pub struct CertifiedAuthoredDeclaration {
     product: CertifiedRecoveryProduct,
     artifacts: crate::artifact_inventory::ArtifactView,
+    compiler_projection: crate::artifact_inventory::CompilerInputProjection,
     lexical_exports: Vec<DeclarationExport>,
     introduced_exports: Vec<DeclarationExport>,
     instances: InstanceInventory,
@@ -435,6 +436,11 @@ impl CertifiedAuthoredDeclaration {
     }
     pub fn product(&self) -> &CertifiedRecoveryProduct {
         &self.product
+    }
+    pub(crate) fn compiler_input_projection(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerInputProjection {
+        &self.compiler_projection
     }
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.artifacts
@@ -753,9 +759,12 @@ fn certify_authored_declaration_inner(
         &compiled.artifact_view,
         Some(artifact_context.as_ref()),
     )?;
+    let compiler_projection =
+        authored_compiler_projection(&artifact_context, &artifacts, selected)?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
         artifacts,
+        compiler_projection,
         lexical_exports: inventory.exports,
         introduced_exports,
         instances: inventory.instances,
@@ -765,6 +774,35 @@ fn certify_authored_declaration_inner(
         original_imports,
         source_lexical_imports,
     })
+}
+
+fn authored_compiler_projection(
+    context: &ExactDeclarationContext,
+    artifacts: &crate::artifact_inventory::ArtifactView,
+    selected: &CertifiedRecoveryProduct,
+) -> Result<crate::artifact_inventory::CompilerInputProjection, CompileError> {
+    let entries = artifacts
+        .entries()
+        .into_iter()
+        .filter(|entry| {
+            matches!(&entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
+            if product.owner() == selected.owner())
+        })
+        .collect::<Vec<_>>();
+    if entries.len() != 1 {
+        return Err(contract("authored compiler offer lacks its exact original"));
+    }
+    let projection = context
+        .compiler_input_projection()
+        .within_view(artifacts)
+        .merge(
+            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(artifacts)?,
+        )?
+        .merge(
+            &crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)?,
+        )?;
+    projection.validate(artifacts)?;
+    Ok(projection)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2345,6 +2383,7 @@ mod authored_tests {
             &descriptors,
             &stored.artifact_dependencies,
             &native_groups,
+            &accepted.context().compiler_input_roles(),
             lexical.clone(),
         )
         .unwrap();

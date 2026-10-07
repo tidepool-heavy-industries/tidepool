@@ -19,8 +19,8 @@ mod snapshots;
 use snapshots::{GraphEncoding, GraphRead};
 pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate};
 
-const VERSION: u32 = 7;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v7";
+const VERSION: u32 = 8;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v8";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -138,6 +138,9 @@ pub(crate) struct RecoveryNode {
     /// Exact admitted native-group closure, independently of full-product
     /// custody. Required even when empty; older records cannot infer it.
     pub native_groups: Vec<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
+    /// Authenticated compiler namespace roles, independent of native custody.
+    /// This field is required even when no original is offered for reuse.
+    pub compiler_roles: Vec<tidepool_toolchain::artifact_inventory::CompilerInputRole>,
     pub exports: Vec<RecoveryExport>,
     pub retracts: Vec<RecoverySymbolIdentity>,
     /// GHC-normalized import specifications introduced by this turn. These
@@ -245,18 +248,6 @@ impl RecoveryArtifactClosure {
             Self::ValueInterface(reference) => interface_paths(&reference.interface, &mut paths),
         }
         paths
-    }
-
-    fn is_native_companion(&self, other: &Self) -> bool {
-        let (home, interface) = match (self, other) {
-            (Self::Home(home), Self::ModuleInterface(interface))
-            | (Self::ModuleInterface(interface), Self::Home(home)) => (home, interface),
-            _ => return false,
-        };
-        home.module_interface.as_ref().is_some_and(|companion| {
-            ArtifactDescriptor::from_recovery_module_interface(companion)
-                == ArtifactDescriptor::from_recovery_module_interface(interface)
-        })
     }
 
     fn owner(&self) -> ExactModuleIdentity {
@@ -763,11 +754,11 @@ pub(crate) fn read_v2_bytes(
     {
         return Err(at(
             path,
-            "v7 recovery graph lacks the supported paired-public-v7 schema",
+            "v8 recovery graph lacks the supported paired-public-v8 schema",
         ));
     }
     let graph: RecoveryGraph = serde_json::from_value(value)
-        .map_err(|e| at(path, format!("invalid v7 recovery graph: {e}")))?;
+        .map_err(|e| at(path, format!("invalid v8 recovery graph: {e}")))?;
     graph.validate().map_err(|mut error| {
         error.path = Some(path.to_path_buf());
         error
@@ -1097,6 +1088,7 @@ fn normalize_node(node: &mut RecoveryNode) {
     node.artifact_refs.dedup();
     node.native_groups.sort();
     node.native_groups.dedup();
+    node.compiler_roles.sort_by_key(|role| role.interface());
 }
 
 impl RecoveryGraphWire {
@@ -1529,28 +1521,57 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
         let mut artifact_owners = BTreeMap::new();
         for id in &node_artifacts {
             let artifact = artifacts[id];
+            let canonical = match artifact {
+                RecoveryArtifactClosure::Home(home) => {
+                    ArtifactDescriptor::from_recovery_module_interface(
+                        home.module_interface
+                            .as_ref()
+                            .expect("validated native companion"),
+                    )
+                    .id
+                }
+                _ => *id,
+            };
             if artifact_owners
-                .insert(artifact.owner(), *id)
-                .is_some_and(|previous| {
-                    previous != *id && !artifact.is_native_companion(artifacts[&previous])
-                })
+                .insert(artifact.owner(), canonical)
+                .is_some_and(|previous| previous != canonical)
             {
                 return Err(error(format!(
-                    "recovery node {} has multiple artifacts for one module owner",
+                    "recovery node {} has conflicting canonical interfaces for one module owner",
                     node.id.0
                 )));
             }
         }
-        // Interface requirements select canonical carriers. Native IDs remain
-        // exact implementation references, irrespective of their digest order.
-        for id in artifact_owners.values_mut() {
-            if let RecoveryArtifactClosure::Home(home) = artifacts[&*id] {
-                *id = ArtifactDescriptor::from_recovery_module_interface(
-                    home.module_interface
-                        .as_ref()
-                        .expect("validated native companion"),
-                )
-                .id;
+        let mut compiler_owners = BTreeSet::new();
+        for role in &node.compiler_roles {
+            let interface = role.interface();
+            let Some(interface_artifact) = artifacts.get(&interface) else {
+                return Err(error("recovered compiler role has no interface carrier"));
+            };
+            if !node_artifacts.contains(&interface)
+                || matches!(interface_artifact, RecoveryArtifactClosure::Home(_))
+                || !compiler_owners.insert(interface_artifact.owner())
+            {
+                return Err(error("duplicate compiler owner or invalid interface role"));
+            }
+            if let Some(original) = role.original() {
+                let Some(RecoveryArtifactClosure::Home(home)) = artifacts.get(&original) else {
+                    return Err(error(
+                        "recovered compiler original offer has no native carrier",
+                    ));
+                };
+                if !node_artifacts.contains(&original)
+                    || ArtifactDescriptor::from_recovery_module_interface(
+                        home.module_interface
+                            .as_ref()
+                            .expect("validated native companion"),
+                    )
+                    .id != interface
+                {
+                    return Err(error(
+                        "recovered compiler original offer differs from its exact interface",
+                    ));
+                }
             }
         }
         for dependency in &node.live_dependencies {
@@ -1652,7 +1673,7 @@ fn checksum_with_encoded_bytes(graph: &impl GraphRead) -> Result<(String, u64), 
         checksum: "",
     })
     .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v7\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v8\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok((
         blake3::hash(&domain).to_hex().to_string(),
@@ -2050,6 +2071,10 @@ mod tests {
             for node in &mut wire.nodes {
                 if node.artifact_refs.contains(&native) {
                     node.artifact_refs.push(canonical);
+                    node.compiler_roles.push(tidepool_toolchain::artifact_inventory::CompilerInputRole::ReusableOriginal {
+                        interface: canonical,
+                        original: native,
+                    });
                 }
             }
         }
@@ -2296,16 +2321,17 @@ mod tests {
     }
 
     #[test]
-    fn v7_partial_native_group_selection_roundtrips_and_retains_zero_edge_groups() {
+    fn v8_partial_native_group_selection_roundtrips_and_retains_zero_edge_groups() {
         let root = tempfile::tempdir().unwrap();
         let (wire, fixture) = compiled_group_selection(root.path());
         let baseline = snapshot(&wire);
         let inventory = baseline.capture_inventory(root.path()).unwrap();
         let node = baseline.node(Generation(1)).unwrap();
         let restored = inventory
-            .context(
+            .context_with_roles(
                 &node.artifact_refs,
                 &node.native_groups,
+                &node.compiler_roles,
                 node.lexical.clone(),
             )
             .unwrap();
@@ -2329,9 +2355,10 @@ mod tests {
         let recovered = decoded
             .capture_inventory(root.path())
             .unwrap()
-            .context(
+            .context_with_roles(
                 &decoded_node.artifact_refs,
                 &decoded_node.native_groups,
+                &decoded_node.compiler_roles,
                 decoded_node.lexical.clone(),
             )
             .unwrap();
@@ -2346,9 +2373,10 @@ mod tests {
         let extended = snapshot(&extended);
         let added = extended.node(Generation(1)).unwrap();
         let extended_context = inventory
-            .context(
+            .context_with_roles(
                 &added.artifact_refs,
                 &added.native_groups,
+                &added.compiler_roles,
                 added.lexical.clone(),
             )
             .unwrap();
@@ -2405,7 +2433,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_native_group_selection_refuses_missing_altered_and_unauthenticated_facts() {
+    fn v8_native_group_selection_refuses_missing_altered_and_unauthenticated_facts() {
         use tidepool_toolchain::artifact_inventory::NativeGroupKey;
         let root = tempfile::tempdir().unwrap();
         let (wire, fixture) = compiled_group_selection(root.path());
@@ -2414,9 +2442,10 @@ mod tests {
         let node = baseline.node(Generation(1)).unwrap();
         assert!(
             inventory
-                .context(
+                .context_with_roles(
                     &node.artifact_refs,
                     &node.native_groups,
+                    &node.compiler_roles,
                     node.lexical.clone()
                 )
                 .is_ok(),
@@ -2429,7 +2458,12 @@ mod tests {
             .filter(|key| key == &fixture.late)
             .collect::<Vec<_>>();
         assert!(inventory
-            .context(&node.artifact_refs, &missing, node.lexical.clone())
+            .context_with_roles(
+                &node.artifact_refs,
+                &missing,
+                &node.compiler_roles,
+                node.lexical.clone()
+            )
             .is_err());
         let mut unknown = node.native_groups.clone();
         unknown.push(NativeGroupKey {
@@ -2437,12 +2471,22 @@ mod tests {
             original_ordinal: u32::MAX,
         });
         assert!(inventory
-            .context(&node.artifact_refs, &unknown, node.lexical.clone())
+            .context_with_roles(
+                &node.artifact_refs,
+                &unknown,
+                &node.compiler_roles,
+                node.lexical.clone()
+            )
             .is_err());
         let mut duplicate = node.native_groups.clone();
         duplicate.push(fixture.late);
         assert!(inventory
-            .context(&node.artifact_refs, &duplicate, node.lexical.clone())
+            .context_with_roles(
+                &node.artifact_refs,
+                &duplicate,
+                &node.compiler_roles,
+                node.lexical.clone()
+            )
             .is_err());
         let mut outside = node.native_groups.clone();
         outside.push(NativeGroupKey {
@@ -2450,7 +2494,12 @@ mod tests {
             original_ordinal: 0,
         });
         assert!(inventory
-            .context(&node.artifact_refs, &outside, node.lexical.clone())
+            .context_with_roles(
+                &node.artifact_refs,
+                &outside,
+                &node.compiler_roles,
+                node.lexical.clone()
+            )
             .is_err());
         let mut altered = wire.clone();
         altered.nodes[0].native_groups.push(fixture.zero_edge);
@@ -2468,7 +2517,7 @@ mod tests {
         fs::write(&manifest, &bytes).unwrap();
         assert!(
             read_v2(&manifest, root.path()).is_err(),
-            "V7 never infers AllGroups"
+            "V8 never infers AllGroups"
         );
         assert_eq!(fs::read(&manifest).unwrap(), bytes);
         let mut old = serde_json::to_value(&baseline).unwrap();
@@ -2493,6 +2542,48 @@ mod tests {
         )
         .unwrap();
         assert!(baseline.capture_inventory(root.path()).is_err());
+    }
+
+    #[test]
+    fn v8_compiler_roles_are_required_exact_and_checksummed() {
+        use tidepool_toolchain::artifact_inventory::CompilerInputRole;
+        let wire = fixture();
+        let original = wire.nodes[0].compiler_roles[0].original().unwrap();
+        let interface = wire.nodes[0].compiler_roles[0].interface();
+        let mut changed = wire.clone();
+        changed.nodes[0].compiler_roles[0] = CompilerInputRole::InterfaceOnly { interface };
+        assert!(
+            RecoveryGraph::from_wire(changed.clone()).is_err(),
+            "checksum binds roles independently of custody"
+        );
+        changed.seal().unwrap();
+        assert_eq!(changed.nodes[0].artifact_refs, wire.nodes[0].artifact_refs);
+        let mut duplicate = wire.clone();
+        let repeated = duplicate.nodes[0].compiler_roles[0].clone();
+        duplicate.nodes[0].compiler_roles.push(repeated);
+        assert!(
+            duplicate.seal().is_err(),
+            "overlapping roles cannot be normalized away"
+        );
+        let mut wrong_kind = wire.clone();
+        wrong_kind.nodes[0].compiler_roles[0] = CompilerInputRole::InterfaceOnly {
+            interface: original,
+        };
+        assert!(wrong_kind.seal().is_err());
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut missing = serde_json::to_value(&snapshot(&wire)).unwrap();
+        missing["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("compiler_roles");
+        let bytes = serde_json::to_vec(&missing).unwrap();
+        fs::write(&manifest, &bytes).unwrap();
+        assert!(
+            read_v2(&manifest, root.path()).is_err(),
+            "v8 never issues reuse from retained availability"
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
     }
 
     fn graph_with_home(materialized: RecoveryArtifactRef) -> RecoveryGraphWire {
@@ -2526,6 +2617,7 @@ mod tests {
                     lexical: vec![],
                     artifact_refs: vec![key],
                     native_groups: vec![],
+                    compiler_roles: vec![],
                     exports: vec![export.clone()],
                     retracts: vec![],
                     workbench_imports: vec!["qualified Data.Map.Strict as Map".into()],
@@ -2542,6 +2634,7 @@ mod tests {
                     lexical: vec![],
                     artifact_refs: vec![],
                     native_groups: vec![],
+                    compiler_roles: vec![],
                     exports: vec![export],
                     retracts: vec![],
                     workbench_imports: vec!["Data.Proxy (Proxy (..))".into()],
@@ -3299,9 +3392,10 @@ mod tests {
             original_join.live_dependencies
         );
         let projected_context = join_inventory
-            .context(
+            .context_with_roles(
                 &projected_join.artifact_refs,
                 &projected_join.native_groups,
+                &projected_join.compiler_roles,
                 projected_join.lexical.clone(),
             )
             .unwrap();
@@ -3535,7 +3629,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_manifest_refuses_persisted_native_relation_rows() {
+    fn v8_manifest_refuses_persisted_native_relation_rows() {
         let baseline = fixture();
         let original = home_artifact(&baseline).artifact_id();
         for dependency in [
@@ -4309,7 +4403,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_checksum_covers_lexical_roots_and_edges() {
+    fn v8_checksum_covers_lexical_roots_and_edges() {
         let root = module("main", "Lib");
         let other = module("main", "Other");
         let mut graph = fixture();
@@ -4525,7 +4619,7 @@ mod tests {
         let mut unsigned = graph.clone();
         unsigned.checksum.clear();
         let bytes = serde_json::to_vec(&unsigned).unwrap();
-        let mut domain = b"tidepool-recovery-graph-v7\0".to_vec();
+        let mut domain = b"tidepool-recovery-graph-v8\0".to_vec();
         domain.extend_from_slice(&bytes);
         assert_eq!(
             checksum(&graph).unwrap(),

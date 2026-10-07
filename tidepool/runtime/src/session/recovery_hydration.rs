@@ -304,9 +304,10 @@ impl SessionLib {
         }
         let mut contexts = BTreeMap::new();
         for node in graph.nodes() {
-            let context = Arc::new(inventory.context(
+            let context = Arc::new(inventory.context_with_roles(
                 &node.artifact_refs,
                 &node.native_groups,
+                &node.compiler_roles,
                 node.lexical.clone(),
             )?);
             validate_recovery_native_markers(node, &context).map_err(invalid)?;
