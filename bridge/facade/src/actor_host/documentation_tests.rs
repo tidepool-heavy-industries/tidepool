@@ -3793,7 +3793,12 @@ fn explicit_display_output(reply: &serde_json::Value) -> &serde_json::Value {
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|item| item.get("operations"))
+        .flat_map(|operations| {
+            operations
+                .as_array()
+                .unwrap_or_else(|| panic!("structured operations are not an array: {reply}"))
+        })
         .find_map(|operation| operation.get("display"))
         .unwrap_or_else(|| panic!("structured display metadata missing: {reply}"))
 }
