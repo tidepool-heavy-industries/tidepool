@@ -928,7 +928,7 @@ fn errors() -> ErrorAdt {
                     field("busyId", "WorktreeId", "WtWorktreeId"),
                     text_field("holder"),
                 ],
-                doc: "one worktree, one agent — binding a second fails explicitly",
+                doc: "exact attachment recovery found a conflicting holder",
             },
             ErrorVariant {
                 ctor: "SubmissionUnstable",
@@ -943,7 +943,7 @@ fn errors() -> ErrorAdt {
             ErrorVariant {
                 ctor: "WorktreeAuthorityDenied",
                 fields: vec![text_field("authorityDetail")],
-                doc: "the executing principal's actor role does not permit this Worktree operation",
+                doc: "the executing principal's concrete resource grant does not permit this Worktree operation",
             },
             ErrorVariant {
                 ctor: "GitFailure",
