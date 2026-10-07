@@ -653,3 +653,260 @@ where
         .resume_starting_parent(context, parent_hole, child.identity(), allocated_label)
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_codegen::scope::ScopeId;
+    use tidepool_repr::{DataConTable, SessionId};
+    use tidepool_runtime::session::{ModuleEnv, RuntimeLexicalScopeLease, SessionLib, SlotKind};
+
+    type Machines = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
+    type Runner = ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>;
+
+    fn session(
+        id: SessionId,
+        root: &std::path::Path,
+    ) -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
+        let lib = SessionLib::open(id, root, ModuleEnv::standalone_default()).unwrap();
+        ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        )
+    }
+
+    fn captured_placement(
+        machines: &Machines,
+        id: SessionId,
+    ) -> (crate::ActorPlacement, Arc<RuntimeLexicalScopeLease>) {
+        let mut checkout = machines.checkout_run(id).unwrap();
+        let scope = checkout.machine().mint_isolated_scope();
+        let captured = checkout.machine().retain_lexical_scope(scope).unwrap();
+        checkout.machine().retire_scope(scope);
+        (
+            crate::ActorPlacement {
+                session: id,
+                resource_scope: RealmId::fresh(),
+                lexical_scope: captured.scope(),
+            },
+            captured,
+        )
+    }
+
+    fn capture_is_live(
+        machines: &Machines,
+        placement: crate::ActorPlacement,
+        captured: &RuntimeLexicalScopeLease,
+    ) -> bool {
+        machines
+            .checkout_run(placement.session)
+            .unwrap()
+            .machine()
+            .validate_lexical_scope_lease(placement.lexical_scope, captured)
+            .is_ok()
+    }
+
+    fn shared_fixture() -> (
+        Runner,
+        Arc<Machines>,
+        crate::ActorPlacement,
+        Arc<RuntimeLexicalScopeLease>,
+        tempfile::TempDir,
+    ) {
+        let id = SessionId(970);
+        let root = tempfile::tempdir().unwrap();
+        let machines = Arc::new(Machines::new());
+        machines.insert_idle(id, Box::new(session(id, root.path())));
+        let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+        let (placement, captured) = captured_placement(&machines, id);
+        (runner, machines, placement, captured, root)
+    }
+
+    #[tokio::test]
+    async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement(
+    ) {
+        crate::resident_workbench::CompilerCloseOwner::Initialization(
+            crate::RetainedActorExit::new(),
+        )
+        .scope(async {
+            let parent = SessionId(971);
+            let id = SessionId(972);
+            let root = tempfile::tempdir().unwrap();
+            let root_path = root.path().to_path_buf();
+            let machines = Arc::new(Machines::new());
+            let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()))
+                .with_child_session_factory(Arc::new(move |id, _| {
+                    Ok(Box::new(session(id, &root_path)))
+                }))
+                .with_child_bootstrap_program(bootstrap_program());
+            let startup = runner.child_session_startup_lease(id);
+            runner
+                .provision_child_session(id, RealmId::fresh(), None, &[])
+                .await
+                .unwrap();
+            let (placement, captured) = captured_placement(&machines, id);
+            let custody = ChildPlacementCustody::new(placement);
+            let actor = ActorRef::first(crate::ActorId(973));
+            custody.transfer_to_actor(actor, placement).unwrap();
+            startup.admitted();
+            let cleanup = crate::lineage::SpawnCleanupOutcome::Unconfirmed(
+                "child cleanup still retained".into(),
+            );
+            assert!(matches!(
+                cleanup,
+                crate::lineage::SpawnCleanupOutcome::Unconfirmed(_)
+            ));
+            release_failed_launch_placement(&runner, parent, &custody)
+                .await
+                .unwrap();
+            release_failed_launch_placement(&runner, parent, &custody)
+                .await
+                .unwrap();
+            assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+            assert!(capture_is_live(&machines, placement, &captured));
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::ActorOwned(actor));
+            // The retained child actor, rather than parent launch failure, owns retirement.
+            runner.retire_root_placement(placement).await.unwrap();
+            assert!(!capture_is_live(&machines, placement, &captured));
+            runner.retire_child_session(id, false).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while machines.kind(id).is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn preactor_refusal_retires_shared_capture_and_refuses_late_transfer() {
+        let (runner, machines, placement, captured, _root) = shared_fixture();
+        let custody = ChildPlacementCustody::new(placement);
+        assert!(capture_is_live(&machines, placement, &captured));
+        release_failed_launch_placement(&runner, placement.session, &custody)
+            .await
+            .unwrap();
+        assert!(!capture_is_live(&machines, placement, &captured));
+        assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
+        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+        assert!(custody
+            .transfer_to_actor(ActorRef::first(crate::ActorId(974)), placement)
+            .is_err());
+        release_failed_launch_placement(&runner, placement.session, &custody)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fallback_refusal_retires_actual_shared_scope_instead_of_fresh_placeholder() {
+        let (runner, machines, placement, captured, _root) = shared_fixture();
+        let placeholder = crate::ActorPlacement {
+            session: SessionId(975),
+            lexical_scope: ScopeId::ROOT,
+            ..placement
+        };
+        let custody = ChildPlacementCustody::new(placeholder);
+        custody.update(placement);
+        release_failed_launch_placement(&runner, placement.session, &custody)
+            .await
+            .unwrap();
+        assert!(!capture_is_live(&machines, placement, &captured));
+        assert_eq!(machines.kind(placement.session), Some(SlotKind::Idle));
+        assert!(machines.kind(placeholder.session).is_none());
+        assert!(custody
+            .transfer_to_actor(ActorRef::first(crate::ActorId(976)), placement)
+            .is_err());
+    }
+    fn bootstrap_program() -> Arc<tidepool_runtime::session::CompiledTurn> {
+        use tidepool_repr::execution_schema::{
+            testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
+            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef,
+        };
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        for (index, (name, fields)) in [("Done", 1), ("Suspended", 2), ("Unit", 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let module = if index < 2 {
+                "Tidepool.Internal.Resume"
+            } else {
+                "Fixture"
+            };
+            let mut identity = testing::identity(module, name);
+            identity.namespace = "constructor".into();
+            let mut family = testing::identity(module, if index < 2 { "Settled" } else { "Unit" });
+            family.namespace = "type".into();
+            wire.constructors.push(ConstructorDecl {
+                identity,
+                family,
+                host_id: tidepool_repr::DataConId(900 + index as u64),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: if index == 1 { 2 } else { 1 },
+                family_size: if index < 2 { 2 } else { 1 },
+                field_reps: vec![RuntimeRep::LiftedRef; fields],
+                strict_fields: vec![false; fields],
+                layout: CheckedLayout {
+                    fields: (0..fields)
+                        .map(|field| FieldLayout {
+                            rep: RuntimeRep::LiftedRef,
+                            offset: field as u32 * 8,
+                        })
+                        .collect(),
+                    alignment: if fields == 0 { 1 } else { 8 },
+                    payload_size: fields as u32 * 8,
+                    root_mask: vec![true; fields],
+                },
+            });
+        }
+        wire.expressions.nodes = vec![
+            ExprFrame::Construct {
+                constructor: ConstructorId(0),
+                fields: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
+            },
+            ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(2),
+                        fields: vec![],
+                    },
+                }),
+                body: 0,
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+            unreachable!()
+        };
+        *body = 1;
+        let mut table = DataConTable::new();
+        for constructor in &wire.constructors {
+            table.insert(tidepool_repr::DataCon {
+                id: constructor.host_id,
+                name: constructor.identity.occurrence.clone(),
+                tag: constructor.tag,
+                rep_arity: constructor.field_reps.len() as u32,
+                field_bangs: vec![],
+                qualified_name: Some(format!(
+                    "{}.{}",
+                    constructor.identity.module, constructor.identity.occurrence
+                )),
+                type_name: constructor.family.occurrence.clone(),
+            });
+        }
+        Arc::new(tidepool_runtime::session::CompiledTurn {
+            prepared: Arc::new(testing::prepare(wire).unwrap()),
+            table,
+            asks: Vec::new(),
+            warnings: Default::default(),
+            certification: None,
+        })
+    }
+}
