@@ -598,7 +598,7 @@ fn cancellation_after_real_effect_preserves_receipt_and_allows_new_intent() {
     assert_eq!(session.observed(), [1, 2, 3, 9]);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 enum HistoryOperation {
     LetInt(i8),
     PureBindInt(i8),
@@ -761,6 +761,99 @@ fn history_config() -> proptest::test_runner::Config {
     config
 }
 
+fn mandatory_capture_operations(seed: i8, flag: bool) -> [HistoryOperation; 11] {
+    [
+        HistoryOperation::ReadInt(seed),
+        HistoryOperation::Observe,
+        HistoryOperation::PureBindInt(seed),
+        HistoryOperation::Tuple(seed, flag),
+        HistoryOperation::UnusedBottom,
+        HistoryOperation::Capture,
+        HistoryOperation::ObserveCapture,
+        HistoryOperation::UnusedBottom,
+        HistoryOperation::Shadow,
+        HistoryOperation::Observe,
+        HistoryOperation::ObserveCapture,
+    ]
+}
+
+fn report_history_input(
+    seed: i8,
+    prefix: &[HistoryOperation],
+    flag: bool,
+    no_mr: bool,
+    operations: &[HistoryOperation],
+    history: &RenderedHistory,
+) {
+    // Emit before either oracle or native execution so shrinking failures retain
+    // their complete input even when the runner's watchdog interrupts the case.
+    eprintln!("typed-segment-history-input {}", serde_json::json!({
+        "seed": seed, "prefix": prefix, "flag": flag, "no_mr": no_mr,
+        "operations": operations, "source": history.cell,
+        "oracle_source": history.oracle, "expected": history.expected,
+        "captured": history.captured, "declaration_line": history.declaration_line,
+    }));
+}
+
+fn exercise_capture_history(history: &RenderedHistory) {
+    let mut session = SemanticSession::new();
+    session.execute_history("generated_cold", history).unwrap();
+    session.assert_only_publication_join_since_last_effect();
+    assert_eq!(session.observed(), history.expected.clone());
+    session.execute_history("generated_warm", history).unwrap();
+    session.assert_only_publication_join_since_last_effect();
+    let mut expected = history.expected.repeat(2);
+    assert_eq!(session.observed(), expected.clone());
+    let before = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let error = session
+        .execute(
+            "generated_rejected",
+            include_str!("fixtures/typed-segment-illtyped.hs"),
+            1,
+        )
+        .unwrap_err();
+    assert!(matches!(error,
+        ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(ref diagnostics)))
+            if !diagnostics.is_empty()));
+    assert_eq!(
+        session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap(),
+        before
+    );
+    assert_eq!(session.observed(), expected.clone());
+    session
+        .execute("generated_recovery", "segmentRecord historyCaptured", 0)
+        .unwrap();
+    expected.push(history.captured);
+    assert_eq!(session.observed(), expected);
+}
+
+#[test]
+fn deterministic_capture_history_matches_ghc_cold_warm_and_recovery() {
+    // The retained shrink reached an empty random prefix. This fixed input
+    // preserves its mandatory capture/shadow and rejection/recovery sequence.
+    let operations = mandatory_capture_operations(0, false);
+    let history = render_history(0, &operations, false);
+    report_history_input(0, &[], false, false, &operations, &history);
+    assert_eq!(history.expected, [1, 0, 1, 0]);
+    assert_eq!(history.captured, 0);
+    assert_ne!(history.mutated_expected, history.expected);
+    assert_eq!(
+        ghc_trace_with_language(
+            "{-# LANGUAGE MonomorphismRestriction #-}",
+            "",
+            &history.oracle,
+        ),
+        history.expected
+    );
+    exercise_capture_history(&history);
+}
+
 proptest::proptest! {
     #![proptest_config(history_config())]
 
@@ -771,21 +864,10 @@ proptest::proptest! {
         flag in proptest::bool::ANY,
         no_mr in proptest::bool::ANY,
     ) {
-        let mut operations = prefix;
-        operations.extend([
-            HistoryOperation::ReadInt(seed),
-            HistoryOperation::Observe,
-            HistoryOperation::PureBindInt(seed),
-            HistoryOperation::Tuple(seed, flag),
-            HistoryOperation::UnusedBottom,
-            HistoryOperation::Capture,
-            HistoryOperation::ObserveCapture,
-            HistoryOperation::UnusedBottom,
-            HistoryOperation::Shadow,
-            HistoryOperation::Observe,
-            HistoryOperation::ObserveCapture,
-        ]);
+        let mut operations = prefix.clone();
+        operations.extend(mandatory_capture_operations(seed, flag));
         let history = render_history(seed, &operations, no_mr);
+        report_history_input(seed, &prefix, flag, no_mr, &operations, &history);
         let language = if no_mr { "NoMonomorphismRestriction" } else { "MonomorphismRestriction" };
         let pragma = format!("{{-# LANGUAGE {language} #-}}");
         proptest::prop_assert_eq!(ghc_trace_with_language(&pragma, "", &history.oracle), history.expected.clone());
@@ -794,24 +876,7 @@ proptest::proptest! {
             && history.coverage.tuples > 0 && history.coverage.observations > 0
             && history.coverage.unused_bottoms > 0 && history.coverage.captures > 0
             && history.coverage.shadows > 0 && history.coverage.captured_uses > 0);
-        let mut session = SemanticSession::new();
-        session.execute_history("generated_cold", &history).unwrap();
-        session.assert_only_publication_join_since_last_effect();
-        proptest::prop_assert_eq!(session.observed(), history.expected.clone());
-        session.execute_history("generated_warm", &history).unwrap();
-        session.assert_only_publication_join_since_last_effect();
-        let mut expected = history.expected.repeat(2);
-        proptest::prop_assert_eq!(session.observed(), expected.clone());
-        let before = session.resident.public_visibility_snapshot_in(session.public).unwrap();
-        let error = session.execute("generated_rejected", include_str!("fixtures/typed-segment-illtyped.hs"), 1).unwrap_err();
-        proptest::prop_assert!(matches!(error,
-            ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(ref diagnostics)))
-                if !diagnostics.is_empty()));
-        proptest::prop_assert_eq!(session.resident.public_visibility_snapshot_in(session.public).unwrap(), before);
-        proptest::prop_assert_eq!(session.observed(), expected.clone());
-        session.execute("generated_recovery", "segmentRecord historyCaptured", 0).unwrap();
-        expected.push(history.captured);
-        proptest::prop_assert_eq!(session.observed(), expected);
+        exercise_capture_history(&history);
         eprintln!("typed-segment-history {}", serde_json::json!({
             "operations": operations.len(), "coverage": history.coverage,
             "cold_runs": 1, "warm_runs": 1, "rejections": 1, "recoveries": 1,
