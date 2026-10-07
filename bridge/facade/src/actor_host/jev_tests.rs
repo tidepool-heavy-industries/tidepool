@@ -1621,10 +1621,14 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
 
 fn watchdog_child_script(label: &str) -> String {
     format!(
-        "let campaign = \"watchdog\" :: CampaignLabel\n\
-         let group = \"children\" :: ForkGroupLabel\n\
-         let leaf = [label|{label}|]\n\
-         worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned (coding @Text projectHead (assignment leaf ()))))\n"
+        "import qualified Tidepool.Agent.Contract as A\n\
+         import Tidepool.Actors.Exomonad\n\
+         Right seed <- checkpoint \"watchdog child context\"\n\
+         Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
+           ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))\n\
+             {{ spawnLabel = Just \"{label}\", spawnLifetime = ActorOwned\n\
+             , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" }})\n\
+         Right worker <- request @Text child () (defaultRequestOptions {{ requestLabel = Just \"{label}\" }})\n"
     )
 }
 

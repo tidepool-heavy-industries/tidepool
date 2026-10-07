@@ -228,10 +228,14 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
     child
 }
 
-const CODING_CHILD: &str = "let campaign = \"source-reload\" :: CampaignLabel\n\
-     let group = \"checkout\" :: ForkGroupLabel\n\
-     let leaf = [label|editor|]\n\
-     worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned (coding @Text projectHead (assignment leaf ()))))\n";
+const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
+     import Tidepool.Actors.Exomonad\n\
+     Right seed <- checkpoint \"source-reload child context\"\n\
+     Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
+       ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))\n\
+         { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
+         , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
+     Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";
 
 /// A historical checkout can carry stale or missing tooling. A child uses the
 /// run's current graph and cannot publish checkout edits into that graph.
