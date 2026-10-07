@@ -16309,7 +16309,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn wait_for_explicit_installation_cleanup<H, O>(
         workbench: &ResidentActorWorkbench<H, O>,
         context: crate::ActorSessionContext,
-        expected_persistent_roots: usize,
+        expected_handles: usize,
+        expected_custody: usize,
+        producer_bindings: Vec<(String, tidepool_repr::SessionVarId)>,
         stage: &'static str,
     ) where
         H: DispatchEffect<O> + Send + 'static,
@@ -16318,9 +16320,22 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let mut last_counts = None;
         let cleanup = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
+                let producer_bindings = producer_bindings.clone();
                 let counts = workbench
                     .access
-                    .with_machine(context.clone(), |session, _, _| {
+                    .with_machine(context.clone(), move |session, context, _| {
+                        for (name, identity) in producer_bindings {
+                            let retained = session.retain_binding_custody_in(
+                                context.placement.lexical_scope,
+                                &name,
+                                identity,
+                            )?;
+                            assert!(
+                                retained.is_some(),
+                                "producer binding retains its exact live handle"
+                            );
+                            drop(retained);
+                        }
                         Ok((
                             session.parked_count(),
                             session.stowed_roots_count(),
@@ -16332,7 +16347,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     .await
                     .expect("inspect explicit installer cleanup");
                 last_counts = Some(counts);
-                if (counts.0, counts.1, counts.2) == (0, 0, expected_persistent_roots) {
+                // Native program root blocks can retire between preparations.
+                // Affine payload handles and custody must return exactly to the
+                // surviving producer baseline, with no parked continuation.
+                if (counts.0, counts.1, counts.3, counts.4)
+                    == (0, 0, expected_handles, expected_custody)
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -16341,7 +16361,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         .await;
         assert!(
             cleanup.is_ok(),
-            "explicit installer cleanup after {stage}: expected parked/stowed/persistent roots (0, 0, {expected_persistent_roots}); last parked/stowed/persistent/handles/custody={last_counts:?}"
+            "explicit installer cleanup after {stage}: expected parked/stowed/handles/custody (0, 0, {expected_handles}, {expected_custody}); last parked/stowed/persistent/handles/custody={last_counts:?}"
         );
     }
 
@@ -16506,13 +16526,20 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     .unwrap(),
             );
             let baseline_roots = session.persistent_roots_count();
+            let baseline_handles = session.value_handle_count();
+            let baseline_custody = session.outstanding_custody();
+            let producer_bindings = bound
+                .iter()
+                .map(|binder| {
+                    (
+                        binder.name.clone(),
+                        tidepool_repr::SessionVarId::from_extract(binder.var_id),
+                    )
+                })
+                .collect::<Vec<_>>();
             eprintln!(
                 "explicit installer baseline persistent/handles/custody={:?}",
-                (
-                    baseline_roots,
-                    session.value_handle_count(),
-                    session.outstanding_custody()
-                ),
+                (baseline_roots, baseline_handles, baseline_custody),
             );
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
@@ -16531,15 +16558,34 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .await
                 .expect("one registered receiver completes application preparation");
             assert!(tools.origin.is_explicit());
+            let receiver_scope = receiver.scope.scope();
+            let receiver_scope_lease = Arc::downgrade(&receiver.scope);
             drop(receiver);
             drop(tools);
             wait_for_explicit_installation_cleanup(
                 &workbench,
                 context.clone(),
-                baseline_roots,
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
                 "accepted application",
             )
             .await;
+            assert!(
+                receiver_scope_lease.upgrade().is_none(),
+                "receiver source lease releases with its installation"
+            );
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert!(
+                        session.compile_view_in(receiver_scope).is_none(),
+                        "released receiver source scope retires"
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
 
             let missing = workbench
                 .prepare_explicit_application(context.clone(), 2, vec![], installer.clone())
@@ -16554,7 +16600,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             wait_for_explicit_installation_cleanup(
                 &workbench,
                 context.clone(),
-                baseline_roots,
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
                 "missing receiver refusal",
             )
             .await;
@@ -16577,7 +16625,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             wait_for_explicit_installation_cleanup(
                 &workbench,
                 context.clone(),
-                baseline_roots,
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
                 "duplicate receiver refusal",
             )
             .await;
@@ -16594,9 +16644,45 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             );
             wait_for_explicit_installation_cleanup(
                 &workbench,
-                context,
-                baseline_roots,
+                context.clone(),
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
                 "tools-only receiver refusal",
+            )
+            .await;
+            let tools = workbench
+                .prepare_explicit_tools(context.clone(), 5, vec![], installer.clone())
+                .await
+                .expect("original retained installer remains callable after refusals");
+            let step = workbench
+                .begin_tool(
+                    context.clone(),
+                    tools.dispatch.clone(),
+                    "probe".into(),
+                    serde_json::json!("input"),
+                )
+                .await
+                .unwrap();
+            let step = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                    .settle_item(context.clone(), *fragment, (*outcome).into())
+                    .await
+                    .unwrap(),
+                other => other,
+            };
+            let ResidentWorkbenchStep::Committed { output, .. } = step else {
+                panic!("original captured tool remains callable after refusals")
+            };
+            assert!(output.contains("captured value"), "{output}");
+            drop(tools);
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context,
+                baseline_handles,
+                baseline_custody,
+                producer_bindings,
+                "original producer liveness probe",
             )
             .await;
             assert_eq!(
