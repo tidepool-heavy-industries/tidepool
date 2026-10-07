@@ -17,18 +17,29 @@ let definition :: Mailbox.ActorDefinition () AgentProtocol ()
 scopeTarget <- do
   actor <- Mailbox.startActor definition ()
   pure (AgentRef.AgentRef actor Nothing)
-let spawnScoped scope label = Spawn.spawnSubagent
+let spawnScoped
+      :: forall effects. Member Core.AgentLaunch effects
+      => Scope.Scope -> Text -> Eff effects (Either Spawn.SpawnError AgentRef.AgentRef)
+    spawnScoped scope label = Spawn.spawnSubagent
       (Spawn.FreshCtx "Idle resource scope fixture") Spawn.SameDir
       ((Spawn.defaultSpawnOptions scopeSpec)
         { Spawn.spawnLifetime = Core.InScope scope, Spawn.spawnLabel = Just label })
-let waitCommandRunning job = do
+let waitCommandRunning
+      :: forall effects. (Member Core.Commands effects, Member Core.Sleep effects)
+      => Cmd.Job -> Eff effects ()
+    waitCommandRunning job = do
       status <- Cmd.status job
       case status of
         Cmd.CommandRunning -> pure ()
         Cmd.CommandStarting -> sleep (milliseconds 1) >> waitCommandRunning job
         Cmd.CommandQueued -> sleep (milliseconds 1) >> waitCommandRunning job
         _ -> error "command did not reach its controlled execution"
-let admitScoped scope label = do
+let admitScoped
+      :: forall effects.
+         ( Member Core.AgentLaunch effects, Member Replies effects
+         , Member Core.Commands effects, Member Core.Sleep effects )
+      => Scope.Scope -> Text -> Eff effects (AgentRef.AgentRef, Reply.Request Int, Cmd.Job)
+    admitScoped scope label = do
       admitted <- spawnScoped scope label
       child <- case admitted of
         Left _ -> error "scope child admission refused"

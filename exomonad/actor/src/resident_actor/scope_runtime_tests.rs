@@ -140,6 +140,8 @@ impl ScopeFixture {
         let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         for import in [
             "Tidepool.Agent.Contract",
+            "Control.Monad.Freer (Eff, Member)",
+            "Data.Text (Text)",
             "qualified Tidepool.Actor as Mailbox",
             "qualified Tidepool.Scope as Scope",
             "qualified Tidepool.Command as Cmd",
