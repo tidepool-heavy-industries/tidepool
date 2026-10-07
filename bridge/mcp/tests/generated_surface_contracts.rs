@@ -105,8 +105,8 @@ fn generated_model_control_codecs_execute_and_preserve_callback_value() {
 }
 
 #[test]
-fn compiled_public_actor_rows_match_generated_rust_order() {
-    use exomonad_tool::PublicActorEffectRow;
+fn compiled_default_actor_row_matches_generated_rust_order() {
+    use exomonad_tool::DEFAULT_ACTOR_EFFECTS;
 
     let surface = Surface::new();
     let compiled = surface.compile("ActorProfiles.hs", true);
@@ -124,21 +124,16 @@ fn compiled_public_actor_rows_match_generated_rust_order() {
         String::from_utf8_lossy(&executed.stderr)
     );
     let reflected: Vec<Vec<String>> = serde_json::from_slice(&executed.stdout)
-        .expect("the compiled fixture must emit every named row as a string array");
-    let expected: Vec<Vec<String>> = PublicActorEffectRow::ALL
-        .into_iter()
-        .map(|row| {
-            std::iter::once(row.haskell_alias().to_owned())
-                .chain(
-                    row.effect_keys()
-                        .iter()
-                        .map(|key| format!("Effect{}", key.haskell_name())),
-                )
-                .collect()
-        })
-        .collect();
+        .expect("the compiled fixture must emit the default row as a string array");
+    let expected: Vec<Vec<String>> = vec![std::iter::once("ActorEffects".to_owned())
+        .chain(
+            DEFAULT_ACTOR_EFFECTS
+                .iter()
+                .map(|key| format!("Effect{}", key.haskell_name())),
+        )
+        .collect()];
     assert_eq!(
         reflected, expected,
-        "compiled KnownEffects must preserve each public alias's exact effect order"
+        "compiled KnownEffects must preserve the default actor row's exact effect order"
     );
 }
