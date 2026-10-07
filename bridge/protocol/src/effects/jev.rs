@@ -51,6 +51,8 @@ pub fn jev() -> Effect {
                     variant("JevTransport", vec![HsType::Text]),
                     variant("JevTimeout", vec![]),
                     variant("JevHttp", vec![HsType::Int, HsType::Text]),
+                    variant("JevCircuitOpen", vec![HsType::Int, HsType::Int]),
+                    variant("JevClientSetup", vec![HsType::Text]),
                     variant("JevBodyLimit", vec![]),
                     variant("JevMalformed", vec![HsType::Text]),
                 ],

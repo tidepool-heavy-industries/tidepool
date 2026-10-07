@@ -18,6 +18,10 @@ pub enum JevCallFailure {
     Timeout,
     #[haskell(module = "Tidepool.Effects.Core", name = "JevHttp")]
     Http(i64, String),
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevCircuitOpen")]
+    CircuitOpen(i64, i64),
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevClientSetup")]
+    ClientSetup(String),
     #[haskell(module = "Tidepool.Effects.Core", name = "JevBodyLimit")]
     BodyLimit,
     #[haskell(module = "Tidepool.Effects.Core", name = "JevMalformed")]
@@ -46,6 +50,21 @@ pub fn unconfigured_jev() -> JevBackendHandle {
     Arc::new(UnconfiguredJev)
 }
 
+/// A backend that retains a client-construction failure for each request.
+#[must_use]
+pub fn failed_jev_client_setup(detail: impl Into<String>) -> JevBackendHandle {
+    Arc::new(FailedJevClientSetup(detail.into()))
+}
+
+struct FailedJevClientSetup(String);
+
+impl JevBackend for FailedJevClientSetup {
+    fn ask(&self, _request: String) -> BoxFuture<'_, Result<String, JevCallFailure>> {
+        let detail = self.0.clone();
+        Box::pin(async move { Err(JevCallFailure::ClientSetup(detail)) })
+    }
+}
+
 impl JevBackend for UnconfiguredJev {
     fn is_installed(&self) -> bool {
         false
@@ -53,5 +72,21 @@ impl JevBackend for UnconfiguredJev {
 
     fn ask(&self, _request: String) -> BoxFuture<'_, Result<String, JevCallFailure>> {
         Box::pin(async { Err(JevCallFailure::Unconfigured) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn setup_failure_is_retained_as_its_typed_cause() {
+        let backend = failed_jev_client_setup("client builder rejected configuration");
+        assert_eq!(
+            backend.ask("{}".into()).await,
+            Err(JevCallFailure::ClientSetup(
+                "client builder rejected configuration".into()
+            ))
+        );
     }
 }

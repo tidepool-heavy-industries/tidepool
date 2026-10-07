@@ -993,15 +993,14 @@ impl exomonad_actor::JevBackend for HostJev {
                     JevFailure::Transport(detail) => Failure::Transport(detail),
                     JevFailure::Timeout => Failure::Timeout,
                     JevFailure::Http { status, body } => Failure::Http(i64::from(status), body),
-                    // The actor's Haskell error surface treats provider
-                    // refusal as HTTP; preserve that contract for fast fails.
                     JevFailure::CircuitOpen {
                         status,
                         retry_after_ms,
-                    } => Failure::Http(
+                    } => Failure::CircuitOpen(
                         i64::from(status),
-                        format!("Jev circuit open; retry after {retry_after_ms} ms"),
+                        i64::try_from(retry_after_ms).unwrap_or(i64::MAX),
                     ),
+                    JevFailure::ClientSetup(detail) => Failure::ClientSetup(detail),
                     JevFailure::BodyLimit => Failure::BodyLimit,
                     JevFailure::Malformed(detail) => Failure::Malformed(detail),
                 }),
@@ -1022,8 +1021,8 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
             Arc::new(HostJev(client))
         }
         Err(error) => {
-            tracing::warn!(%error, "jev client unavailable; Jev requests answer JevUnconfigured");
-            exomonad_actor::unconfigured_jev()
+            tracing::warn!(%error, "jev client setup failed; Jev requests retain the setup failure");
+            exomonad_actor::failed_jev_client_setup(error.to_string())
         }
     }
 }

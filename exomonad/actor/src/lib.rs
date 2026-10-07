@@ -34,7 +34,9 @@ mod hosted_lifecycle;
 mod identity;
 mod interactive_session;
 mod jev;
-pub use jev::{unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure};
+pub use jev::{
+    failed_jev_client_setup, unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure,
+};
 mod kernel;
 mod lineage;
 mod local_actor;
