@@ -1136,7 +1136,7 @@ impl ProjectedGroup {
 
 /// Immutable provenance of one reusable source module product. Every digest
 /// is filled from worker-certified bytes before native compilation.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CachedHomeOwner {
     pub unit: String,
     pub module: String,
