@@ -11764,8 +11764,18 @@ where
                     admitted_workbench.as_ref(),
                 )))
                 .await
-                .map(|advance| match advance {
-                    WorkbenchRunAdvance::Complete(step) => step,
+                .and_then(|advance| {
+                    match advance {
+                    WorkbenchRunAdvance::Complete(step) => Ok(step),
+                    WorkbenchRunAdvance::ParkGreen => Err(workbench_failure(
+                        &execution_state.cursor.receipts,
+                        execution_state.cursor.index,
+                        execution_state.request.items.len(),
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "async frontier reached a serial workbench without owned task admission"
+                                .into(),
+                        ),
+                    )),
                     WorkbenchRunAdvance::ParkEffect
                     | WorkbenchRunAdvance::ParkUnit
                     | WorkbenchRunAdvance::ParkNative
@@ -11773,6 +11783,7 @@ where
                     | WorkbenchRunAdvance::ParkAfterToolFinish => {
                         unreachable!("legacy workbench remains serial")
                     }
+                }
                 });
             let call_outcome = match &result {
                 Ok(
