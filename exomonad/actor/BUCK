@@ -10,7 +10,6 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
 rust_filegroup(
     name = "exomonad_actor_sources",
     mapped_srcs = {
-        "//bridge/haskell:actor_role_source": "bridge/haskell/actors/Tidepool/Actors/Role.hs",
         "Cargo.toml": "exomonad/actor/Cargo.toml",
         "src/after_tool.rs": "exomonad/actor/src/after_tool.rs",
         "src/agent_spec.rs": "exomonad/actor/src/agent_spec.rs",
@@ -200,7 +199,6 @@ tidepool_rust_library(
 rust_filegroup(
     name = "exomonad_actor_unit_tests_sources",
     mapped_srcs = {
-        "//bridge/haskell:actor_role_source": "bridge/haskell/actors/Tidepool/Actors/Role.hs",
         "Cargo.toml": "exomonad/actor/Cargo.toml",
         "src/after_tool.rs": "exomonad/actor/src/after_tool.rs",
         "src/agent_spec.rs": "exomonad/actor/src/agent_spec.rs",
