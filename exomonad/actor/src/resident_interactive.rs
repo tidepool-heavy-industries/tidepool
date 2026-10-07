@@ -276,7 +276,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn dispatch_validated_with_context_boxed(
         &self,
-        mut invocation: ToolInvocation,
+        invocation: ToolInvocation,
         arguments: Result<ToolArguments, ResidentToolError>,
         capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
         context: Option<Arc<dyn crate::HostedContextBinding>>,
@@ -287,7 +287,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Box::pin(async move {
             let issued = client.issue_workbench_call(invocation.context.clone());
             let validated = (|| {
-                invocation.arguments = arguments?;
+                let arguments = arguments?;
                 let declaration = tools
                     .iter()
                     .find(|tool| tool.name() == invocation.name)
@@ -297,14 +297,14 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                             invocation.name
                         ))
                     })?;
-                if !declaration.accepts(&invocation.arguments) {
+                if !declaration.accepts(&arguments) {
                     return Err(ResidentToolError::InvalidInvocation(format!(
                         "invalid argument kind for {:?}",
                         invocation.name
                     )));
                 }
                 Ok((
-                    request_for_tool(declaration, invocation.arguments)?,
+                    request_for_tool(declaration, arguments)?,
                     selected_contract(declaration),
                 ))
             })();

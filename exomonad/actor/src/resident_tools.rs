@@ -6,7 +6,7 @@
 
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
-use exomonad_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_runtime::session::{
     PublicationCancellation, PublicationDecision, PublicationPhase, ResidentHole,
     WorkbenchExecutionId, WorkbenchRequest, WorkbenchResponse,
