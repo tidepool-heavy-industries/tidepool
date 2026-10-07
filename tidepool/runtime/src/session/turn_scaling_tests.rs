@@ -1424,12 +1424,22 @@ where
                 None,
             ),
             AuthorityChecks::SegmentWorkCounts(count) => {
-                compile_cell_program_admitted_work_controls(
-                    request,
-                    admission.clone(),
-                    &templates,
-                    Some(count),
-                )
+                // Item certification and its ledger events run on this thread.
+                let subscriber = tracing_subscriber::registry().with(
+                    tracing_subscriber::fmt::layer()
+                        .with_test_writer()
+                        .with_filter(tracing_subscriber::EnvFilter::new(
+                            "off,exomonad_harness::timing=debug",
+                        )),
+                );
+                tracing::subscriber::with_default(subscriber, || {
+                    compile_cell_program_admitted_work_controls(
+                        request,
+                        admission.clone(),
+                        &templates,
+                        Some(count),
+                    )
+                })
             }
             _ => compile_cell_program_admitted(request, admission.clone(), &templates),
         }
