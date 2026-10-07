@@ -12,7 +12,6 @@ struct Fixture {
     watch: WatchId,
     control: Arc<crate::WorkbenchExecutionControl>,
     retirement: RetainedActorExit,
-    groups: crate::ForkGroupRegistry,
 }
 
 impl Fixture {
@@ -61,7 +60,6 @@ impl Fixture {
             watch,
             control,
             retirement: RetainedActorExit::new(),
-            groups: crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default()),
         }
     }
 
@@ -81,8 +79,6 @@ impl Fixture {
                 self.watch,
                 &self.control,
                 &self.retirement,
-                &self.groups,
-                None,
             ),
         )
         .await
@@ -134,8 +130,6 @@ async fn either_finishes_with_one_request_and_all_waits_for_both() {
             watch,
             &fixture.control,
             &fixture.retirement,
-            &fixture.groups,
-            None,
         ));
         if any_of {
             assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
@@ -268,8 +262,6 @@ async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledgi
         fixture.watch,
         &fixture.control,
         &retirement,
-        &fixture.groups,
-        None,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     let terminal = ActorTerminal {
@@ -322,8 +314,6 @@ async fn stale_watch_and_replacement_incarnation_remain_typed_refusals() {
         fixture.watch,
         &replacement_control,
         &fixture.retirement,
-        &fixture.groups,
-        None,
     )
     .await;
     assert!(matches!(
@@ -396,15 +386,12 @@ async fn direct_readiness_wakes_without_a_named_watch_notice_and_preserves_typed
     let control = crate::WorkbenchExecutionControl::untracked();
     control.arm_sleep();
     let retirement = RetainedActorExit::new();
-    let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
     let mut waiting = Box::pin(wait_watch_event(
         &registry,
         owner,
         watch,
         &control,
         &retirement,
-        &groups,
-        None,
     ));
     assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
     let (_, notices) = registry.abandon_response(owner, request).unwrap();

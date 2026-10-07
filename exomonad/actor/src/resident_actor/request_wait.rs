@@ -51,29 +51,6 @@ enum WatchWaitEvent {
     Retired(crate::ActorTerminal),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("child {target} starts after this invocation settles; await it in a later invocation")]
-pub(super) struct DeferredWaitRefusal {
-    target: ActorRef,
-}
-
-pub(super) fn guard_deferred_target(
-    groups: &crate::ForkGroupRegistry,
-    owner: ActorRef,
-    boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-    target: ActorRef,
-) -> Result<(), DeferredWaitRefusal> {
-    if boundary.is_some_and(|boundary| {
-        groups
-            .pending_children_at_boundary(owner, boundary)
-            .contains(&target)
-    }) {
-        Err(DeferredWaitRefusal { target })
-    } else {
-        Ok(())
-    }
-}
-
 /// The request registry owns subscription and exact-incarnation validation.
 /// Selecting cancellation never acknowledges native continuation cleanup.
 async fn wait_watch_event(
@@ -82,8 +59,6 @@ async fn wait_watch_event(
     watch: WatchId,
     control: &Arc<crate::WorkbenchExecutionControl>,
     retirement: &crate::RetainedActorExit,
-    _groups: &crate::ForkGroupRegistry,
-    _boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> WatchWaitEvent {
     let waiting = requests.await_watch(actor, watch);
     tokio::pin!(waiting);
@@ -116,7 +91,6 @@ pub(super) async fn await_watch<H, O>(
     context: ActorSessionContext,
     control: Arc<crate::WorkbenchExecutionControl>,
     poll: crate::request_effect::WatchPoll,
-    boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -131,8 +105,6 @@ where
         poll.watch,
         &control,
         &kernel.retained_exit(),
-        &environment.fork_groups,
-        boundary.as_ref(),
     )
     .await
     {
