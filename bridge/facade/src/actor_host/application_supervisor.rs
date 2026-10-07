@@ -28,7 +28,7 @@ pub(super) async fn run_interactive_applications(
         config
             .workspace_inputs
             .as_ref()
-            .and_then(|inputs| inputs.prompts.get("core"))
+            .and_then(|inputs| inputs.prompts.get("base"))
             .map(String::as_str),
         config.jev_surface(),
     )

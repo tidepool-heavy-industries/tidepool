@@ -1005,7 +1005,7 @@ fn worker_launch_resolver(config: &ActorHostConfig) -> exomonad_actor::WorkerLau
         config
             .workspace_inputs
             .as_ref()
-            .and_then(|inputs| inputs.prompts.get("core"))
+            .and_then(|inputs| inputs.prompts.get("base"))
             .map(String::as_str),
         config.jev_surface(),
     );
