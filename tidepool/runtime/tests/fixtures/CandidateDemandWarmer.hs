@@ -1,8 +1,9 @@
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE DataKinds #-}
 module CandidateDemandWarmer where
 
 import Control.Monad.Freer (Eff)
-import Tidepool.Internal.Resume (Settled, settle)
+import "tidepool-resume" Tidepool.Internal.Resume (Settled, settle)
 import CandidateDemandFacade
 import OptionalSupport ()
 

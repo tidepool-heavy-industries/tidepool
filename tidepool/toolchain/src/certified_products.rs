@@ -6492,7 +6492,7 @@ fn certify_target_owners_from_sources(
 }
 
 #[cfg(test)]
-mod resume_issuer_tests;
+mod home_self_issuer_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

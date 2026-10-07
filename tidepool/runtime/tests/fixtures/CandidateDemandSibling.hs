@@ -1,8 +1,9 @@
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE DataKinds #-}
 module CandidateDemandSibling where
 
 import Control.Monad.Freer (Eff)
-import Tidepool.Internal.Resume (Settled, settle)
+import "tidepool-resume" Tidepool.Internal.Resume (Settled, settle)
 import CandidateDemandInstance (sibling)
 
 result :: Int

@@ -1138,14 +1138,6 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    )?
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -1205,13 +1197,6 @@ impl ModuleCandidateOffer {
         checked_item.validate_include(include)?;
         let mut selected = None;
         let exact = compile_context_with_declarations(compile_context, context.clone())
-            .with_generated_scaffold_imports(
-                checked_item
-                    .item
-                    .turn_templates()
-                    .iter()
-                    .map(|(_, source)| source.as_str()),
-            )?
             .with_generated_planned_imports(
                 checked_item
                     .prefix
@@ -1362,7 +1347,6 @@ impl ModuleCandidateOffer {
         let exact = (*context)
             .clone()
             .with_declarations(declarations)
-            .with_generated_scaffold_imports(templates.iter().map(String::as_str))?
             .prepare_compilation_with_authorization(
                 &scratch.join("exact-scope"),
                 producer,
