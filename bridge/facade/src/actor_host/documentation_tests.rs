@@ -2846,13 +2846,32 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects() {
-    let repository = recipe_workspace_with_modules(
-        Some(&["Project.QuantitiesChecks.workspaceProfile"]),
-        Some(&["Project.Work"]),
-    );
-    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
-        .await
-        .unwrap();
+    let campaign = workspace_campaign_with(|authored| {
+        crate::exomonad::edit_fixture_project_config(authored, |project| {
+            project.haskell.modules = vec!["Project.Work".into()];
+        });
+    })
+    .await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs"
+        ),
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        r#"if not (null workspaceProfileKeys) && all (\keys -> "ResourceScopes" `elem` keys && "Sleep" `elem` keys) workspaceProfileKeys then pure () else error "the installed workspace notebooks lost scope or sleep""#,
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        r#"if scopeBody workspaceSleepOutcome == Right () && scopeCleanup workspaceSleepOutcome == Right () then pure () else error "WorkspaceEffects scoped sleep did not complete with confirmed cleanup""#,
+    )
+    .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
