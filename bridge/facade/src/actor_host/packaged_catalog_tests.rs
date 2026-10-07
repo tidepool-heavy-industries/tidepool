@@ -68,8 +68,8 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             "Tidepool.Actors.Internal.ExomonadDriver",
         ),
         (
-            "PackagedCatalogCodingDisplay",
-            "CodingEffects",
+            "PackagedCatalogActorDisplay",
+            "ActorEffects",
             "Tidepool.Actors.Role",
         ),
     ] {
