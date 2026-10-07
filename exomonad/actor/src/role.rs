@@ -157,7 +157,8 @@ impl ActorCapabilities {
 
     #[must_use]
     pub fn permits_child(&self, child: &Self) -> bool {
-        child.has_unique_effects()
+        self.descendants.maximum_active_children != Some(0)
+            && child.has_unique_effects()
             && child.descendants.maximum_depth < self.descendants.maximum_depth
             && self
                 .descendants
@@ -233,6 +234,17 @@ mod tests {
             .is_err());
         assert!(parent
             .preview_child(ActorCapabilities::default(), Some((1, 65536)))
+            .is_err());
+    }
+
+    #[test]
+    fn zero_active_child_limit_refuses_admission_even_with_remaining_depth() {
+        let parent = ActorCapabilities::default().with_descendant_budget(DescendantBudget {
+            maximum_depth: 3,
+            maximum_active_children: Some(0),
+        });
+        assert!(parent
+            .preview_child(ActorCapabilities::default(), None)
             .is_err());
     }
 
