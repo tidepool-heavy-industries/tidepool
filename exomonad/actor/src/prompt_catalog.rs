@@ -175,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_is_complete_nonempty_and_role_typed() {
+    fn catalog_is_complete_nonempty_and_layer_typed() {
         let artifacts = PromptId::ALL.map(PromptId::artifact);
         assert_eq!(artifacts.map(|artifact| artifact.id), PromptId::ALL);
         assert!(artifacts
@@ -204,28 +204,6 @@ mod tests {
         ] {
             assert!(!workbench_doc(topic, &[]).unwrap().trim().is_empty());
         }
-        // Every topic with a workspace skill names it on its last line, and the
-        // topic listing names the skills beside the topics. `jev` instead
-        // links the skill inline and says so, rather than duplicating its
-        // content behind a trailer.
-        for (topic, skill) in [
-            ("actors", "exomonad-define-actors"),
-            ("cleanup", "exomonad-cleanup"),
-            ("agents", "exomonad-agent-work"),
-            ("workbench", "exomonad-workbench"),
-        ] {
-            let body = workbench_doc(topic, &[]).unwrap();
-            assert_eq!(
-                body.trim_end().lines().last(),
-                Some(format!("skill: {skill}").as_str()),
-                "`doc {topic}` must end by naming {skill}"
-            );
-            assert!(workbench_doc("topics", &[]).unwrap().contains(skill));
-        }
-        assert!(workbench_doc("jev", &[]).unwrap().contains("exomonad-jev"));
-        assert!(workbench_doc("topics", &[])
-            .unwrap()
-            .contains("exomonad-jev"));
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing", &[]).is_err());
     }
@@ -300,34 +278,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_topic_naming_a_shipped_skill_says_so() {
-        // A short skill alias resolves even when it has no built-in doc topic.
-        let refusal = workbench_doc("command", &[]).unwrap_err();
-        assert!(
-            refusal.contains("`exomonad-command` skill covers this"),
-            "{refusal}"
+    fn skill_aliases_use_the_current_roster_and_unknown_topics_refuse() {
+        assert_eq!(skill_for_topic("agent-work"), Some("exomonad-agent-work"));
+        assert_eq!(
+            skill_for_topic("exomonad-agent-work"),
+            Some("exomonad-agent-work")
         );
-        assert!(refusal.starts_with("unknown Exomonad documentation topic `command`"));
-
-        // The full name works too, and so does every other shipped skill that
-        // is not already a topic in its own right.
-        for topic in [
-            "exomonad-command",
-            "review",
+        for retired in [
+            "fork",
+            "exomonad-fork",
             "coordinate",
-            "project-work",
-            "exomonad-project-work",
+            "exomonad-coordinate",
+            "unfold",
+            "exomonad-unfold",
         ] {
-            let refusal = workbench_doc(topic, &[]).unwrap_err();
-            assert!(
-                refusal.contains("skill covers this"),
-                "`doc {topic}`: {refusal}"
-            );
+            assert_eq!(skill_for_topic(retired), None);
         }
-
-        // A topic that names nothing still refuses plainly, with no skill line.
-        let missing = workbench_doc("missing", &[]).unwrap_err();
-        assert!(!missing.contains("skill covers this"), "{missing}");
+        assert!(workbench_doc("missing", &[]).is_err());
     }
 
     #[test]
