@@ -1,7 +1,8 @@
 let scopeSpec :: AgentSpec ScopeTools '[]
     scopeSpec = defaultSpec
       { specTools = ScopeTools
-          { ping = tool "Read a retained scope child closure." $ \_ -> pure (73 :: Int)
+          { ping = presentWith presentDisplay $
+              tool "Read a retained scope child closure." $ \_ -> pure (73 :: Int)
           }
       }
 let definition :: Mailbox.ActorDefinition () AgentProtocol ()
