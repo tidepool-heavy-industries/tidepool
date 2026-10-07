@@ -20,6 +20,91 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
         .map(|block| block.split_once("```").unwrap().0)
 }
 
+#[tokio::test]
+async fn captured_child_keeps_original_nominal_types_after_parent_shadowing_and_failure() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/captured_context_original_owner_setup.hs"),
+    )
+    .await;
+
+    let child = campaign
+        .next_deployment(
+            "captured child installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    let child_id = child.actor.identity();
+    campaign.assert_no_deployment("captured child remains idle", |event| {
+        matches!(event, LocalResidentDeployment::SessionReady { activation } if activation.id.actor() == child_id)
+    });
+
+    committed(
+        root.as_ref(),
+        "Right originalOwnerRequest <- request @OriginalReply originalOwner (OriginalInput 41) defaultRequestOptions",
+    )
+    .await;
+    campaign
+        .next_deployment(
+            "captured child typed request activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child_id =>
+                {
+                    Ok(activation)
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+
+    committed(
+        root.as_ref(),
+        "data OriginalInput = LaterInput Bool deriving Show\ndata OriginalReply = LaterReply Bool deriving Show",
+    )
+    .await;
+    let parent_failure = dispatch_haskell_script_result(
+        root.as_ref(),
+        "error \"parent-failure-after-captured-request\" >> pure ()",
+    )
+    .await
+    .expect_err("the parent cell deliberately fails after shadowing its types");
+    let parent_failure = format!("{parent_failure:?}");
+    assert!(
+        parent_failure.contains("parent-failure-after-captured-request"),
+        "{parent_failure}"
+    );
+    assert!(campaign.actor.terminal().get().is_none());
+
+    let reply = dispatch_haskell_script(
+        child.policy.as_ref(),
+        "case sessionInput of OriginalInput n -> respond (OriginalReply (n + 1))",
+    )
+    .await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    let observed = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "originalOwnerReply <- pollResponse originalOwnerRequest\ndisplay (show originalOwnerReply)",
+    )
+    .await;
+    let text = explicit_display_output(&observed)["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("OriginalReply 42"), "{observed}");
+    assert!(!text.contains("LaterReply"), "{observed}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 async fn committed(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     source: &str,
@@ -2448,7 +2533,7 @@ async fn route_reply_case(cancel: bool) {
     displayed(
         &mut campaign,
         root.as_ref(),
-        "let routeCampaign = \"route-reply\" :: CampaignLabel",
+        "let routeCampaign = \"route-reply\" :: Text",
     )
     .await;
     displayed(
