@@ -36,15 +36,17 @@ are not inherited. Calls in one cell share its model budget. Match `modelOutcome
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 
-Every hosted tool field in an installed `AgentSpec` ends with `presentWith`,
-which returns an abstract `Presented handler`. This required finishing
-constructor selects model-facing text while preserving the handler's semantic
-result. Use `presentWith id` for `Text`, `presentWith presentJson` for JSON, or
+Each hosted function handler field (`Call`, `RawCall`, `Notify`, and their
+`Sync` forms) in an installed `AgentSpec` must use `presentWith`, which returns
+an abstract `Presented handler`. This required finishing constructor selects
+model-facing text while preserving the handler's semantic result. Use
+`presentWith id` for `Text`, `presentWith presentJson` for JSON, or
 `presentWith presentDisplay` for a `Display` value. For example,
-`lookup = presentWith id $ tool description handler`. A bare hosted handler is
-rejected during spec compilation. Programmatic actor handlers do not need a
-renderer. The after-tool hook receives `toolResultValue` as semantic JSON and
-`toolResultOutput` as the selected text; it does not render or replace the
+`lookup = presentWith id $ tool description handler`. A bare handler fails
+Haskell typechecking because the hosted field requires `Presented`. Native
+`HaskellCell`/`HaskellTool` fields and programmatic actor handlers do not use
+this wrapper. The after-tool hook receives `toolResultValue` as semantic JSON
+and `toolResultOutput` as the selected text; it does not render or replace the
 tool's text.
 
 ## Agent work
@@ -124,7 +126,7 @@ separately. `nextCandidateEvent` chooses between a terminal result and a
 progress update. `AwaitError`, `ResponseFailure`, and an authored blocked result
 remain distinct layers.
 
-The workspace's `Project.WorkspaceEffects` is a local alias of generated
+The workspace's `Project.Work.WorkspaceEffects` is a local alias of generated
 `ActorEffects`. A task, prompt, or label does not select or narrow that installed
 profile; the actual supplied `AgentSpec` and runtime grants determine the child's
 tools and effects.
