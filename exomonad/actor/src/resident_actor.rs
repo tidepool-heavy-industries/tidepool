@@ -4038,15 +4038,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         {
             record.interactive_policy_installed = true;
         }
-        // best-effort: the deployment observer channel may have no listener
-        // (e.g. shut down); a missed PolicyInstalled event has no correctness
-        // effect since the policy flag above is already committed to state.
-        self.environment
-            .deployments
-            .try_send(LocalResidentDeployment::PolicyInstalled(Box::new(
-                installation,
-            )))
-            .ok();
+        let admission = installation.spawn_admission.clone();
+        if let Err(error) =
+            self.environment
+                .deployments
+                .try_send(LocalResidentDeployment::PolicyInstalled(Box::new(
+                    installation,
+                )))
+        {
+            if let Some(authority) = admission {
+                authority.fail(format!(
+                    "provider attachment deployment unavailable: {error}"
+                ));
+            }
+        }
     }
 
     /// The actor whose native application services this actor's commands.
@@ -5069,8 +5074,10 @@ where
             } else {
                 crate::ForkContext::SelectedContext
             };
-            self.validate_worker_context(lifetime, fork_context)
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            if spawn.is_none() {
+                self.validate_worker_context(lifetime, fork_context)
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            }
             if descriptor.fork_group().is_some() {
                 if checkpoint_lease.is_none()
                     && self.policy_installed
