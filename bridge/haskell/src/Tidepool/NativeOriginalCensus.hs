@@ -34,7 +34,7 @@ data OriginalNativeCensus = OriginalNativeCensus
   , censusGroups :: ![(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])]
   , censusRequirements :: !(Map.Map (String, String) String)
   , censusCanonicalCertificate :: !(Maybe String)
-  } deriving (Eq)
+  } deriving (Eq, Show)
 
 nativeCensusOwner :: OriginalNativeCensus -> (String, String, String, String, String)
 nativeCensusOwner = censusOwner
@@ -277,8 +277,10 @@ project :: ParsedCensus -> OriginalNativeCensus
 project parsed = OriginalNativeCensus
   { censusOwner = parsedOwner parsed
   , censusGroups =
-      [ (ordinal, binders, [(nativeIdentity global, requiresDefinition global)])
-      | (ordinal, binders, globals) <- parsedGroups parsed ]
+      [ (ordinal, binders,
+          [(nativeIdentity global, requiresDefinition global) | global <- globals])
+      | (ordinal, binders, globals) <- parsedGroups parsed
+      ]
   , censusRequirements = Map.fromList (parsedRequirements parsed)
   , censusCanonicalCertificate = parsedCanonicalCertificate parsed
   }
