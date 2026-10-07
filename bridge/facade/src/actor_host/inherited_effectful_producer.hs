@@ -9,5 +9,5 @@ Right workerAgent <- spawnSubagent (FreshCtx "Return an effectful command closur
   (ForkWorktree currentCheckout)
   ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
     { spawnLabel = Just "producer", spawnLifetime = ActorOwned })
-Right worker <- request @(() -> Eff '[Commands] Cmd.Job) workerAgent ()
+Right worker <- request @(() -> Eff '[Replies, Commands, Lookup, BoundWorktree] Cmd.Job) workerAgent ()
   (defaultRequestOptions { requestLabel = Just "producer" })

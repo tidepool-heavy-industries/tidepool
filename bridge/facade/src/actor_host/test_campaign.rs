@@ -401,6 +401,47 @@ impl TestCampaign {
         .await
     }
 
+    /// This campaign has no provider process. Acknowledge the exact spawn
+    /// after its native policy and workspace attachment are installed.
+    pub fn acknowledge_native_spawn(
+        &self,
+        installation: &exomonad_actor::LocalResidentInstallation,
+    ) {
+        let actor = installation.actor.identity();
+        let admission = installation
+            .spawn_admission
+            .as_ref()
+            .expect("native child retains its spawn admission");
+        admission.validate_child(actor).unwrap();
+        assert!(installation.actor.terminal().get().is_none());
+        let installed_policy = installation
+            .policy
+            .snapshot_for_request()
+            .expect("native tools and source are installed before spawn acknowledgement");
+        assert_eq!(installation.policy.tools(), installed_policy.tools());
+        if !installation.launch_worktrees.is_empty() {
+            assert!(installation.worktree_custody.is_some());
+            let principal = WorktreePrincipal::exact_actor(
+                &runtime_namespace(self.session_root.path()),
+                actor.id.0,
+                actor.incarnation.0,
+            );
+            for worktree in &installation.launch_worktrees {
+                let tree = self
+                    .worktrees
+                    .lookup(&WorktreeId::from_raw(worktree))
+                    .unwrap()
+                    .expect("native child workspace is registered");
+                assert!(self
+                    .bindings
+                    .lock()
+                    .membership(tree.id(), &principal)
+                    .is_some());
+            }
+        }
+        admission.acknowledge(actor).unwrap();
+    }
+
     pub async fn start() -> Self {
         Self::start_with_admission(|admission| admission).await
     }
@@ -416,13 +457,13 @@ impl TestCampaign {
     }
 
     pub async fn start_with_admission(
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
     ) -> Self {
         Self::start_with_config(transform, |_| {}).await
     }
 
     pub async fn start_with_config(
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Self {
         Self::start_with_conversation(transform, configure, None).await
@@ -431,7 +472,7 @@ impl TestCampaign {
     /// A campaign whose root can read its own conversation, so `reflect`
     /// returns the supplied turns instead of reporting the context unbound.
     pub async fn start_with_conversation(
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Self {
@@ -439,7 +480,7 @@ impl TestCampaign {
     }
 
     pub(super) async fn start_with_model_factory(
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
@@ -456,7 +497,7 @@ impl TestCampaign {
     }
 
     async fn start_configured(
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         root: CampaignRoot,
     ) -> Self {

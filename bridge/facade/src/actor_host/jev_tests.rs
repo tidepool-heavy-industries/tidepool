@@ -1657,7 +1657,7 @@ async fn next_watchdog_child(
         child.actor.identity().into(),
         ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&child);
     child
 }
 

@@ -2445,12 +2445,7 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
             integrate: true,
         },
     );
-    child_installation
-        .fork_gate
-        .as_ref()
-        .expect("child fork gate")
-        .mark_ready()
-        .unwrap();
+    campaign.acknowledge_native_spawn(&child_installation);
     let setup = setup.await.unwrap();
     assert_eq!(setup["status"], "committed", "{setup:?}");
 
@@ -2480,12 +2475,7 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
             integrate: true,
         },
     );
-    grandchild_installation
-        .fork_gate
-        .as_ref()
-        .expect("grandchild fork gate")
-        .mark_ready()
-        .unwrap();
+    campaign.acknowledge_native_spawn(&grandchild_installation);
     let child_spawn = child_spawn.await.unwrap();
     assert_eq!(child_spawn["status"], "committed", "{child_spawn:?}");
 

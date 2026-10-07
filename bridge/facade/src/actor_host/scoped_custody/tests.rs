@@ -1,6 +1,6 @@
 use super::*;
 use crate::actor_host::*;
-use exomonad_actor::ForkWorkspaceCustody;
+use exomonad_actor::WorkspaceCustody;
 use exomonad_node::{
     run_process_supervisor, LaunchReservation, ProcessInvocation, ProcessMountBoundary,
     ProcessSupervisorClient, ProcessSupervisorManifest,
