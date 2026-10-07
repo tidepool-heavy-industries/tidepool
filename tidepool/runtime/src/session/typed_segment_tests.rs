@@ -310,7 +310,7 @@ fn signed_template_helpers_execute_recursion_and_polymorphism_once() {
         include_str!("fixtures/typed-segment-template-helper-use.hs"),
         CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
-        AuthorityChecks::SegmentWorkCounts(7),
+        AuthorityChecks::SegmentWorkCounts(super::SegmentWorkShape::IndependentActions(7)),
         &SourceImports::new(),
         None,
         &preamble,
@@ -977,7 +977,7 @@ fn one_four_eight_actions_use_one_completed_inference_segment() {
             &source,
             0,
             &ScalePublication::Ephemeral,
-            AuthorityChecks::SegmentWorkCounts(count),
+            AuthorityChecks::SegmentWorkCounts(super::SegmentWorkShape::CaptureChain(count)),
         )
         .unwrap();
         assert_eq!(session.observed(), (1..=count as i64).collect::<Vec<_>>());

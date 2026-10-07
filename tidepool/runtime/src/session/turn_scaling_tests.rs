@@ -950,8 +950,22 @@ enum AuthorityChecks<'a> {
     RefusalBranches,
     TypedEntryRefusalBranches,
     FreshTargetWork,
-    SegmentWorkCounts(usize),
+    SegmentWorkCounts(SegmentWorkShape),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SegmentWorkShape {
+    CaptureChain(usize),
+    IndependentActions(usize),
+}
+
+impl SegmentWorkShape {
+    fn item_count(self) -> usize {
+        match self {
+            Self::CaptureChain(count) | Self::IndependentActions(count) => count,
+        }
+    }
 }
 
 enum CellDeclarationExpectation {
@@ -965,11 +979,12 @@ enum CellDeclarationExpectation {
 pub(super) fn assert_compiler_work(
     program: &tidepool_toolchain::checked_cell::CellProgram,
     stderr: &[u8],
-    expected_items: Option<usize>,
+    expected_shape: Option<SegmentWorkShape>,
 ) {
     use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
 
-    if let Some(count) = expected_items {
+    if let Some(shape) = expected_shape {
+        let count = shape.item_count();
         assert_eq!(program.typed_segments().len(), 1);
         let segment = &program.typed_segments()[0];
         assert_eq!(segment.items().len(), count);
@@ -1054,7 +1069,7 @@ pub(super) fn assert_compiler_work(
                     dependencies.is_empty(),
                     "the first action has no produced inputs"
                 );
-            } else {
+            } else if matches!(shape, SegmentWorkShape::CaptureChain(_)) {
                 let prior = &program.items()[index - 1];
                 let DecodedTurnOut::Bind { bound, .. } =
                     decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
@@ -1095,7 +1110,7 @@ pub(super) fn assert_compiler_work(
         }
     }
     assert!(!owners.is_empty());
-    if expected_items.is_some() {
+    if expected_shape.is_some() {
         assert_eq!(
             owners.len(),
             1,
@@ -1165,11 +1180,13 @@ pub(super) fn assert_compiler_work(
                 "admission": program.admission_digest(), "unit": unit, "module": module,
                 "cycle": cycle, "purpose": purpose, "target_frontends": 1,
                 "target_finalizations": 1, "dependency_frontends": dependency_counts[0],
-                "dependency_finalizations": dependency_counts[1], "items": expected_items,
+                "dependency_finalizations": dependency_counts[1],
+                "items": expected_shape.map(SegmentWorkShape::item_count),
             })
         );
     }
-    if let Some(count) = expected_items {
+    if let Some(shape) = expected_shape {
+        let count = shape.item_count();
         for (name, expected) in [
             ("typed_segment_kept_entries", count),
             ("typed_segment_generated_instance_retries", 0),
