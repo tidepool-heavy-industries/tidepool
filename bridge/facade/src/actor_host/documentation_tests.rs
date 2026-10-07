@@ -2833,7 +2833,7 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
 async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects() {
     let campaign = workspace_campaign_with(|authored| {
         crate::exomonad::edit_fixture_project_config(authored, |project| {
-            project.haskell.modules = vec!["Project.Work".into()];
+            project.haskell.modules.clear();
         });
     })
     .await;
