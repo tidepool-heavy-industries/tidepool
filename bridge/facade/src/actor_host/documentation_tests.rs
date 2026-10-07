@@ -5,9 +5,7 @@ use super::test_campaign::{
     dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
 };
 use super::*;
-use exomonad_tool::{
-    ToolArguments, ToolInvocation, ToolInvocationContext,
-};
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 fn example(document: &str) -> &str {
     examples(document).next().unwrap()
@@ -95,9 +93,7 @@ async fn captured_child_keeps_original_nominal_types_after_parent_shadowing_and_
         "originalOwnerReply <- pollResponse originalOwnerRequest\ndisplay (show originalOwnerReply)",
     )
     .await;
-    let text = explicit_display_output(&observed)["text"]
-        .as_str()
-        .unwrap();
+    let text = explicit_display_output(&observed)["text"].as_str().unwrap();
     assert!(text.contains("OriginalReply 42"), "{observed}");
     assert!(!text.contains("LaterReply"), "{observed}");
 
@@ -644,11 +640,7 @@ fn open_test_workspace(
         panic!("child must have one worktree")
     };
     let worktree_id = exomonad_worktree::WorktreeId::from_raw(worktree_id);
-    let worktree = campaign
-        .worktrees
-        .lookup(&worktree_id)
-        .unwrap()
-        .unwrap();
+    let worktree = campaign.worktrees.lookup(&worktree_id).unwrap().unwrap();
     assert!(worktree.cwd().is_dir(), "installation workspace must exist");
     let principal = WorktreePrincipal::exact_actor(
         &runtime_namespace(campaign.session_root.path()),
@@ -933,7 +925,8 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     .await;
     campaign.await_watch_ready().await;
     let unavailable = displayed(
-        &mut campaign, root.as_ref(),
+        &mut campaign,
+        root.as_ref(),
         "state <- pollWatch retainedFailureReady\ndisplay (inspectFull state)",
     )
     .await;
@@ -974,12 +967,16 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let mut child = None;
-    committed(root.as_ref(), concat!(
-        "import qualified Tidepool.Agent.Contract as A\n",
-        "data Report = Report Int deriving Show\n",
-        "Right worker <- spawnSubagent (FreshCtx \"activation preview worker\") SameDir ",
-        "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
-    )).await;
+    committed(
+        root.as_ref(),
+        concat!(
+            "import qualified Tidepool.Agent.Contract as A\n",
+            "data Report = Report Int deriving Show\n",
+            "Right worker <- spawnSubagent (FreshCtx \"activation preview worker\") SameDir ",
+            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+        ),
+    )
+    .await;
     committed(
         root.as_ref(),
         include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
@@ -1029,7 +1026,13 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("Right previewResponse <- request @Report worker {input} defaultRequestOptions")).await;
+        committed(
+            root.as_ref(),
+            &format!(
+                "Right previewResponse <- request @Report worker {input} defaultRequestOptions"
+            ),
+        )
+        .await;
         let activation = campaign
             .next_deployment(
                 "preview activation",
@@ -1349,7 +1352,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     }
     let consumer = children
         .iter()
-            .find(|child| child.label == "consumer")
+        .find(|child| child.label == "consumer")
         .unwrap();
     let producer = children
         .iter()
@@ -1816,8 +1819,14 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         )
         .await;
     assert_eq!(peer.supervisor_parent, None);
-    assert_eq!(peer.context_parent, Some(campaign.root_installation.actor.identity()));
-    assert_eq!(peer.creator, Some(campaign.root_installation.actor.identity()));
+    assert_eq!(
+        peer.context_parent,
+        Some(campaign.root_installation.actor.identity())
+    );
+    assert_eq!(
+        peer.creator,
+        Some(campaign.root_installation.actor.identity())
+    );
     let peer_id = peer.actor.identity();
     campaign.assert_no_deployment("idle spawn waits for a typed request", |event| {
         matches!(event, LocalResidentDeployment::SessionReady { activation } if activation.id.actor() == peer_id)
@@ -1850,7 +1859,11 @@ async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_s
         "Right answer <- await (result peerRequest)\ndisplay answer",
     )
     .await;
-    assert_eq!(explicit_display_output(&answered)["text"], "ready", "{answered}");
+    assert_eq!(
+        explicit_display_output(&answered)["text"],
+        "ready",
+        "{answered}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
