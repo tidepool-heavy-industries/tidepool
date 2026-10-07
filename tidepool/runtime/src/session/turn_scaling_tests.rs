@@ -537,8 +537,10 @@ mod cell_request_observer_tests {
                 "compile_request", request_mode = "declaration_interface",
                 execution_layer = "physical");
             drop(outside);
-            let publication = tracing::info_span!("publication_declaration_certification",
-                reserved_generation = 7_u64);
+            let publication = tracing::info_span!(
+                "publication_declaration_certification",
+                reserved_generation = 7_u64
+            );
             let _entered = publication.enter();
             for mode in ["declaration_interface", "cell_program", "unknown"] {
                 let wrapper = tracing::info_span!(target: "tidepool_extract_cmd::endpoint",
