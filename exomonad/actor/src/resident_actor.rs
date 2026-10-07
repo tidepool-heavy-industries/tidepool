@@ -5314,7 +5314,6 @@ where
             .active_workbench()
             .unwrap_or_else(|| environment.runner.application_workbench());
         let control = effect_owner.control();
-        let invocation_work = effect_owner.invocation_work();
         let ephemeral_work = effect_owner.ephemeral_work();
         let operation: futures_util::future::BoxFuture<
             'static,

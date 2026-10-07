@@ -85,7 +85,7 @@ pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CurrentRequestWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    ReserveRequestWith(String, (i64, i64), bool),
+    ReserveRequestWith(Option<String>, (i64, i64), bool, crate::WorkerLifetime),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
     SubmitRequestWith(i64, HaskellValue, (i64, i64), Option<RequestDuration>),
@@ -100,7 +100,7 @@ pub(crate) enum RepliesReq {
     ObserveResponseWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CancelRequestWith(i64),
-    DetachRequestWith(i64),
+    RetainRequestWith(i64, crate::WorkerLifetime),
     AbandonResponseWith(i64),
     ForgetResponseWith(i64),
     ObserveReplyWith(i64),
