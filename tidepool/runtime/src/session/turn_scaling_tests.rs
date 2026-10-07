@@ -945,12 +945,13 @@ where
 }
 
 #[derive(Clone, Copy)]
-enum AuthorityChecks {
+enum AuthorityChecks<'a> {
     Configured,
     RefusalBranches,
     TypedEntryRefusalBranches,
     FreshTargetWork,
     SegmentWorkCounts(usize),
+    NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
 
 enum CellDeclarationExpectation {
@@ -1200,7 +1201,7 @@ fn execute_cell_with_authority_checks<H>(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
 ) -> Duration
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
@@ -1230,7 +1231,7 @@ fn try_execute_cell_with_authority_checks<H>(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
 ) -> Result<Duration, ResidentError>
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
@@ -1261,7 +1262,7 @@ fn try_execute_cell_with_template_imports<H>(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
     template_imports: &SourceImports,
 ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
 where
@@ -1293,7 +1294,7 @@ fn try_execute_cell_with_template_imports_expectation<H>(
     source: &str,
     declarations: CellDeclarationExpectation,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
     template_imports: &SourceImports,
     expected_observation: Option<i64>,
 ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
@@ -1327,7 +1328,7 @@ fn try_execute_cell_with_template_imports_expectation_observed<H>(
     source: &str,
     declarations: CellDeclarationExpectation,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
     template_imports: &SourceImports,
     expected_observation: Option<i64>,
     observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
@@ -1445,6 +1446,14 @@ where
             compile_view_evidence: "",
         };
         match authority_checks {
+            AuthorityChecks::NativeEmissionOwnersAbsent(old_owners) => {
+                compile_cell_program_admitted_native_emission_controls(
+                    request,
+                    admission.clone(),
+                    &templates,
+                    old_owners,
+                )
+            }
             AuthorityChecks::TypedEntryRefusalBranches => {
                 compile_cell_program_admitted_receipt_controls(
                     request,
@@ -2616,7 +2625,7 @@ fn simple_cell_vertical(
     label: &str,
     source: &str,
     declarations: usize,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
 ) -> Vec<String> {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();

@@ -1018,7 +1018,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         include_str!("fixtures/typed-segment-warm-duration.hs"),
         CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
-        AuthorityChecks::Configured,
+        AuthorityChecks::NativeEmissionOwnersAbsent(&old_owners),
         &SourceImports::from_specs(["qualified Tidepool.Duration as Duration"]),
         None,
         |program| {
@@ -1028,16 +1028,9 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                 };
                 observed += 1;
                 let products = item.native_products().unwrap();
-                assert!(products.recovery_products.iter().all(|product| {
-                    !old_owners.contains(&(
-                        product.owner().unit.clone(),
-                        product.owner().module.clone(),
-                    ))
-                }), "warm compilation must emit no native or retained-Core product for an old owner");
-                let (table, _) = tidepool_repr::serial::read_metadata(
-                    item.native_metadata_bytes().unwrap(),
-                )
-                .unwrap();
+                let (table, _) =
+                    tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
+                        .unwrap();
                 let turn: ciborium::value::Value =
                     ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
                 let fields = turn.as_array().unwrap()[1].as_array().unwrap();
@@ -1053,11 +1046,18 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                     .into_iter()
                     .filter(|descriptor| descriptor.kind == ArtifactKind::OriginalModule)
                     .map(|descriptor| {
-                        ((descriptor.owner.unit, descriptor.owner.module), descriptor.id)
+                        (
+                            (descriptor.owner.unit, descriptor.owner.module),
+                            descriptor.id,
+                        )
                     })
                     .collect::<BTreeMap<_, _>>();
                 let source_key = |import: &PendingImportOwner| match import {
-                    PendingImportOwner::Source { owner, original_ordinal, .. } => {
+                    PendingImportOwner::Source {
+                        owner,
+                        original_ordinal,
+                        ..
+                    } => {
                         if owner.unit == original.owner().unit
                             && owner.module == original.owner().module
                         {
@@ -1078,31 +1078,40 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                     .map(|group| {
                         (
                             NativeGroupKey {
-                                artifact: ids[&(
-                                    group.owner().unit.clone(),
-                                    group.owner().module.clone(),
-                                )],
+                                artifact: ids
+                                    [&(group.owner().unit.clone(), group.owner().module.clone())],
                                 original_ordinal: group.group().original_ordinal(),
                             },
-                            group.imports().iter().filter_map(source_key).collect::<Vec<_>>(),
+                            group
+                                .imports()
+                                .iter()
+                                .filter_map(source_key)
+                                .collect::<Vec<_>>(),
                         )
                     })
                     .collect::<BTreeMap<_, _>>();
                 assert_eq!(edges.len(), products.certified_groups.len());
-                let NativeRequirementRoot::Group { artifact, original_ordinal } = native
-                    .typed_entry()
-                    .unwrap()
-                    .native_requirement_root()
+                let NativeRequirementRoot::Group {
+                    artifact,
+                    original_ordinal,
+                } = native.typed_entry().unwrap().native_requirement_root()
                 else {
                     panic!("the authored entry must issue an exact native group root")
                 };
                 let mut pending = selected.iter().copied().collect::<Vec<_>>();
-                pending.push(NativeGroupKey { artifact, original_ordinal });
+                pending.push(NativeGroupKey {
+                    artifact,
+                    original_ordinal,
+                });
                 pending.extend(products.pending_imports.iter().filter_map(source_key));
                 let mut expected = BTreeSet::new();
                 while let Some(key) = pending.pop() {
                     if expected.insert(key) {
-                        pending.extend(edges.get(&key).expect("every demanded group must have its certified original row"));
+                        pending.extend(
+                            edges.get(&key).expect(
+                                "every demanded group must have its certified original row",
+                            ),
+                        );
                     }
                 }
                 assert_eq!(products.artifact_view.selected_native_groups(), expected);
