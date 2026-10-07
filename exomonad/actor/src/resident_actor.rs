@@ -12632,7 +12632,7 @@ where
                             )
                             .map_err(Self::failure)?;
                     } else {
-                        layers.bind_for(context.actor.into(), "", &self.launch_worktrees);
+                        layers.bind_for(context.actor.into(), "");
                     }
                 }
             }

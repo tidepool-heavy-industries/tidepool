@@ -327,6 +327,10 @@ pub(super) async fn attach_checkpoint_actor(
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
+    if let Some(authority) = &installation.spawn_admission {
+        authority.validate_child(actor)?;
+    }
+
     if installation.spawn_admission.is_none() {
         let gate = installation
             .fork_gate
@@ -404,6 +408,10 @@ pub(super) async fn attach_selected_actor(
             .map_err(|error| error.to_string())?;
     }
     let actor = installation.actor.identity();
+    if let Some(authority) = &installation.spawn_admission {
+        authority.validate_child(actor)?;
+    }
+
     let run = super::runtime_namespace(run_root);
     if parent.identity().run != run {
         return Err("selected provider ancestor belongs to another run".into());

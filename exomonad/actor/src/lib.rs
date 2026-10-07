@@ -84,15 +84,15 @@ pub use conversation::{ConversationFuture, ConversationReader, ConversationUnava
 pub use agent_spec::preparation::ToolsetAcquisition;
 pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
 pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
+pub use exomonad_worktree::WorkspaceAccess;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
-pub use exomonad_worktree::WorkspaceAccess;
 
 pub use fork_workspace::{
-    WorkspaceAdmission, WorkspaceAdmissionError, WorkspaceAdmissionFuture,
-    WorkspaceCustody, ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedWorkspaceAttachment,
-    SpawnWorkspaceWire, WorkspaceSelection,
+    ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedWorkspaceAttachment, SpawnWorkspaceWire,
+    WorkspaceAdmission, WorkspaceAdmissionError, WorkspaceAdmissionFuture, WorkspaceCustody,
+    WorkspaceSelection,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
@@ -108,7 +108,8 @@ pub use kernel::{
 pub use lineage::{
     ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
     ForkGroupCleanupOutcome, ForkGroupError, ForkGroupGate, ForkGroupId, ForkGroupPhase,
-    ForkGroupPublication, ForkGroupRegistry, SpawnAdmission, SpawnAdmissionOutcome, SpawnCleanupOutcome,
+    ForkGroupPublication, ForkGroupRegistry, SpawnAdmission, SpawnAdmissionOutcome,
+    SpawnCleanupOutcome,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,
@@ -176,8 +177,9 @@ pub use runtime_observation::{
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
-    ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart,
-    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime, SpawnContextWire, SpawnError, SpawnRetainedResources,
+    ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart, SpawnContextWire,
+    SpawnError, SpawnRetainedResources, WorkerLaunchPreview, WorkerLaunchRequest,
+    WorkerLaunchResolver, WorkerLifetime,
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,

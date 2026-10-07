@@ -189,11 +189,8 @@ where
             let source_layers = environment.source_layers.clone();
             let helper_branch = if let Some(layers) = &source_layers {
                 Some(
-                    if checkpoint_lease.is_some() || inherited_source.is_some() {
-                        layers.retain_helpers(context.actor.into())
-                    } else {
-                        layers.prepare_helpers(context.actor.into(), &launch_worktrees, prepared_workspace.is_some())
-                    }.map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                    layers.retain_helpers(context.actor.into())
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                 )
             } else {
                 None
@@ -205,13 +202,12 @@ where
                             &lease.issuer_source_layer,
                             context.actor.into(),
                             helper_branch.as_deref().unwrap_or_default(),
-                            &launch_worktrees,
                         )
                         .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                     None => match &inherited_source {
                         Some(source) => layers.admit_retained_layer(source),
                         None => layers.layer_include_for(
-                            helper_branch.as_deref().unwrap_or_default(), &launch_worktrees,
+                            helper_branch.as_deref().unwrap_or_default(),
                         ),
                     }.map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                 };
@@ -503,7 +499,6 @@ where
                 layers.bind_for(
                     child.identity().into(),
                     helper_branch.as_deref().unwrap_or_default(),
-                    &bound_worktrees,
                 );
             }
         }

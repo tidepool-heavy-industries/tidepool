@@ -215,6 +215,22 @@ impl SpawnAdmission {
         crate::start::SpawnError::SpawnPartialFailure(resources, record.cleanup.clone(), detail)
     }
 
+    pub fn validate_child(&self, child: ActorRef) -> Result<(), String> {
+        let state = self.registry.state.lock();
+        let record = state
+            .spawns
+            .get(&self.id)
+            .ok_or("spawn admission unavailable")?;
+        if record.child != Some(child) {
+            return Err("spawn attachment names another incarnation".into());
+        }
+        let outcome = record.outcome.borrow().clone();
+        match outcome {
+            SpawnAdmissionOutcome::Pending | SpawnAdmissionOutcome::Ready(_) => Ok(()),
+            SpawnAdmissionOutcome::Failed { detail, .. } => Err(detail),
+        }
+    }
+
     /// Called after the provider attachment owner acknowledged the exact
     /// installed actor. Startup, workspace, context and tools are ready first.
     pub fn acknowledge(&self, child: ActorRef) -> Result<(), String> {
