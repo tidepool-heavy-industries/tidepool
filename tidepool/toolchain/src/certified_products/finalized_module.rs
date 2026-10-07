@@ -1951,6 +1951,7 @@ mod tests {
             &[nominal.clone(), consumer],
             &values,
             None,
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();

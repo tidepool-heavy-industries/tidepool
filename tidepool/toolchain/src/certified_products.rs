@@ -6496,6 +6496,7 @@ pub(crate) mod tests {
             &[],
             &[],
             None,
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
             &mut admission,
         )
         .unwrap();
@@ -6536,6 +6537,7 @@ pub(crate) mod tests {
                 &[],
                 &[],
                 None,
+                crate::artifact_inventory::NativeArtifactDemand::AllGroups,
                 &mut admission,
             )
             .is_err(),
@@ -6564,6 +6566,7 @@ pub(crate) mod tests {
             &[],
             &[],
             None,
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
             &mut next,
         )
         .unwrap();
@@ -6584,6 +6587,7 @@ pub(crate) mod tests {
                 &[],
                 &[],
                 None,
+                crate::artifact_inventory::NativeArtifactDemand::AllGroups,
                 &mut changed,
             )
             .is_err()
@@ -6602,6 +6606,7 @@ pub(crate) mod tests {
                 &[],
                 &[],
                 None,
+                crate::artifact_inventory::NativeArtifactDemand::AllGroups,
                 &mut admission,
             )
             .is_err(),
