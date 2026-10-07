@@ -931,16 +931,64 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     };
     use tidepool_toolchain::certified_products::PendingImportOwner;
 
+    fn execution_context(
+        item: &tidepool_toolchain::checked_cell::CellProgramItem,
+    ) -> Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext> {
+        let native = item.native().unwrap();
+        let (table, _) =
+            tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+        let turn: ciborium::value::Value =
+            ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+        let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+        let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+        native
+            .original_execution_context(&native.target_owned(), &table, &sites)
+            .unwrap()
+    }
+
     let mut session = SemanticSession::new();
-    session
-        .execute(
-            "warm_native_cold_baseline",
-            "baselinePlannedValue <- pure (2 :: Int)",
-            0,
-        )
+    let mut cold = None;
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "warm_native_cold_baseline",
+        "baselinePlannedValue <- pure (2 :: Int)",
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::default(),
+        None,
+        |program| {
+            let [item] = program.items() else {
+                panic!("the cold baseline must admit exactly one native binding");
+            };
+            cold = Some((
+                execution_context(item),
+                item.native()
+                    .unwrap()
+                    .value_interface_certificate()
+                    .unwrap(),
+            ));
+        },
+    )
+    .unwrap();
+    let (before, baseline_proof) = cold.unwrap();
+    let baseline_binding = session
+        .resident
+        .current_binding_in(session.public, "baselinePlannedValue")
         .unwrap();
-    let before = session.resident.compile_view_in(session.public).unwrap();
-    let before = before.exact_declaration_context().unwrap();
+    assert_eq!(baseline_binding.1, baseline_proof.owner());
+    assert!(Arc::ptr_eq(
+        session
+            .resident
+            .state
+            .retained_checked_value_artifact(baseline_binding.1)
+            .unwrap(),
+        &baseline_proof,
+    ));
     let originals = before.recovery_products();
     let original = originals
         .iter()
@@ -1008,6 +1056,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
             assert!(context.artifact_view().descriptors().contains(&descriptor));
         };
     let mut observed = 0;
+    let mut warm = None;
     try_execute_cell_with_template_imports_expectation_observed(
         &mut session.resident,
         session.public,
@@ -1028,18 +1077,15 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                 };
                 observed += 1;
                 let products = item.native_products().unwrap();
-                let (table, _) =
-                    tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
-                        .unwrap();
-                let turn: ciborium::value::Value =
-                    ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
-                let fields = turn.as_array().unwrap()[1].as_array().unwrap();
-                let sites =
-                    tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
-                let context = native
-                    .original_execution_context(&native.target_owned(), &table, &sites)
-                    .unwrap();
+                let context = execution_context(item);
                 assert_retained(&context);
+                if native.item().binders() == ["warmDurationResult"] {
+                    assert!(warm.is_none());
+                    warm = Some((
+                        context.clone(),
+                        native.value_interface_certificate().unwrap(),
+                    ));
+                }
                 let ids = products
                     .artifact_view
                     .descriptors()
@@ -1130,9 +1176,28 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
             .count()
             < full.groups.len()
     );
-    let after = session.resident.compile_view_in(session.public).unwrap();
-    let after = after.exact_declaration_context().unwrap();
-    assert_retained(after);
+    let (after, result_proof) = warm.unwrap();
+    let result_binding = session
+        .resident
+        .current_binding_in(session.public, "warmDurationResult")
+        .unwrap();
+    assert_eq!(result_binding.1, result_proof.owner());
+    assert!(Arc::ptr_eq(
+        session
+            .resident
+            .state
+            .retained_checked_value_artifact(result_binding.1)
+            .unwrap(),
+        &result_proof,
+    ));
+    assert_eq!(
+        session
+            .resident
+            .current_binding_in(session.public, "baselinePlannedValue")
+            .unwrap(),
+        baseline_binding,
+    );
+    assert_retained(&after);
     assert_eq!(
         after
             .artifact_view()
