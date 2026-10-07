@@ -5675,7 +5675,8 @@ mod checkpoint_scope_tests {
 mod maintained_binding_lifetime_properties {
     use super::*;
     use proptest::prelude::*;
-    use proptest::test_runner::{Config, FileFailurePersistence};
+    use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+    use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     const SOURCE_GENERATION: u64 = 12_100;
@@ -5687,7 +5688,7 @@ mod maintained_binding_lifetime_properties {
     #[derive(Clone, Debug)]
     struct Plan {
         chain_capture: bool,
-        capture_first: bool,
+        guided_capture_first: Option<bool>,
         release_ranks: Vec<u8>,
         reads: Vec<(u8, u8)>,
     }
@@ -5695,18 +5696,15 @@ mod maintained_binding_lifetime_properties {
     fn plan() -> impl Strategy<Value = Plan> {
         (
             any::<bool>(),
-            any::<bool>(),
-            proptest::collection::vec(any::<u8>(), 5),
+            proptest::collection::vec(any::<u8>(), 6),
             proptest::collection::vec((0_u8..4, 0_u8..4), 1..20),
         )
-            .prop_map(
-                |(chain_capture, capture_first, release_ranks, reads)| Plan {
-                    chain_capture,
-                    capture_first,
-                    release_ranks,
-                    reads,
-                },
-            )
+            .prop_map(|(chain_capture, release_ranks, reads)| Plan {
+                chain_capture,
+                guided_capture_first: None,
+                release_ranks,
+                reads,
+            })
     }
 
     #[derive(Clone, Debug)]
@@ -5734,7 +5732,7 @@ mod maintained_binding_lifetime_properties {
         owner_retired: bool,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, serde::Serialize)]
     struct Support {
         same_generation_originals: usize,
         same_generation_identity_pair: usize,
@@ -5752,10 +5750,14 @@ mod maintained_binding_lifetime_properties {
         alias_hidden_from_capture: usize,
         held_root_receipts: usize,
         owner_retired_with_holders: usize,
+        owner_retired_without_holders: usize,
         shared_pair_survived_member_eviction: usize,
         interface_survived_single_member: usize,
         capture_before_explicit_release: usize,
         explicit_before_capture_release: usize,
+        chained_capture_outlived_issuer: usize,
+        reads: usize,
+        dead_scope_reads: usize,
     }
 
     fn model_live_ids(model: &Model) -> HashSet<SessionVarId> {
@@ -5996,6 +5998,7 @@ mod maintained_binding_lifetime_properties {
         let source_identity = source_identity.value.identity.clone();
         source_identity_entry(&mut state, owner, source_identity.clone(), source_handle);
         support.same_generation_originals += 1;
+        support.same_generation_identity_pair += 1;
         support.shared_handle_bindings += 1;
 
         let source_id = SessionVarId::from_extract(ROOTED_IDS[0]);
@@ -6208,12 +6211,20 @@ mod maintained_binding_lifetime_properties {
         let captures = [Some(before), Some(after), chained];
         let mut explicit_sets = vec![Some(first_lease), Some(second_lease)];
         let mut actions = (0_u8..6).collect::<Vec<_>>();
+        // Every generated action executes. An absent optional capture has no
+        // retirement action, and broad histories allow the owner to go last.
+        if chained.is_none() {
+            actions.retain(|action| *action != 3);
+        }
         actions.sort_by_key(|action| {
+            let Some(capture_first) = plan.guided_capture_first else {
+                return (0, 0, 0, plan.release_ranks[usize::from(*action)], *action);
+            };
             if *action == 0 {
                 (0_u8, 0_u8, 0_u8, 0_u8, *action)
             } else {
                 let capture = (1..=3).contains(action);
-                let partition = if plan.capture_first {
+                let partition = if capture_first {
                     if capture {
                         1
                     } else {
@@ -6229,7 +6240,7 @@ mod maintained_binding_lifetime_properties {
                     1,
                     partition,
                     capture_tier,
-                    plan.release_ranks[usize::from(*action - 1)],
+                    plan.release_ranks[usize::from(*action)],
                     *action,
                 )
             }
@@ -6256,6 +6267,7 @@ mod maintained_binding_lifetime_properties {
                     let retained = model_live_ids(&model);
                     support.pending_owner_bindings += retained.len();
                     support.owner_retired_with_holders += usize::from(!retained.is_empty());
+                    support.owner_retired_without_holders += usize::from(retained.is_empty());
                     receipt.roots_released
                 }
                 1..=3 => {
@@ -6272,11 +6284,16 @@ mod maintained_binding_lifetime_properties {
                 4..=5 => {
                     let index = usize::from(action - 4);
                     if let Some(lease) = explicit_sets[index].take() {
-                        let prior_counts: BTreeMap<_, _> = lease
+                        let prior_counts: HashMap<_, _> = lease
                             .iter()
                             .map(|id| (*id, state.bindings().lease_count(*id)))
                             .collect();
-                        let released = state.release_binding_leases(lease.iter().copied());
+                        let mut ids = lease.iter().copied().collect::<Vec<_>>();
+                        ids.sort_by_key(|id| id.raw());
+                        if plan.release_ranks[usize::from(action)] % 2 != 0 {
+                            ids.reverse();
+                        }
+                        let released = state.release_binding_leases(ids);
                         let released_roots = state.release_binding_roots(released);
                         model.explicit[index] = None;
                         for id in lease {
@@ -6307,6 +6324,10 @@ mod maintained_binding_lifetime_properties {
                 usize::from(expected_released == 0 && !before_handles.is_empty());
             support.released_handles += expected_released;
             check_state(&state, &model, &handles, &interfaces);
+            if let Some(scope) = chained {
+                support.chained_capture_outlived_issuer +=
+                    usize::from(model.scopes[&scope].live && !model.scopes[&before].live);
+            }
             let after_source = after_live.contains(&source_id);
             let after_pair = after_live.contains(&SessionVarId::from_extract(ROOTED_IDS[1]));
             if after_source && !after_pair {
@@ -6332,6 +6353,8 @@ mod maintained_binding_lifetime_properties {
                     expected,
                     "generated read {scope:?}/{name} after action {action}"
                 );
+                support.reads += 1;
+                support.dead_scope_reads += usize::from(!scope_model.live);
             }
         }
 
@@ -6347,18 +6370,6 @@ mod maintained_binding_lifetime_properties {
         assert_eq!(support.explicit_releases, 2);
         assert_eq!(support.released_handles, 2);
         assert_eq!(support.alias_hidden_from_capture, 1);
-        assert!(
-            support.owner_retired_with_holders > 0,
-            "support: {support:?}"
-        );
-        assert!(
-            support.shared_pair_survived_member_eviction > 0,
-            "support: {support:?}"
-        );
-        assert!(
-            support.interface_survived_single_member > 0,
-            "support: {support:?}"
-        );
         assert_eq!(
             model_live_ids(&model),
             HashSet::new(),
@@ -6421,28 +6432,58 @@ mod maintained_binding_lifetime_properties {
         config
     }
 
-    proptest! {
-        #![proptest_config(config())]
+    #[derive(Default, serde::Serialize)]
+    struct Observed {
+        callbacks: usize,
+        completed_histories: usize,
+        chained_histories: usize,
+        owner_with_holders: usize,
+        owner_without_holders: usize,
+        partial_generation_survival: usize,
+        chained_capture_outlived_issuer: usize,
+        reads: usize,
+        dead_scope_reads: usize,
+    }
 
-        #[test]
-        fn actual_binding_lifetime_histories_match_rooted_model(history in plan()) {
+    #[test]
+    fn actual_binding_lifetime_histories_match_rooted_model() {
+        // Apply contextual campaign controls after selecting native persistence.
+        let mut config = proptest::test_runner::contextualize_config(config());
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::actual_binding_lifetime_histories_match_rooted_model"
+        ));
+        let configuration = format!("{config:?}");
+        let cases = config.cases;
+        let observed = RefCell::new(Observed::default());
+        let result = TestRunner::new(config).run(&plan(), |history| {
+            observed.borrow_mut().callbacks += 1;
             let support = run_history(history);
-            prop_assert_eq!(support.same_generation_originals, 3, "{support:?}");
-            prop_assert_eq!(support.same_generation_identity_pair, 2, "{support:?}");
-            prop_assert_eq!(support.shared_handle_bindings, 4, "{support:?}");
-            prop_assert_eq!(support.aliases, 1, "{support:?}");
-            prop_assert_eq!(support.shadows, 1, "{support:?}");
-            prop_assert_eq!(support.captures_before_shadow, 1, "{support:?}");
-            prop_assert_eq!(support.captures_after_shadow, 1, "{support:?}");
-            prop_assert!(support.chained_captures <= 1, "{support:?}");
-            prop_assert_eq!(support.explicit_alias_leases, 2, "{support:?}");
-            prop_assert_eq!(support.capture_releases, 2 + support.chained_captures, "{support:?}");
-            prop_assert_eq!(support.explicit_releases, 2, "{support:?}");
-            prop_assert_eq!(support.released_handles, 2, "{support:?}");
-            prop_assert_eq!(support.alias_hidden_from_capture, 1, "{support:?}");
-            prop_assert!(support.owner_retired_with_holders > 0, "{support:?}");
-            prop_assert!(support.shared_pair_survived_member_eviction > 0, "{support:?}");
-            prop_assert!(support.interface_survived_single_member > 0, "{support:?}");
+            let mut observed = observed.borrow_mut();
+            observed.completed_histories += 1;
+            observed.chained_histories += usize::from(support.chained_captures != 0);
+            observed.owner_with_holders += support.owner_retired_with_holders;
+            observed.owner_without_holders += support.owner_retired_without_holders;
+            observed.partial_generation_survival += support.interface_survived_single_member;
+            observed.chained_capture_outlived_issuer += support.chained_capture_outlived_issuer;
+            observed.reads += support.reads;
+            observed.dead_scope_reads += support.dead_scope_reads;
+            Ok(())
+        });
+        // Callback counts include persisted replay and shrinking. Explicit
+        // cases=0 remains a valid replay setting; qualification checks counts.
+        eprintln!(
+            "binding_lifetime_campaign={}",
+            serde_json::json!({
+                "configured_cases": cases,
+                "configuration": configuration,
+                "observation_scope": "runner callbacks in this process, including replay and shrinking",
+                "observed": &*observed.borrow(),
+            })
+        );
+        if let Err(error) = result {
+            panic!("actual binding lifetime property failed: {error}");
         }
     }
 
@@ -6452,11 +6493,11 @@ mod maintained_binding_lifetime_properties {
             for capture_first in [true, false] {
                 let support = run_history(Plan {
                     chain_capture,
-                    capture_first,
+                    guided_capture_first: Some(capture_first),
                     release_ranks: if capture_first {
-                        vec![4, 0, 2, 3, 4]
+                        vec![0, 4, 0, 2, 3, 4]
                     } else {
-                        vec![3, 2, 4, 0, 1]
+                        vec![0, 3, 2, 4, 0, 1]
                     },
                     reads: vec![(0, 0), (1, 3), (2, 1), (3, 2)],
                 });
@@ -6478,6 +6519,20 @@ mod maintained_binding_lifetime_properties {
                     "actual binding lifetime partition chain={chain_capture} capture_first={capture_first}: {support:?}"
                 );
             }
+        }
+        for release_ranks in [vec![0, 1, 4, 5, 2, 3], vec![5, 0, 1, 2, 3, 4]] {
+            let support = run_history(Plan {
+                chain_capture: true,
+                guided_capture_first: None,
+                release_ranks,
+                reads: vec![(0, 3), (1, 0), (3, 0)],
+            });
+            assert!(support.chained_capture_outlived_issuer > 0, "{support:?}");
+            assert!(
+                support.owner_retired_with_holders > 0 || support.owner_retired_without_holders > 0,
+                "{support:?}"
+            );
+            eprintln!("actual binding lifetime broad release partition: {support:?}");
         }
     }
 }
