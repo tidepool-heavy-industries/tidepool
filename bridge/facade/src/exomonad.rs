@@ -3013,8 +3013,9 @@ mod tests {
         let installed_revision = git
             .try_run(&installed_workspace, &["rev-parse", "HEAD"])
             .unwrap();
-        let source_revision = git.try_run(&source, &["rev-parse", "HEAD"]).unwrap();
-        assert_eq!(installed_revision.trimmed(), source_revision.trimmed());
+        // The declared source projection contains skill bytes, not Git metadata.
+        // The scaffold checks out the pin verified against the declared bundle.
+        assert_eq!(installed_revision.trimmed(), scaffold::DEFAULT_WORKSPACE_REV);
         let mut checked = 0;
         for skill in std::fs::read_dir(&source).unwrap() {
             let skill = skill.unwrap().path();
@@ -3038,13 +3039,11 @@ mod tests {
             );
             for file in walk_files(&skill) {
                 let relative = file.strip_prefix(&source).unwrap();
-                assert!(
-                    workspace
-                        .path()
-                        .join(".exomonad/workspace/skills")
-                        .join(relative)
-                        .is_file(),
-                    "missing pinned skill file {}",
+                let installed = installed_workspace.join("skills").join(relative);
+                assert_eq!(
+                    std::fs::read(&installed).unwrap(),
+                    std::fs::read(&file).unwrap(),
+                    "pinned skill bytes differ for {}",
                     relative.display()
                 );
                 checked += 1;
