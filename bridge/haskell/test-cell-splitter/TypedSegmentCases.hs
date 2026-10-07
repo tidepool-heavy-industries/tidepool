@@ -4,11 +4,16 @@ import Control.Exception (SomeException, bracket, evaluate, fromException, try)
 import Control.Monad (forM, forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (isPrefixOf)
+import Data.Maybe (isJust)
+import qualified Data.Set as Set
 import GHC
+import GHC.Core (bindersOfBinds)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
 import GHC.Builtin.Types (intTy)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Types.Name (getOccString)
+import GHC.Types.Name (getOccString, nameModule_maybe)
+import GHC.Types.Var (varName)
+import qualified GHC.Stg.Syntax as Stg
 import GHC.Types.SourceError (SourceError)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -20,7 +25,7 @@ import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.DiagJson (diagsFromSourceError)
 import Tidepool.GhcPipeline
-import Tidepool.PreparedStg (pmBindings)
+import Tidepool.PreparedStg (pmModule, pmBindings, pmOriginalTopNames)
 import Tidepool.SessionArtifacts
 import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TurnSource (preambleDefaultDeclaration)
@@ -60,12 +65,28 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
       writeFile path (preparedTypedSegmentSource source)
       result <- try (runRequest (pure ()) $ \compiler -> compiler
         (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))
-        mempty (TypedSegmentCompile plan GeneralCompile) Nothing path includes Nothing)
+        mempty (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile) Nothing path includes Nothing)
           :: IO (Either SomeException PreparedSegmentProductsResult)
       case (expected, result) of
         (PrepareAccepted, Right products) -> do
-          unless (not (null (concatMap pmBindings (pprModules (preparedSegmentProducts products)))))
-            (fail (name ++ ": actual prepared STG is empty"))
+          let segment = preparedSegmentCaptures products
+              issued = bindersOfBinds (TypedSegment.typedSegmentRoots segment)
+          owner <- case Set.toList (Set.fromList [owner
+              | identifier <- issued, Just owner <- [nameModule_maybe (varName identifier)]]) of
+            [owner] -> pure owner
+            _ -> fail (name ++ ": issued item/ABI roots do not have one actual module owner")
+          target <- case [modul | modul <- pprModules (preparedSegmentProducts products), pmModule modul == owner] of
+            [modul] -> pure modul
+            _ -> fail (name ++ ": actual prepared target module is absent or ambiguous")
+          let emitted = Set.fromList [varName identifier
+                | (Stg.StgTopLifted binding, _) <- pmBindings target
+                , identifier <- case binding of
+                    Stg.StgNonRec identifier _ -> [identifier]
+                    Stg.StgRec bindings -> map fst bindings]
+          forM_ issued $ \identifier -> unless
+              (varName identifier `Set.member` pmOriginalTopNames target
+                && varName identifier `Set.member` emitted)
+            (fail (name ++ ": an actual issued item/ABI entry was lost during prepared lowering"))
           -- Generalization/defaulting controls look at the GHC-issued value
           -- type, never a type moved from the enclosing action's quantifiers.
           let captures = concatMap TypedSegment.typedItemCaptures
@@ -112,7 +133,8 @@ preparationCases =
     , "scoped-equality", "nested-existential", "patterns", "strict-patterns"
     , "lazy-nested-bottom", "applied-original", "substitution-shadow", "bare-bottom"
     , "constrained-open-let", "zero-let-lazy", "zero-let-bang", "zero-let-strict"
-    , "strict-closure-let", "wildcard-action", "bang-wildcard-action" ]]
+    , "strict-closure-let", "wildcard-action", "bang-wildcard-action"
+    , "refutable-failure", "authored-helper-alias" ]]
   ++ [(name, PrepareTypedRefusal) | name <-
     [ "unresolved-action", "unresolved-dependent"
     , "unresolved-phantom-action", "open-let", "cross-item-existential" ]]
@@ -186,7 +208,8 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
     rewrittenPaths <- forM sources $ \(_, ordinary, rewritten, _, prepared) -> do
       summary <- getModSummary (mkModuleName ordinary)
       parsed <- parseModule summary
-      transformed <- liftIO (rewriteParsedSegmentRoot (preparedTypedSegmentPlan prepared) parsed)
+      transformed <- liftIO (rewriteParsedSegmentRoot (preparedTypedSegmentOperations prepared)
+        (preparedTypedSegmentPlan prepared) parsed)
       -- Preserve the actual source pragmas: ParsedModule's printed AST does
       -- not include the header's LANGUAGE directives. Only the module owner
       -- changes so both programs can be loaded in the same interpreter.
@@ -207,17 +230,20 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
       transformed <- execute rewritten
       liftIO $ do
         let expected = (differentialTrace control, differentialFailure control)
-        unless (original == expected)
+            outcome (values, exception) = (values, isJust exception)
+        unless (outcome original == expected)
           (fail (differentialFixture control ++ ": ordinary GHC result " ++ show original ++ " /= " ++ show expected))
-        unless (transformed == expected)
+        unless (outcome transformed == expected)
           (fail (differentialFixture control ++ ": production rewrite result " ++ show transformed ++ " /= " ++ show expected))
+        unless (original == transformed)
+          (fail (differentialFixture control ++ ": production rewrite changed the complete language exception message/category"))
     liftIO (putStrLn ("production rewrite differential: " ++ show (length sources)
       ++ " histories, " ++ show (2 * length sources) ++ " executed programs"))
   where
     execute owner = do
       setContext [IIDecl (simpleImportDecl (mkModuleName owner))]
-      value <- compileExpr "(oracleRun :: IO ([Int], Bool))"
-      result <- liftIO (unsafeCoerce value :: IO ([Int], Bool))
+      value <- compileExpr "(oracleRun :: IO ([Int], Maybe (Either String String)))"
+      result <- liftIO (unsafeCoerce value :: IO ([Int], Maybe (Either String String)))
       -- Finish the shared base-type result before changing interpreter scope.
       void (liftIO (evaluate (length (show result))))
       pure result
@@ -252,7 +278,9 @@ differentialCases =
   , failure "strict-closure-let"
   , success "wildcard-action" "_ <- record 2\n" [1, 2]
   , failure "bang-wildcard-action"
+  , failure "refutable-failure"
   , DifferentialCase "applied-original" "_ <- record 1\n" "_ <- record answer\n" [1] True
+  , success "authored-helper-alias" "_ <- record answer\n" [9]
   ]
   where
     success name after values = DifferentialCase name (before name) after values False
@@ -284,7 +312,7 @@ oracleTemplate owner = unlines
   ]
 
 oracleEntry :: TypedSegment.TypedSegmentPlan -> String
-oracleEntry plan = "\noracleRun :: IO ([Int], Bool)\noracleRun = check "
+oracleEntry plan = "\noracleRun :: IO ([Int], Maybe (Either String String))\noracleRun = check "
   ++ TypedSegment.typedSegmentPlanRoot plan ++ "\n"
 
 temporary :: IO FilePath
