@@ -4138,17 +4138,18 @@ fn certify_inherited_inventory_with_validation(
 
 /// Bounded decoded products tied to the exact immutable bytes that issued them.
 /// Keeping construction private prevents pairing a different inventory with a
-/// valid sidecar and makes a second decode/equality check unnecessary.
-pub(crate) struct ParsedModuleProducts<'a> {
+/// valid sidecar. Shared consumers compare their observed bytes before reuse.
+pub(crate) struct ParsedModuleProducts {
     operation: Arc<InventoryOperation>,
-    bytes: &'a [u8],
+    bytes: Arc<[u8]>,
+    package_bundle: Arc<[u8]>,
     products: Vec<RawModuleProduct>,
     sidecars: Vec<Vec<u8>>,
     package_imports: Option<BTreeMap<(String, String), Vec<u8>>>,
 }
 
-impl<'a> ParsedModuleProducts<'a> {
-    pub(crate) fn decode(bytes: &'a [u8], package_bundle: &[u8]) -> CertResult<Self> {
+impl ParsedModuleProducts {
+    pub(crate) fn decode(bytes: &[u8], package_bundle: &[u8]) -> CertResult<Self> {
         Self::decode_with_operation(
             bytes,
             package_bundle,
@@ -4159,7 +4160,7 @@ impl<'a> ParsedModuleProducts<'a> {
         &self.operation
     }
     pub(crate) fn decode_with_operation(
-        bytes: &'a [u8],
+        bytes: &[u8],
         package_bundle: &[u8],
         operation: Arc<InventoryOperation>,
     ) -> CertResult<Self> {
@@ -4172,12 +4173,73 @@ impl<'a> ParsedModuleProducts<'a> {
             &products,
             &operation,
         )?;
+        operation.charge(bytes.len())?;
+        operation.charge(package_bundle.len())?;
         Ok(Self {
             operation,
-            bytes,
+            bytes: Arc::from(bytes),
+            package_bundle: Arc::from(package_bundle),
             products,
             sidecars,
             package_imports,
+        })
+    }
+
+    /// Reuse is representation-only: every consumer still supplies and checks
+    /// its physical bytes under the same admission's accounting owner.
+    pub(crate) fn validate_observation(
+        &self,
+        bytes: &[u8],
+        package_bundle: &[u8],
+        operation: &Arc<InventoryOperation>,
+    ) -> CertResult<()> {
+        if !Arc::ptr_eq(&self.operation, operation) {
+            return Err(CertificationError::Mismatch(
+                "shared inventory accounting owner",
+            ));
+        }
+        operation.charge(bytes.len())?;
+        operation.charge(package_bundle.len())?;
+        if self.bytes.as_ref() != bytes || self.package_bundle.as_ref() != package_bundle {
+            return Err(CertificationError::Mismatch(
+                "physical segment original inventory changed",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Candidate publication needs independent mutable container ownership;
+    /// recursive-group definitions remain their existing immutable shared data.
+    pub(crate) fn copy_for_publication(&self) -> CertResult<Self> {
+        self.operation
+            .reserve::<RawModuleProduct>(self.products.len())?;
+        for product in &self.products {
+            self.operation.charge(product.unit.len())?;
+            self.operation.charge(product.module.len())?;
+            self.operation.charge(product.interface.len())?;
+            self.operation
+                .reserve::<tidepool_repr::execution_schema::ProjectedGroup>(product.groups.len())?;
+        }
+        self.operation.reserve::<Vec<u8>>(self.sidecars.len())?;
+        for bytes in &self.sidecars {
+            self.operation.charge(bytes.len())?;
+        }
+        if let Some(packages) = &self.package_imports {
+            self.operation
+                .reserve::<((String, String), Vec<u8>, [usize; 4])>(packages.len())?;
+            for ((unit, module), bytes) in packages {
+                self.operation.charge(unit.len())?;
+                self.operation.charge(module.len())?;
+                self.operation.charge(bytes.len())?;
+            }
+        }
+        Ok(Self {
+            operation: self.operation.clone(),
+            bytes: self.bytes.clone(),
+            package_bundle: self.package_bundle.clone(),
+            products: self.products.clone(),
+            sidecars: self.sidecars.clone(),
+            package_imports: self.package_imports.clone(),
         })
     }
 
@@ -4541,7 +4603,7 @@ fn validate_exact_cached_closure_with_validation(
 pub(crate) fn certify_products(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
-    fresh_products: &ParsedModuleProducts<'_>,
+    fresh_products: &ParsedModuleProducts,
     fresh_evidence_bytes: &[u8],
     fresh_input_path: &Path,
     captured_payload_root: &Path,
@@ -4574,7 +4636,7 @@ pub(crate) fn certify_products(
 pub(crate) fn certify_products_with_validation(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
-    fresh_products: &ParsedModuleProducts<'_>,
+    fresh_products: &ParsedModuleProducts,
     fresh_evidence_bytes: &[u8],
     fresh_input_path: &Path,
     captured_payload_root: &Path,
@@ -4710,7 +4772,7 @@ pub(crate) fn certify_products_with_validation(
         ));
     }
     let parsed_fresh = fresh_products.products();
-    let fresh_product_bytes = fresh_products.bytes;
+    let fresh_product_bytes = fresh_products.bytes.as_ref();
     if let Some(admission) = exact {
         validate_exact_cached_closure_with_validation(
             candidates,
@@ -9324,6 +9386,32 @@ pub(crate) mod tests {
                 && required_module == "Types" && expected_sha256 == hex(&sha(&[0x42]))
                 && selected == hex(&[9; 32])
         ));
+    }
+
+    #[test]
+    fn shared_product_publication_copies_are_charged_to_the_same_operation() {
+        let body = sidecar();
+        let packages = empty_package_bundle();
+        let parsed = ParsedModuleProducts::decode(&body, &packages).unwrap();
+        let spent = parsed.operation.work_usage().unwrap().0;
+        let copy = parsed.copy_for_publication().unwrap();
+        assert!(Arc::ptr_eq(&parsed.bytes, &copy.bytes));
+        assert!(Arc::ptr_eq(&parsed.package_bundle, &copy.package_bundle));
+        assert!(Arc::ptr_eq(&parsed.operation, &copy.operation));
+        assert_eq!(parsed.products, copy.products);
+        assert_eq!(parsed.sidecars, copy.sidecars);
+        assert_eq!(parsed.package_imports, copy.package_imports);
+        assert_ne!(parsed.sidecars[0].as_ptr(), copy.sidecars[0].as_ptr());
+        assert!(parsed.operation.work_usage().unwrap().0 > spent);
+        let remaining = parsed.operation.work_usage().unwrap().1;
+        parsed.operation.charge(remaining).unwrap();
+        assert!(matches!(
+            parsed.copy_for_publication(),
+            Err(CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+            ))
+        ));
+        assert_eq!(parsed.operation.work_usage().unwrap().1, 0);
     }
 
     #[test]

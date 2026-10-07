@@ -1453,6 +1453,7 @@ pub(crate) struct ExactSourceAdmission {
 pub(crate) struct ExactProgramSegmentAdmission {
     request: ExactCompilationRequest,
     admissions: Vec<ExactSourceAdmission>,
+    original_products: std::sync::OnceLock<crate::certified_products::ParsedModuleProducts>,
 }
 impl ExactProgramSegmentAdmission {
     fn validate_request(&self, request: &ExactCompilationRequest) -> Result<(), CompileError> {
@@ -1510,6 +1511,35 @@ impl ExactProgramSegmentAdmission {
             source: first,
         })
     }
+    pub(crate) fn original_products(
+        &self,
+        request: &ExactCompilationRequest,
+        bytes: &[u8],
+        package_bundle: &[u8],
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<&crate::certified_products::ParsedModuleProducts, CompileError> {
+        self.validate_request(request)?;
+        if self.original_products.get().is_none() {
+            let parsed = crate::certified_products::ParsedModuleProducts::decode_with_operation(
+                bytes,
+                package_bundle,
+                operation.clone(),
+            )
+            .map_err(compiler_evidence_failure)?;
+            self.original_products
+                .set(parsed)
+                .map_err(|_| failure("segment inventory concurrently initialized"))?;
+        }
+        let parsed = self
+            .original_products
+            .get()
+            .ok_or_else(|| failure("segment inventory absent"))?;
+        parsed
+            .validate_observation(bytes, package_bundle, operation)
+            .map_err(compiler_evidence_failure)?;
+        Ok(parsed)
+    }
+
     pub(crate) fn admissions(&self) -> &[ExactSourceAdmission] {
         &self.admissions
     }
@@ -2188,6 +2218,7 @@ impl ExactCompilationRequest {
         Ok(ExactProgramSegmentAdmission {
             request: self.clone(),
             admissions: self.validate_outputs(root)?,
+            original_products: std::sync::OnceLock::new(),
         })
     }
     pub(crate) fn admit_program_segment_support(
@@ -8892,6 +8923,72 @@ mod tests {
         }
         let segment = request.admit_program_segment(&output).unwrap();
         assert_eq!(segment.admissions().len(), 2);
+        // These are neutral current-wire definitions, not native/source authority.
+        let original = crate::certified_products::tests::original_groups_fixture(
+            "Observed",
+            vec![(3, vec![]), (11, vec![])],
+            1,
+            &BTreeMap::new(),
+        );
+        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        ));
+        let first = segment
+            .original_products(&request, original.product_bytes(), b"", &operation)
+            .unwrap();
+        assert_eq!(
+            first.products()[0]
+                .groups
+                .iter()
+                .map(|group| group.original_ordinal())
+                .collect::<Vec<_>>(),
+            vec![3, 11]
+        );
+        let spent = operation.work_usage().unwrap().0;
+        let second = segment
+            .original_products(&request, original.product_bytes(), b"", &operation)
+            .unwrap();
+        assert!(std::ptr::eq(first, second));
+        // A repeat pays its physical comparison, not another typed decode/framing.
+        assert_eq!(
+            operation.work_usage().unwrap().0 - spent,
+            original.product_bytes().len()
+        );
+        let mut changed_body = original.product_bytes().to_vec();
+        changed_body[0] ^= 1;
+        for (body, package) in [
+            (changed_body.as_slice(), b"".as_slice()),
+            (original.product_bytes(), b"changed".as_slice()),
+        ] {
+            assert!(
+                matches!(segment.original_products(&request, body, package, &operation),
+                Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                    crate::certified_products::CertificationError::Mismatch("physical segment original inventory changed")))
+            );
+        }
+        let foreign_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        ));
+        assert!(
+            matches!(segment.original_products(&request, original.product_bytes(), b"", &foreign_operation),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Mismatch("shared inventory accounting owner")))
+        );
+        assert_eq!(foreign_operation.work_usage().unwrap().0, 0);
+        let independent = request.admit_program_segment(&output).unwrap();
+        let independently_parsed = independent
+            .original_products(&request, original.product_bytes(), b"", &foreign_operation)
+            .unwrap();
+        assert!(!std::ptr::eq(first, independently_parsed));
+        assert!(foreign_operation.work_usage().unwrap().0 > original.product_bytes().len());
+        let remaining = operation.work_usage().unwrap().1;
+        operation.charge(remaining).unwrap();
+        assert!(
+            matches!(segment.original_products(&request, original.product_bytes(), b"", &operation),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Product(tidepool_repr::execution_schema::ParseError::LimitExceeded("work"))))
+        );
+        assert_eq!(operation.work_usage().unwrap().1, 0);
         let mut evidence: crate::cache::DependencyEvidence =
             serde_json::from_str(receipt.as_array().unwrap()[7].as_text().unwrap()).unwrap();
         evidence.cache_safe = false;
