@@ -75,7 +75,6 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
             .await
             .expect("selected child completes typed input admission and attaches its provider");
             let child_installation = host.context.observer.installation(child_id).await;
-            assert!(!child_installation.checkpoint);
             assert_eq!(child_installation.context_parent, None);
             let child_notebook = child_installation
                 .tools
@@ -129,13 +128,10 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     .await;
 }
 
-/// Opt-in qualification of the dedicated-machine factory through a selected
-/// typed launch. Default campaigns and the production host share a machine.
-/// This campaign explicitly installs the root's compiled child bootstrap;
-/// the child must retain its nominal inputs, allocate its own declarations,
-/// and release its distinct machine on retirement.
+/// A fresh-context child retains its typed input, allocates its own
+/// declarations, and releases its distinct machine on retirement.
 #[tokio::test]
-async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
+async fn fresh_context_child_owns_and_retires_its_machine() {
     let mut campaign = TestCampaign::start_with_child_sessions().await;
     let root = campaign.root_installation.policy.clone();
     let root_session = campaign
@@ -176,15 +172,9 @@ async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
         .expect("child actor has a session");
     assert_ne!(
         child_session, root_session,
-        "an opted-in eligible SelectedContext launch must own its own machine"
+        "the explicit fresh-context launch must own its own machine"
     );
 
-    installation
-        .fork_gate
-        .as_ref()
-        .expect("selected fork readiness owner")
-        .mark_ready()
-        .unwrap();
     let setup = setup.await.unwrap();
     assert_eq!(setup["status"], "committed", "{setup}");
     campaign
