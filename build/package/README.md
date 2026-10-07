@@ -209,10 +209,14 @@ and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
 The frozen descriptor is the authority for the exact M1/M2 case rosters, counts
 and deadlines. M2 has a 600-second default watchdog; unfinished-parent survival,
-nominal publication join, checkpoint release and the selected coding child each
-have 900 seconds. The selected child case scaffolds the shipped workspace and
-passes a `Project.Work` Task from the root to a coding child through compiler
-admission, then checks the child's narrower effect row and original typed reply.
+nominal publication join, checkpoint release and
+`actor_host::fresh_child_tests::scaffolded_selected_coding_child_preserves_workspace_input_and_effect_row`
+each have 900 seconds. This case scaffolds the shipped workspace and passes a
+`Project.Work` Task from the root to a spawned child through compiler admission
+with its actual supplied `AgentSpec`; it checks the installed effect profile,
+including Worktree allocation and compile-time rejection of Journal use, and
+verifies that the typed candidate reply preserves the task's original source
+and obligation.
 Checkpoint release retains the issuer settlement, observer creation,
 original-scope read/reply and final cleanup in one watchdog; the measured issuer
 portion already took 538 seconds before those later phases. These outer process
