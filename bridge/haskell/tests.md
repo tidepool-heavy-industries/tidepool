@@ -1,6 +1,6 @@
 # Haskell test components
 
-`tidepool-extract.cabal` declares 26 test suites. The pinned Cabal metadata
+`tidepool-extract.cabal` declares the test suites. The pinned Cabal metadata
 producer finalizes these components, and `scripts/buck2-haskell-components.py`
 projects their sources, package edges and options into `components.bzl`.
 Buck owns their generated inputs, runtime tools and execution. Use the owning
@@ -53,23 +53,25 @@ matching Buck outputs, with `Tidepool/Effects/Core.hs` and
 outputs are compilation errors. No stub modules or alternate generator are
 provided. Native Buck compilation consumes the artifact providers directly.
 
-The narrow helper contracts are independently selectable native suites:
+The narrow helper contracts are independently selectable native suites. Their
+current named cases come from the Tasty tree; inspect a target with
+`just test-native //bridge/haskell:TARGET --list-tests`. Listing discovers cases
+but does not execute them.
 
-| Target under `//bridge/haskell:` | Named Tasty cases | Retained checks |
-| --- | ---: | --- |
-| `native_helper_contract` | 17 | Native assertion, bounded observation and generated actor-cell behavior |
-| `pinned_source_contract` | 1 | Actual facade pinned assertion with external `Ext.Tiny` |
-| `automation_helper_contract` | 2 | Eight planning assertions and 26 generated Commands interpreter assertions |
-| `browser_scenario_contract` | 3 | Original workflow matrix, protocol isolation, helper refusals and command specification |
-| `command_tools_contract` | 15 | Command receipt facts, UTF-8 bounds, output recovery and route selection |
-| `tool_profiles_contract` | 10 | Installation/dispatch matrix, two accepted compiler profiles and seven type-boundary refusals |
+| Target under `//bridge/haskell:` | Retained checks |
+| --- | --- |
+| `native_helper_contract` | Native assertion, bounded observation and generated actor-cell behavior |
+| `pinned_source_contract` | Actual facade pinned assertion with external `Ext.Tiny` |
+| `automation_helper_contract` | Planning and generated Commands interpreter assertions |
+| `browser_scenario_contract` | Original workflow matrix, protocol isolation, helper refusals and command specification |
+| `command_tools_contract` | Command receipt facts, UTF-8 bounds, output recovery and route selection |
+| `tool_profiles_contract` | Installation/dispatch matrix, accepted compiler profiles and type-boundary refusals |
 
 Assertion matrices are checks inside named cases; they do not inflate the
-runner's executed-case count. These six suites expose 48 cases. The separate
-facade `facade_prepared_recipe_contract_test` executes eight prepared-runtime
-cases in one counted test. `facade_recipe_source_capture_test` records seven
-cells and four assertion labels in one diagnostic test; recording those labels
-does not validate their behavior.
+runner's executed-case count. The facade `facade_prepared_recipe_contract_test`
+covers prepared-runtime behavior. `facade_recipe_source_capture_test` records
+cells and assertion labels diagnostically; recording those labels does not
+validate their behavior.
 
 Workspace modules come from the workspace's source exports. The automation
 suite's pinned Jev modules use declared `jev_sources` artifact projections.
