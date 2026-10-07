@@ -1610,17 +1610,6 @@ installProgramImports values original plan = plan { cellPlanPrologue = prologue
       ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
         ++ " (" ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")") RetainedGeneratedImport [mkModuleName (completedValueModule value)] | value <- values]
 
-globalProgramKeys :: Int -> Int -> String -> String
-globalProgramKeys offset count source = T.unpack $ T.replace "__tidepool_program_" "__tidepool_cell_"
-  (foldr replace (T.pack source) [0..count-1])
-  where
-    replace index = T.replace (T.pack ("__tidepool_cell_pin_" ++ show index ++ "_"))
-        (T.pack ("__tidepool_program_pin_" ++ show (offset+index) ++ "_"))
-      . T.replace (T.pack ("__tidepool_cell_expr_" ++ show index))
-        (T.pack ("__tidepool_program_expr_" ++ show (offset+index)))
-    -- Temporary prefixes avoid replacing a key twice when segments overlap.
-    -- Normalize only after every local key has moved.
-
 addProgramValue :: FilePath -> Word64 -> [BoundBinder] -> ProgramCellState -> IO ProgramCellState
 addProgramValue _ _ [] state = pure state
 addProgramValue root generation binders@(firstBinder:_) state = do
