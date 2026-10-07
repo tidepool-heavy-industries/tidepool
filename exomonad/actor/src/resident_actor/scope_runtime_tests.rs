@@ -123,6 +123,7 @@ impl ScopeFixture {
     fn new(case: u64, backends: Vec<Arc<ControlledBackend>>) -> Self {
         eval_harness::require_extract();
         let declarations = [
+            tidepool_mcp::console_decl(),
             tidepool_mcp::agent_tools_decl(),
             tidepool_mcp::agent_launch_decl(),
             tidepool_mcp::agent_control_decl(),
@@ -189,6 +190,7 @@ impl ScopeFixture {
             .new_workbench(
                 "scope-runtime-parent".into(),
                 crate::ActorCapabilities::default().with_effect_keys(vec![
+                    crate::ActorEffectKey::Console,
                     crate::ActorEffectKey::Actor,
                     crate::ActorEffectKey::AgentLaunch,
                     crate::ActorEffectKey::AgentControl,
@@ -447,6 +449,8 @@ impl ScopeFixture {
     }
 }
 
+// Notebook expressions bind observations. These fixtures explicitly render
+// their Boolean assertion through Console and discard the final statement.
 fn assert_committed(reply: crate::KernelWorkbenchReply) {
     let response = reply.expect("public Haskell scope contract");
     assert_eq!(

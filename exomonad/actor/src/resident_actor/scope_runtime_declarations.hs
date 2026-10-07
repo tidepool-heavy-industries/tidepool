@@ -5,4 +5,4 @@ import Tidepool.Agent.Contract
 data ScopePing = ScopePing { sentinel :: Int } deriving (FromJSON, JsonSchema)
 data ScopeTools mode = ScopeTools { ping :: mode :- Call ScopePing Int }
 
-pure True
+_ <- say (tshow True)

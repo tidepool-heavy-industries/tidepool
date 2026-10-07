@@ -55,4 +55,4 @@ let admitScoped
         Right job -> pure job
       waitCommandRunning job
       pure (child, request, job)
-pure True
+_ <- say (tshow True)
