@@ -205,6 +205,7 @@ import Tidepool.ExactScope
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
   , originalGroupFromCandidate, originalGroupFromProjected, normalizeInterfaceEvidence
+  , canonicalProofMatchesOwner
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
@@ -2894,9 +2895,11 @@ originalReconciliationChecks scope recovered = do
       nativeProduct key = case filter ((== key) . productOwner) (scopeProducts scope) of
         [value] -> pure value
         _ -> fail "reconciliation fixture lost its unique genuine scope product"
+      normalizedGroups = sortOn originalOrdinal . map (\group -> group
+        {originalGlobals=Set.toAscList (Set.fromList (originalGlobals group))})
   full <- fullGroups owner
   snapshot <- nativeProduct owner
-  unless (sortOn originalOrdinal full == sortOn originalOrdinal (originalGroups snapshot)
+  unless (normalizedGroups full == normalizedGroups (originalGroups snapshot)
       && length full > 1) $
     fail "genuine native scope differs from the complete emitted original groups"
   selected <- case filter (not . null . originalGlobals) full of
@@ -2933,11 +2936,19 @@ originalReconciliationChecks scope recovered = do
           _:rest -> '0':rest
           [] -> "0"}
   requireRefused changedProducer proofs (row full)
+  genuine <- maybe (fail "genuine original canonical proof is absent") pure (Map.lookup owner proofs)
+  unless (canonicalProofMatchesOwner (scopeProducerSha256 selectedScope) owner genuine
+      && not (canonicalProofMatchesOwner (scopeProducerSha256 changedProducer) owner genuine)) $
+    fail "canonical proof producer binding lost its positive or altered-producer control"
+  -- Admitted scope inputs cannot rekey a proof under another sealed owner.
+  -- Calibrate the expected-owner predicate directly; moved products below
+  -- separately exercise reconciliation's absent admitted owner boundary.
   forM_ [("other-unit",snd owner),(fst owner,"OtherOriginal")] $ \changedOwner -> do
+    when (canonicalProofMatchesOwner (scopeProducerSha256 selectedScope) changedOwner genuine) $
+      fail "canonical proof accepted another expected unit or module"
     let moved = admitted {originalUnit=fst changedOwner,originalModule=snd changedOwner}
         movedScope = selectedScope {scopeProducts=
           [if productOwner value == owner then moved else value | value <- scopeProducts selectedScope]}
-    genuine <- maybe (fail "genuine original canonical proof is absent") pure (Map.lookup owner proofs)
     requireRefused movedScope (Map.insert changedOwner genuine proofs)
       [(fst changedOwner,snd changedOwner,full)]
   requireRefused selectedScope proofs
