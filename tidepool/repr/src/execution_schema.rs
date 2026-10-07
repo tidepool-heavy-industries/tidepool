@@ -1382,6 +1382,16 @@ impl InventoryOperation {
         self.limits
     }
 
+    /// Cumulative admission work, for observation only; never resets the owner.
+    pub fn work_usage(&self) -> Result<(usize, usize), ParseError> {
+        let budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
+        let remaining = budget.remaining();
+        Ok((self.limits.max_work - remaining, remaining))
+    }
+
     pub fn charge(&self, amount: usize) -> Result<(), ParseError> {
         self.budget
             .lock()

@@ -267,6 +267,24 @@ pub(crate) fn record_stage_with_owners(
     record_stage_counts(node, round, stage, elapsed, bytes, Some(owners));
 }
 
+/// Observe the existing admission ledger without creating or resetting budget.
+pub(crate) fn record_inventory_work(
+    stage: &str,
+    output: &std::path::Path,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) {
+    if let Ok((work_spent, work_remaining)) = operation.work_usage() {
+        tracing::debug!(
+            target: "exomonad_harness::timing",
+            stage,
+            output = %output.display(),
+            work_spent,
+            work_remaining,
+            "inventory work"
+        );
+    }
+}
+
 fn record_stage_counts(
     node: u64,
     round: u64,

@@ -2476,12 +2476,34 @@ fn seal_turn_outputs_with_validation(
     let receipt_bytes =
         CompilerSidecar::CertifiedProducts.read(output_dir, &validation.inventory)?;
     let product_decode_start = Instant::now();
-    let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
-        &product_bytes,
-        &package_bundle_bytes,
-        validation.inventory.clone(),
-    )
-    .map_err(compiler_evidence_failure)?;
+    timing::record_inventory_work("products.decode.before", output_dir, &validation.inventory);
+    let owned_fresh_products = if source_segment.is_none() {
+        Some(
+            certified_products::ParsedModuleProducts::decode_with_operation(
+                &product_bytes,
+                &package_bundle_bytes,
+                validation.inventory.clone(),
+            )
+            .map_err(compiler_evidence_failure)?,
+        )
+    } else {
+        None
+    };
+    let fresh_products = if let Some(segment) = source_segment {
+        segment.original_products(
+            offer.exact.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("segment inventory lacks exact request".into())
+            })?,
+            &product_bytes,
+            &package_bundle_bytes,
+            &validation.inventory,
+        )?
+    } else {
+        owned_fresh_products
+            .as_ref()
+            .ok_or_else(|| CompileError::ExtractFailed("original inventory absent".into()))?
+    };
+    timing::record_inventory_work("products.decode.after", output_dir, &validation.inventory);
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2578,10 +2600,11 @@ fn seal_turn_outputs_with_validation(
         }
         return Ok(None);
     };
+    timing::record_inventory_work("products.certify.before", output_dir, &validation.inventory);
     let certified = certified_products::certify_products_with_validation(
         offer.selected.as_deref(),
         &receipt,
-        &fresh_products,
+        fresh_products,
         &evidence_bytes,
         source_path,
         output_dir,
@@ -2597,8 +2620,9 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], Vec::as_slice),
         produced_types,
         validation,
-    )
-    .map_err(compiler_evidence_failure)?;
+    );
+    timing::record_inventory_work("products.certify.after", output_dir, &validation.inventory);
+    let certified = certified.map_err(compiler_evidence_failure)?;
     let target_admission_start = Instant::now();
     ensure_ready_module_inventory(&receipt.modules, valid)?;
     let accepted = receipt
@@ -2643,11 +2667,17 @@ fn seal_turn_outputs_with_validation(
             .as_ref()
             .is_none_or(|exact| empty_exact_context(&exact.context))
     {
+        let publication_products = match owned_fresh_products {
+            Some(products) => products,
+            None => fresh_products
+                .copy_for_publication()
+                .map_err(compiler_evidence_failure)?,
+        };
         let (_, publication) = module_candidates::prepare_publication(
             &offer.producer,
             &offer.include,
             valid,
-            fresh_products,
+            publication_products,
             source,
             exact.as_ref().map_or(
                 module_candidates::CandidateVersionOrigin::Ordinary,
