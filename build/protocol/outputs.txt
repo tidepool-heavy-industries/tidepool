@@ -52,6 +52,8 @@ bridge/handlers/src/generated/mod.rs
 tidepool/bridge-effects/src/generated/mod.rs
 tidepool/bridge-effects/src/generated/model_control.rs
 bridge/haskell/lib/Tidepool/Internal/ModelControl.hs
+exomonad/tool/src/generated/public_profiles.rs
+bridge/haskell/lib/Tidepool/Internal/ActorProfiles.hs
 tidepool/runtime/src/generated/ask.rs
 tidepool/runtime/src/generated/mod.rs
 exomonad/actor/src/generated/actor.rs

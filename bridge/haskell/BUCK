@@ -8,6 +8,11 @@ load("@prelude//:rules.bzl", "export_file", "filegroup", "haskell_binary", "hask
 declare_haskell_components()
 declare_rust_test_inputs()
 
+_PROTOCOL_LIBRARY_SOURCES = {
+    "lib/Tidepool/Internal/ActorProfiles.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ActorProfiles_hs]",
+    "lib/Tidepool/Internal/ModelControl.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]",
+}
+
 # Source and fixture artifacts exposed to native actions that model these
 # dependencies explicitly.
 export_file(
@@ -144,8 +149,8 @@ filegroup(
     name = "facade_embedded_sources",
     srcs = dict([(source, source) for source in glob(
         ["lib/**/*.hs", "actors/**/*.hs"],
-        exclude = ["lib/**/Prelude_cbor/**", "lib/Tidepool/Internal/ModelControl.hs"],
-    )] + [("lib/Tidepool/Internal/ModelControl.hs", "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")]),
+        exclude = ["lib/**/Prelude_cbor/**"] + _PROTOCOL_LIBRARY_SOURCES.keys(),
+    )] + _PROTOCOL_LIBRARY_SOURCES.items()),
     visibility = ["PUBLIC"],
 )
 
@@ -186,7 +191,7 @@ tidepool_prepared_fixture(
 # independent cohort source files to one broad fixture tree.
 filegroup(
     name = "corpus_library_sources",
-    srcs = dict([(source, source) for source in glob(["lib/**/*.hs"], exclude = ["lib/**/Prelude_cbor/**", "lib/Tidepool/Internal/ModelControl.hs"])] + [("lib/Tidepool/Internal/ModelControl.hs", "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")]),
+    srcs = dict([(source, source) for source in glob(["lib/**/*.hs"], exclude = ["lib/**/Prelude_cbor/**"] + _PROTOCOL_LIBRARY_SOURCES.keys())] + _PROTOCOL_LIBRARY_SOURCES.items()),
     visibility = ["PUBLIC"],
 )
 filegroup(

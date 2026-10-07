@@ -178,6 +178,8 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn('"//build/package:tidepool_extract_runtime_libraries"', rendered)
 
     def test_generated_sources_and_workspace_sources_keep_owning_producers(self):
+        self.assertEqual(G.source("Tidepool.Internal.ActorProfiles", ["generated/protocol"])[1],
+                         "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ActorProfiles_hs]")
         self.assertEqual(G.source("Tidepool.Internal.ModelControl", ["generated/protocol"])[1],
                          "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")
         self.assertEqual(G.source("Project.Checks", ["generated/pinned"])[1],

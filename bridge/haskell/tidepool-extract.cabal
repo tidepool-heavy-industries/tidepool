@@ -912,6 +912,7 @@ test-suite automation-helper-contract
     Tidepool.Inspection
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite

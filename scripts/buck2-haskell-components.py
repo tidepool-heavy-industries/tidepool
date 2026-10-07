@@ -13,6 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "bridge/haskell"
 WORKSPACE = ROOT / "exomonad/examples/workspace/.exomonad"
 EFFECTS = {"Tidepool.Effects", "Tidepool.Effects.Core", "Tidepool.Effects.Authored"}
+PROTOCOL_MODULES = {
+    "Tidepool.Internal.ActorProfiles",
+    "Tidepool.Internal.ModelControl",
+}
 
 
 class ComponentKind(Enum):
@@ -152,8 +156,8 @@ def source(module, roots):
     path = module.replace(".", "/") + ".hs"
     if module in EFFECTS:
         return path, "//bridge/mcp:effects_generated[" + path.replace("/", "_").replace(".", "_") + "]"
-    if module == "Tidepool.Internal.ModelControl":
-        return path, "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]"
+    if module in PROTOCOL_MODULES:
+        return path, "//bridge/protocol:generated[" + normalized_path("bridge/haskell/lib/" + path) + "]"
     if module == "Project.Checks" and "generated/pinned" in roots:
         return path, "//bridge/facade:workspace_pinned_check_source"
     if is_jev_core(module) and "generated/jev/core" in roots:
@@ -310,7 +314,9 @@ def render(metadata=None):
                                 else resolved.relative_to(PACKAGE.resolve()).as_posix())
                     if "Prelude_cbor" not in path.parts:
                         resources[relative] = source_location(path)
-        resources["lib/Tidepool/Internal/ModelControl.hs"] = "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]"
+        for module in sorted(PROTOCOL_MODULES):
+            path, producer = source(module, ["generated/protocol"])
+            resources["lib/" + path] = producer
         rule = ["filegroup(", f"    name = {literal(name + '_resources')},", f"    srcs = {literal(resources)},", ")", ""]
         lines.extend("    " + line if line else "" for line in "\n".join(rule).splitlines())
         # One declaration owns each path's Buck expression and runtime role.

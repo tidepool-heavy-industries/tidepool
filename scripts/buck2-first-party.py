@@ -533,7 +533,7 @@ def source_inputs(package, target, features=(), test_target=False):
     # to native Rust compilation.
     if package["name"] in {
         "tidepool-mcp", "tidepool-handlers", "tidepool-bridge-effects",
-        "tidepool-runtime", "exomonad-actor", "tidepool",
+        "tidepool-runtime", "exomonad-actor", "exomonad-tool", "tidepool",
     }:
         for path in protocol_output_paths():
             if path.startswith(CURRENT_DIR + "/src/generated/") and path.endswith(".rs"):
