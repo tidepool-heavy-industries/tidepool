@@ -11065,11 +11065,8 @@ pub(crate) mod tests {
         let mut expected_owners = BTreeSet::from([prior[0].owner().clone()]);
         let mut first_promoted = None;
         for (index, body_tag) in [0, 0, 1, 0].into_iter().enumerate() {
-            context = context
-                .with_compiler_input_projection(
-                    context.compiler_input_projection().interface_only(),
-                )
-                .unwrap();
+            let projection = context.compiler_input_projection().interface_only();
+            context = context.with_compiler_input_projection(projection).unwrap();
             let directory = root.path().join(format!("promotion-{index}"));
             std::fs::create_dir(&directory).unwrap();
             let input = directory.join("Target.hs");
