@@ -76,7 +76,10 @@ import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.Error (MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic, unionMessages)
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
-import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
+import GHC.Tc.Errors.Types
+  ( TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..)
+  , SolverReportWithCtxt(..) )
+import GHC.Tc.Errors.Types qualified as TcError
 import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, TypedSegmentFailure(..),
   typedSegmentItems, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
@@ -914,6 +917,15 @@ rejectedCellInstances recipe authority failure = nub
             else [(StructuralDisplayCompanionDuplicate, structural)
                  | Just (className (is_cls instance')) == generatedDisplayName authority]
       , ty <- is_tys instance' ]
+    -- A derived consumer can demand Generic before duplicate-instance
+    -- validation runs. Use the solver's actual matching instances, with the
+    -- same class/target identity checks as declaration-time recovery.
+    rejectedTypes (TcRnSolverReport (SolverReportWithCtxt
+      { reportContent = TcError.OverlappingInstances { TcError.overlappingInstances_matches = instances } }) _)
+      | let matches = [instance' | instance' <- toList instances
+              , nameUnique (className (is_cls instance')) == genClassKey]
+      , length matches >= 2 =
+          [(GenericDuplicate, generic, ty) | instance' <- matches, ty <- is_tys instance']
     rejectedTypes (TcRnConflictingFamInstDecls instances) =
       [(GenericDuplicate, generic, ty) | instance' <- toList instances
       , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance']
