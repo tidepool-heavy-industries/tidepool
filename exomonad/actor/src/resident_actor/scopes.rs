@@ -206,98 +206,105 @@ where
         Ok((work, realm))
     }
 
-    pub(super) async fn run_resource_scope(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        effect_owner: CurrentEffectOwner<'_>,
-        ancestry: &crate::CallAncestry,
+    pub(super) fn run_resource_scope<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'a>,
+        ancestry: &'a crate::CallAncestry,
         continuation: ResidentHole,
         callback: RootCustody,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let (work, realm) = match self.register_resource_scope(context, &effect_owner) {
-            Ok(registered) => registered,
-            Err(detail) => {
-                return self
-                    .environment
-                    .runner
-                    .resume_value(
-                        context.clone(),
-                        continuation,
-                        (
-                            Err::<(), _>(ScopeFailure::ScopeRejected(detail)),
-                            Ok::<(), CleanupError>(()),
-                        ),
-                    )
-                    .await
-            }
-        };
-        let frame = ScopeFrame {
-            continuation,
-            work,
-            realm,
-        };
-        let token = frame.work.scope_token().expect("registered scope identity");
-        let scoped_owner = CurrentEffectOwner::Scoped {
-            base: Box::new(effect_owner),
-            scope: frame.work.clone(),
-        };
-        let mut next = self
-            .environment
-            .runner
-            .run_owned_scope_callback(
-                context.clone(),
-                callback,
-                frame.realm,
-                token,
-                frame.work.clone(),
-            )
-            .await;
-        let body = loop {
-            let boundary = match next {
-                Ok(outcome) => {
-                    self.environment
+    ) -> futures_util::future::BoxFuture<'a, Result<ResidentOutcome, ResidentActorWorkbenchError>>
+    {
+        Box::pin(async move {
+            let (work, realm) = match self.register_resource_scope(context, &effect_owner) {
+                Ok(registered) => registered,
+                Err(detail) => {
+                    return self
+                        .environment
                         .runner
-                        .capture_boundary(context.clone(), outcome, frame.realm)
+                        .resume_value(
+                            context.clone(),
+                            continuation,
+                            (
+                                Err::<(), _>(ScopeFailure::ScopeRejected(detail)),
+                                Ok::<(), CleanupError>(()),
+                            ),
+                        )
                         .await
                 }
-                Err(error) => break Err(ScopeFailure::ScopeEvaluationFailed(error.to_string())),
             };
-            match boundary {
-                Ok(ResidentActorBoundary::ScopeDone { token: done, .. }) if done == token => {
-                    break Ok(())
+            let frame = ScopeFrame {
+                continuation,
+                work,
+                realm,
+            };
+            let token = frame.work.scope_token().expect("registered scope identity");
+            let scoped_owner = CurrentEffectOwner::Scoped {
+                base: Box::new(effect_owner),
+                scope: frame.work.clone(),
+            };
+            let mut next = self
+                .environment
+                .runner
+                .run_owned_scope_callback(
+                    context.clone(),
+                    callback,
+                    frame.realm,
+                    token,
+                    frame.work.clone(),
+                )
+                .await;
+            let body = loop {
+                let boundary = match next {
+                    Ok(outcome) => {
+                        self.environment
+                            .runner
+                            .capture_boundary(context.clone(), outcome, frame.realm)
+                            .await
+                    }
+                    Err(error) => {
+                        break Err(ScopeFailure::ScopeEvaluationFailed(error.to_string()))
+                    }
+                };
+                match boundary {
+                    Ok(ResidentActorBoundary::ScopeDone { token: done, .. }) if done == token => {
+                        break Ok(())
+                    }
+                    Ok(ResidentActorBoundary::ScopeDone { .. }) => {
+                        break Err(ScopeFailure::ScopeEvaluationFailed(
+                            "scope completion belongs to a different delimiter".into(),
+                        ))
+                    }
+                    Ok(ResidentActorBoundary::Completed) => {
+                        break Err(ScopeFailure::ScopeEvaluationFailed(
+                            "scope body completed without its result marker".into(),
+                        ))
+                    }
+                    Ok(boundary) => {
+                        next = Box::pin(self.resolve_effect(
+                            kernel,
+                            context,
+                            scoped_owner.clone(),
+                            ancestry,
+                            boundary,
+                        ))
+                        .await
+                    }
+                    Err(error) => {
+                        break Err(ScopeFailure::ScopeEvaluationFailed(error.to_string()))
+                    }
                 }
-                Ok(ResidentActorBoundary::ScopeDone { .. }) => {
-                    break Err(ScopeFailure::ScopeEvaluationFailed(
-                        "scope completion belongs to a different delimiter".into(),
-                    ))
-                }
-                Ok(ResidentActorBoundary::Completed) => {
-                    break Err(ScopeFailure::ScopeEvaluationFailed(
-                        "scope body completed without its result marker".into(),
-                    ))
-                }
-                Ok(boundary) => {
-                    next = Box::pin(self.resolve_effect(
-                        kernel,
-                        context,
-                        scoped_owner.clone(),
-                        ancestry,
-                        boundary,
-                    ))
-                    .await
-                }
-                Err(error) => break Err(ScopeFailure::ScopeEvaluationFailed(error.to_string())),
-            }
-        };
-        finish_scope(
-            self.environment.clone(),
-            kernel.clone(),
-            context.clone(),
-            frame,
-            body,
-        )
-        .await
+            };
+            finish_scope(
+                self.environment.clone(),
+                kernel.clone(),
+                context.clone(),
+                frame,
+                body,
+            )
+            .await
+        })
     }
 
     pub(super) fn prepare_scope_finish(

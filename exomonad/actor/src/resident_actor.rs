@@ -3468,7 +3468,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     fn capture_exit_target(
         &self,
         kernel: &KernelContext,
-        effect_owner: &CurrentEffectOwner<'_>,
+        _effect_owner: &CurrentEffectOwner<'_>,
         target: ActorRef,
     ) -> Result<crate::RetainedActorExit, ResidentActorWorkbenchError> {
         let actor = kernel.resolve(target).ok_or_else(|| {
@@ -4751,7 +4751,7 @@ where
         &self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        effect_owner: CurrentEffectOwner<'_>,
+        _effect_owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         target: ActorRef,
         request: MailboxValue,
@@ -5127,13 +5127,13 @@ where
     /// request continuation, then hand it back to the ordinary actor scheduler.
     async fn stage_request_reply(
         &mut self,
-        kernel: &KernelContext,
+        _kernel: &KernelContext,
         context: &ActorSessionContext,
         request: crate::RequestId,
         result: RootCustody,
         carried_preview: Option<String>,
-        boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
-        invocation: Option<&InvocationWork>,
+        _boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+        _invocation: Option<&InvocationWork>,
         effects: Option<&mut WorkbenchEffectState>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let settled = async {
