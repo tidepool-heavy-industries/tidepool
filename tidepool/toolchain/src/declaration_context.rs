@@ -2536,20 +2536,6 @@ impl ExactCompilationRequest {
         request.validate_outputs_selected(root, Some(&owner), &self.context)
     }
 
-    pub(crate) fn validate_outputs_in_context(
-        &self,
-        root: &Path,
-        context: &ExactDeclarationContext,
-    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
-        if context.toolchain_identity_sha256() != self.producer_sha256
-            && !(context.toolchain_identity_sha256() == [0; 32]
-                && context.artifact_view().is_empty())
-        {
-            return Err(failure("same-transaction context has another producer"));
-        }
-        self.validate_outputs_selected(root, None, context)
-    }
-
     fn validate_outputs_selected(
         &self,
         root: &Path,
