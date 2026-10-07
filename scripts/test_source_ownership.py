@@ -7,6 +7,9 @@ The named Cargo unit-test target owns these module and embedded fixture bytes.
 import re
 
 TEST_ONLY_SOURCES = {
+    'exomonad-tool': frozenset({
+        'exomonad/tool/src/surface/properties.rs',
+    }),
     'tidepool-heap': frozenset({
         'tidepool/heap/src/static_region/properties.rs',
     }),

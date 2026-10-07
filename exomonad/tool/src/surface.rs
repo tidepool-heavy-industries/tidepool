@@ -221,6 +221,9 @@ pub fn describe_changes(changes: &[SurfaceChange]) -> String {
 }
 
 #[cfg(test)]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{CustomToolDeclaration, ToolDeclaration};

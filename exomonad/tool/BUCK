@@ -41,6 +41,7 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_tool_src_generated_public_profiles_rs]": "exomonad/tool/src/generated/public_profiles.rs",
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
+        "src/surface/properties.rs": "exomonad/tool/src/surface/properties.rs",
     },
     visibility = ["PUBLIC"],
 )
@@ -54,6 +55,7 @@ tidepool_rust_isolated_test(
     edition = "2021",
     srcs_filegroup = ":exomonad_tool_unit_tests_sources",
     deps = [
+        "//third-party/rust:proptest",
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
     ],
@@ -68,6 +70,7 @@ filegroup(
         "exomonad/tool/src/effects.rs": "src/effects.rs",
         "exomonad/tool/src/lib.rs": "src/lib.rs",
         "exomonad/tool/src/surface.rs": "src/surface.rs",
+        "exomonad/tool/src/surface/properties.rs": "src/surface/properties.rs",
     },
     visibility = ["PUBLIC"],
 )
