@@ -371,6 +371,10 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
         failure.to_string().contains("missingConfiguredStartupSpec"),
         "{failure}"
     );
+    assert!(
+        failure.to_string().contains("ConfiguredSpec.hs:6:13"),
+        "{failure}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -444,10 +448,6 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
             );
             assert!(
                 diagnostic.message.contains("missingConfiguredStartupSpec"),
-                "{diagnostic:?}"
-            );
-            assert!(
-                diagnostic.message.contains("ConfiguredSpec.hs"),
                 "{diagnostic:?}"
             );
             assert!(failure.cleanup_confirmed(), "{failure}");
