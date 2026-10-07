@@ -482,16 +482,23 @@ async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_wit
 
     // Use the installed child tool after the body realm and owner have closed.
     // No hosted model inference participates in this retained closure call.
-    let answer = crate::ResidentInteractivePolicy::local(survivor)
-        .dispatch_boxed(exomonad_tool::ToolInvocation {
-            context: None,
-            name: "ping".into(),
-            arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({"sentinel": 0})),
-        })
-        .await
-        .expect("retained child tool remains callable")
-        .into_json()
-        .unwrap();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(240),
+        crate::ResidentInteractivePolicy::local(survivor).dispatch_boxed(
+            exomonad_tool::ToolInvocation {
+                context: None,
+                name: "ping".into(),
+                arguments: exomonad_tool::ToolArguments::Structured(
+                    serde_json::json!({"sentinel": 0}),
+                ),
+            },
+        ),
+    )
+    .await
+    .expect("retained child call is bounded")
+    .expect("retained child tool remains callable")
+    .into_json()
+    .unwrap();
     assert!(answer.to_string().contains("73"), "{answer:?}");
 
     let result = fixture

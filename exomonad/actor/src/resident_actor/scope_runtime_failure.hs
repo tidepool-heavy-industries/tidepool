@@ -1,7 +1,7 @@
 do
   outcome <- Scope.withScope $ \scope -> do
     _ <- admitScoped scope "scope-failed-child"
-    error "deliberate scope body failure"
+    error "deliberate scope body failure" >> pure ()
   case (Scope.scopeBody outcome, Scope.scopeCleanup outcome) of
     (Left (Scope.ScopeEvaluationFailed _), Right ()) -> pure True
     _ -> error "body failure and cleanup outcome were conflated"
