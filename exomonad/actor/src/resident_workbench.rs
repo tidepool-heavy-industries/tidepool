@@ -2731,12 +2731,19 @@ pub(crate) enum ResidentActorBoundary {
     WatchProgressPoll {
         continuation: ResidentHole,
         watch: crate::WatchId,
+        path: Vec<usize>,
         request: crate::RequestId,
         after: u64,
+    },
+    WatchDecisionPoll {
+        continuation: ResidentHole,
+        watch: crate::WatchId,
+        path: Vec<usize>,
     },
     CommandReportPoll {
         continuation: ResidentHole,
         watch: crate::WatchId,
+        path: Vec<usize>,
         job: String,
     },
     RequestRetention {
@@ -2974,6 +2981,7 @@ impl ResidentActorBoundary {
             Self::RequestUpdate { .. } => "updateRequest",
             Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
+            Self::WatchDecisionPoll { .. } => "observed decision",
             Self::CommandReportPoll { .. } => "pollWatch command",
             Self::RequestRetention { .. } => "retainRequest",
             Self::RequestCancellation(_) => "cancelRequest",
@@ -3388,6 +3396,7 @@ impl ResidentRequest {
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
             Self::Watches(WatchesReq::AwaitWatchWith(..)) => "awaitWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
+            Self::Watches(WatchesReq::ObserveWatchDecisionWith(..)) => "observed decision",
             Self::Watches(WatchesReq::ObserveWatchCommandWith(..)) => "pollWatch command",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
         }
@@ -9112,16 +9121,20 @@ where
                             watch: crate::request_effect::watch_id(watch_id)?,
                         }))
                     }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, request, after)) => {
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, path, request, after)) => {
                         Ok(ResidentActorBoundary::WatchProgressPoll {
                             continuation: hole,
                             watch: crate::request_effect::watch_id(watch)?,
+                            path: crate::request_effect::projection_path(path)?,
                             request: crate::request_effect::request_id(request)?,
                             after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
                         })
                     }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, job)) => {
-                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, job })
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchDecisionWith(watch, path)) => {
+                        Ok(ResidentActorBoundary::WatchDecisionPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)? })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, path, job)) => {
+                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
                     }
                     ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchForget(WatchForget {
@@ -17949,6 +17962,169 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("parent remains registered after cancelled child startup")
             .expect("independent parent custody remains evaluable");
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn compiled_observed_watch_projects_original_nested_decisions_after_source_forget() {
+        with_test_compiler_owner(compiled_observed_watch_projects_original_nested_decisions_after_source_forget_with_compiler_owner()).await;
+    }
+
+    async fn compiled_observed_watch_projects_original_nested_decisions_after_source_forget_with_compiler_owner(
+    ) {
+        use crate::request::{ReadinessDependency, RequestRegistry};
+        use crate::request_effect::{ReplyResult, WatchSubject};
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let session_id = tidepool_repr::SessionId(0xCA03);
+        let (mut session, root) = bare_session_at(session_id);
+        std::fs::write(
+            root.path().join("AwaitRuntime.hs"),
+            include_str!("fixtures/AwaitRuntime.hs"),
+        )
+        .unwrap();
+        let preamble = insert_preamble_imports(
+            surface.preamble(),
+            "qualified AwaitRuntime\nimport qualified Tidepool.Agent.Watch as AwaitW",
+        );
+        let templates = resident_workbench_templates(
+            &preamble,
+            "'[AwaitW.Watches]",
+            "qualified Tidepool.Agent.Watch as AwaitW",
+        );
+        let mut include = surface.include_path_refs();
+        include.push(root.path());
+        let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
+            exact_context: None,
+            session_id: None,
+            turn_text: "projected <- AwaitRuntime.nestedNamed",
+            templates: &templates,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+            gen: 1,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        })
+        .unwrap() else {
+            panic!("named-watch fixture must compile a bind");
+        };
+        session.set_effect_execution(
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        let mut outcome = session
+            .run_with_sites("nested-named", compiled.code())
+            .unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(session_id, Box::new(session));
+        let source = ActorWorkbenchSource::new(preamble, surface.include_paths().to_vec());
+        let runner = ResidentActorRunner::new(machines, source);
+        let owner = crate::ActorRef::first(crate::ActorId(0xCA03));
+        let mut context = crate::ActorDescriptor::new(
+            "named-observer",
+            crate::ActorPlacement {
+                session: session_id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+        )
+        .session_context(owner);
+        context.effect_policy = EffectRunPolicy::SuspendAll;
+        context.haskell_effects_alias = "'[AwaitW.Watches]".into();
+        let registry = RequestRegistry::default();
+        let mut sources = Vec::new();
+        let mut projections = 0;
+        for _ in 0..16 {
+            let boundary = runner
+                .capture_boundary(context.clone(), outcome, RealmId::ROOT)
+                .await
+                .unwrap();
+            outcome = match boundary {
+                ResidentActorBoundary::WatchRegistration(registration) => {
+                    let plan = registration
+                        .dependencies
+                        .try_map(|(subject, requirement)| {
+                            Ok(match subject {
+                                WatchSubject::Watch(watch) => ReadinessDependency::Watch(watch),
+                                WatchSubject::Request(request) => {
+                                    ReadinessDependency::Request(request, requirement)
+                                }
+                                WatchSubject::Command(_) => panic!("fixture has no commands"),
+                            })
+                        })
+                        .unwrap();
+                    if registration.transient {
+                        let watch = registry.register_transient_watch(owner, plan).unwrap();
+                        for source in &sources {
+                            assert_eq!(
+                                registry.forget_watch(owner, *source),
+                                Ok(crate::ForgetWatchOutcome::Forgotten)
+                            );
+                        }
+                        runner
+                            .resume_value(
+                                context.clone(),
+                                registration.continuation,
+                                ReplyResult(Ok::<i64, crate::ReplyError>(watch.0 as i64)),
+                            )
+                            .await
+                            .unwrap()
+                    } else {
+                        let watch = registry
+                            .register_watch_plan(owner, registration.label, plan)
+                            .unwrap()
+                            .0;
+                        sources.push(watch);
+                        runner
+                            .resume_int(context.clone(), registration.continuation, watch.0)
+                            .await
+                            .unwrap()
+                    }
+                }
+                ResidentActorBoundary::WatchAwait(poll) => runner
+                    .resume_watch_observation(
+                        context.clone(),
+                        poll.continuation,
+                        registry.observe_watch(owner, poll.watch),
+                    )
+                    .await
+                    .unwrap(),
+                ResidentActorBoundary::WatchDecisionPoll {
+                    continuation,
+                    watch,
+                    path,
+                } => {
+                    projections += 1;
+                    let decision = registry
+                        .observe_watch_snapshot_decision(watch, &path)
+                        .unwrap();
+                    runner
+                        .resume_value(context.clone(), continuation, decision)
+                        .await
+                        .unwrap()
+                }
+                ResidentActorBoundary::WatchForget(forget) => runner
+                    .resume_watch_forget(
+                        context.clone(),
+                        forget.continuation,
+                        registry.forget_watch(owner, forget.watch),
+                    )
+                    .await
+                    .unwrap(),
+                ResidentActorBoundary::Completed => {
+                    assert_eq!(sources.len(), 2);
+                    assert_eq!(projections, 2);
+                    return;
+                }
+                other => panic!(
+                    "unexpected named-watch fixture boundary: {}",
+                    other.operation()
+                ),
+            };
+        }
+        panic!("named-watch fixture exceeded its finite effect trace");
     }
 
     #[tokio::test]

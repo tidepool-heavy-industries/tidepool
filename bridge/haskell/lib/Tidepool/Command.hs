@@ -93,7 +93,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
-import Tidepool.Agent.Watch.Internal (Await (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), Watches (..), requireObserved)
+import Tidepool.Agent.Watch.Internal (Await (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), Watches (..), Observation (..), requireObserved)
 import Tidepool.Command.Types
 import Tidepool.Effects.Core
   ( CommandCleanup (..),
@@ -266,7 +266,7 @@ tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
 -- started at; it says nothing about a later revision.
 awaitFinished :: Job -> Await CommandReport
 awaitFinished (Job key) =
-  Await (AwaitPlan [LeafNode (AwaitCommand key)] 0) (\watchId _ _ -> requireObserved <$> send (ObserveWatchCommandWith watchId key))
+  Await (AwaitPlan [LeafNode (AwaitCommand key)] 0) (\(Observation watchId path) _ _ -> requireObserved <$> send (ObserveWatchCommandWith watchId path key))
 
 -- | Run once and suspend until terminal completion, preserving the continuation.
 run :: (Member Commands effects) => Command -> Eff effects RunResult

@@ -12,10 +12,10 @@ module Tidepool.Agent.Watch.Internal
   , AwaitDependency (..), AwaitError (..)
   , Watch, WatchId (..), Watches (..), WatchState (..)
   , RawWatchObservation (..), ForgetWatchOutcome (..)
-  , result, settlement, eitherOf, after, afterSited, await
+  , result, settlement, eitherOf, after, afterSited, observed, await
   , watch, pollWatch, forgetWatch
   , Route, RouteState (..), route, pollRoute, listRoutes, forgetRoute
-  , requireObserved
+  , requireObserved, Observation (..)
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -34,6 +34,7 @@ data AwaitDependency
   = AwaitDependency RequestId Bool
   | AwaitProgress RequestId ProgressCursor
   | AwaitCommand Text
+  | AwaitWatching Int
   deriving (Eq)
 
 -- | Topological node references are local to this immutable expression.
@@ -51,8 +52,10 @@ data AwaitPlan = AwaitPlan [AwaitNode] Int
 -- failure is a value only when its settlement projection requested that.
 data AwaitDecision = AwaitDecision [(Int, Maybe ResponseFailure)] [(Int, Bool)]
 
+data Observation = Observation Int [Int]
+
 data Await a = Await AwaitPlan
-  (forall effects. Member Watches effects => Int -> Int -> AwaitDecision -> Eff effects a)
+  (forall effects. Member Watches effects => Observation -> Int -> AwaitDecision -> Eff effects a)
 
 instance Functor Await where
   fmap f (Await plan observe) = Await plan (\watchId offset decision -> f <$> observe watchId offset decision)
@@ -115,10 +118,11 @@ data Watches a where
   RegisterRouteWith :: Text -> (Int -> Eff effects ()) -> AwaitPlan -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
-  ObserveWatchProgressWith :: RequestSite '[progress] (ProgressState progress) -> Int -> Int -> Int -> Watches (ProgressState progress)
+  ObserveWatchProgressWith :: RequestSite '[progress] (ProgressState progress) -> Int -> [Int] -> Int -> Int -> Watches (ProgressState progress)
+  ObserveWatchDecisionWith :: Int -> [Int] -> Watches AwaitDecision
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   AwaitWatchWith :: Int -> Watches RawWatchObservation
-  ObserveWatchCommandWith :: Int -> Text -> Watches (Maybe CommandReport)
+  ObserveWatchCommandWith :: Int -> [Int] -> Text -> Watches (Maybe CommandReport)
   ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
 
 data ForgetWatchOutcome = WatchForgotten | WatchForgetPending | WatchForgetRejected ReplyError
@@ -149,8 +153,17 @@ after = afterSited (error "after: extractor must assign a typed site")
 {-# OPAQUE afterSited #-}
 afterSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
 afterSited site (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
-  Await (AwaitPlan [LeafNode (AwaitProgress request cursor)] 0) $ \watchId _ _ ->
-    send (ObserveWatchProgressWith site watchId requestId revision)
+  Await (AwaitPlan [LeafNode (AwaitProgress request cursor)] 0) $ \(Observation watchId path) _ _ ->
+    send (ObserveWatchProgressWith site watchId path requestId revision)
+
+-- | Await the original watch's decision, retaining its selected values.
+-- The source handle can be forgotten after this dependency is admitted.
+observed :: Watch a -> Await a
+observed (Watch (WatchId source) (Await _ observe)) =
+  Await (AwaitPlan [LeafNode (AwaitWatching source)] 0) $ \(Observation identity path) node _ -> do
+    let nestedPath = path <> [node]
+    decision <- send (ObserveWatchDecisionWith identity nestedPath)
+    observe (Observation identity nestedPath) 0 decision
 
 watch :: Member Watches effects => Maybe Text -> Await a -> Eff effects (Watch a)
 watch label awaiting@(Await plan _) = do
@@ -160,7 +173,7 @@ watch label awaiting@(Await plan _) = do
 pollWatch :: Member Watches effects => Watch a -> Eff effects (WatchState a)
 pollWatch (Watch (WatchId identity) (Await _ observe)) = do
   observation <- send (ObserveWatchWith identity)
-  project identity observe observation
+  project (Observation identity []) observe observation
 
 -- | The sole readiness evaluator. Its transient subscription is runtime-owned
 -- and cancellation releases that subscription without cancelling requests.
@@ -180,16 +193,16 @@ waitSubscription (Watch (WatchId identity) (Await _ observe)) = loop
   where
     loop = do
       observation <- send (AwaitWatchWith identity)
-      projected <- project identity observe observation
+      projected <- project (Observation identity []) observe observation
       case projected of
         WatchPending _ -> loop
         WatchReady value -> pure (Right value)
         WatchUnavailable failure -> pure (Left failure)
 
-project :: Member Watches effects => Int -> (Int -> Int -> AwaitDecision -> Eff effects a) -> RawWatchObservation -> Eff effects (WatchState a)
-project identity observe observation = case observation of
+project :: Member Watches effects => Observation -> (Observation -> Int -> AwaitDecision -> Eff effects a) -> RawWatchObservation -> Eff effects (WatchState a)
+project view observe observation = case observation of
   RawWatchPending progress -> pure (WatchPending progress)
-  RawWatchReady decision -> WatchReady <$> observe identity 0 decision
+  RawWatchReady decision -> WatchReady <$> observe view 0 decision
   RawWatchUnavailable request failure -> pure (WatchUnavailable (AwaitDependencyUnavailable request failure))
   RawWatchRejected failure -> pure (WatchUnavailable (AwaitRejected failure))
 

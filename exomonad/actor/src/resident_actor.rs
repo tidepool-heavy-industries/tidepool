@@ -4341,7 +4341,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let runtime = self.runtime_observation.snapshot();
         let usage = runtime.latest_provider_usage();
         let unavailable_responses = format!("{:?}", requests.unavailable_responses);
-        let unavailable_watches = format!("{:?}", requests.unavailable_watches);
+        let unavailable_watches = format!(
+            "{:?}; rejected: {:?}",
+            requests.unavailable_watches, requests.rejected_watches
+        );
         let roster_summary = if view != StatusView::Concise || hidden_terminal_actors == 0 {
             String::new()
         } else {
@@ -6246,12 +6249,14 @@ where
             ResidentActorBoundary::WatchProgressPoll {
                 continuation,
                 watch,
+                path,
                 request,
                 after,
             } => Box::pin(async move {
-                let observation = environment.requests.observe_watch_progress(
+                let observation = environment.requests.observe_watch_snapshot_progress(
                     context.actor,
                     watch,
+                    &path,
                     request,
                     after,
                 );
@@ -6260,14 +6265,33 @@ where
                     .resume_progress_observation(context.clone(), continuation, observation)
                     .await
             }),
+            ResidentActorBoundary::WatchDecisionPoll {
+                continuation,
+                watch,
+                path,
+            } => Box::pin(async move {
+                let decision = environment
+                    .requests
+                    .observe_watch_snapshot_decision(watch, &path)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "retained watch decision unavailable: {error:?}"
+                        ))
+                    })?;
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, decision)
+                    .await
+            }),
             ResidentActorBoundary::CommandReportPoll {
                 continuation,
                 watch,
+                path,
                 job,
             } => Box::pin(async move {
                 let report = environment
                     .requests
-                    .observe_watch_command(watch, &job)
+                    .observe_watch_snapshot_command(watch, &path, &job)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::ActorProtocol(format!(
                             "watch command snapshot unavailable: {error:?}"

@@ -33,12 +33,14 @@ impl Fixture {
                 .register_transient_watch(
                     owner,
                     crate::request::readiness::Plan::checked(
-                        vec![crate::request::readiness::Node::Leaf((
-                            request,
-                            crate::request::WatchRequirement::Response {
-                                allow_failure: false,
-                            },
-                        ))],
+                        vec![crate::request::readiness::Node::Leaf(
+                            crate::request::ReadinessDependency::Request(
+                                request,
+                                crate::request::WatchRequirement::Response {
+                                    allow_failure: false,
+                                },
+                            ),
+                        )],
                         0,
                     )
                     .unwrap(),
@@ -105,8 +107,14 @@ async fn either_finishes_with_one_request_and_all_waits_for_both() {
         use crate::request::readiness::{Node, Plan};
         let dependencies = Plan::checked(
             vec![
-                Node::Leaf((fixture.request, requirement)),
-                Node::Leaf((request, requirement)),
+                Node::Leaf(crate::request::ReadinessDependency::Request(
+                    fixture.request,
+                    requirement,
+                )),
+                Node::Leaf(crate::request::ReadinessDependency::Request(
+                    request,
+                    requirement,
+                )),
                 if any_of {
                     Node::Either(0, 1)
                 } else {

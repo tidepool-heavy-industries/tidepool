@@ -28,16 +28,17 @@ impl TransientWatchLease {
 
 impl Drop for TransientWatchLease {
     fn drop(&mut self) {
-        if self.armed
-            && self
-                .requests
-                .release_transient_watch(self.actor, self.watch)
-                .is_ok()
+        if !self.armed {
+            return;
+        }
+        if let Ok(notifications) = self
+            .requests
+            .release_transient_watch(self.actor, self.watch)
         {
             if let Some(deployments) = self.deployments.clone() {
                 let requests = Arc::clone(&self.requests);
                 tokio::spawn(async move {
-                    publish_request_notifications(&requests, &deployments, Vec::new()).await;
+                    publish_request_notifications(&requests, &deployments, notifications).await;
                 });
             }
         }

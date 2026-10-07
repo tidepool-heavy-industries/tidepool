@@ -95,6 +95,7 @@ pub(crate) enum LeafState {
     /// A settlement projection captures an unavailable outcome as a value.
     SettledFailure(ResponseFailure),
     Failed(RequestId, ResponseFailure),
+    Rejected(ReplyError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,12 +104,14 @@ enum State {
     Ready,
     SettledFailure(ResponseFailure),
     Failed(RequestId, ResponseFailure),
+    Rejected(ReplyError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Ready(Decision),
     Failed(RequestId, ResponseFailure),
+    Rejected(ReplyError),
 }
 
 pub(crate) struct Evaluation {
@@ -143,8 +146,12 @@ impl Evaluation {
                     LeafState::Ready => State::Ready,
                     LeafState::SettledFailure(failure) => State::SettledFailure(failure),
                     LeafState::Failed(request, failure) => State::Failed(request, failure),
+                    LeafState::Rejected(error) => State::Rejected(error),
                 },
                 Node::All(left, right) => match (&self.states[*left], &self.states[*right]) {
+                    (State::Rejected(error), _) | (_, State::Rejected(error)) => {
+                        State::Rejected(*error)
+                    }
                     (State::Failed(request, failure), _) | (_, State::Failed(request, failure)) => {
                         State::Failed(*request, failure.clone())
                     }
@@ -163,6 +170,7 @@ impl Evaluation {
                     match selected {
                         Some(left_selected) => {
                             match &self.states[if left_selected { *left } else { *right }] {
+                                State::Rejected(error) => State::Rejected(*error),
                                 State::Failed(request, failure) => {
                                     State::Failed(*request, failure.clone())
                                 }
@@ -176,6 +184,7 @@ impl Evaluation {
         }
         match &self.states[plan.root] {
             State::Pending => None,
+            State::Rejected(error) => Some(Outcome::Rejected(*error)),
             State::Failed(request, failure) => Some(Outcome::Failed(*request, failure.clone())),
             _ => Some(Outcome::Ready(self.decision(plan))),
         }

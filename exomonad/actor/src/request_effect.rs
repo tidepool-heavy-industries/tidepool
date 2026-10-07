@@ -161,8 +161,9 @@ pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     AwaitWatchWith(i64),
     ForgetWatchWith(i64),
-    ObserveWatchProgressWith(i64, i64, i64, i64),
-    ObserveWatchCommandWith(i64, String),
+    ObserveWatchProgressWith(i64, i64, Vec<i64>, i64, i64),
+    ObserveWatchDecisionWith(i64, Vec<i64>),
+    ObserveWatchCommandWith(i64, Vec<i64>, String),
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -175,6 +176,7 @@ pub(crate) enum AwaitDependency {
     AwaitDependency(i64, bool),
     AwaitProgress(i64, i64),
     AwaitCommand(String),
+    AwaitWatching(i64),
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -191,6 +193,15 @@ pub(crate) enum AwaitNode {
     LeafNode(AwaitDependency),
     AllNode(i64, i64),
     EitherNode(i64, i64),
+}
+
+pub(crate) fn projection_path(path: Vec<i64>) -> Result<Vec<usize>, BridgeError> {
+    path.into_iter()
+        .map(|node| {
+            usize::try_from(node)
+                .map_err(|_| BridgeError::UnsupportedType("negative observation path".into()))
+        })
+        .collect()
 }
 
 impl AwaitPlan {
@@ -229,6 +240,7 @@ impl AwaitPlan {
 pub(crate) enum WatchSubject {
     Request(RequestId),
     Command(String),
+    Watch(WatchId),
 }
 
 impl AwaitDependency {
@@ -245,6 +257,12 @@ impl AwaitDependency {
                 crate::request::WatchRequirement::ProgressAfter(u64::try_from(cursor).map_err(
                     |_| BridgeError::UnsupportedType("negative progress cursor".into()),
                 )?),
+            ),
+            Self::AwaitWatching(watch) => (
+                WatchSubject::Watch(watch_id(watch)?),
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
             ),
             Self::AwaitCommand(job) => (
                 WatchSubject::Command(job),
@@ -495,6 +513,7 @@ impl ToHaskell for RequestAnswer {
             Self::Watch(Ok(WatchObservation::Pending(progress))) => {
                 emit!("RawWatchPending", progress)
             }
+            Self::Watch(Ok(WatchObservation::Rejected(error))) => emit!("RawWatchRejected", error),
             Self::Watch(Ok(WatchObservation::Ready(decision))) => emit!("RawWatchReady", decision),
             Self::Watch(Ok(WatchObservation::Unavailable { request, failure })) => {
                 emit!("RawWatchUnavailable", request, failure)

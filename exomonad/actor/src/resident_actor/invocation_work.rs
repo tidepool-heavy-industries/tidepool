@@ -860,16 +860,17 @@ impl InvocationWork {
                 )),
             }
         }
+        let mut watch_notifications = Vec::new();
         for watch in watches {
-            if let Err(error) = environment
+            match environment
                 .requests
                 .release_transient_watch(self.owner, watch)
             {
-                if error != crate::ReplyError::Stale {
-                    cleanup
-                        .failures
-                        .push(format!("transient watch {} release: {error:?}", watch.0));
-                }
+                Ok(notifications) => watch_notifications.extend(notifications),
+                Err(error) if error != crate::ReplyError::Stale => cleanup
+                    .failures
+                    .push(format!("transient watch {} release: {error:?}", watch.0)),
+                Err(_) => {}
             }
         }
         if tokio::time::timeout(
@@ -877,7 +878,7 @@ impl InvocationWork {
             publish_request_notifications(
                 &environment.requests,
                 &environment.deployments,
-                Vec::new(),
+                watch_notifications,
             ),
         )
         .await

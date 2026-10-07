@@ -314,13 +314,16 @@ impl CommandSettlements {
         &self,
         plan: crate::request::readiness::Plan<(WatchSubject, crate::request::WatchRequirement)>,
     ) -> Result<
-        crate::request::readiness::Plan<(RequestId, crate::request::WatchRequirement)>,
+        crate::request::readiness::Plan<crate::request::ReadinessDependency>,
         crate::request::ReplyError,
     > {
         let mut held = Vec::new();
         let resolved = plan.try_map(|(subject, requirement)| {
             let request = match subject {
                 WatchSubject::Request(request) => request,
+                WatchSubject::Watch(watch) => {
+                    return Ok(crate::request::ReadinessDependency::Watch(watch))
+                }
                 WatchSubject::Command(job) => {
                     self.arm(&job, false, None).map_err(|error| match error {
                         CommandError::CommandUnauthorized => {
@@ -331,7 +334,10 @@ impl CommandSettlements {
                 }
             };
             held.push(request);
-            Ok((request, requirement))
+            Ok(crate::request::ReadinessDependency::Request(
+                request,
+                requirement,
+            ))
         });
         if resolved.is_err() {
             self.requests.release_command_holds(&held);
@@ -341,12 +347,15 @@ impl CommandSettlements {
 
     pub(super) fn release(
         &self,
-        plan: &crate::request::readiness::Plan<(RequestId, crate::request::WatchRequirement)>,
+        plan: &crate::request::readiness::Plan<crate::request::ReadinessDependency>,
     ) {
         self.requests.release_command_holds(
             &plan
                 .leaves()
-                .map(|(_, (request, _))| *request)
+                .filter_map(|(_, dependency)| match dependency {
+                    crate::request::ReadinessDependency::Request(request, _) => Some(*request),
+                    crate::request::ReadinessDependency::Watch(_) => None,
+                })
                 .collect::<Vec<_>>(),
         );
     }
