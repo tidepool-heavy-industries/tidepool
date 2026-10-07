@@ -2646,8 +2646,8 @@ fn seal_turn_outputs_with_validation(
             "turn target product receipt count".into(),
         ));
     }
-    let package_closure =
-        merge_package_closure_with_validation(&receipt.packages, offer.exact.as_ref(), validation)?;
+    let package_catalog =
+        package_availability_with_validation(&receipt.packages, &certified, validation)?;
     enum TargetDemand {
         Checked {
             entry: crate::checked_cell::CheckedTypedEntry,
@@ -2681,7 +2681,7 @@ fn seal_turn_outputs_with_validation(
                 &certified.recovery_products,
                 &certified.groups,
                 &certified.source_selection,
-                &package_closure,
+                &package_catalog.interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)?;
@@ -2694,7 +2694,7 @@ fn seal_turn_outputs_with_validation(
                 &certified.recovery_products,
                 &certified.groups,
                 &certified.source_selection,
-                &package_closure,
+                &package_catalog.interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)?,
@@ -2726,10 +2726,6 @@ fn seal_turn_outputs_with_validation(
             demand,
             validation,
         )?;
-    let typed_entry = match target_demand {
-        TargetDemand::Checked { entry, .. } => Some(entry),
-        TargetDemand::Ordinary(_) => None,
-    };
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
         &certified.groups,
@@ -2739,6 +2735,16 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], |request| request.groups.as_ref()),
         validation,
     )?;
+    let target_imports = match &target_demand {
+        TargetDemand::Checked { imports, .. } | TargetDemand::Ordinary(imports) => {
+            imports.as_slice()
+        }
+    };
+    let package_closure = package_catalog.select(&certified.groups, target_imports)?;
+    let typed_entry = match target_demand {
+        TargetDemand::Checked { entry, .. } => Some(entry),
+        TargetDemand::Ordinary(_) => None,
+    };
     let pending_imports = certified_products::certify_target_owners_with_validation(
         prepared,
         accepted,
@@ -2963,30 +2969,93 @@ fn checked_output_context(
     Ok((context, request.program_source_lexical().to_vec()))
 }
 
-fn merge_package_closure_with_validation(
-    packages: &BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
-    exact: Option<&crate::declaration_context::ExactCompilationRequest>,
-    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-) -> Result<BTreeMap<(String, String), certified_products::PackageInterfaceWitness>, CompileError> {
-    let mut selected = packages.clone();
-    if let Some(request) = exact {
-        let inherited = certified_products::inherited_package_witnesses_with_validation(
-            &request.context.recovery_products(),
-            validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        for (owner, witness) in inherited {
-            if selected
-                .insert(owner, witness.clone())
-                .is_some_and(|old| old != witness)
+struct PackageInterfaceCatalog<'a> {
+    current: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    interfaces: BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+}
+
+impl PackageInterfaceCatalog<'_> {
+    /// Availability supports owner admission; only authenticated target imports
+    /// and selected native imports transfer inherited package authority.
+    fn select(
+        &self,
+        groups: &[certified_products::PendingCertifiedGroup],
+        target_imports: &[certified_products::PendingImportOwner],
+    ) -> Result<BTreeMap<(String, String), certified_products::PackageInterfaceWitness>, CompileError>
+    {
+        let mut demanded = BTreeMap::new();
+        for import in groups
+            .iter()
+            .flat_map(|group| group.imports())
+            .chain(target_imports)
+        {
+            let (unit, module, digest) = match import {
+                certified_products::PendingImportOwner::Package {
+                    unit,
+                    module,
+                    interface_digest,
+                    ..
+                }
+                | certified_products::PendingImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    interface_digest,
+                    ..
+                } => (unit, module, interface_digest),
+                _ => continue,
+            };
+            let owner = (unit.clone(), module.clone());
+            if demanded
+                .insert(owner, *digest)
+                .is_some_and(|old| old != *digest)
             {
                 return Err(CompileError::ExtractFailed(
-                    "exact inherited package selection differs from current target".into(),
+                    "target package demand has conflicting interface digests".into(),
                 ));
             }
         }
+        let mut selected = self.current.clone();
+        for (owner, digest) in demanded {
+            let witness = self
+                .interfaces
+                .get(&owner)
+                .filter(|witness| witness.sha256 == digest)
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "target package demand lacks matching available interface".into(),
+                    )
+                })?;
+            selected.insert(owner, witness.clone());
+        }
+        Ok(selected)
     }
-    Ok(selected)
+}
+
+fn package_availability_with_validation<'a>(
+    packages: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    certified: &certified_products::CertifiedProducts,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<PackageInterfaceCatalog<'a>, CompileError> {
+    let mut selected = packages.clone();
+    let inherited = certified_products::inherited_package_witnesses_with_validation(
+        &certified.recovery_products,
+        validation,
+    )
+    .map_err(compiler_evidence_failure)?;
+    for (owner, witness) in inherited {
+        if selected
+            .insert(owner, witness.clone())
+            .is_some_and(|old| old != witness)
+        {
+            return Err(CompileError::ExtractFailed(
+                "exact inherited package selection differs from current target".into(),
+            ));
+        }
+    }
+    Ok(PackageInterfaceCatalog {
+        current: packages,
+        interfaces: selected,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4041,11 +4110,8 @@ fn compile_invocation_inner(
             ));
         }
         let target_admission_start = Instant::now();
-        let package_closure = merge_package_closure_with_validation(
-            &receipt.packages,
-            exact_request.as_ref(),
-            &mut validation,
-        )?;
+        let package_catalog =
+            package_availability_with_validation(&receipt.packages, &certified, &mut validation)?;
         let mut target_imports = Vec::new();
         for (name, target) in &artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
@@ -4059,7 +4125,7 @@ fn compile_invocation_inner(
                         &certified.recovery_products,
                         &certified.groups,
                         &certified.source_selection,
-                        &package_closure,
+                        &package_catalog.interfaces,
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?,
@@ -4094,6 +4160,7 @@ fn compile_invocation_inner(
                     .map_or(&[], |request| request.groups.as_ref()),
                 &mut validation,
             )?;
+        let package_closure = package_catalog.select(&certified.groups, &target_imports)?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())

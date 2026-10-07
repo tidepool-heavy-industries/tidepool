@@ -11,9 +11,9 @@ use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs
 use crate::recovery_artifacts::PackageInterfaceValidation;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
-    testing, Atom, ExprFrame, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs,
-    InventoryOperation, ResultContract, RuntimeRep, SignatureId, SymbolIdentity, TopBinding,
-    ValueId, ValueRef,
+    testing, Alternative, AlternativePattern, Atom, CaseKind, ExprFrame, GlobalDecl, GlobalId,
+    Group, HeapBinding, HeapRhs, InventoryOperation, ResultContract, RuntimeRep, SignatureId,
+    SymbolIdentity, TopBinding, ValueId, ValueRef,
 };
 
 const MODULE: &str = "PrivatePackageReader";
@@ -64,31 +64,56 @@ fn issue_original(
     root: &Path,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
 ) -> CertifiedProducts {
+    issue_original_with_extra_group(root, packages, None)
+}
+
+fn issue_original_with_extra_group(
+    root: &Path,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    extra_package: Option<SymbolIdentity>,
+) -> CertifiedProducts {
     let source = format!("module {MODULE} where\n");
     let input = root.join(format!("{MODULE}.hs"));
     std::fs::write(&input, &source).unwrap();
-    let mut wire = testing::wire_program();
-    let Group::NonRecursive(top) = &mut wire.bindings[0] else {
-        unreachable!()
-    };
-    top.identity = reader();
-    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
-    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
-    wire.globals.push(GlobalDecl {
-        identity: literal(),
-        rep: RuntimeRep::Address,
-        entry_signature: None,
-        required_evaluated: true,
-        required_generation: None,
-    });
-    let group = testing::projected_group(wire, ORDINAL).unwrap();
+    let mut imports = vec![(ORDINAL, reader(), literal())];
+    if let Some(package) = extra_package {
+        imports.push((
+            ORDINAL + 1,
+            SymbolIdentity {
+                unit: "main".into(),
+                ..testing::identity(MODULE, "unusedReader")
+            },
+            package,
+        ));
+    }
+    let groups = imports
+        .iter()
+        .map(|(ordinal, binder, package)| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity = binder.clone();
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+            wire.expressions.nodes[0] =
+                ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+            wire.globals.push(GlobalDecl {
+                identity: package.clone(),
+                rep: RuntimeRep::Address,
+                entry_signature: None,
+                required_evaluated: true,
+                required_generation: None,
+            });
+            testing::projected_group(wire, *ordinal).unwrap()
+        })
+        .collect();
     let interface = b"private reader interface".to_vec();
     let products =
         tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
             unit: "main".into(),
             module: MODULE.into(),
             interface: interface.clone(),
-            groups: vec![group],
+            groups,
         }]);
     let package_roots = encode(&array([
         text("TPPKGROOTS"),
@@ -139,7 +164,6 @@ fn issue_original(
     worker.sources[0].path = input.clone();
     worker.modules[0].source = input.clone();
     let evidence_bytes = serde_json::to_vec(&worker).unwrap();
-    let package = &packages[&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())];
     let module = CertifiedModuleReceipt {
         origin: ProductOrigin::Fresh,
         unit: "main".into(),
@@ -149,21 +173,27 @@ fn issue_original(
         product_sha256: digest(&products),
         source_sha256: digest(source.as_bytes()),
         dependency_witness_sha256: digest(&evidence_bytes),
-        groups: vec![AcceptedGroup {
-            original_ordinal: ORDINAL,
-            globals: vec![AcceptedGlobal {
-                identity: literal(),
-                rep: RuntimeRep::Address,
-                entry_signature: None,
-                required_evaluated: true,
-                owner: ReceiptImportOwner::Package {
-                    unit: PACKAGE_UNIT.into(),
-                    module: PACKAGE_MODULE.into(),
-                    binder: literal(),
-                    interface_digest: package.sha256,
-                },
-            }],
-        }],
+        groups: imports
+            .into_iter()
+            .map(|(ordinal, _, package)| {
+                let witness = &packages[&(package.unit.clone(), package.module.clone())];
+                AcceptedGroup {
+                    original_ordinal: ordinal,
+                    globals: vec![AcceptedGlobal {
+                        identity: package.clone(),
+                        rep: RuntimeRep::Address,
+                        entry_signature: None,
+                        required_evaluated: true,
+                        owner: ReceiptImportOwner::Package {
+                            unit: package.unit.clone(),
+                            module: package.module.clone(),
+                            binder: package,
+                            interface_digest: witness.sha256,
+                        },
+                    }],
+                }
+            })
+            .collect(),
         interface_requirements: BTreeMap::new(),
     };
     let modules = vec![module];
@@ -196,6 +226,15 @@ fn issue_original(
     .unwrap()
 }
 
+fn selected_package_closure(
+    current: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    certified: &CertifiedProducts,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<BTreeMap<(String, String), PackageInterfaceWitness>, CompileError> {
+    package_availability_with_validation(current, certified, validation)?
+        .select(&certified.groups, &[])
+}
+
 #[test]
 fn private_original_package_witness_survives_sparse_literal_target() {
     let directory = tempfile::tempdir().unwrap();
@@ -222,7 +261,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             },
         ),
     ]);
-    let issued = issue_original(directory.path(), &packages);
+    let mut issued = issue_original(directory.path(), &packages);
     assert_eq!(issued.recovery_products.len(), 1);
     assert_eq!(issued.groups.len(), 1);
     assert!(matches!(issued.groups[0].imports(),
@@ -296,6 +335,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         },
     }));
     let signature = target_wire.signatures[0].clone();
+    let mut late_wire = target_wire.clone();
     let target = Arc::new(testing::prepare(target_wire).unwrap());
     let original = &issued.recovery_products[0];
     let accepted = vec![AcceptedGlobal {
@@ -337,9 +377,14 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let public_request = public_original
         .prepare_compilation(&directory.path().join("public-original-inputs"), &PRODUCER)
         .unwrap();
-    let inherited = merge_package_closure_with_validation(
+    assert_eq!(public_request.groups[0].owner(), issued.groups[0].owner());
+    assert_eq!(
+        public_request.groups[0].imports(),
+        issued.groups[0].imports()
+    );
+    let inherited = selected_package_closure(
         &BTreeMap::new(),
-        Some(&public_request),
+        &issued,
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
@@ -349,9 +394,9 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     );
     assert!(!inherited.contains_key(&arbitrary_owner));
     std::fs::write(&witness.selected_path, b"changed package interface").unwrap();
-    assert!(merge_package_closure_with_validation(
+    assert!(selected_package_closure(
         &BTreeMap::new(),
-        Some(&public_request),
+        &issued,
         &mut PackageInterfaceValidation::default(),
     )
     .is_err());
@@ -365,9 +410,9 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             sha256: witness.sha256,
         },
     )]);
-    assert!(merge_package_closure_with_validation(
+    assert!(selected_package_closure(
         &conflicting,
-        Some(&public_request),
+        &issued,
         &mut PackageInterfaceValidation::default(),
     )
     .is_err());
@@ -375,9 +420,9 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         (PACKAGE_UNIT.into(), PACKAGE_MODULE.into()),
         witness.clone(),
     )]);
-    let current = merge_package_closure_with_validation(
+    let current = selected_package_closure(
         &current,
-        Some(&request),
+        &issued,
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
@@ -393,12 +438,199 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     );
     assert!(!current.contains_key(&arbitrary_owner));
 
+    // Custody without a selected native package edge does not grant a target
+    // package witness, even when the original still owns that witness.
+    let selected_groups = std::mem::take(&mut issued.groups);
+    let unselected = selected_package_closure(
+        &BTreeMap::new(),
+        &issued,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert!(unselected.is_empty());
+
+    // A source root and a direct package global can both be admitted before
+    // the first native group is selected. Availability is not target evidence.
+    let empty_view = view
+        .inventory()
+        .admit_recovery_selection(
+            &view.inventory().empty_view(),
+            view.entries(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    assert!(empty_view.selected_native_groups().is_empty());
+    let empty_private =
+        OriginalCompilerInputs::from_selection(&issued.source_selection, &empty_view).unwrap();
+    let late_request = public
+        .prepare_compilation(&directory.path().join("late-public-inputs"), &PRODUCER)
+        .unwrap()
+        .in_program_context_with_private_input(
+            &directory.path().join("late-private-inputs"),
+            public.clone(),
+            &empty_private,
+        )
+        .unwrap();
+    assert!(late_request.groups.is_empty());
+    let late_effective = late_request.compiler_inputs().unwrap();
+    let late_selection = CertifiedSourceSelection::from_compiler_projection(
+        &late_effective.projection,
+        &late_effective.metadata,
+        &InventoryOperation::new(Default::default()),
+    )
+    .unwrap();
+    late_wire.globals.push(GlobalDecl {
+        identity: literal(),
+        rep: RuntimeRep::Address,
+        entry_signature: None,
+        required_evaluated: true,
+        required_generation: None,
+    });
+    late_wire
+        .expressions
+        .nodes
+        .push(ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(
+            GlobalId(1),
+        ))]));
+    late_wire.expressions.nodes.push(ExprFrame::Case {
+        scrutinee: 0,
+        binder: ValueId(2),
+        scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Address]),
+        kind: CaseKind::Polymorphic,
+        alternatives: vec![Alternative {
+            pattern: AlternativePattern::Default,
+            binders: Vec::new(),
+            body: 1,
+        }],
+    });
+    let Group::NonRecursive(top) = &mut late_wire.bindings[0] else {
+        unreachable!()
+    };
+    let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+        unreachable!()
+    };
+    *body = 2;
+    let late_target = Arc::new(testing::prepare(late_wire).unwrap());
+    let mut late_accepted = accepted.clone();
+    late_accepted.push(AcceptedGlobal {
+        identity: literal(),
+        rep: RuntimeRep::Address,
+        entry_signature: None,
+        required_evaluated: true,
+        owner: ReceiptImportOwner::Package {
+            unit: PACKAGE_UNIT.into(),
+            module: PACKAGE_MODULE.into(),
+            binder: literal(),
+            interface_digest: witness.sha256,
+        },
+    });
+    let empty_packages = BTreeMap::new();
+    let catalog = package_availability_with_validation(
+        &empty_packages,
+        &issued,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    let late_imports = certified_products::certify_target_available_owners_with_validation(
+        &late_target,
+        &late_accepted,
+        &issued.recovery_products,
+        &issued.groups,
+        &late_selection,
+        &catalog.interfaces,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        late_imports.as_slice(),
+        [
+            PendingImportOwner::Source { .. },
+            PendingImportOwner::Package { .. }
+        ]
+    ));
+    let demanded_view =
+        crate::declaration_context::certified_product_artifact_view_with_validation(
+            producer,
+            &issued.recovery_products,
+            &issued.module_interfaces,
+            &issued.value_interfaces,
+            Some(&late_effective.artifacts),
+            NativeArtifactDemand::CertifiedTargetImports(&late_imports),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+    let late_groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
+        &demanded_view,
+        &issued.groups,
+        late_request.groups.as_ref(),
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert_eq!(late_groups.len(), 1);
+    let direct_only = catalog.select(&[], &late_imports[1..]).unwrap();
+    assert_eq!(
+        direct_only.get(&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())),
+        Some(&witness)
+    );
+    let native_only = catalog.select(&late_groups, &[]).unwrap();
+    assert_eq!(
+        native_only.get(&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())),
+        Some(&witness)
+    );
+    let late_closure = catalog.select(&late_groups, &late_imports).unwrap();
+    let late_interfaces = certified_products::certify_target_package_interfaces_with_validation(
+        &late_target,
+        &late_closure,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        late_interfaces.interface_digest(PACKAGE_UNIT, PACKAGE_MODULE),
+        Some(witness.sha256)
+    );
+    assert!(!late_closure.contains_key(&arbitrary_owner));
+    assert!(late_request.context.lexical_graph().is_empty());
+    assert!(late_request.context.compiler_input_roles().is_empty());
+    issued.groups = selected_groups;
+    let archive_root = directory.path().join("two-native-groups");
+    std::fs::create_dir_all(&archive_root).unwrap();
+    let mut subset = issue_original_with_extra_group(
+        &archive_root,
+        &packages,
+        Some(SymbolIdentity {
+            unit: PACKAGE_UNIT.into(),
+            ..testing::identity("External.Unselected", "literal")
+        }),
+    );
+    assert_eq!(subset.groups.len(), 2);
+    let all_groups = selected_package_closure(
+        &BTreeMap::new(),
+        &subset,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert!(all_groups.contains_key(&arbitrary_owner));
+    subset
+        .groups
+        .retain(|group| group.group().original_ordinal() == ORDINAL);
+    let selected = selected_package_closure(
+        &BTreeMap::new(),
+        &subset,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        selected.get(&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())),
+        Some(&witness)
+    );
+    assert!(!selected.contains_key(&arbitrary_owner));
+
     // The later output has only a source global and an external Bytes binding.
     // Its sparse module receipt cannot repeat the private reader's imports,
     // and Bytes does not issue a local package export witness in the worker.
-    let inherited = merge_package_closure_with_validation(
+    let inherited = selected_package_closure(
         &BTreeMap::new(),
-        Some(&request),
+        &issued,
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
