@@ -320,6 +320,10 @@ impl EventJournal {
 }
 
 #[cfg(test)]
+#[path = "journal_properties.rs"]
+mod properties;
+
+#[cfg(test)]
 mod version_tests {
     use super::*;
     use crate::id::{GitOid, WorktreeId};
