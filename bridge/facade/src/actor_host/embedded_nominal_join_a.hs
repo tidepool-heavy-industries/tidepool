@@ -12,9 +12,9 @@ m2JoinA <- do
     ((defaultSpawnOptions workerSpec) { spawnLabel = Just "original-alpha", spawnLifetime = ActorOwned })
   Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
     ((defaultSpawnOptions workerSpec) { spawnLabel = Just "original-beta", spawnLifetime = ActorOwned })
-  Right alphaRequest <- request @M2Reply alpha (m2OriginalAssignment [label|original-alpha|])
+  Right alphaRequest <- request @M2Reply alpha m2OriginalInput
     (defaultRequestOptions { requestLabel = Just "original-alpha" })
-  Right betaRequest <- request @M2Reply beta (m2OriginalAssignment [label|original-beta|])
+  Right betaRequest <- request @M2Reply beta m2OriginalInput
     (defaultRequestOptions { requestLabel = Just "original-beta" })
   R.send (storeAgents (R.client groupStore)) [alpha, beta]
   replies <- watch (Just "original-nominal-replies")
