@@ -208,7 +208,7 @@ import Tidepool.ExactScope
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
@@ -3902,22 +3902,32 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
   putStrLn "native checked signatures: 7 shapes, source-free nominal slot and authority/slot refusals passed"
 
 originalHomeThinInterfaceTest :: IO ()
-originalHomeThinInterfaceTest = originalThinInterfaceTest False
+originalHomeThinInterfaceTest = originalThinInterfaceTest OriginalHomeThinInput
 
 packageOnlyThinInterfaceTest :: IO ()
-packageOnlyThinInterfaceTest = originalThinInterfaceTest True
+packageOnlyThinInterfaceTest = originalThinInterfaceTest PackageTextThinInput
+
+wiredInPackageThinInterfaceTest :: IO ()
+wiredInPackageThinInterfaceTest = originalThinInterfaceTest PackageUnitThinInput
+
+data ThinInputFixture = OriginalHomeThinInput | PackageTextThinInput | PackageUnitThinInput
+  deriving Eq
 
 -- Compile once to obtain genuine original authority, then remove the source.
 -- The only operation below that removal is the native interface transaction.
-originalThinInterfaceTest :: Bool -> IO ()
-originalThinInterfaceTest packageOnly = withScratch $ \work -> do
+originalThinInterfaceTest :: ThinInputFixture -> IO ()
+originalThinInterfaceTest inputFixture = withScratch $ \work -> do
   let source = work </> "HostActivationOwner.hs"
       output = work </> "thin-output"
       manifest = work </> "thin-offer.cbor"
-  if packageOnly then writeFile source (unlines
-    ["module HostActivationOwner where", "import Data.Text (Text)"
-    ,"__result :: Text", "__result = undefined"])
-    else copyFile "test-source-boot/fixtures/HostActivationOwnerOriginal.hs" source
+      packageOnly = inputFixture /= OriginalHomeThinInput
+  case inputFixture of
+    OriginalHomeThinInput -> copyFile "test-source-boot/fixtures/HostActivationOwnerOriginal.hs" source
+    PackageTextThinInput -> writeFile source (unlines
+      ["module HostActivationOwner where", "import Data.Text (Text)"
+      ,"__result :: Text", "__result = undefined"])
+    PackageUnitThinInput -> writeFile source (unlines
+      ["module HostActivationOwner where", "__result :: ()", "__result = ()"])
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source [work] Nothing
   let pipeline = pprPipelineResult original
   ty <- maybe (fail "thin fixture has no native input type") pure (prResultType pipeline)
@@ -3932,6 +3942,17 @@ originalThinInterfaceTest packageOnly = withScratch $ \work -> do
   signature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes (decodeListLen >> decodeString >> decodeString >> decodeCheckedSignature)
       (BSL.fromStrict offered))
+  when (inputFixture == PackageUnitThinInput) $ withExactInterfaceTransaction [] $ \environment -> do
+    void (resolveCheckedSignature environment signature)
+    external <- hscEPS environment
+    owner <- case witnessTerm of
+      TList [_,_,_,_,TList [TList [TString unit,TString name,_]]] ->
+        pure (mkModule (stringToUnit (T.unpack unit)) (mkModuleName (T.unpack name)))
+      _ -> fail "unit fixture does not have one original package owner"
+    unless (isNothing (lookupModuleEnv (eps_PIT external) owner))
+      (fail "unit fixture did not exercise signature resolution without a loaded package interface")
+    putStrLn ("thin unit fixture: unresolved original interface owner="
+      ++ unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner))
   fixture <- capturePreparedFixture work original
   scopePath <- writeGenuineMetadataScope work ["HostActivationOwner" | not packageOnly] fixture
   scope <- readExactScope scopePath >>= either fail pure
@@ -3972,12 +3993,27 @@ originalThinInterfaceTest packageOnly = withScratch $ \work -> do
         (emit 72 (OriginalLiveInput (encoded (TList (replace 2 badSignature values)))) signature)
       case values !! 3 of
         TBytes shape -> do
-          altered <- term shape >>= \case
+          shapeTerm <- term shape
+          altered <- case shapeTerm of
             TList [tag, owner, TList arguments] -> pure (TList [tag, owner, TList (arguments ++ [TList [tag, owner, TList arguments]])])
             _ -> fail "thin fixture has no nominal canonical structure"
           let mismatch = encoded (TList (replace 3 (TBytes (encoded altered)) values))
           requireUserError "same owner different structure" "original input type structure or original interface seals differ from offer"
             (emit 76 (OriginalLiveInput mismatch) signature)
+          case (shapeTerm, values !! 4) of
+            (TList [tag,TList owner,arguments], TList seals)
+              | TString unit:TString name:_ <- owner -> do
+                  let changedName = TString (name <> "AlteredOwner")
+                      changedShape = TList [tag,TList (replace 1 changedName owner),arguments]
+                      changeSeal (TList seal)
+                        | take 2 seal == [TString unit,TString name] = TList (replace 1 changedName seal)
+                      changeSeal seal = seal
+                      changed = encoded (TList (replace 4 (TList (map changeSeal seals))
+                        (replace 3 (TBytes (encoded changedShape)) values)))
+                  either fail pure (validateCheckedTypeWitnessBytes changed)
+                  requireUserError "different original owner" "original input type structure or original interface seals differ from offer"
+                    (emit 77 (OriginalLiveInput changed) signature)
+            _ -> fail "thin fixture has no canonical owner to alter"
         _ -> fail "thin fixture canonical structure is not bytes"
       case values !! 4 of
         TList (TList seal : seals) -> do
@@ -4017,7 +4053,7 @@ originalThinInterfaceTest packageOnly = withScratch $ \work -> do
   outputs <- filesAt output
   unless (sort outputs == sort [path, path ++ ".packages", path ++ ".requirements"])
     (fail "thin issuer emitted products beyond the native interface companions")
-  forM_ [72,73,74,75,76] $ \generation -> do
+  forM_ [72,73,74,75,76,77] $ \generation -> do
     exists <- doesFileExist (sessionHiPath output (SessionModule ValMod (Generation generation)))
     when exists (fail "refused thin interface published a binding")
  where
