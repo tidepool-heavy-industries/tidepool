@@ -1320,9 +1320,11 @@ async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
 
 const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
      import Tidepool.Actors.Exomonad\n\
+     import qualified AgentSpec as Spec\n\
+     import qualified Project.Tools as Tools\n\
      Right seed <- checkpoint \"agent-spec child context\"\n\
      Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
-       ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))\n\
+       ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec Tools.SpecTools '[Replies, Commands, Lookup, BoundWorktree]))\n\
          { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
          , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
      Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";

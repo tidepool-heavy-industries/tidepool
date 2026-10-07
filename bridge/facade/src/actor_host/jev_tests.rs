@@ -1623,9 +1623,12 @@ fn watchdog_child_script(label: &str) -> String {
     format!(
         "import qualified Tidepool.Agent.Contract as A\n\
          import Tidepool.Actors.Exomonad\n\
+         import Tidepool.Effects.Core (ActorContext, Jev, Notifications, Reflect)\n\
+         import qualified AgentSpec as Spec\n\
+         import qualified Project.Tools as Tools\n\
          Right seed <- checkpoint \"watchdog child context\"\n\
          Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
-           ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))\n\
+           ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec Tools.WatchdogTools '[Replies, Commands, Lookup, BoundWorktree, Jev, ActorContext, Notifications, Reflect]))\n\
              {{ spawnLabel = Just \"{label}\", spawnLifetime = ActorOwned\n\
              , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" }})\n\
          Right worker <- request @Text child () (defaultRequestOptions {{ requestLabel = Just \"{label}\" }})\n"
