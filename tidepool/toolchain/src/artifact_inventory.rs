@@ -1160,7 +1160,7 @@ impl ArtifactInventory {
         }
         expanded.extend(implicit);
         let mut state = self.0.lock().expect("inventory lock");
-        let parent_nodes = closure(&state, parent.roots().into_iter());
+        let parent_nodes = admitted_closure(&state, parent.roots().into_iter());
         let parent_ids = artifact_ids(&parent_nodes);
         let mut supplied = BTreeMap::new();
         for entry in expanded {
@@ -1185,7 +1185,7 @@ impl ArtifactInventory {
             .collect::<Vec<_>>();
         roots.extend(groups.iter().copied().map(InventoryNodeKey::Group));
         let mut selected_ids = parent_ids.clone();
-        selected_ids.extend(artifact_ids(&closure(
+        selected_ids.extend(artifact_ids(&admitted_closure(
             &state,
             supplied.keys().copied().map(InventoryNodeKey::Artifact),
         )));
@@ -1283,7 +1283,7 @@ impl Drop for ViewLease {
         // This also handles cycles without scanning unrelated graph history.
         let started = std::time::Instant::now();
         state.reclamation_runs += 1;
-        let candidates = closure(&state, lost_roots.into_iter());
+        let candidates = admitted_closure(&state, lost_roots.into_iter());
         state.reclamation_candidate_nodes += candidates.len() as u64;
         let survivors = candidates
             .iter()
@@ -1296,7 +1296,7 @@ impl Drop for ViewLease {
                         .any(|edge| !candidates.contains(&state.graph[edge.source()]))
             })
             .collect::<Vec<_>>();
-        let retained = closure(&state, survivors.into_iter());
+        let retained = admitted_closure(&state, survivors.into_iter());
         for id in candidates.difference(&retained) {
             let index = state.indices.remove(id).expect("indexed artifact");
             state.graph.remove_node(index);
@@ -1309,23 +1309,26 @@ impl Drop for ViewLease {
         // Parent drops after the lock guard, preserving recursive release.
     }
 }
-fn closure(
+fn admitted_closure(
     state: &InventoryState,
     roots: impl Iterator<Item = InventoryNodeKey>,
 ) -> BTreeSet<InventoryNodeKey> {
     let mut pending = roots.collect::<Vec<_>>();
     let mut seen = BTreeSet::new();
     while let Some(id) = pending.pop() {
+        // Planned seeds are validated by the admission solver, not represented
+        // as retained vertices until its complete atomic plan is committed.
+        let Some(index) = state.indices.get(&id) else {
+            continue;
+        };
         if seen.insert(id) {
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            if let Some(index) = state.indices.get(&id) {
-                pending.extend(
-                    state
-                        .graph
-                        .edges(*index)
-                        .map(|edge| state.graph[edge.target()]),
-                );
-            }
+            pending.extend(
+                state
+                    .graph
+                    .edges(*index)
+                    .map(|edge| state.graph[edge.target()]),
+            );
         }
     }
     seen
@@ -1479,7 +1482,7 @@ impl ArtifactView {
     pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
-        let nodes = closure(&state, self.roots().into_iter());
+        let nodes = admitted_closure(&state, self.roots().into_iter());
         let selected_native_groups = native_groups(&nodes);
         let mut entries = BTreeMap::new();
         let mut artifacts = BTreeMap::new();
@@ -1548,11 +1551,11 @@ impl ArtifactView {
     }
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        projected_dependencies(&state, &closure(&state, self.roots().into_iter()))
+        projected_dependencies(&state, &admitted_closure(&state, self.roots().into_iter()))
     }
     pub fn selected_native_groups(&self) -> BTreeSet<NativeGroupKey> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        native_groups(&closure(&state, self.roots().into_iter()))
+        native_groups(&admitted_closure(&state, self.roots().into_iter()))
     }
     /// Interface dependencies remain independent of executable group demand.
     pub fn interface_dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
@@ -1576,7 +1579,7 @@ impl ArtifactView {
         roots: &[NativeRequirementRoot],
     ) -> Result<NativeRequirements, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        let owned = closure(&state, self.roots().into_iter());
+        let owned = admitted_closure(&state, self.roots().into_iter());
         let mut pending = Vec::new();
         for root in roots {
             let (id, ordinals) = match *root {
@@ -1693,7 +1696,7 @@ impl ArtifactView {
     /// source view's lifetime. Hidden dependencies remain graph-owned.
     pub fn select_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        let owned = closure(&state, self.roots().into_iter());
+        let owned = admitted_closure(&state, self.roots().into_iter());
         if roots
             .iter()
             .any(|id| !owned.contains(&InventoryNodeKey::Artifact(*id)))
@@ -1725,10 +1728,10 @@ impl ArtifactView {
         }
         if Arc::ptr_eq(&self.0.inventory.0, &other.0.inventory.0) {
             let state = self.0.inventory.0.lock().expect("inventory lock");
-            let parent_nodes = closure(&state, self.roots().into_iter());
+            let parent_nodes = admitted_closure(&state, self.roots().into_iter());
             let parent_ids = artifact_ids(&parent_nodes);
             let mut nodes = parent_nodes.clone();
-            nodes.extend(closure(&state, other.roots().into_iter()));
+            nodes.extend(admitted_closure(&state, other.roots().into_iter()));
             let ids = artifact_ids(&nodes);
             let entries = ids
                 .iter()
@@ -1761,7 +1764,7 @@ impl ArtifactView {
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
-        let mut entries = artifact_ids(&closure(&state, self.roots().into_iter()))
+        let mut entries = artifact_ids(&admitted_closure(&state, self.roots().into_iter()))
             .iter()
             .filter_map(|id| state.payloads.get(id).cloned())
             .collect::<Vec<_>>();
@@ -1796,7 +1799,7 @@ impl ArtifactView {
         owners: impl Iterator<Item = ExactModuleIdentity>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        let owned = closure(&state, self.roots().into_iter());
+        let owned = admitted_closure(&state, self.roots().into_iter());
         let mut interfaces = BTreeMap::new();
         let mut native = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
         for id in artifact_ids(&owned) {
@@ -1836,7 +1839,7 @@ impl ArtifactView {
         owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        let owned = closure(&state, self.roots().into_iter());
+        let owned = admitted_closure(&state, self.roots().into_iter());
         let selected = artifact_ids(&owned)
             .iter()
             .filter_map(|id| {
@@ -1883,6 +1886,77 @@ mod native_history_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_original_admission_distinguishes_supplied_rows_from_retained_vertices() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let original = native_entry("ColdOriginal", &[]);
+        let id = original.descriptor.id;
+        let groups = original
+            .native_group_ordinals
+            .iter()
+            .map(|ordinal| NativeGroupKey {
+                artifact: id,
+                original_ordinal: *ordinal,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!groups.is_empty());
+        let planned = std::iter::once(InventoryNodeKey::Artifact(id))
+            .chain(groups.iter().copied().map(InventoryNodeKey::Group));
+        assert!(admitted_closure(&inventory.0.lock().unwrap(), planned).is_empty());
+        let first = inventory.admit(&empty, vec![original.clone()]).unwrap();
+        assert_eq!(first.selected_native_groups(), groups);
+        assert!(first.artifact_ids().contains(&id));
+        first
+            .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(id)])
+            .unwrap();
+        let node_count = inventory.node_count();
+        let reused = inventory.admit(&first, vec![original]).unwrap();
+        assert_eq!(reused, first);
+        assert_eq!(inventory.node_count(), node_count);
+        let missing = inventory
+            .admit(&reused, vec![entry("NeedsMissing", &["Missing"])])
+            .unwrap_err();
+        assert!(
+            matches!(missing, CompileError::ArtifactInventory(ref error) if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. }))
+        );
+        assert_eq!(inventory.node_count(), node_count);
+        assert_eq!(first.selected_native_groups(), groups);
+    }
+
+    #[test]
+    fn admitted_closure_never_adds_unknown_artifact_or_group_seeds() {
+        let inventory = ArtifactInventory::default();
+        let original = native_entry("Existing", &[]);
+        let id = original.descriptor.id;
+        let retained = inventory
+            .admit(&inventory.empty_view(), vec![original])
+            .unwrap();
+        let unknown_id = ArtifactId([0xfe; 32]);
+        let unknown_group = NativeGroupKey {
+            artifact: id,
+            original_ordinal: u32::MAX,
+        };
+        let state = inventory.0.lock().unwrap();
+        let known = admitted_closure(&state, retained.roots().into_iter());
+        let mixed = admitted_closure(
+            &state,
+            retained.roots().into_iter().chain([
+                InventoryNodeKey::Artifact(unknown_id),
+                InventoryNodeKey::Group(unknown_group),
+            ]),
+        );
+        assert_eq!(mixed, known);
+        drop(state);
+        assert!(retained.select_roots(vec![unknown_id]).is_err());
+        assert!(retained
+            .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: id,
+                original_ordinal: u32::MAX,
+            }])
+            .is_err());
+    }
 
     #[test]
     fn canonical_producer_identity_preserves_exact_artifact_digest() {
