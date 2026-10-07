@@ -21,14 +21,14 @@ pub struct ResidentInteractivePolicy {
 }
 
 impl ResidentInteractivePolicy {
-    /// Project the persistent Haskell workbench of this exact actor incarnation.
+    /// Project only the reserved status and reload controls of this incarnation.
+    /// This constructor does not expose Haskell or other authored AgentSpec tools.
+    /// Retain `LocalResidentDeployment::PolicyInstalled`'s installation policy
+    /// for authored tools. Native notebook tests use the workbench client's
+    /// admission path rather than this controls-only projection.
+    ///
     /// All dispatch, completion, reattachment and sealing target this same actor;
     /// construction neither creates a session nor grants additional authority.
-    ///
-    /// Host composition should construct this projection from its owned actor
-    /// rather than accept an independently supplied endpoint/actor pair. Each
-    /// projection has a client serialization gate; the actor mailbox remains
-    /// the shared admission and execution owner across multiple projections.
     pub fn local(actor: crate::LocalActorRef) -> Self {
         Self::with_client(ResidentToolClient::local(actor))
     }
