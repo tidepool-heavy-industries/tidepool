@@ -128,6 +128,7 @@ defaultRequestOptions = RequestOptions Nothing Nothing Nothing NotifyOwner Actor
 data RequestError
   = RequestReservationRejected ReplyError
   | RequestSubmissionRejected ReplyError
+  | RequestInvalidDeadline Text
   deriving (Show, Eq)
 
 newtype Reply (result :: Type) = Reply RequestId
