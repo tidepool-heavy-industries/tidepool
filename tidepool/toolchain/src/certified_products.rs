@@ -401,6 +401,8 @@ pub(crate) fn authenticates_original_native_entry(
 ) -> bool {
     product.original_native().is_some_and(|witness| {
         witness.matches_original(product)
+            && binder.unit == witness.owner.unit
+            && binder.module == witness.owner.module
             && witness.groups.iter().any(|group| {
                 group.group.original_ordinal() == original_ordinal
                     && group.group.binders().contains(binder)
