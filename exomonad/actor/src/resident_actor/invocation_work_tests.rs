@@ -1028,6 +1028,156 @@ async fn invocation_cleanup_releases_transient_watch_without_cancelling_target()
     fixture.finish().await;
 }
 
+#[tokio::test]
+async fn failed_actor_route_releases_transient_leases_before_next_callback() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    let request = fixture.environment.requests.reserve(owner, target);
+    fixture
+        .environment
+        .requests
+        .mark_queued(owner, target, request)
+        .unwrap();
+    let descriptor = ActorDescriptor::new(
+        "callback cleanup fixture",
+        crate::ActorPlacement {
+            session: tidepool_repr::SessionId(1),
+            resource_scope: RealmId::fresh(),
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    );
+    let mut behavior = ResidentKernelBehavior::with_boot(
+        descriptor,
+        fixture.environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    for (ordinal, result) in [
+        Err("callback evaluation failed".to_string()),
+        Err("callback cancelled".to_string()),
+        Ok(()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let provenance = RequestReservationOwner::Route(crate::WatchId(700 + ordinal as u64));
+        behavior.active_route_reservation_owner = Some(provenance.clone());
+        let effects = behavior.actor_effect_owner(owner);
+        assert!(
+            effects.invocation_work().is_none(),
+            "callback leases do not alter request defaults"
+        );
+        let work = effects
+            .ephemeral_work()
+            .expect("actor callback lease owner");
+        assert!(work.matches(owner, &provenance));
+        assert_eq!(behavior.retained_scope_roots().len(), ordinal + 1);
+        let watch = fixture
+            .environment
+            .requests
+            .register_transient_watch(
+                owner,
+                crate::request::test_readiness_groups(vec![vec![(
+                    request,
+                    WatchRequirement::Response {
+                        allow_failure: false,
+                    },
+                )]]),
+            )
+            .unwrap();
+        work.register_transient_watch(watch).unwrap();
+        let subscription = fixture
+            .environment
+            .requests
+            .subscribe_watch(owner, watch)
+            .unwrap();
+        assert_eq!(work.state.lock().watches.len(), 1);
+        let expected = result.clone();
+        assert_eq!(
+            behavior
+                .finish_callback_resources(&fixture.kernel, &work, result)
+                .await,
+            expected
+        );
+        assert!(work.is_closed());
+        assert!(work.state.lock().watches.is_empty());
+        assert!(!fixture.environment.requests.retains_watch(owner, watch));
+        assert!(fixture
+            .environment
+            .requests
+            .watches_overview(owner)
+            .watches
+            .is_empty());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), subscription.wait())
+                .await
+                .unwrap(),
+            Err(crate::ReplyError::Stale)
+        );
+        assert!(matches!(
+            fixture
+                .environment
+                .requests
+                .observe_response(owner, request),
+            Ok(ResponseObservation::Pending(_))
+        ));
+    }
+    behavior.active_route_reservation_owner = None;
+    let actor_root = behavior.actor_effect_owner(owner).ephemeral_work().unwrap();
+    let same_root = behavior.actor_effect_owner(owner).ephemeral_work().unwrap();
+    assert!(Arc::ptr_eq(&actor_root, &same_root));
+    assert_eq!(behavior.retained_scope_roots().len(), 4);
+    assert!(
+        !actor_root.is_closed(),
+        "failed route does not close later actor callbacks"
+    );
+    fixture.cleanup(&actor_root).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn explicit_projection_release_removes_actor_callback_membership() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    let request = fixture.environment.requests.reserve(owner, target);
+    fixture
+        .environment
+        .requests
+        .mark_queued(owner, target, request)
+        .unwrap();
+    let mut journal = workbench_ledger::WorkbenchExecutions::default();
+    let work = journal.actor_scope_root(owner);
+    for _ in 0..8 {
+        let watch = fixture
+            .environment
+            .requests
+            .register_transient_watch(
+                owner,
+                crate::request::test_readiness_groups(vec![vec![(
+                    request,
+                    WatchRequirement::Response {
+                        allow_failure: false,
+                    },
+                )]]),
+            )
+            .unwrap();
+        work.register_transient_watch(watch).unwrap();
+        fixture
+            .environment
+            .requests
+            .release_transient_watch(owner, watch)
+            .unwrap();
+        work.release_transient_watch_membership(watch);
+        assert!(work.state.lock().watches.is_empty());
+        assert!(!fixture.environment.requests.retains_watch(owner, watch));
+        assert_eq!(journal.invocation_work().len(), 1);
+    }
+    fixture.cleanup(&work).await;
+    fixture.finish().await;
+}
+
 struct PendingBackend {
     cancellations: AtomicUsize,
     finish: tokio::sync::Semaphore,

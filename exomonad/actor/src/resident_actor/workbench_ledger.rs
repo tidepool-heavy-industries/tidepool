@@ -182,10 +182,18 @@ impl WorkbenchExecutions {
     }
 
     pub(super) fn actor_scope_root(&mut self, actor: ActorRef) -> Arc<InvocationWork> {
-        if let Some(root) = self.1.iter().find(|root| root.is_owned_by(actor)) {
+        self.callback_root(actor, RequestReservationOwner::Scope(0))
+    }
+
+    pub(super) fn callback_root(
+        &mut self,
+        actor: ActorRef,
+        reservation: RequestReservationOwner,
+    ) -> Arc<InvocationWork> {
+        if let Some(root) = self.1.iter().find(|root| root.matches(actor, &reservation)) {
             return root.clone();
         }
-        let root = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let root = InvocationWork::new(actor, reservation);
         self.1.push(root.clone());
         root
     }

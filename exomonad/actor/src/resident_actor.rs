@@ -3239,6 +3239,7 @@ enum CurrentEffectOwner<'a> {
         scope: Arc<InvocationWork>,
     },
     Actor {
+        ephemeral_work: Arc<InvocationWork>,
         publication: CheckpointPublication,
         reservation_owner: Option<RequestReservationOwner>,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
@@ -3282,6 +3283,7 @@ impl CurrentEffectOwner<'_> {
     fn ephemeral_work(&self) -> Option<Arc<InvocationWork>> {
         match self {
             Self::Scoped { scope, .. } => Some(scope.clone()),
+            Self::Actor { ephemeral_work, .. } => Some(ephemeral_work.clone()),
             _ => self.invocation_work(),
         }
     }
@@ -3899,7 +3901,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn actor_effect_owner(&self, actor: ActorRef) -> CurrentEffectOwner<'static> {
         let control = crate::resident_workbench::execution_control();
+        let ephemeral_work = match &self.active_route_reservation_owner {
+            Some(reservation) => self
+                .workbench_executions
+                .lock()
+                .callback_root(actor, reservation.clone()),
+            None => self.workbench_executions.lock().actor_scope_root(actor),
+        };
         CurrentEffectOwner::Actor {
+            ephemeral_work,
             publication: self.checkpoint_publication.clone(),
             reservation_owner: control
                 .as_ref()
@@ -5303,6 +5313,7 @@ where
         let publication = effect_owner.publication().clone();
         let control = effect_owner.control();
         let invocation_work = effect_owner.invocation_work();
+        let ephemeral_work = effect_owner.ephemeral_work();
         let operation: futures_util::future::BoxFuture<
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
@@ -5732,6 +5743,11 @@ where
                 let released = environment
                     .requests
                     .release_transient_watch(context.actor, release.watch);
+                if released.is_ok() || matches!(&released, Err(crate::ReplyError::Stale)) {
+                    if let Some(work) = ephemeral_work {
+                        work.release_transient_watch_membership(release.watch);
+                    }
+                }
                 let outcome = match released {
                     Ok(notifications) => {
                         publish_request_notifications(
@@ -11594,6 +11610,10 @@ where
                 return Ok(KernelStep::Continue(()));
             };
             let reservation_owner = RequestReservationOwner::Route(watch);
+            let route_work = self
+                .workbench_executions
+                .lock()
+                .callback_root(context.actor, reservation_owner.clone());
             let previous_reservation_owner = self
                 .active_route_reservation_owner
                 .replace(reservation_owner.clone());
@@ -11688,13 +11708,11 @@ where
                     .await
                     .map_err(|error| error.to_string());
             }
-
+            // Projection and nested scope resources belong to this callback.
+            result = self
+                .finish_callback_resources(kernel, &route_work, result)
+                .await;
             self.active_route_reservation_owner = previous_reservation_owner;
-            let (_, notifications) = self
-                .environment
-                .requests
-                .abort_unsubmitted(context.actor, &reservation_owner);
-            self.publish_watch_notifications(notifications).await;
             self.checkpoint_publication = CheckpointPublication::Resident;
             let notification = self
                 .environment

@@ -46,6 +46,25 @@ where
         self.workbench_executions.lock().invocation_work()
     }
 
+    pub(super) async fn finish_callback_resources(
+        &self,
+        kernel: &KernelContext,
+        work: &InvocationWork,
+        result: Result<(), String>,
+    ) -> Result<(), String> {
+        let cleanup = work.cleanup(&self.environment, kernel).await;
+        match cleanup.uncertainty() {
+            None => result,
+            Some(uncertainty) => {
+                let detail = format!("route callback cleanup unconfirmed: {uncertainty}");
+                Err(match result {
+                    Ok(()) => detail,
+                    Err(error) => format!("{error}; {detail}"),
+                })
+            }
+        }
+    }
+
     pub(super) fn resolve_resource_owner(
         &self,
         context: &ActorSessionContext,
@@ -175,7 +194,7 @@ where
     ) -> Result<(Arc<InvocationWork>, RealmId), String> {
         let parent = match effect_owner {
             CurrentEffectOwner::Scoped { scope, .. } => scope.clone(),
-            _ => effect_owner.invocation_work().unwrap_or_else(|| {
+            _ => effect_owner.ephemeral_work().unwrap_or_else(|| {
                 self.workbench_executions
                     .lock()
                     .actor_scope_root(context.actor)

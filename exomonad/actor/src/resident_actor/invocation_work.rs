@@ -797,6 +797,10 @@ impl InvocationWork {
         .map_err(|_| crate::ReplyError::CancellationRequested)
     }
 
+    pub(super) fn release_transient_watch_membership(&self, watch: crate::WatchId) {
+        self.state.lock().watches.retain(|member| *member != watch);
+    }
+
     #[cfg(test)]
     fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
         self.with_admission_state(|state| {
@@ -1005,11 +1009,14 @@ impl InvocationWork {
                 .requests
                 .release_transient_watch(self.owner, watch)
             {
-                Ok(notifications) => watch_notifications.extend(notifications),
+                Ok(notifications) => {
+                    self.release_transient_watch_membership(watch);
+                    watch_notifications.extend(notifications);
+                }
                 Err(error) if error != crate::ReplyError::Stale => cleanup
                     .failures
                     .push(format!("transient watch {} release: {error:?}", watch.0)),
-                Err(_) => {}
+                Err(_) => self.release_transient_watch_membership(watch),
             }
         }
         if tokio::time::timeout(
