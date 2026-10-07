@@ -841,17 +841,11 @@ impl ActorWorkbenchSource {
 
     /// Select the workspace's `[haskell] spec` value — rule two of spec
     /// discovery, for a workspace that wants a name other than
-    /// `AgentSpec.agentSpec`.
+    /// `AgentSpec.agentSpec`. The installer owns its import; this selection
+    /// does not expose the policy module to authored notebook cells.
     #[must_use]
     pub fn with_spec(mut self, entry: impl Into<Arc<str>>) -> Self {
-        let entry = entry.into();
-        if let Some((module, _)) = entry.rsplit_once('.') {
-            self.workbench_imports
-                .extend_text(&format!("qualified {module}"));
-        }
-        self.workbench_imports
-            .extend_text("qualified Tidepool.Agent.Contract");
-        self.spec = Some(entry);
+        self.spec = Some(entry.into());
         self
     }
 
@@ -12237,6 +12231,47 @@ mod tool_dispatch_tests {
 #[cfg(test)]
 pub(crate) mod request_tests {
     use super::*;
+
+    #[test]
+    fn selected_spec_import_belongs_to_installer_only() {
+        let source = ActorWorkbenchSource::new(String::new(), Vec::new())
+            .with_imports("qualified PublicNotebook");
+        let selected = source.clone().with_spec("PrivatePolicy.agentSpec");
+        let public_imports = source.workbench_imports.template_text();
+        assert_eq!(selected.workbench_imports.template_text(), public_imports);
+        for template in resident_workbench_templates(&selected.preamble, "'[]", &public_imports) {
+            assert!(template.source.contains("import qualified PublicNotebook"));
+            assert!(!template.source.contains("PrivatePolicy"));
+        }
+
+        let (recipe, resolved) = selected
+            .installer_recipe(&crate::CheckpointSourceLayer::default(), &[], &[])
+            .unwrap();
+        assert_eq!(resolved.entry.as_deref(), Some("PrivatePolicy.agentSpec"));
+        assert_eq!(recipe.entry, "PrivatePolicy.agentSpec");
+        let installation =
+            crate::agent_spec::installation_expression(&recipe.entry, &recipe.effects);
+        let templates = resident_workbench_templates(
+            &recipe.preamble,
+            &installation.dispatcher_effect_row(),
+            &recipe.imports,
+        );
+        let template = templates
+            .iter()
+            .find(|template| {
+                template.kind == tidepool_runtime::session::TemplateSelector::BindDiscard
+            })
+            .unwrap();
+        let installer = tidepool_runtime::session::render_template(
+            &template.source,
+            &installation.expression,
+            &[],
+        );
+        assert!(installer.contains("import qualified PrivatePolicy"));
+        assert!(installer.contains("import qualified Tidepool.Agent.Contract"));
+        assert!(installer.contains("PrivatePolicy.agentSpec"));
+        assert!(installer.contains("import qualified PublicNotebook"));
+    }
 
     proptest::proptest! {
         #[test]

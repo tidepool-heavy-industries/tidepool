@@ -265,6 +265,58 @@ fn write_bootstrap_workspace(workspace: &Path, spec: &str) {
 }
 
 #[test]
+fn driver_sources_keep_policy_private_and_preserve_explicit_public_modules() {
+    let project = tempfile::tempdir().unwrap();
+    let authored = project.path().join(".exomonad");
+    let spec = include_str!("fixtures/configured_bootstrap_spec.hs");
+    write_bootstrap_workspace(project.path(), spec);
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        spec.replace("ConfiguredSpec", "AgentSpec"),
+    )
+    .unwrap();
+    for expose_policy in [false, true] {
+        crate::exomonad::write_fixture_project_config(&authored, "test-model", |config| {
+            config.haskell.source_roots = vec![".".into()];
+            config.haskell.modules = vec!["Project.BootstrapWitness".into()];
+            if expose_policy {
+                config.haskell.modules.push("ConfiguredSpec".into());
+            }
+            config.haskell.spec = Some("ConfiguredSpec.agentSpec".into());
+        });
+        let run = tempfile::tempdir().unwrap();
+        let selected =
+            crate::exomonad::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert!(selected.provides_module("ConfiguredSpec"));
+        assert!(selected.provides_module("AgentSpec"));
+        let sources = driver_sources(
+            Path::new("unused-live-actors"),
+            Some(&selected),
+            run.path(),
+            None,
+        )
+        .unwrap();
+        let templates =
+            resident_workbench_templates(&sources.workbench_preamble, DRIVER_EFFECTS, "");
+        let template = templates
+            .iter()
+            .find(|template| template.kind == tidepool_runtime::session::TemplateSelector::Expr)
+            .unwrap();
+        let notebook =
+            tidepool_runtime::session::render_template(&template.source, DRIVER_ENTRY, &[]);
+        assert!(notebook.contains("import Project.BootstrapWitness"));
+        assert_eq!(notebook.contains("import ConfiguredSpec"), expose_policy);
+        assert!(!notebook.contains("import qualified ConfiguredSpec"));
+        assert!(!notebook.contains("import AgentSpec"));
+        assert!(!notebook.contains("import qualified AgentSpec"));
+        assert!(!sources.bootstrap_preamble.contains("ConfiguredSpec"));
+        assert!(!sources
+            .bootstrap_preamble
+            .contains("Project.BootstrapWitness"));
+    }
+}
+
+#[test]
 fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec() {
     let project = tempfile::tempdir().unwrap();
     let valid_run = tempfile::tempdir().unwrap();
@@ -303,7 +355,7 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     assert!(bootstrap
         .preamble
         .contains("import Project.BootstrapWitness"));
-    assert!(bootstrap
+    assert!(!bootstrap
         .preamble
         .contains("import qualified ConfiguredSpec"));
     let sources = driver_sources(

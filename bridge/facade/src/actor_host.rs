@@ -2937,7 +2937,7 @@ pub(crate) fn typecheck_candidate_revision(
     extra_modules: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let DriverSources {
-        workbench_preamble: preamble,
+        workbench_preamble: mut preamble,
         include,
         ..
     } = driver_sources(
@@ -2950,6 +2950,23 @@ pub(crate) fn typecheck_candidate_revision(
             extra_modules,
         }),
     )?;
+    // Workspace validation checks selected policy modules independently of
+    // their exposure in the public notebook's configured module imports.
+    let named = inputs
+        .spec
+        .as_deref()
+        .into_iter()
+        .filter_map(|entry| entry.rsplit_once('.').map(|(module, _)| module.to_owned()));
+    let conventional = inputs
+        .provides_module("AgentSpec")
+        .then(|| "AgentSpec".to_owned());
+    let installed: std::collections::BTreeSet<String> =
+        conventional.into_iter().chain(named).collect();
+    for module in installed {
+        if inputs.provides_module(&module) {
+            preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
+        }
+    }
     // rootDriver has the fixed type Eff RootEffects (), so its ordinary
     // driver turn uses the first effectful expression template. Keep that
     // exact module and graph while requesting only GHC typechecking.
@@ -3118,25 +3135,6 @@ fn driver_sources(
         }
         for module in candidate.iter().flat_map(|c| c.extra_modules.iter()) {
             preamble = insert_preamble_imports(&preamble, module);
-        }
-        // Workspace validation includes the installed spec even when no module
-        // import names it. Runtime bootstrap uses the fixed preamble; spec
-        // preparation validates the installed policy before the actor is ready.
-        // Keep these qualified imports in the actor's full workbench template.
-        let named = inputs
-            .spec
-            .as_deref()
-            .into_iter()
-            .filter_map(|entry| entry.rsplit_once('.').map(|(module, _)| module.to_owned()));
-        let conventional = inputs
-            .provides_module("AgentSpec")
-            .then(|| "AgentSpec".to_owned());
-        let installed: std::collections::BTreeSet<String> =
-            conventional.into_iter().chain(named).collect();
-        for module in installed {
-            if inputs.provides_module(&module) {
-                preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
-            }
         }
     }
     Ok(DriverSources {
