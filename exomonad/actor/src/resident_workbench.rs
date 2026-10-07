@@ -9255,6 +9255,26 @@ where
             .await
     }
 
+    pub(crate) async fn run_owned_scope_callback(
+        &self,
+        context: crate::ActorSessionContext,
+        callback: RootCustody,
+        realm: RealmId,
+        token: i64,
+        work: Arc<crate::resident_actor::invocation_work::InvocationWork>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                work.with_admission(|| {
+                    session
+                        .run_rooted_entry("scope_callback", callback, token, realm, None)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                })
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+            })
+            .await
+    }
+
     /// Admit the original child entry only while its retained lexical grant
     /// still belongs to this runtime epoch and exact installed scope.
     pub(crate) async fn run_fork_child_rooted_entry(

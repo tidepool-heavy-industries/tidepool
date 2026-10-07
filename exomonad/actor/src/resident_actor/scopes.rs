@@ -226,7 +226,13 @@ where
         let mut next = self
             .environment
             .runner
-            .run_scope_callback(context.clone(), callback, frame.realm, token)
+            .run_owned_scope_callback(
+                context.clone(),
+                callback,
+                frame.realm,
+                token,
+                frame.work.clone(),
+            )
             .await;
         let body = loop {
             let boundary = match next {

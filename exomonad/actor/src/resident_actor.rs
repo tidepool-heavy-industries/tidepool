@@ -9849,6 +9849,7 @@ where
                             let token =
                                 frame.work.scope_token().expect("registered scope identity");
                             let realm = frame.realm;
+                            let work = frame.work.clone();
                             current.scopes.push(frame);
                             current.native_start =
                                 Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
@@ -9859,6 +9860,7 @@ where
                                     callback,
                                     realm,
                                     token,
+                                    work,
                                 });
                             if execution_state.park_effects {
                                 return Ok(FragmentAdvance::ParkNative);

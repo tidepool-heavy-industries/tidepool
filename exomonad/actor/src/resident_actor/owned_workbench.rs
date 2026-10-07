@@ -383,6 +383,7 @@ pub(super) enum WorkbenchFragmentRequest {
         callback: RootCustody,
         realm: RealmId,
         token: i64,
+        work: Arc<InvocationWork>,
     },
     ScopeResume {
         fragment: ResidentWorkbenchFragment,
@@ -437,10 +438,11 @@ where
             callback,
             realm,
             token,
+            work,
         } => Some((
             fragment,
             runner
-                .run_scope_callback(context.clone(), callback, realm, token)
+                .run_owned_scope_callback(context.clone(), callback, realm, token, work)
                 .await,
             Some(realm),
         )),
