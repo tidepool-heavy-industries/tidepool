@@ -838,8 +838,8 @@ fn exercise_capture_history(history: &RenderedHistory) {
 
 #[test]
 fn deterministic_capture_history_matches_ghc_cold_warm_and_recovery() {
-    // The retained shrink reached an empty random prefix. This fixed input
-    // preserves its mandatory capture/shadow and rejection/recovery sequence.
+    // This fixed input preserves the mandatory capture/shadow and
+    // rejection/recovery sequence without a random prefix.
     let operations = mandatory_capture_operations(0, false);
     let history = render_history(0, &operations, false);
     report_history_input(0, &[], false, false, &operations, &history);
