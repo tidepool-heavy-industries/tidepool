@@ -51,6 +51,32 @@ class SourceExportFilenameTests(unittest.TestCase):
         ])
         self.assert_compiler_sources(exports)
 
+    def test_workspace_runtime_resources_have_owning_native_exports(self):
+        workspace_package = G.WORKSPACE.parent
+        exports = []
+        environment = {
+            "load": lambda *args: None,
+            "export_file": lambda **rule: exports.append(rule),
+            "filegroup": lambda **rule: None,
+            "glob": lambda patterns: sorted({
+                path.relative_to(workspace_package).as_posix()
+                for pattern in patterns for path in workspace_package.glob(pattern)
+                if path.is_file()
+            }),
+        }
+        for filename in ("authored_sources.bzl", "BUCK"):
+            path = workspace_package / filename
+            exec(compile(path.read_text(), str(path), "exec"), environment)
+        declared = {"//exomonad/examples/workspace:" + rule["name"]: rule for rule in exports}
+        resources = [path for path in G.WORKSPACE.rglob("*")
+                     if path.is_file() and path.suffix in {".hs", ".hs-boot", ".json", ".cbor", ".txt"}]
+        self.assertTrue(any(path.name == "usage-examples.json" for path in resources))
+        for path in resources:
+            with self.subTest(resource=path.relative_to(G.WORKSPACE)):
+                export = declared[G.source_location(path)]
+                self.assertEqual(export["src"], path.relative_to(workspace_package).as_posix())
+                self.assertEqual(export["out"], path.name)
+
     def test_static_source_exports_preserve_compiler_filenames(self):
         exports = []
         for relative in ("bridge/haskell/BUCK", "exomonad/examples/workspace/BUCK"):
