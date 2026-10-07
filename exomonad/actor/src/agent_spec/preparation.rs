@@ -12,6 +12,41 @@ use tidepool_runtime::session::{
 
 use super::ResolvedSpec;
 
+/// The acquisition that issued immutable installer readiness. Ready-cache
+/// hits and joined waiters retain this original provenance.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolsetAcquisition {
+    DeploymentOriginal { recipe: String, original: uuid::Uuid },
+    FreshRunOriginal { recipe: String, original: uuid::Uuid },
+    ExistingRunOriginal { recipe: String, original: uuid::Uuid },
+    UnretainedCompilation { recipe: String },
+}
+
+impl ToolsetAcquisition {
+    #[must_use]
+    pub fn recipe(&self) -> &str {
+        match self {
+            Self::DeploymentOriginal { recipe, .. }
+            | Self::FreshRunOriginal { recipe, .. }
+            | Self::ExistingRunOriginal { recipe, .. }
+            | Self::UnretainedCompilation { recipe } => recipe,
+        }
+    }
+
+    /// Selection metadata is derived from the issuing acquisition, never an
+    /// independent claim that compilation reused a deployment.
+    #[must_use]
+    pub fn completed_entry_selection(&self) -> Option<(&str, uuid::Uuid)> {
+        match self {
+            Self::DeploymentOriginal { recipe, original }
+            | Self::FreshRunOriginal { recipe, original }
+            | Self::ExistingRunOriginal { recipe, original } => Some((recipe, *original)),
+            Self::UnretainedCompilation { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub(crate) struct InstallerRecipe {
     /// In-memory coalescing retains the exact issuer and source selection.

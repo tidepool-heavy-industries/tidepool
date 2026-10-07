@@ -114,6 +114,7 @@ pub use local_actor::{
     WorkbenchAdvance, WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
+pub use agent_spec::preparation::ToolsetAcquisition;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
