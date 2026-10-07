@@ -61,8 +61,18 @@ pub(crate) trait WorkbenchReceiptOwner: Send + Sync {
     fn freeze(&self, reply: &mut crate::KernelWorkbenchReply);
 }
 
+mod operation_settlement;
+pub use operation_settlement::{
+    HostedOperationFinalization, HostedOperationSettlement, HostedOperationTerminal,
+    ProviderFinalizationKind,
+};
+pub(crate) use operation_settlement::{HostedOperationWeak, ProviderFinalization};
+
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
+    pub(crate) provider_finalization: Arc<ProviderFinalization>,
+    pub(crate) provider_owner: std::sync::OnceLock<HostedOperationWeak>,
+    pub(crate) provider_replay: std::sync::OnceLock<HostedOperationSettlement>,
     publication: Arc<PublicationDecision>,
     native_cancel: Arc<std::sync::atomic::AtomicBool>,
     reservation_attempt: crate::request::WorkbenchReservationAttempt,
@@ -109,6 +119,9 @@ impl WorkbenchExecutionControl {
     fn new(invocation: Option<WorkbenchCallKey>) -> Arc<Self> {
         Arc::new(Self {
             invocation,
+            provider_finalization: Arc::new(ProviderFinalization::default()),
+            provider_owner: std::sync::OnceLock::new(),
+            provider_replay: std::sync::OnceLock::new(),
             publication: PublicationDecision::new(),
             native_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
@@ -551,7 +564,15 @@ struct HostedCellPublication {
 impl HostedCellPublication {
     fn publish(actor: &crate::LocalActorRef, control: &Arc<WorkbenchExecutionControl>) -> Self {
         let slot = Arc::clone(actor.hosted_cell());
-        slot.publish_transport(Arc::clone(control));
+        if control
+            .invocation
+            .as_ref()
+            .is_some_and(|key| key.invocation().model_operation().is_some())
+        {
+            slot.publish_provider_transport(actor.identity(), Arc::clone(control));
+        } else {
+            slot.publish_transport(Arc::clone(control));
+        }
         Self {
             slot,
             control: Arc::clone(control),
@@ -736,6 +757,18 @@ pub trait ResidentToolEndpoint: Send + Sync {
             "request-scoped installed tools are unavailable".into(),
         ))
     }
+    /// Resolve only an operation already issued by this incarnation's transport.
+    /// Optional workbench custody capability. Generic serial tool endpoints do
+    /// not issue a native workbench finalization owner.
+    fn retained_operation(
+        &self,
+        _invocation: ToolInvocationContext,
+    ) -> Result<HostedOperationSettlement, ResidentToolError> {
+        Err(ResidentToolError::Unavailable(
+            "retained native operation settlement is unsupported".into(),
+        ))
+    }
+
     /// Unsupported implementations cannot fabricate an admission barrier.
     fn seal_hosted_work_boxed(
         &self,
@@ -985,17 +1018,46 @@ impl ResidentToolClient {
         Self { actor }
     }
 
+    pub(crate) fn retained_operation(
+        &self,
+        invocation: ToolInvocationContext,
+    ) -> Result<HostedOperationSettlement, ResidentToolError> {
+        self.actor
+            .hosted_cell()
+            .retained_operation(&invocation.into())
+            .map_err(ResidentToolError::Unavailable)?
+            .ok_or_else(|| {
+                ResidentToolError::Unavailable(
+                    "operation has no issued native settlement owner".into(),
+                )
+            })
+    }
+
     pub(crate) async fn cancel_workbench(
         &self,
         invocation: ToolInvocationContext,
     ) -> Result<WorkbenchCancellationOutcome, ResidentToolError> {
         let execution = execution_id(self.actor.identity(), &invocation.clone().into());
-        let control = self.actor.hosted_cell().find(|control| {
-            control
-                .invocation
-                .as_ref()
-                .is_some_and(|key| execution_id(self.actor.identity(), key) == execution)
-        });
+        let retained = self
+            .actor
+            .hosted_cell()
+            .retained_operation(&invocation.clone().into())
+            .map_err(ResidentToolError::Unavailable)?;
+        if let Some(retained) = &retained {
+            if let HostedOperationTerminal::Settled(outcome) = retained.terminal() {
+                return Ok(outcome);
+            }
+        }
+        let control = retained
+            .and_then(|retained| retained.control())
+            .or_else(|| {
+                self.actor.hosted_cell().find(|control| {
+                    control
+                        .invocation
+                        .as_ref()
+                        .is_some_and(|key| execution_id(self.actor.identity(), key) == execution)
+                })
+            });
         let Some(control) = control else {
             let (reply, receive) = oneshot::channel();
             self.actor
@@ -1109,6 +1171,36 @@ impl ResidentToolClient {
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Result<WorkbenchBoundaryReconciliation, ResidentToolError> {
+        if boundary.hosted().is_some() {
+            let owner = self
+                .actor
+                .hosted_cell()
+                .retained_boundary(&boundary)
+                .map_err(ResidentToolError::Unavailable)?;
+            return match owner.terminal() {
+                HostedOperationTerminal::Pending
+                | HostedOperationTerminal::Settled(
+                    WorkbenchCancellationOutcome::Unconfirmed { .. }
+                    | WorkbenchCancellationOutcome::UnknownEvaluation { .. },
+                ) => Ok(WorkbenchBoundaryReconciliation::Pending),
+                HostedOperationTerminal::Settled(_) => match owner.finalization() {
+                    HostedOperationFinalization::Settled(Ok(_)) => {
+                        Ok(WorkbenchBoundaryReconciliation::Settled)
+                    }
+                    HostedOperationFinalization::Settled(Err(error)) => {
+                        Err(ResidentToolError::Unavailable(error))
+                    }
+                    HostedOperationFinalization::Pending => owner
+                        .reply()
+                        .map(|reply| WorkbenchBoundaryReconciliation::Recovered { reply })
+                        .ok_or_else(|| {
+                            ResidentToolError::Unavailable(
+                                "native terminal lost its exact original reply".into(),
+                            )
+                        }),
+                },
+            };
+        }
         if self
             .actor
             .hosted_cell()
@@ -1140,41 +1232,72 @@ impl ResidentToolClient {
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .address()
-            .send_message(crate::KernelMessage::ToolAborted {
-                boundary,
-                reply: reply.into(),
-            })
-            .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
-        receive
-            .await
-            .map_err(|_| {
-                ResidentToolError::Unavailable("actor stopped before output abort".into())
-            })?
-            .map_err(ResidentToolError::Invocation)
+        self.finalize_provider_operation(boundary, false).await
     }
 
     pub(crate) async fn complete(
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .address()
-            .send_message(crate::KernelMessage::ToolCompleted {
-                boundary: boundary.clone(),
-                reply: reply.into(),
-            })
-            .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
-        let result = receive
-            .await
-            .map_err(|_| {
-                ResidentToolError::Unavailable("actor stopped before tool completion".into())
-            })?
-            .map_err(ResidentToolError::Invocation)?;
-        Ok(result)
+        self.finalize_provider_operation(boundary, true).await
+    }
+
+    async fn finalize_provider_operation(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        completed: bool,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        let retained = if boundary.hosted().is_some() {
+            Some(
+                self.actor
+                    .hosted_cell()
+                    .retained_boundary(&boundary)
+                    .map_err(ResidentToolError::Unavailable)?,
+            )
+        } else {
+            None
+        };
+        if retained.as_ref().is_none_or(|owner| {
+            matches!(owner.finalization(), HostedOperationFinalization::Pending)
+        }) {
+            let (reply, receive) = oneshot::channel();
+            let message = if completed {
+                crate::KernelMessage::ToolCompleted {
+                    boundary,
+                    reply: reply.into(),
+                }
+            } else {
+                crate::KernelMessage::ToolAborted {
+                    boundary,
+                    reply: reply.into(),
+                }
+            };
+            let result = match self.actor.address().send_message(message) {
+                Ok(()) => receive
+                    .await
+                    .map_err(|_| {
+                        ResidentToolError::Unavailable(
+                            "actor stopped before provider finalization reply".into(),
+                        )
+                    })
+                    .and_then(|reply| reply.map_err(ResidentToolError::Invocation)),
+                Err(_) => Err(ResidentToolError::Unavailable(
+                    "the owning actor has stopped".into(),
+                )),
+            };
+            if retained.is_none() {
+                return result;
+            }
+            // A lost/closed mailbox is not proof. Retirement or the ordinary
+            // actor finalizer must settle the exact retained owner instead.
+        }
+        retained
+            .expect("hosted finalizer retains its issued owner")
+            .acknowledge()
+            .await?;
+        // Cleanup acknowledgement does not publish native context. CellExit and
+        // provider ContextDisposition remain authoritative after retirement.
+        Ok(serde_json::Value::Null)
     }
 
     #[cfg(test)]
@@ -1283,6 +1406,11 @@ impl ResidentToolClient {
             .map_err(|failure| hosted_admission_failure(self.actor.identity(), failure))
         {
             control.settle(Err(error.clone()));
+            control.provider_finalization.reject_before_admission();
+            if let Some(publication) = publication {
+                publication.accept();
+            }
+            self.actor.hosted_cell().complete(&control);
             return Err(ResidentToolError::Invocation(error));
         }
         if let Some(publication) = publication {

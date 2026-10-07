@@ -189,6 +189,30 @@ impl EmbeddedPolicySnapshot {
         Ok(true)
     }
 
+    pub(super) fn retained_operation(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<exomonad_actor::HostedOperationSettlement, ResidentToolError> {
+        self.policy.retained_operation(context)
+    }
+
+    pub(super) async fn abort_operation(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<(), ResidentToolError> {
+        let original = context.model_operation().ok_or_else(|| {
+            ResidentToolError::InvalidInvocation(
+                "provider finalization needs an original operation".into(),
+            )
+        })?;
+        self.policy
+            .abort_boxed(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
+                original.clone(),
+            ))
+            .await
+            .map(|_| ())
+    }
+
     pub(super) async fn cancel(
         &self,
         context: ToolInvocationContext,

@@ -802,6 +802,11 @@ where
             self.workbench_executions
                 .lock()
                 .begin(execution, request.clone(), invocation.as_ref());
+            self.workbench_executions.lock().bind_provider_finalization(
+                execution,
+                invocation.as_ref(),
+                control.as_ref(),
+            );
         }
         let replay_request = execution.as_ref().map(|_| request.clone());
         let reservation_owner = RequestReservationOwner::Workbench {

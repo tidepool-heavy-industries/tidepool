@@ -3797,11 +3797,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )?;
         }
         if let Some(execution) = request.execution_id() {
-            match self.workbench_executions.lock().lookup(
-                execution,
-                &request,
-                invocation_key.as_ref(),
-            ) {
+            match self
+                .workbench_executions
+                .lock()
+                .lookup_for_provider_control(
+                    execution,
+                    &request,
+                    invocation_key.as_ref(),
+                    control.as_ref(),
+                ) {
                 Err(failure) => {
                     return Err(KernelInvocationFailure::Rejected {
                         receipts: Vec::new(),
@@ -3814,7 +3818,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         diagnostic: None,
                     });
                 }
-                Ok(Some(reply)) => return Ok(WorkbenchPreflight::Retained(reply)),
+                Ok(Some(reply)) => {
+                    return Ok(WorkbenchPreflight::Retained(reply));
+                }
                 Ok(None) => {}
             }
         }
@@ -11653,6 +11659,84 @@ where
         result
     }
 
+    async fn abort_provider_boundary(
+        &mut self,
+        kernel: &KernelContext,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<(), KernelBehaviorError> {
+        if self.settled_fork_boundaries.contains(&boundary) {
+            return Ok(());
+        }
+        let context = self.context(kernel.identity());
+        let owner = WorkbenchExecutions::boundary_abort_owner(
+            &self.workbench_executions,
+            &boundary,
+            || {
+                self.environment
+                    .fork_groups
+                    .has_abort_work_at_boundary(context.actor, &boundary)
+            },
+        )?;
+        let Some(owner) = owner else {
+            self.workbench_executions
+                .lock()
+                .release_fork_source(&boundary);
+            self.settled_fork_boundaries.push(boundary);
+            return Ok(());
+        };
+        let mut cleanup = owner.collect_cleanup(|| {
+            let scopes = self
+                .environment
+                .fork_groups
+                .settle_checkpoints(context.actor, &boundary, false)
+                .into_iter()
+                .filter_map(|(session, scope)| {
+                    (session == context.placement.session).then_some(scope)
+                })
+                .collect();
+            let children = self
+                .environment
+                .fork_groups
+                .abort_unpublished_at_boundary(context.actor, &boundary);
+            workbench_ledger::BoundaryAbortCleanup { children, scopes }
+        });
+        while let Some(child) = cleanup.children.last().copied() {
+            if let Some(child) = kernel.resolve(child) {
+                let shutdown = child
+                    .shutdown_with_cleanup(ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: "enclosing tool output was aborted".into(),
+                        diagnostic: None,
+                    })
+                    .await
+                    .map_err(KernelInvocationFailure::into_behavior_error)?;
+                if !shutdown.cleanup.is_confirmed() {
+                    return Err(KernelBehaviorError {
+                        detail: format!(
+                            "provider boundary child {:?} cleanup is unconfirmed",
+                            child.identity()
+                        ),
+                        diagnostic: None,
+                    });
+                }
+            }
+            cleanup.children.pop();
+            owner.retain_cleanup(cleanup.clone());
+        }
+        self.environment
+            .runner
+            .retire_fork_scopes(context.clone(), cleanup.scopes.clone())
+            .await
+            .map_err(Self::workbench_failure)?;
+        cleanup.scopes.clear();
+        owner.retain_cleanup(cleanup);
+        self.workbench_executions
+            .lock()
+            .release_fork_source(&boundary);
+        self.settled_fork_boundaries.push(boundary);
+        Ok(())
+    }
+
     async fn abort_unpublished_groups(
         &self,
         kernel: &KernelContext,
@@ -12348,68 +12432,15 @@ where
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
-            if self.settled_fork_boundaries.contains(&boundary) {
-                return Ok(());
-            }
-            let context = self.context(kernel.identity());
-            let owner = WorkbenchExecutions::boundary_abort_owner(
-                &self.workbench_executions,
+            let result = self.abort_provider_boundary(kernel, boundary.clone()).await;
+            self.workbench_executions.lock().finalize_provider_boundary(
                 &boundary,
-                || {
-                    self.environment
-                        .fork_groups
-                        .has_abort_work_at_boundary(context.actor, &boundary)
-                },
-            )?;
-            let Some(owner) = owner else {
-                self.workbench_executions
-                    .lock()
-                    .release_fork_source(&boundary);
-                self.settled_fork_boundaries.push(boundary);
-                return Ok(());
-            };
-            let mut cleanup = owner.collect_cleanup(|| {
-                let scopes = self
-                    .environment
-                    .fork_groups
-                    .settle_checkpoints(context.actor, &boundary, false)
-                    .into_iter()
-                    .filter_map(|(session, scope)| {
-                        (session == context.placement.session).then_some(scope)
-                    })
-                    .collect();
-                let children = self
-                    .environment
-                    .fork_groups
-                    .abort_unpublished_at_boundary(context.actor, &boundary);
-                workbench_ledger::BoundaryAbortCleanup { children, scopes }
-            });
-            while let Some(child) = cleanup.children.last().copied() {
-                if let Some(child) = kernel.resolve(child) {
-                    child
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "enclosing tool output was aborted".into(),
-                            diagnostic: None,
-                        })
-                        .await
-                        .map_err(KernelInvocationFailure::into_behavior_error)?;
-                }
-                cleanup.children.pop();
-                owner.retain_cleanup(cleanup.clone());
-            }
-            self.environment
-                .runner
-                .retire_fork_scopes(context.clone(), cleanup.scopes.clone())
-                .await
-                .map_err(Self::workbench_failure)?;
-            cleanup.scopes.clear();
-            owner.retain_cleanup(cleanup);
-            self.workbench_executions
-                .lock()
-                .release_fork_source(&boundary);
-            self.settled_fork_boundaries.push(boundary);
-            Ok(())
+                result
+                    .as_ref()
+                    .map(|()| crate::ProviderFinalizationKind::Aborted)
+                    .map_err(ToString::to_string),
+            );
+            result
         })
     }
 
@@ -12419,6 +12450,8 @@ where
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
+            let proof_boundary = boundary.clone();
+            let result = async {
             if !self
                 .workbench_executions
                 .lock()
@@ -12525,6 +12558,15 @@ where
                 self.settled_fork_boundaries.push(boundary);
             }
             Ok(())
+            }.await;
+            self.workbench_executions.lock().finalize_provider_boundary(
+                &proof_boundary,
+                result
+                    .as_ref()
+                    .map(|()| crate::ProviderFinalizationKind::Completed)
+                    .map_err(ToString::to_string),
+            );
+            result
         })
     }
 
@@ -12660,7 +12702,7 @@ where
             match self
                 .workbench_executions
                 .lock()
-                .lookup(execution, request, key.as_ref())
+                .lookup_for_provider_control(execution, request, key.as_ref(), Some(&control))
             {
                 Ok(Some(reply)) => {
                     let result =
@@ -12711,6 +12753,11 @@ where
             self.workbench_executions
                 .lock()
                 .begin(execution, request.clone(), key.as_ref());
+            self.workbench_executions.lock().bind_provider_finalization(
+                execution,
+                key.as_ref(),
+                Some(&control),
+            );
         }
         crate::OwnedActorTask::serial(move |mut behavior: Self, kernel| {
             Box::pin(async move {
@@ -13086,6 +13133,11 @@ where
                     execution,
                     request.clone(),
                     invocation.as_ref(),
+                );
+                self.workbench_executions.lock().bind_provider_finalization(
+                    execution,
+                    invocation.as_ref(),
+                    control.as_ref(),
                 );
             }
             let local_execution_id = execution.clone().unwrap_or_else(|| {
@@ -13649,6 +13701,33 @@ where
                 },
             ))
             .await;
+            let mut provider_cleanup_errors = Vec::new();
+            let provider_boundaries = self
+                .workbench_executions
+                .lock()
+                .pending_provider_boundaries();
+            for boundary in provider_boundaries {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    self.abort_provider_boundary(kernel, boundary.clone()),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(KernelBehaviorError::new(
+                        "provider boundary cleanup remains pending at actor retirement",
+                    ))
+                });
+                self.workbench_executions.lock().finalize_provider_boundary(
+                    &boundary,
+                    result
+                        .as_ref()
+                        .map(|()| crate::ProviderFinalizationKind::RetirementAborted)
+                        .map_err(ToString::to_string),
+                );
+                if let Err(error) = result {
+                    provider_cleanup_errors.push(error.to_string());
+                }
+            }
             let staged_replacement = self.replacement_staged();
             let staged_fork = self.boot.is_some() && self.descriptor.fork_group().is_some();
             self.source_connections.take();
@@ -13697,6 +13776,7 @@ where
             self.boot = None;
             self.sources.clear();
             let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
+            retained_errors.extend(provider_cleanup_errors);
             self.pending_program.take();
             if let Some(suspended) = self.suspended_cast.take() {
                 if let Err(error) = self

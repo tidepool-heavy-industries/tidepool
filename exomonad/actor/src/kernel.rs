@@ -590,15 +590,16 @@ pub struct LocalActorRef {
 pub(crate) struct MailboxAdmission(std::sync::Arc<AdmissionOwner>, HostedCellSlot);
 
 /// One incarnation's published hosted calls, from transport queuing through
-/// actor-owned completion. Multiple callers may be queued behind one active
-/// notebook; dropping one waiter must not erase another call's control.
+/// native completion and provider acknowledgement. Multiple callers may queue
+/// behind one active notebook; dropping one waiter cannot erase another call.
 pub(crate) type HostedCellSlot = std::sync::Arc<HostedCellPublications>;
 
 #[derive(Default)]
 pub(crate) struct HostedCellPublications(parking_lot::Mutex<Vec<HostedCellEntry>>);
 
 struct HostedCellEntry {
-    control: std::sync::Arc<crate::WorkbenchExecutionControl>,
+    control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+    provider: Option<crate::HostedOperationSettlement>,
     accepted: bool,
 }
 
@@ -608,31 +609,46 @@ impl HostedCellPublications {
         control: std::sync::Arc<crate::WorkbenchExecutionControl>,
     ) {
         self.0.lock().push(HostedCellEntry {
-            control,
+            control: Some(control),
+            provider: None,
             accepted: false,
         });
     }
 
     pub(crate) fn accept(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
         let mut entries = self.0.lock();
-        if let Some(entry) = entries
-            .iter_mut()
-            .find(|entry| std::sync::Arc::ptr_eq(&entry.control, control))
-        {
+        if let Some(entry) = entries.iter_mut().find(|entry| {
+            entry
+                .control
+                .as_ref()
+                .cloned()
+                .or_else(|| entry.provider.as_ref().and_then(|owner| owner.control()))
+                .is_some_and(|issued| std::sync::Arc::ptr_eq(&issued, control))
+        }) {
             entry.accepted = true;
         }
     }
 
     pub(crate) fn claim(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
         let mut entries = self.0.lock();
-        if let Some(entry) = entries
-            .iter_mut()
-            .find(|entry| std::sync::Arc::ptr_eq(&entry.control, control))
-        {
+        if let Some(entry) = entries.iter_mut().find(|entry| {
+            entry
+                .control
+                .as_ref()
+                .cloned()
+                .or_else(|| entry.provider.as_ref().and_then(|owner| owner.control()))
+                .is_some_and(|issued| std::sync::Arc::ptr_eq(&issued, control))
+        }) {
             entry.accepted = true;
+            // A sequential request may have yielded its active slot while
+            // remaining queued. Claim restores work tracking, not authority.
+            if entry.control.is_none() && control.terminal_reply().is_none() {
+                entry.control = Some(control.clone());
+            }
         } else if control.invocation.is_some() {
             entries.push(HostedCellEntry {
-                control: std::sync::Arc::clone(control),
+                control: Some(std::sync::Arc::clone(control)),
+                provider: None,
                 accepted: true,
             });
         }
@@ -642,21 +658,124 @@ impl HostedCellPublications {
         &self,
         control: &std::sync::Arc<crate::WorkbenchExecutionControl>,
     ) {
-        self.0
-            .lock()
-            .retain(|entry| entry.accepted || !std::sync::Arc::ptr_eq(&entry.control, control));
+        self.0.lock().retain(|entry| {
+            entry.accepted
+                || !entry
+                    .control
+                    .as_ref()
+                    .is_some_and(|issued| std::sync::Arc::ptr_eq(issued, control))
+        });
+    }
+
+    pub(crate) fn publish_provider_transport(
+        &self,
+        actor: crate::ActorRef,
+        control: std::sync::Arc<crate::WorkbenchExecutionControl>,
+    ) {
+        let provider = crate::HostedOperationSettlement::issue(actor, control.clone());
+        self.0.lock().push(HostedCellEntry {
+            control: Some(control),
+            provider: Some(provider),
+            accepted: false,
+        });
     }
 
     pub(crate) fn complete(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
-        self.0
-            .lock()
-            .retain(|entry| !std::sync::Arc::ptr_eq(&entry.control, control));
+        self.0.lock().retain_mut(|entry| {
+            if !entry
+                .control
+                .as_ref()
+                .is_some_and(|issued| std::sync::Arc::ptr_eq(issued, control))
+            {
+                return true;
+            }
+            if let Some(original) = control.provider_replay.get() {
+                entry.provider = Some(original.clone());
+                entry.control.take();
+                return true;
+            }
+            match &entry.provider {
+                Some(provider) => {
+                    // Deferred mailbox work releases active tracking without
+                    // pretending native computation has reached its terminal.
+                    if control.terminal_reply().is_some() {
+                        provider.native_finished();
+                    }
+                    entry.control.take();
+                    true
+                }
+                None => false,
+            }
+        });
     }
 
     pub(crate) fn take_all_and_clear(
         &self,
     ) -> Vec<std::sync::Arc<crate::WorkbenchExecutionControl>> {
-        self.0.lock().drain(..).map(|entry| entry.control).collect()
+        let mut controls = Vec::new();
+        self.0.lock().retain_mut(|entry| {
+            if let Some(control) = entry.control.take() {
+                controls.push(control);
+                if let Some(provider) = &entry.provider {
+                    provider.native_finished();
+                }
+            }
+            entry.provider.is_some()
+        });
+        controls
+    }
+
+    pub(crate) fn finalization_owner_lost(&self) {
+        for provider in self
+            .0
+            .lock()
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+        {
+            if let Some(control) = provider.control() {
+                control.provider_finalization.finish(Err(
+                    "native actor ended without confirming this operation's finalization".into(),
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn retained_operation(
+        &self,
+        invocation: &crate::resident_tools::WorkbenchCallKey,
+    ) -> Result<Option<crate::HostedOperationSettlement>, String> {
+        let entries = self.0.lock();
+        let mut matches = entries
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+            .filter(|provider| provider.key() == invocation);
+        let Some(owner) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.all(|other| owner.same_owner(other)) {
+            Ok(Some(owner.clone()))
+        } else {
+            Err("one operation has contradictory native settlement owners".into())
+        }
+    }
+
+    pub(crate) fn retained_boundary(
+        &self,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<crate::HostedOperationSettlement, String> {
+        let entries = self.0.lock();
+        let mut matches = entries
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+            .filter(|provider| provider.key().matches_boundary(boundary));
+        let Some(owner) = matches.next() else {
+            return Err("provider boundary has no issued native operation".into());
+        };
+        if owner.key().is_original_invocation() && matches.all(|other| owner.same_owner(other)) {
+            Ok(owner.clone())
+        } else {
+            Err("nested or multiple native operations cannot certify the enclosing provider boundary".into())
+        }
     }
 
     pub(crate) fn find(
@@ -666,15 +785,18 @@ impl HostedCellPublications {
         self.0
             .lock()
             .iter()
-            .find(|entry| predicate(&entry.control))
-            .map(|entry| std::sync::Arc::clone(&entry.control))
+            .filter_map(|entry| entry.control.as_ref())
+            .find(|control| predicate(control))
+            .cloned()
     }
 
     fn computing(&self) -> bool {
-        self.0
-            .lock()
-            .iter()
-            .any(|entry| entry.control.is_computing_hosted_cell())
+        self.0.lock().iter().any(|entry| {
+            entry
+                .control
+                .as_ref()
+                .is_some_and(|control| control.is_computing_hosted_cell())
+        })
     }
 }
 

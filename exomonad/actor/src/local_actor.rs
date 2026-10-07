@@ -1104,6 +1104,9 @@ impl<B> Drop for LocalActorState<B> {
                 self.context.identity,
             )));
         }
+        self.mailbox_admission
+            .hosted_cell()
+            .finalization_owner_lost();
     }
 }
 
@@ -2807,6 +2810,9 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
 
 fn settle_pending_workbench(pending: PendingWorkbench, mut reply: crate::KernelWorkbenchReply) {
     if let Some(control) = pending.control {
+        if matches!(&reply, Err(KernelInvocationFailure::Rejected { .. })) {
+            control.provider_finalization.reject_before_admission();
+        }
         reply = control.settle_reply(reply);
         pending.hosted_cell.complete(&control);
     }

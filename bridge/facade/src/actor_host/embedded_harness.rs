@@ -1140,42 +1140,52 @@ impl Provider for EmbeddedDispatcher {
             .dispatch(name, arguments, context, authority)
             .await
             .map_err(ProviderError::into_tool_failure);
-        if let Some(binding) = binding {
-            let output = JobOutput::Completed(result);
-            return binding
-                .completion(output.clone())
-                .unwrap_or_else(|| unavailable_context_completion(output));
-        }
-        // A signalled cancellation asks the same exact native owner to
-        // arbitrate its retained terminal. The ordinary result waiter and
-        // the scheduler's cancellation waiter may observe that reply in
-        // either order; both must project the same typed cancellation.
-        // Dispatch has already released the native reply, so this cannot
-        // depend on completion of the provider future or Store publication.
-        let output = if cancellation.is_cancelled() {
-            let terminal = match operation.as_ref().map(|operation| self.context(operation)) {
-                Some(Ok(invocation)) => self.snapshot.cancel(invocation).await,
-                Some(Err(error)) => {
-                    return ProviderCompletion {
-                        output: JobOutput::CancellationUnconfirmed(error.to_string()),
-                        full_success: false,
-                        context: harness::provider::ContextDisposition::Unedited,
-                    };
+        let invocation = operation.as_ref().map(|operation| self.context(operation));
+        let retained_terminal = invocation
+            .as_ref()
+            .and_then(|invocation| invocation.as_ref().ok())
+            .and_then(|invocation| self.snapshot.retained_operation(invocation.clone()).ok())
+            .map(|owner| owner.terminal());
+        // Native retirement can win before scheduler cancellation is signalled.
+        // Its immutable CellExit, rather than notification timing, determines
+        // cancellation, publication and unconfirmed cleanup.
+        let terminal = match retained_terminal {
+            Some(exomonad_actor::HostedOperationTerminal::Settled(terminal)) => Some(Ok(terminal)),
+            _ if cancellation.is_cancelled() => Some(match invocation.as_ref() {
+                Some(Ok(invocation)) => self.snapshot.cancel(invocation.clone()).await,
+                Some(Err(error)) => Err(ResidentToolError::Unavailable(error.to_string())),
+                None => Err(ResidentToolError::Unavailable(
+                    "native cancellation requires an exact operation".into(),
+                )),
+            }),
+            _ => None,
+        };
+        let output = if let Some(terminal) = terminal {
+            if matches!(
+                &terminal,
+                Ok(WorkbenchCancellationOutcome::Cancelled { .. })
+            ) {
+                let finalized = match invocation.as_ref() {
+                    Some(Ok(invocation)) => self.snapshot.abort_operation(invocation.clone()).await,
+                    _ => Err(ResidentToolError::Unavailable(
+                        "cancelled operation lacks original finalization authority".into(),
+                    )),
+                };
+                if let Err(error) = finalized {
+                    return unavailable_context_completion(JobOutput::CancellationUnconfirmed(
+                        error.to_string(),
+                    ));
                 }
-                None => {
-                    return ProviderCompletion {
-                        output: JobOutput::CancellationUnconfirmed(
-                            "native cancellation requires an exact operation".into(),
-                        ),
-                        full_success: false,
-                        context: harness::provider::ContextDisposition::Unedited,
-                    };
-                }
-            };
+            }
             native_terminal_output(result, terminal)
         } else {
             JobOutput::Completed(result)
         };
+        if let Some(binding) = binding {
+            return binding
+                .completion(output.clone())
+                .unwrap_or_else(|| unavailable_context_completion(output));
+        }
         UneditedInvocationCompletion::project(output)
     }
 
@@ -1251,9 +1261,14 @@ impl CancellationOwner for EmbeddedDispatcher {
             Ok(context) => context,
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };
-        match self.snapshot.cancel(context).await {
+        match self.snapshot.cancel(context.clone()).await {
             Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
-                CancellationAcknowledgment::StoppedWithReceipt(workbench_reply_receipt(reply))
+                match self.snapshot.abort_operation(context).await {
+                    Ok(()) => CancellationAcknowledgment::StoppedWithReceipt(
+                        workbench_reply_receipt(reply),
+                    ),
+                    Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
+                }
             }
             Ok(
                 WorkbenchCancellationOutcome::Expired { reply, .. }

@@ -211,6 +211,13 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Some(haskell_tool_instructions())
     }
 
+    fn retained_operation(
+        &self,
+        invocation: exomonad_tool::ToolInvocationContext,
+    ) -> Result<crate::HostedOperationSettlement, ResidentToolError> {
+        self.client.retained_operation(invocation)
+    }
+
     fn reconcile_workbench_boxed(
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
