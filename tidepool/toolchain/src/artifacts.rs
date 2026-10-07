@@ -1676,6 +1676,7 @@ impl ModuleCandidateOffer {
                     &mut validation,
                 )?;
                 while index < end {
+                    let item_produced_types = produced_types.for_item(index)?;
                     program_request = program_request
                         .in_program_context(&root.join("program-inputs"), context.clone())?;
                     let effective = self.program_offer(program_request.clone());
@@ -1683,7 +1684,7 @@ impl ModuleCandidateOffer {
                     let output = effective.read_program_output(
                         &directory,
                         &segment_root,
-                        &produced_types,
+                        &item_produced_types,
                         &mut validation,
                     )?;
                     let source_admissions = effective
@@ -1696,7 +1697,7 @@ impl ModuleCandidateOffer {
                         context,
                         &output,
                         &source_admissions,
-                        Some(&produced_types),
+                        Some(&item_produced_types),
                     )?;
                     admissions.extend(source_admissions);
                     let generation = match &planned.slots[index] {

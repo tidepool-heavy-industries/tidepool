@@ -292,8 +292,10 @@ verifyOutputProjection root prepared = do
   let environment = typedSegmentSessionEnvironment prepared
       snapshots = typedSegmentSessionInterfaces prepared
       evidence = DependencyEvidence False False [] [] [] []
-      capture originals directory = captureFinalizedModuleArtifacts originals environment
-        Map.empty Map.empty evidence directory
+      capture originals directory = do
+        createDirectoryIfMissing True directory
+        captureFinalizedModuleArtifacts originals environment
+          Map.empty Map.empty evidence directory
       keys = map (T.pack . moduleNameString . moduleName . fst . capturedSessionInterface)
       seals = map (snd . fst) . finalizedValueInterfaceSeals
   unless (length snapshots == 2 && null (typedSegmentSessionInterfacesThrough (-1) prepared))
