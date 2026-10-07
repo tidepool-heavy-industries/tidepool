@@ -62,10 +62,18 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("effect module");
     let mut include = effects.include_paths().to_vec();
-    include.push(eval_harness::prelude_path());
-    include.push(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"),
+    let prelude = eval_harness::prelude_path();
+    let actors = prelude
+        .parent()
+        .expect("declared Haskell resource root contains its library")
+        .join("actors");
+    assert!(
+        actors.is_dir(),
+        "declared actor sources are missing at {}",
+        actors.display()
     );
+    include.push(prelude);
+    include.push(actors);
     let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
     for import in [
         "qualified Tidepool.Actor as Mailbox",
