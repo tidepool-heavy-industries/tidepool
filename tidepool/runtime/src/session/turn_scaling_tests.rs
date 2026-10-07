@@ -955,7 +955,7 @@ enum AuthorityChecks {
 
 enum CellDeclarationExpectation {
     Total(usize),
-    CapturedAt(usize),
+    CapturedAt { name: &'static str, line: usize },
 }
 
 // The caller supplies the response of the same physical request whose products
@@ -991,11 +991,27 @@ pub(super) fn assert_compiler_work(
         for (index, item) in program.items().iter().enumerate() {
             let native = item.native().unwrap();
             let target = native.target_owned();
-            let dependencies = target
-                .globals()
-                .iter()
-                .filter(|global| global.required_generation.is_some())
-                .collect::<Vec<_>>();
+            let (table, _) =
+                tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+            let turn: ciborium::value::Value =
+                ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+            let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+            let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+            let context = native
+                .original_execution_context(&target, &table, &sites)
+                .unwrap();
+            // The entry stub can call a selected original helper that demands
+            // a live capture. Inspect that sealed group closure, not the
+            // stub's direct globals or every group in the source capsule.
+            let root = native.typed_entry().unwrap().native_requirement_root();
+            assert!(matches!(
+                root,
+                tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group { .. }
+            ));
+            let dependencies = context
+                .artifact_view()
+                .native_binding_requirements_from_roots(&[root])
+                .unwrap();
             let prior_captures = program.items()[..index]
                 .iter()
                 .flat_map(|prior| {
@@ -1023,8 +1039,10 @@ pub(super) fn assert_compiler_work(
                         .any(|(unit, module, name, generation)| {
                             global.identity.unit == *unit
                                 && global.identity.module == *module
+                                && global.identity.namespace == "value"
                                 && global.identity.occurrence == *name
-                                && global.required_generation == Some(*generation)
+                                && global.identity.record_parent.is_none()
+                                && global.generation == *generation
                         })
                 }),
                 "the actual item target must demand only exact captures from its prior plan prefix"
@@ -1048,9 +1066,10 @@ pub(super) fn assert_compiler_work(
                         global.identity.unit
                             == prior.native().unwrap().typed_entry().unwrap().entry().unit
                             && global.identity.module == bound[0].module
+                            && global.identity.namespace == "value"
                             && global.identity.occurrence == bound[0].name
-                            && global.required_generation
-                                == Some(prior.native().unwrap().generation())
+                            && global.identity.record_parent.is_none()
+                            && global.generation == prior.native().unwrap().generation()
                     })
                     .count();
                 assert_eq!(matching, 1,
@@ -1332,16 +1351,16 @@ where
                 .count(),
             expected
         ),
-        CellDeclarationExpectation::CapturedAt(line) => {
+        CellDeclarationExpectation::CapturedAt { name, line } => {
             let declarations = plan
                 .items()
                 .iter()
                 .filter(|item| item.kind() == ParsedCellPlanKind::Declaration)
                 .collect::<Vec<_>>();
             let [declaration] = declarations.as_slice() else {
-                panic!("history requires one authored declaration group: {declarations:?}");
+                panic!("capture requires one authored declaration group: {declarations:?}");
             };
-            assert_eq!(declaration.binders(), ["historyCaptured"]);
+            assert_eq!(declaration.binders(), [name]);
             assert_eq!(declaration.span().start_line(), line);
             assert_eq!(declaration.span().end_line(), line + 1);
             assert_eq!(
