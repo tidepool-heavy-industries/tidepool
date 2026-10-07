@@ -199,15 +199,18 @@ impl Fixture {
         }
     }
 
-    async fn parent(&self) -> LocalActorRef {
-        let actor = self
-            .forest
+    async fn bare_parent(&self) -> LocalActorRef {
+        self.forest
             .new_workbench(
                 "green-native-fixture".into(),
                 crate::ActorCapabilities::default().with_effect_keys(self.effect_keys.clone()),
             )
             .await
-            .expect("native workbench actor");
+            .expect("native workbench actor")
+    }
+
+    async fn parent(&self) -> LocalActorRef {
+        let actor = self.bare_parent().await;
         let setup = include_str!("green_runtime_setup.hs");
         let setup = if self.host.scenario == Scenario::Single {
             setup.to_string()
@@ -417,6 +420,47 @@ async fn compiled_green_evaluation_failure_is_not_success_or_authored_cancellati
     );
     assert_eq!(fixture.host.state.lock().committed, ["two", "one"]);
     assert!(!control.cancellation_requested());
+    fixture.assert_live_leases_released();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn compiled_expression_single_form_runs_without_prior_declaration_publication() {
+    let fixture = Fixture::new(750, Scenario::Single);
+    let actor = fixture.bare_parent().await;
+    assert_true(
+        fixture
+            .execute(
+                &actor,
+                include_str!("green_runtime_expression_single.hs"),
+                None,
+            )
+            .await,
+    );
+    assert_eq!(fixture.host.state.lock().committed, ["single"]);
+    fixture.assert_live_leases_released();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn compiled_expression_concurrent_forms_reverse_settlement_preserves_heap_closures() {
+    let fixture = Fixture::new(751, Scenario::Reverse);
+    let actor = fixture.bare_parent().await;
+    assert_true(
+        fixture
+            .execute(
+                &actor,
+                include_str!("green_runtime_expression_reverse.hs"),
+                None,
+            )
+            .await,
+    );
+    assert_eq!(
+        fixture.host.state.lock().awaited,
+        BTreeSet::from(["one".to_string(), "two".to_string()])
+    );
+    assert_eq!(fixture.host.state.lock().committed, ["two", "one"]);
+    assert!(fixture.host.state.lock().closed.is_empty());
     fixture.assert_live_leases_released();
     fixture.finish().await;
 }
