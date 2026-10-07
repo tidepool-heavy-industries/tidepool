@@ -515,6 +515,31 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertEqual(rule['crate_root'], declared_source)
         self.assertNotIn('TIDEPOOL_PROPTEST_REGRESSIONS', calls[-1][1]['env'])
 
+    def test_shared_binary_regression_path_only_applies_to_libtest(self):
+        calls = []
+        definitions = SCRIPT.with_name('defs.bzl').read_text()
+        namespace = {
+            'rust_optimization_level': lambda *_: '1',
+            'rust_binary': lambda **kwargs: calls.append(kwargs),
+        }
+        exec('\n'.join(line for line in definitions.splitlines()
+                       if not line.startswith('load(')), namespace)
+        common = {
+            'package_name': 'component', 'package_dir': 'owned/component',
+            'version': '0.1.0', 'crate_root': 'owned/component/src/lib.rs',
+        }
+
+        namespace['tidepool_rust_binary'](
+            name='shared_case', rustc_flags=['--test'], **common)
+        namespace['tidepool_rust_binary'](
+            name='ordinary_tool', rustc_flags=[], **common)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]['env']['TIDEPOOL_PROPTEST_REGRESSIONS'],
+                         'owned/component/proptest-regressions/shared_case.txt')
+        self.assertIn('--test', calls[0]['rustc_flags'])
+        self.assertNotIn('TIDEPOOL_PROPTEST_REGRESSIONS', calls[1]['env'])
+
     def test_declared_resources_are_absolute_for_discovery_and_execution(self):
         assets = Path(self.tmp.name) / 'web assets'
         assets.mkdir()

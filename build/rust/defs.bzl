@@ -19,6 +19,8 @@ def tidepool_rust_library(name, package_name, package_dir, version, env = {}, ru
 
 def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
+    if "--test" in rustc_flags:
+        compiler_env = _test_regression_environment(compiler_env, package_dir, name)
     rust_binary(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
 def _test_environment(env, haskell_worker):
