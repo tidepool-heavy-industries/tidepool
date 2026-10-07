@@ -9,15 +9,11 @@ pub fn agent_control_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "AgentControlStopWith :: (Int, Int) -> AgentControl AgentStopControlOutcome",
-            "AgentControlExecuteCleanupWith :: Int -> [(Int, Int, Int)] -> AgentControl CleanupReceipt",
+            "AgentControlRetainWith :: (Int, Int) -> WorkerLifetime -> AgentControl (Either AgentRetentionError ())",
         ],
         type_defs: &[
             "data AgentStopControlOutcome = AgentStoppedNow | AgentStoppedRetaining Text | AgentStoppedReleasing | AgentStopAlreadyStopped | AgentStopUnavailable | AgentStopUnauthorized | AgentStopFailed Text deriving (Show, Eq)",
-            "data CleanupActorState = CleanupActorRunning | CleanupActorTerminal deriving (Show, Eq)",
-            "data CleanupActorPlan = CleanupActorPlan { cleanupActorId :: Int, cleanupActorIncarnation :: Int, cleanupActorLabel :: Text, cleanupActorState :: CleanupActorState, cleanupActorRevision :: Int } deriving (Show, Eq)",
-            "data CleanupPlan = CleanupPlan { cleanupPlanGroup :: Int, cleanupPlanActors :: [CleanupActorPlan], cleanupPlanPendingResponses :: [Int], cleanupPlanPendingWatches :: [Int], cleanupPlanRefusal :: Maybe Text } deriving (Show, Eq)",
-            "data CleanupStepReceipt = CleanupForgotResponses [Int] | CleanupForgotWatches [Int] | CleanupStoppedActor Int Int AgentStopControlOutcome | CleanupForgotActor Int Int | CleanupActorRetained Int Int [Int] [Int] | CleanupGroupRetired Int | CleanupActorOutputPending Int Int Int | CleanupBlocked Text | CleanupStalePlan deriving (Show, Eq)",
-            "data CleanupReceipt = CleanupReceipt { cleanupReceiptPlan :: CleanupPlan, cleanupReceiptSteps :: [CleanupStepReceipt], cleanupReceiptComplete :: Bool } deriving (Show, Eq)",
+            "data AgentRetentionError = AgentRetainUnavailable | AgentRetainUnauthorized | AgentRetainOwnerUnavailable | AgentRetainOwnerClosed deriving (Show, Eq)",
         ],
         extra_imports: &[],
         helpers: &[],

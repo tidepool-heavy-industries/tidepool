@@ -7,6 +7,7 @@ use tidepool_bridge_derive::FromHaskell;
 #[allow(clippy::enum_variant_names)]
 #[derive(FromHaskell)]
 pub enum BoundWorktreeReq {
+    BoundWorkspaceGet,
     BoundWorktreeGet,
     BoundWorktreeLookup(tidepool_bridge_effects::WtWorktreeId),
     BoundWorktreeBranchOf(tidepool_bridge_effects::WtWorktreeId),
@@ -31,6 +32,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
+            BoundWorktreeReq::BoundWorkspaceGet => self.bound_workspace_get(cx),
             BoundWorktreeReq::BoundWorktreeGet => self.bound_worktree_get(cx),
             BoundWorktreeReq::BoundWorktreeLookup(tree_id) => {
                 self.bound_worktree_lookup(cx, tree_id)

@@ -21,13 +21,13 @@ pub enum WorktreeError {
     DirtySubmoduleUnsupported(String),
     /// source is mid-merge / mid-rebase / mid-cherry-pick
     SourceOperationInProgress(tidepool_bridge_effects::WtInProgressKind),
-    /// one worktree, one agent — binding a second fails explicitly
+    /// exact attachment recovery found a conflicting holder
     WorktreeBusy(tidepool_bridge_effects::WtWorktreeId, String),
     /// the checkout kept changing during bounded submission observation
     SubmissionUnstable(tidepool_bridge_effects::WtWorktreeId),
     /// the executing principal has no active binding for this managed worktree
     WorktreeUnauthorized(tidepool_bridge_effects::WtWorktreeId),
-    /// the executing principal's actor role does not permit this Worktree operation
+    /// the executing principal's concrete resource grant does not permit this Worktree operation
     WorktreeAuthorityDenied(String),
     /// git itself failed; the receipt carries the invocation and its output
     GitFailure(tidepool_bridge_effects::WtGitFailureReceipt),
@@ -44,9 +44,9 @@ pub enum WorktreeError {
 #[derive(FromHaskell)]
 pub enum WorktreeReq {
     WorktreeCreate(tidepool_bridge_effects::WtWorktreeSpec),
-    WorktreeCreateForActorPath(tidepool_bridge_effects::WtWorktreeSpec, String),
-    WorktreeCreateFromBoundForActorPath(tidepool_bridge_effects::WtDirtyPolicy, String),
     WorktreeLookup(tidepool_bridge_effects::WtWorktreeId),
+    WorktreeGrantWorkspace(tidepool_bridge_effects::WtWorktreeId),
+    WorktreeCurrentWorkspace,
     WorktreeBound,
     WorktreeList,
     WorktreeListMatching(Option<bool>, Option<String>, Option<i64>),
@@ -72,13 +72,11 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
             WorktreeReq::WorktreeCreate(spec) => cx.respond(self.worktree_create(spec)),
-            WorktreeReq::WorktreeCreateForActorPath(spec, actor_path) => {
-                cx.respond(self.worktree_create_for_actor_path(spec, actor_path))
-            }
-            WorktreeReq::WorktreeCreateFromBoundForActorPath(dirty_policy, actor_path) => {
-                cx.respond(self.worktree_create_from_bound_for_actor_path(dirty_policy, actor_path))
-            }
             WorktreeReq::WorktreeLookup(tree_id) => cx.respond(self.worktree_lookup(tree_id)),
+            WorktreeReq::WorktreeGrantWorkspace(tree_id) => {
+                cx.respond(self.worktree_grant_workspace(tree_id))
+            }
+            WorktreeReq::WorktreeCurrentWorkspace => cx.respond(self.worktree_current_workspace()),
             WorktreeReq::WorktreeBound => cx.respond(self.worktree_bound()),
             WorktreeReq::WorktreeList => cx.respond(self.worktree_list()),
             WorktreeReq::WorktreeListMatching(present, branch_prefix, created_after) => {

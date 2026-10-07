@@ -351,6 +351,9 @@ def generated_producer_rules(package_name):
 
 def source_inputs(package, target, features=(), test_target=False):
     directory = ROOT / CURRENT_DIR
+    generated_paths = [path for path in protocol_output_paths()
+                       if path.startswith(CURRENT_DIR + "/src/generated/")
+                       and path.endswith(".rs")]
     source_root = pathlib.Path(target["src_path"]).resolve()
     sources = {directory / "Cargo.toml"}
     external = {}
@@ -395,6 +398,11 @@ def source_inputs(package, target, features=(), test_target=False):
             sources.update(graph)
         else:
             sources.add(source_root)
+    # Snapshot contents cannot contribute sources or include dependencies to a
+    # native action. The producer roster owns this directory's complete closure.
+    if generated_paths:
+        sources = {source for source in sources
+                   if not source.is_relative_to(directory / "src/generated")}
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {
@@ -527,14 +535,11 @@ def source_inputs(package, target, features=(), test_target=False):
     # Schema output paths define the source closure, including outputs that do
     # not yet exist in the checkout. Checked-in generated copies are not inputs
     # to native Rust compilation.
-    if package["name"] in {
-        "tidepool-mcp", "tidepool-handlers", "tidepool-bridge-effects",
-        "tidepool-runtime", "exomonad-actor", "exomonad-tool", "tidepool",
-    }:
-        for path in protocol_output_paths():
-            if path.startswith(CURRENT_DIR + "/src/generated/") and path.endswith(".rs"):
-                mapped.pop(path.removeprefix(CURRENT_DIR + "/"), None)
-                mapped[generated_protocol_label(path)] = path
+    if generated_paths:
+        # The producer roster is complete. A removed generated effect must not
+        # survive as an ordinary source input through an obsolete snapshot.
+        for path in generated_paths:
+            mapped[generated_protocol_label(path)] = path
     return dict(sorted(mapped.items(), key=lambda item: item[1]))
 
 

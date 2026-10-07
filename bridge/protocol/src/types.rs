@@ -653,6 +653,11 @@ impl WireDerives {
         if single_line.len() < 100 {
             single_line
         } else {
+            let body = if body.len() + 5 <= 100 {
+                body
+            } else {
+                idents.join(",\n    ")
+            };
             format!("#[derive(\n    {body},\n)]")
         }
     }

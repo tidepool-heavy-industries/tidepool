@@ -22,6 +22,8 @@ use tidepool_bridge_derive::FromHaskell;
 )]
 pub enum CommandsReq {
     CommandStartWith(tidepool_bridge_effects::CommandSpec),
+    CommandStartOwnedWith(tidepool_bridge_effects::CommandSpec, crate::WorkerLifetime),
+    CommandRetainWith(String, crate::WorkerLifetime),
     CommandBackgroundWith(tidepool_bridge_effects::CommandSpec),
     CommandStatusWith(String),
     CommandAwaitWith(String, i64),

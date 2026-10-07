@@ -5,6 +5,7 @@ pub mod context_read_write;
 pub mod model_control;
 pub mod reflect;
 pub mod repo_event;
+pub mod resource_scopes;
 pub mod source;
 pub mod worktree;
 
@@ -13,5 +14,6 @@ pub use context_read_write::*;
 pub use model_control::*;
 pub use reflect::*;
 pub use repo_event::*;
+pub use resource_scopes::*;
 pub use source::*;
 pub use worktree::*;

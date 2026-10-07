@@ -9,9 +9,9 @@ pub fn worktree_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)",
-            "WorktreeCreateForActorPath :: WorktreeSpec -> Text -> Worktree (Either WorktreeError WorktreeHandle)",
-            "WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)",
+            "WorktreeGrantWorkspace :: WorktreeId -> Worktree (Either WorktreeError WorkspaceHandle)",
+            "WorktreeCurrentWorkspace :: Worktree (Either WorktreeError WorkspaceHandle)",
             "WorktreeBound :: Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeListMatching :: Maybe Bool -> Maybe Text -> Maybe Int -> Worktree (Either WorktreeError [WorktreeSummary])",
@@ -21,6 +21,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "WorktreeTryMerge :: MergeRequest -> Worktree (Either WorktreeError MergeOutcome)",
         ],
         type_defs: &[
+            "data WorkspaceHandle = WorkspaceHandle Text deriving (Show, Eq)",
             "data WorktreeId = WorktreeId Text deriving (Show, Eq)",
             "data GitOid = GitOid Text deriving (Show, Eq)",
             "data GitRef = GitRef Text deriving (Show, Eq)",
@@ -34,7 +35,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "data WorkingState = WorkingState { changes :: DirtySummary, operation :: Maybe InProgressKind } deriving (Show, Eq)",
             "data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, committedPaths :: [Text], submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)",
             "data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)",
-            "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
+            "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: Maybe BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
             "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
             "data MergeRequest = MergeRequest { mergeSourceHead :: GitOid, mergeSourceWorktree :: WorktreeId, mergeSourceBranch :: Maybe BranchName, mergeTargetWorktree :: WorktreeId, mergeMessage :: Text, mergeAdvance :: Maybe BranchName } deriving (Show, Eq)",

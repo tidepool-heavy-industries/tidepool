@@ -8,8 +8,6 @@ use tidepool_bridge_derive::FromHaskell;
 #[derive(FromHaskell)]
 pub enum WorktreeAllocationReq {
     WorktreeAllocationCreate(tidepool_bridge_effects::WtWorktreeSpec),
-    WorktreeAllocationCreateForActorPath(tidepool_bridge_effects::WtWorktreeSpec, String),
-    WorktreeAllocationCreateFromBoundForActorPath(tidepool_bridge_effects::WtDirtyPolicy, String),
 }
 
 impl tidepool_mcp::DescribeEffect for ActorWorktreeAllocationHandler {
@@ -32,17 +30,6 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             WorktreeAllocationReq::WorktreeAllocationCreate(spec) => {
                 self.worktree_allocation_create(cx, spec)
             }
-            WorktreeAllocationReq::WorktreeAllocationCreateForActorPath(spec, actor_path) => {
-                self.worktree_allocation_create_for_actor_path(cx, spec, actor_path)
-            }
-            WorktreeAllocationReq::WorktreeAllocationCreateFromBoundForActorPath(
-                dirty_policy,
-                actor_path,
-            ) => self.worktree_allocation_create_from_bound_for_actor_path(
-                cx,
-                dirty_policy,
-                actor_path,
-            ),
         }
     }
 

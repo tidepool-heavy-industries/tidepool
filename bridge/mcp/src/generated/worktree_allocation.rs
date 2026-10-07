@@ -9,8 +9,6 @@ pub fn worktree_allocation_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "WorktreeAllocationCreate :: WorktreeSpec -> WorktreeAllocation (Either WorktreeError WorktreeHandle)",
-            "WorktreeAllocationCreateForActorPath :: WorktreeSpec -> Text -> WorktreeAllocation (Either WorktreeError WorktreeHandle)",
-            "WorktreeAllocationCreateFromBoundForActorPath :: DirtyPolicy -> Text -> WorktreeAllocation (Either WorktreeError WorktreeHandle)",
         ],
         type_defs: &[],
         extra_imports: &[],

@@ -9,6 +9,7 @@ pub fn agent_tools_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "AgentToolsInstallWith :: Value -> (Int -> Eff toolEffs Text) -> AgentTools ()",
+            "AgentToolsInstallReceiverWith :: RequestSite '[] () -> (Int -> Eff receiverEffs ()) -> AgentTools ()",
             "AgentToolsInputWith :: AgentTools (Text, Value)",
             "AgentToolsAwaitWith :: Value -> Text -> Maybe Text -> AgentTools (Text, Value)",
             "AgentToolsReplyWith :: Value -> AgentTools ()",

@@ -21,24 +21,12 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum ActorReq {
-    ActorBeginForkGroupWith(bool, String, Vec<String>),
     ActorStartWith(
         String,
         tidepool_bridge::HaskellValue,
-        crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,
-        Vec<String>,
+        Option<tidepool_bridge_effects::WtWorkspaceHandle>,
     ),
-    ActorForkWith(
-        String,
-        tidepool_bridge::HaskellValue,
-        i64,
-        crate::ActorLaunchRoleWire,
-        crate::ActorEffectProfileWire,
-        Vec<String>,
-    ),
-    ActorCommitForkGroupWith(i64),
-    ActorAbortForkGroupWith(i64),
     ActorWaitWith((i64, i64)),
     ActorPollWith((i64, i64)),
     ActorCallWith((i64, i64), tidepool_bridge::HaskellValue),
@@ -51,6 +39,5 @@ pub enum ActorReq {
         tidepool_bridge::HaskellValue,
         String,
         crate::ActorEffectProfileWire,
-        Vec<String>,
     ),
 }
