@@ -1,6 +1,7 @@
 {-# LANGUAGE GHC2024 #-}
 module SegmentProbeSupport
   ( segmentRecord
+  , carrierBaseline
   , lateCarrierIncrement
   , lateCarrierDouble
   , lateCarrierNegate
@@ -17,6 +18,10 @@ segmentRecord value = send (Print (T.pack (P.show value)))
 
 -- Keep reuse-test demand as original call edges rather than inlining or
 -- specialization. The uncalled negate helper distinguishes partial selection.
+{-# OPAQUE carrierBaseline #-}
+carrierBaseline :: Int -> Int
+carrierBaseline value = value
+
 {-# OPAQUE lateCarrierIncrement #-}
 lateCarrierIncrement :: Int -> Int
 lateCarrierIncrement value = value P.+ 1

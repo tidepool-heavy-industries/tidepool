@@ -1022,11 +1022,11 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         &session.images,
         (0, 0),
         "warm_native_cold_baseline",
-        "baselinePlannedValue <- pure (2 :: Int)",
+        "baselinePlannedValue <- pure (Carrier.carrierBaseline 2)",
         CellDeclarationExpectation::Total(0),
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
-        &SourceImports::default(),
+        &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
         None,
         |program| {
             let [item] = program.items() else {
@@ -1042,6 +1042,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         },
     )
     .unwrap();
+    assert!(session.observed().is_empty());
     let (before, baseline_proof) = cold.unwrap();
     let baseline_binding = session
         .resident
@@ -1094,6 +1095,10 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
             .unwrap()
             .original_ordinal()
     };
+    let baseline = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("carrierBaseline"),
+    };
     let increment = NativeGroupKey {
         artifact: descriptor.id,
         original_ordinal: operation_group("lateCarrierIncrement"),
@@ -1109,12 +1114,16 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     assert_ne!(increment, double);
     assert_ne!(increment, negate);
     assert_ne!(double, negate);
+    assert_ne!(baseline, increment);
+    assert_ne!(baseline, double);
+    assert_ne!(baseline, negate);
     let mut selected_carrier = before
         .artifact_view()
         .selected_native_groups()
         .into_iter()
         .filter(|key| key.artifact == descriptor.id)
         .collect::<BTreeSet<_>>();
+    assert!(selected_carrier.contains(&baseline));
     assert!(!selected_carrier.contains(&increment));
     assert!(!selected_carrier.contains(&double));
     assert!(!selected_carrier.contains(&negate));
