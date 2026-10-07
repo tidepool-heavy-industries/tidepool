@@ -2055,7 +2055,15 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 
 #[tokio::test]
 async fn candidate_reports_preserve_admissions_receipts_and_observation_failures() {
-    let campaign = workspace_campaign().await;
+    let campaign = workspace_campaign_with(|authored| {
+        crate::exomonad::edit_fixture_project_config(authored, |project| {
+            project.haskell.modules = vec![
+                "Project.Work".into(),
+                "Project.WorkflowExamplesChecks".into(),
+            ];
+        });
+    })
+    .await;
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
@@ -2712,6 +2720,13 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
 }
 
 fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
+    recipe_workspace_with_modules(checks, None)
+}
+
+fn recipe_workspace_with_modules(
+    checks: Option<&[&str]>,
+    modules: Option<&[&str]>,
+) -> tempfile::TempDir {
     let repository = tempfile::tempdir().unwrap();
     // A candidate is a project, and a project is a Git tree: that is how `nix`
     // reads the `flake.nix` a package's pinned Haskell source is named in.
@@ -2733,11 +2748,16 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
         repository.path(),
     )
     .unwrap();
-    if let Some(checks) = checks {
+    if checks.is_some() || modules.is_some() {
         crate::exomonad::edit_fixture_project_config(
             &repository.path().join(".exomonad"),
             |project| {
-                project.haskell.checks = checks.iter().map(|entry| (*entry).into()).collect();
+                if let Some(checks) = checks {
+                    project.haskell.checks = checks.iter().map(|entry| (*entry).into()).collect();
+                }
+                if let Some(modules) = modules {
+                    project.haskell.modules = modules.iter().map(|entry| (*entry).into()).collect();
+                }
             },
         );
     }
@@ -2826,7 +2846,10 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects() {
-    let repository = recipe_workspace(Some(&["Project.QuantitiesChecks.workspaceProfile"]));
+    let repository = recipe_workspace_with_modules(
+        Some(&["Project.QuantitiesChecks.workspaceProfile"]),
+        Some(&["Project.Work"]),
+    );
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
