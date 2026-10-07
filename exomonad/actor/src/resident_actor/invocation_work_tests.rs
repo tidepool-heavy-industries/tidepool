@@ -878,6 +878,8 @@ impl Fixture {
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
+            form_host: None,
+            form_registry: Default::default(),
             release_tracked: Default::default(),
             conversation_reader: None,
             usage_pointers: Default::default(),
