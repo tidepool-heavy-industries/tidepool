@@ -69,6 +69,6 @@ abstractWorkspace = Spawn.ExistingWorkspace
 
 -- Partial admission exposes a real reference that ordinary typed cleanup accepts.
 cleanupPartialSpawn :: Member Core.AgentControl effects => Spawn.SpawnError -> Eff effects (Maybe Agent.StopOutcome)
-cleanupPartialSpawn (Spawn.SpawnPartialFailure (Spawn.SpawnRetainedActor agent _) _ _) =
+cleanupPartialSpawn (Spawn.SpawnPartialFailure (Spawn.SpawnRetainedActor agent) _ _) =
   Just <$> Agent.stopAgent agent
 cleanupPartialSpawn _ = pure Nothing

@@ -64,7 +64,7 @@ releaseCheckpoint (ContextCheckpoint token) = send (AgentLaunchReleaseCheckpoint
 -- | A partial admission retains usable runtime-issued handles for cleanup.
 data SpawnRetainedResources
   = SpawnRetainedWorkspace Core.WorktreeHandle
-  | SpawnRetainedActor AgentRef (Maybe Core.WorktreeHandle)
+  | SpawnRetainedActor AgentRef
   deriving (Show)
 
 data SpawnError
@@ -123,7 +123,7 @@ spawnError (Core.SpawnPartialFailure retained cleanup cause) =
 retainedResources :: Core.SpawnRetainedResourcesWire -> SpawnRetainedResources
 retainedResources (Core.SpawnRetainedWorkspace workspace) = SpawnRetainedWorkspace workspace
 retainedResources (Core.SpawnRetainedActor (actor, incarnation) workspace) =
-  SpawnRetainedActor (admittedAgent actor incarnation workspace) workspace
+  SpawnRetainedActor (admittedAgent actor incarnation workspace)
 
 contextWire :: SpawnContext -> SpawnContextWire
 contextWire (ForkCtx (ContextCheckpoint token)) = CapturedSpawn token
