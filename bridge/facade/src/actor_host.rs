@@ -124,7 +124,6 @@ mod jev_tests;
 #[cfg(test)]
 mod observation_budget_tests;
 #[cfg(test)]
-mod research_policy_tests;
 #[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
@@ -540,7 +539,6 @@ pub struct ActorHostConfig {
     pub tmux_session: String,
     pub model: String,
     pub effort: ForkEffort,
-    pub research_policy: exomonad_actor::ResearchPolicy,
     pub pane_environment: std::collections::BTreeMap<String, String>,
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
     /// the key from `TYPESAFE_API_KEY` or the secrets directory.
@@ -747,10 +745,8 @@ fn remove_predecessor_socket_root(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-fn operator_effective_role(
-    research_policy: exomonad_actor::ResearchPolicy,
-) -> exomonad_actor::EffectiveRole {
-    exomonad_actor::EffectiveRole::root().with_research_policy(research_policy)
+fn operator_capabilities() -> exomonad_actor::ActorCapabilities {
+    exomonad_actor::ActorCapabilities::default()
 }
 
 fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
@@ -874,8 +870,7 @@ fn durable_root_identity(
 
 fn contains_durable_root_admission(records: &[exomonad_actor::DurableActorRecord]) -> bool {
     records.iter().any(|record| {
-        record.admission.role == exomonad_actor::ActorRole::Root
-            && record.admission.creator.is_none()
+        record.admission.creator.is_none()
             && record.admission.supervisor_parent.is_none()
             && record.admission.context_parent.is_none()
     })
@@ -1001,7 +996,7 @@ fn resolve_worker_launch(
     base_fingerprint: &str,
 ) -> Result<exomonad_actor::WorkerLaunchPreview, String> {
     let mut instructions = developer_instructions_selected(
-        &request.role,
+        &request.capabilities,
         config.workspace_inputs.as_ref(),
         request.instructions.as_deref(),
     );
@@ -2288,7 +2283,7 @@ async fn run_owned(
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();
-    let operator_role = operator_effective_role(config.research_policy);
+    let operator_role = operator_capabilities();
     let operator_socket = run_root.join("operator").join("operator.sock");
     if operator_socket.exists() {
         std::fs::remove_file(&operator_socket)?;
@@ -2868,10 +2863,10 @@ pub(crate) fn spec_effect_preflight(
     preamble = insert_preamble_imports(&preamble, "Tidepool.Actors.Exomonad");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
-    for profile in exomonad_tool::PublicActorProfile::ALL {
-        let label = profile.label();
+    {
+        let capabilities = exomonad_actor::ActorCapabilities::default();
         let installation =
-            exomonad_actor::agent_spec::installation_expression(entry, profile.effect_keys());
+            exomonad_actor::agent_spec::installation_expression(entry, capabilities.effect_keys());
         let dispatcher_effects = installation.dispatcher_effect_row();
         let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
         let template = templates
@@ -2907,12 +2902,12 @@ pub(crate) fn spec_effect_preflight(
                     },
                 );
                 failures.push(format!(
-                    "profile {label} cannot install spec {entry}:\n{detail}"
+                    "root installer cannot install spec {entry}:\n{detail}"
                 ));
             }
             Err(error) => {
                 return Err(runtime_error(format!(
-                    "could not establish whether profile {label} can install spec {entry}: {error}"
+                    "could not establish whether the root can install spec {entry}: {error}"
                 )));
             }
         }
@@ -3437,9 +3432,7 @@ fn compile_root(
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite)
-    .with_effective_role(
-        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy),
-    );
+    .with_capabilities(exomonad_actor::ActorCapabilities::default());
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
             exomonad_actor::ActorSourceLayers::layer_include(layers.as_ref(), &[])
@@ -3468,19 +3461,6 @@ fn host_workbench_source(
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_toolset_support_roots(toolset_support)
-        .with_preparation_profiles(match &config.workspace_inputs {
-            Some(inputs) => inputs
-                .config()?
-                .preparation
-                .selected_profiles(config.research_policy)?
-                .into_iter()
-                .filter_map(|selected| match selected.profile {
-                    crate::exomonad::PreparationProfile::Root => None,
-                    crate::exomonad::PreparationProfile::Public(profile) => Some(profile),
-                })
-                .collect(),
-            None => Vec::new(),
-        })
         .with_installed_effect_support(host_context_support())
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
@@ -3526,7 +3506,9 @@ pub(crate) async fn prepare_workspace_toolsets(
     source: Arc<crate::exomonad::source::ExomonadSourceReload>,
 ) -> Result<Vec<crate::exomonad::workspace::PreparedToolsetCoverage>, Box<dyn std::error::Error>> {
     let authored = inputs.config()?;
-    let profiles = authored.preparation.selected_profiles(authored.research)?;
+    let requested_effects = exomonad_actor::ActorCapabilities::default()
+        .effect_keys()
+        .to_vec();
     let settings = authored
         .launch
         .embedded
@@ -3552,7 +3534,6 @@ pub(crate) async fn prepare_workspace_toolsets(
         tmux_session: String::new(),
         model: authored.defaults.model,
         effort: authored.defaults.effort.into(),
-        research_policy: authored.research,
         pane_environment: Default::default(),
         jev: None,
     };
@@ -3630,12 +3611,12 @@ pub(crate) async fn prepare_workspace_toolsets(
     let outcome = compiler_owner
         .scope(async {
             let mut selected = Vec::new();
-            for profile in profiles {
+            {
                 let ready = workbench
                     .prepare_source_toolset(
                         tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                         frozen.clone(),
-                        &profile.requested_effects,
+                        &requested_effects,
                         &supported,
                         Arc::clone(&registry),
                     )
@@ -3646,8 +3627,7 @@ pub(crate) async fn prepare_workspace_toolsets(
                     )
                 })?;
                 selected.push(crate::exomonad::workspace::PreparedToolsetCoverage {
-                    profile: profile.profile,
-                    requested_effects: profile.requested_effects,
+                    requested_effects,
                     effective_effects: ready.effects().to_vec(),
                     recipe: recipe.to_owned(),
                     original,
@@ -4024,83 +4004,33 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
 }
 
 #[cfg(test)]
-fn developer_instructions(effective_role: &exomonad_actor::EffectiveRole) -> String {
-    developer_instructions_selected(effective_role, None, None)
+fn developer_instructions(capabilities: &exomonad_actor::ActorCapabilities) -> String {
+    developer_instructions_selected(capabilities, None, None)
 }
 
 fn developer_instructions_selected(
-    effective_role: &exomonad_actor::EffectiveRole,
+    capabilities: &exomonad_actor::ActorCapabilities,
     inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     instructions: Option<&str>,
 ) -> String {
-    if let Some(body) = instructions {
-        return append_effective_role(body.to_owned(), effective_role);
-    }
-    let role = effective_role.role();
-    let key = match role {
-        exomonad_actor::ActorRole::Root => "root",
-        exomonad_actor::ActorRole::Research => "research",
-        exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Inherited => "coding",
-        exomonad_actor::ActorRole::Scaffolding => "scaffolding",
-        exomonad_actor::ActorRole::Integration => "integration",
-    };
-    if let Some(body) = inputs.and_then(|inputs| inputs.prompts.get(key)) {
-        let body = body.clone();
-
-        return append_effective_role(body, effective_role);
-    }
-    if role == exomonad_actor::ActorRole::Root {
-        let instructions = PromptId::ExomonadRoot.body().to_string();
-
-        append_effective_role(instructions, effective_role)
-    } else {
-        let instructions = match role {
-            exomonad_actor::ActorRole::Research => PromptId::ReadonlyAgent.body().into(),
-            exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Inherited => {
-                PromptId::WorktreeAgent.body().into()
-            }
-            exomonad_actor::ActorRole::Scaffolding => PromptId::ScaffoldingAgent.body().into(),
-            exomonad_actor::ActorRole::Integration => PromptId::IntegrationAgent.body().into(),
-            exomonad_actor::ActorRole::Root => unreachable!("root handled above"),
-        };
-        append_effective_role(instructions, effective_role)
-    }
+    let body = instructions
+        .or_else(|| inputs.and_then(|inputs| inputs.prompts.get("agent").map(String::as_str)))
+        .unwrap_or_else(|| PromptId::Agent.body());
+    append_capabilities(body.to_owned(), capabilities)
 }
 
-fn append_effective_role(mut instructions: String, role: &exomonad_actor::EffectiveRole) -> String {
-    let descendants = role.descendants();
+fn append_capabilities(
+    mut instructions: String,
+    capabilities: &exomonad_actor::ActorCapabilities,
+) -> String {
+    let descendants = capabilities.descendants();
     instructions.push_str(&format!(
-        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
-        role.prompt_profile(),
-        role.role(),
-        role.haskell_effects_type(),
-        role.native_tools(),
-        role.workspace(),
+        "\n\nAvailable effects: {}; descendant_depth={}; active_children={}. Concrete resource grants authorize resource access independently of effect membership.\n",
+        capabilities.haskell_effects_type(),
         descendants.maximum_depth,
         exomonad_actor::render_child_budget(descendants.maximum_active_children),
     ));
     instructions
-}
-
-fn worktree_grant(role: exomonad_actor::ActorRole) -> ActorWorktreeGrant {
-    match role {
-        exomonad_actor::ActorRole::Root => ActorWorktreeGrant::Repository,
-        exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Scaffolding => {
-            ActorWorktreeGrant::Bound {
-                enumerate: false,
-                allocate: true,
-                integrate: true,
-            }
-        }
-        exomonad_actor::ActorRole::Integration => ActorWorktreeGrant::Bound {
-            enumerate: false,
-            allocate: false,
-            integrate: true,
-        },
-        exomonad_actor::ActorRole::Research | exomonad_actor::ActorRole::Inherited => {
-            ActorWorktreeGrant::default()
-        }
-    }
 }
 
 /// Resolve command mounts from the exact actor's worktree grant and custody.
@@ -4125,9 +4055,9 @@ fn resident_command_roots(
     let writable = writable_repository_roots(
         root,
         if custody.is_some() && grant != ActorWorktreeGrant::RepositoryReadOnly {
-            exomonad_actor::WorkspaceAccess::WritableBound
+            true
         } else {
-            exomonad_actor::WorkspaceAccess::InspectOnly
+            false
         },
         source,
         custody.as_deref(),
@@ -4170,7 +4100,7 @@ struct ResidentCommandRoots {
 /// typed observation, never by writing in the child's checkout.
 fn writable_repository_roots(
     root: bool,
-    workspace_access: exomonad_actor::WorkspaceAccess,
+    workspace_writable: bool,
     source: &Path,
     worker_worktree: Option<&Path>,
     git_common_dir: &Path,
@@ -4182,12 +4112,12 @@ fn writable_repository_roots(
         let mut writable = vec![source.to_path_buf()];
         writable.extend(root_worktrees.map(Path::to_path_buf));
         writable
-    } else if workspace_access == exomonad_actor::WorkspaceAccess::WritableBound {
+    } else if workspace_writable {
         worker_worktree.map(Path::to_path_buf).into_iter().collect()
     } else {
         Vec::new()
     };
-    if root || workspace_access == exomonad_actor::WorkspaceAccess::WritableBound {
+    if root || workspace_writable {
         // Writable linked worktrees intentionally share objects, refs, config,
         // and per-worktree administrative state. Inspection-only actors must
         // observe the same metadata without being able to mutate it.

@@ -152,7 +152,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         Some(workspaces.clone()),
         crate::Incarnation::FIRST,
     );
-    let role = crate::EffectiveRole::root().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
+    let role = crate::ActorCapabilities::default().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
     let issuer = forest
         .new_workbench("checkpoint-issuer".into(), role.clone())
         .await
@@ -430,7 +430,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         Some(workspaces.clone()),
         crate::Incarnation::FIRST,
     );
-    let role = crate::EffectiveRole::root().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
+    let role = crate::ActorCapabilities::default().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
     let parent = forest
         .new_workbench("private-capture-parent".into(), role.clone())
         .await
@@ -831,7 +831,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         Some(workspaces.clone()),
         crate::Incarnation::FIRST,
     );
-    let role = crate::EffectiveRole::root().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
+    let role = crate::ActorCapabilities::default().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
     let parent = forest
         .new_workbench("partial-capture-parent".into(), role.clone())
         .await

@@ -1831,7 +1831,7 @@ where
             let environment = self.environment.clone();
             let permitted = self
                 .descriptor
-                .effective_role()
+                .capabilities()
                 .effect_keys()
                 .contains(&crate::ActorEffectKey::Commands);
             return OwnedWorkbenchTask::new(Box::pin(async move {
@@ -1970,7 +1970,7 @@ where
         let environment = self.environment.clone();
         let commands_permitted = self
             .descriptor
-            .effective_role()
+            .capabilities()
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
         let context = owned.state.effects.context.clone();

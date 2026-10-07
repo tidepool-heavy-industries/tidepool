@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ActorDescriptor, ActorId, ActorPlacement, EffectiveRole, HostedCheckpointContext};
+use crate::{ActorDescriptor, ActorId, ActorPlacement, ActorCapabilities, HostedCheckpointContext};
 use tidepool_codegen::suspension::RealmId;
 
 fn fixture(
@@ -26,7 +26,7 @@ fn fixture(
     let token = groups.capture_checkpoint_with_host_attachment(
         "capture".into(),
         owner,
-        EffectiveRole::root(),
+        ActorCapabilities::default(),
         None,
         None,
         crate::CheckpointSourceLayer::default(),

@@ -438,10 +438,12 @@ pub(super) async fn run_interactive_applications(
                             root_identity = installation.actor.identity();
                             launch_context.root = root_identity;
                         }
-                        worktree_authority.install_grant(
-                            installation.actor.identity().into(),
-                            worktree_grant(installation.effective_role.role()),
-                        );
+                        if installation.creator.is_none() {
+                            worktree_authority.install_grant(
+                                installation.actor.identity().into(),
+                                ActorWorktreeGrant::Repository,
+                            );
+                        }
                         {
                             let service = &embedded_service;
                             let settings = service.settings.clone();
@@ -517,7 +519,7 @@ pub(super) async fn run_interactive_applications(
                                 ForkEffort::High => harness::model::Effort::High,
                             };
                             let mut instructions = developer_instructions_selected(
-                                &installation.effective_role,
+                                &installation.capabilities,
                                 launch_context.config.workspace_inputs.as_ref(),
                                 installation.instructions.as_deref(),
                             );

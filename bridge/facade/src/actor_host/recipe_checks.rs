@@ -163,7 +163,6 @@ impl Driver {
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,
             effort: defaults.defaults.effort.into(),
-            research_policy: defaults.research,
 
             pane_environment: BTreeMap::new(),
             jev: None,
@@ -462,10 +461,12 @@ impl Driver {
                         ));
                     }
                 }
-                session.authority.install_grant(
-                    installation.actor.identity().into(),
-                    worktree_grant(installation.effective_role.role()),
-                );
+                if installation.creator.is_none() {
+                    session.authority.install_grant(
+                        installation.actor.identity().into(),
+                        ActorWorktreeGrant::Repository,
+                    );
+                }
                 if let Some(gate) = &installation.fork_gate {
                     gate.mark_ready()?;
                 }
@@ -611,7 +612,6 @@ impl Driver {
         let defaults = selected.config()?;
         self.config.model = defaults.defaults.model;
         self.config.effort = defaults.defaults.effort.into();
-        self.config.research_policy = defaults.research;
         self.config.workspace_inputs = Some(selected);
         let session = ModelFreeSession::start(&self.config, |admission| admission).await?;
         self.installations

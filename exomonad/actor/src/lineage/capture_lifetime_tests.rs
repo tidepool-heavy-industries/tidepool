@@ -25,7 +25,7 @@ fn capture(
     let token = groups.capture_checkpoint_with_retained_scope(
         "capture".into(),
         ActorRef::first(crate::ActorId(1)),
-        crate::EffectiveRole::root(),
+        crate::ActorCapabilities::default(),
         None,
         None,
         crate::CheckpointSourceLayer::default(),

@@ -366,7 +366,7 @@ where
                     || descriptor.creator() != previous.creator()
                     || descriptor.supervisor_parent() != previous.supervisor_parent()
                     || descriptor.profile() != previous.profile()
-                    || descriptor.effective_role() != previous.effective_role()
+                    || descriptor.capabilities() != previous.capabilities()
                     || descriptor.context_parent() != previous.context_parent()
                     || descriptor.fork_boundary() != previous.fork_boundary()
                     || descriptor.checkpoint_token() != previous.checkpoint_token()

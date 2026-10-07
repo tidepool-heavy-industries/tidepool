@@ -173,8 +173,8 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
                     lexical_scope: ScopeId::ROOT,
                 },
             )
-            .with_effective_role(
-                exomonad_actor::EffectiveRole::root().with_effect_keys(Vec::new()),
+            .with_capabilities(
+                exomonad_actor::ActorCapabilities::default().with_effect_keys(Vec::new()),
             ),
             outcome,
         )

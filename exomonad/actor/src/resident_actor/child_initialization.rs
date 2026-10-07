@@ -171,7 +171,7 @@ fn same_allocation(original: &ActorDescriptor, current: &ActorDescriptor) -> boo
         && original.context_parent() == current.context_parent()
         && original.checkpoint_token() == current.checkpoint_token()
         && original.profile() == current.profile()
-        && original.effective_role() == current.effective_role()
+        && original.capabilities() == current.capabilities()
         && original.persistence_policy() == current.persistence_policy()
         && original.source_layer() == current.source_layer()
 }

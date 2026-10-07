@@ -83,7 +83,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
     let requester = forest
         .new_workbench(
             "terminal-transfer-requester".into(),
-            crate::EffectiveRole::root().with_effect_keys(vec![
+            crate::ActorCapabilities::default().with_effect_keys(vec![
                 crate::ActorEffectKey::Actor,
                 crate::ActorEffectKey::Replies,
             ]),
@@ -306,7 +306,7 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
         let actor = forest
             .new_workbench(
                 "private-publication-refusal".into(),
-                crate::EffectiveRole::root().with_effect_keys(Vec::new()),
+                crate::ActorCapabilities::default().with_effect_keys(Vec::new()),
             )
             .await
             .expect("root workbench");

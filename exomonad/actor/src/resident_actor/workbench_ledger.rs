@@ -521,7 +521,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "research".into(),
             actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -601,7 +601,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "research".into(),
             actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),

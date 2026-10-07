@@ -128,8 +128,8 @@ where
                         actor_path,
                         seed,
                         crate::ForkWorkspacePolicy {
-                            native_tools: descriptor.effective_role().native_tools(),
-                            workspace: descriptor.effective_role().workspace(),
+                            native_tools: descriptor.capabilities().native_tools(),
+                            workspace: descriptor.capabilities().workspace(),
                         },
                     )
                     .await
@@ -349,7 +349,7 @@ pub(super) fn matches_parent(
         || current.supervisor_parent() != original.supervisor_parent()
         || current.context_parent() != original.context_parent()
         || current.profile() != original.profile()
-        || current.effective_role() != original.effective_role()
+        || current.capabilities() != original.capabilities()
         || current.persistence_policy() != original.persistence_policy()
         || current.source_layer() != original.source_layer())
 }

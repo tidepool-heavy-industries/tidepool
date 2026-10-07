@@ -535,7 +535,7 @@ impl ConcurrentResident {
         let actor = forest
             .new_workbench(
                 "concurrent-publication".into(),
-                exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
+                exomonad_actor::ActorCapabilities::default().with_effect_keys(vec![
                     exomonad_actor::ActorEffectKey::Commands,
                     exomonad_actor::ActorEffectKey::Watches,
                 ]),
@@ -1110,7 +1110,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         let actor = forest
             .new_workbench(
                 "resident-await-watch".into(),
-                exomonad_actor::EffectiveRole::root().with_effect_keys(if direct_binding_cell {
+                exomonad_actor::ActorCapabilities::default().with_effect_keys(if direct_binding_cell {
                     vec![exomonad_actor::ActorEffectKey::Commands]
                 } else {
                     vec![

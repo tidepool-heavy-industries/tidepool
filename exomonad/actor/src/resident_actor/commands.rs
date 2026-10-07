@@ -44,7 +44,7 @@ where
     ) -> CommandResolution {
         let permitted = self
             .descriptor
-            .effective_role()
+            .capabilities()
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
         resolve_command(

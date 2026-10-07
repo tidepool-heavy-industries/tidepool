@@ -1,8 +1,8 @@
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use crate::{
-    ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports,
-    ActorCapabilities,
+    ActorCapabilities, ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext,
+    ActorSourceImports,
 };
 
 /// The host or lineage owner chooses persistence independently of actor names
@@ -167,6 +167,12 @@ impl ActorDescriptor {
     pub fn with_capabilities(mut self, capabilities: ActorCapabilities) -> Self {
         self.capabilities = capabilities;
         self
+    }
+
+    /// Root identity follows ancestry, independently of available effects.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.creator.is_none() && self.supervisor_parent.is_none() && self.context_parent.is_none()
     }
 
     #[must_use]

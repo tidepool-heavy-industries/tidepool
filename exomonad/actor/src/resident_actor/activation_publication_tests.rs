@@ -274,7 +274,7 @@ async fn interrupt_during_preview(
                     initial_user_message: None,
                     launch_worktrees: Vec::new(),
                     worktree_custody: None,
-                    effective_role: descriptor.effective_role().clone(),
+                    capabilities: descriptor.capabilities().clone(),
                     fork_effort: None,
                     model: None,
                     instructions: None,

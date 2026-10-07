@@ -78,8 +78,8 @@ pub use workbench_display::bounded_output as bound_workbench_display;
 
 pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
 // A `ConversationReader` resolves to `Vec<ConversationTurn>`, so anyone who
-// installs one has to be able to name what it yields. `ActorRole` and
-// `ActorCapabilities` are this crate's own; a conversation's speaker is the
+// installs one has to be able to name what it yields. Actor capabilities belong
+// to this crate; a conversation's speaker is the
 // provider's, hence the alias.
 pub use agent_spec::preparation::ToolsetAcquisition;
 pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
@@ -162,9 +162,7 @@ pub use resident_workbench::{
     ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
     SourceToolsetRecipe, ToolDispatchError, ToolDispatchReply,
 };
-pub use role::{
-    render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget,
-};
+pub use role::{render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget};
 pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
     ActorSourceDriftObservation, ActorWorkbenchPosture, ActorWorkbenchTransfer,

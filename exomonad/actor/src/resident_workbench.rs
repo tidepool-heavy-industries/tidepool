@@ -511,7 +511,6 @@ pub struct ActorWorkbenchSource {
     toolset_support_manifests:
         Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
     toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
-    preparation_rows: Arc<[Vec<crate::ActorEffectKey>]>,
 }
 
 /// Immutable installer readiness. It owns source and native code, while each
@@ -758,7 +757,6 @@ impl ActorWorkbenchSource {
             request_evidence: None,
             request_helper_recipe: Default::default(),
             toolset_preparation: Default::default(),
-            preparation_rows: Arc::from([]),
         }
     }
 
@@ -768,22 +766,6 @@ impl ActorWorkbenchSource {
     pub fn with_toolset_support_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.toolset_support = roots.into();
         self.toolset_support_manifests = Default::default();
-        self
-    }
-
-    /// Exact public child requests to warm after the root's required installer.
-    #[must_use]
-    pub fn with_preparation_profiles(
-        mut self,
-        profiles: impl IntoIterator<Item = exomonad_tool::PublicActorProfile>,
-    ) -> Self {
-        let mut rows = Vec::new();
-        for profile in profiles {
-            if !rows.iter().any(|row| row == profile.effect_keys()) {
-                rows.push(profile.effect_keys().to_vec());
-            }
-        }
-        self.preparation_rows = rows.into();
         self
     }
 
@@ -865,41 +847,6 @@ impl ActorWorkbenchSource {
             Some(entry) => self.with_spec(entry),
             None => self,
         }
-    }
-}
-
-#[cfg(test)]
-mod preparation_profile_tests {
-    use super::ActorWorkbenchSource;
-    use exomonad_tool::{ActorEffectKey, PublicActorProfile};
-
-    #[test]
-    fn warming_keeps_distinct_rows_and_reuses_shared_coding_profile() {
-        let source = ActorWorkbenchSource::new("", Vec::new()).with_preparation_profiles([
-            PublicActorProfile::Research,
-            PublicActorProfile::ResearchLeaf,
-            PublicActorProfile::Coding,
-            PublicActorProfile::Scaffolding,
-        ]);
-        assert_eq!(source.preparation_rows.len(), 3);
-        assert_eq!(
-            source.preparation_rows[0],
-            PublicActorProfile::Research.effect_keys()
-        );
-        assert_eq!(
-            source.preparation_rows[1],
-            PublicActorProfile::ResearchLeaf.effect_keys()
-        );
-        assert_eq!(
-            source.preparation_rows[2],
-            PublicActorProfile::Coding.effect_keys()
-        );
-        assert!(source.preparation_rows[0].contains(&ActorEffectKey::Forks));
-        assert!(!source.preparation_rows[1].contains(&ActorEffectKey::Forks));
-        assert!(source
-            .preparation_rows
-            .iter()
-            .all(|row| !row.contains(&ActorEffectKey::Sleep)));
     }
 }
 
@@ -4682,10 +4629,6 @@ where
             }
             outcome => outcome,
         }
-    }
-
-    pub(crate) fn preparation_rows(&self) -> &[Vec<crate::ActorEffectKey>] {
-        &self.access.source.preparation_rows
     }
 
     /// Execute one prepared installer in an actor-owned lexical scope. Its
@@ -12305,9 +12248,8 @@ pub(crate) mod request_tests {
             let workbench = ActorWorkbenchSource::new(String::new(), Vec::new());
             let source = crate::CheckpointSourceLayer::default();
             let before = tidepool_extract_cmd::extract_spawn_count();
-            for row in exomonad_tool::PublicActorEffectRow::ALL {
+            for requested in [exomonad_tool::DEFAULT_ACTOR_EFFECTS] {
               for selected_mask in [0, u64::MAX, mask] {
-                let requested = row.effect_keys();
                 let members = requested.iter().enumerate()
                     .filter(|(index, _)| selected_mask & (1_u64 << *index) != 0)
                     .map(|(_, key)| *key)
@@ -21399,7 +21341,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let token = groups.capture_checkpoint_with_retained_scope(
             "real Haskell context".into(),
             context.actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -21658,7 +21600,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let token = groups.capture_checkpoint(
             "retryable release".into(),
             context.actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),

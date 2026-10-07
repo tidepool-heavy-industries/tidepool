@@ -148,7 +148,7 @@ pub struct LocalResidentInstallation {
     pub spawn_admission: Option<crate::SpawnAdmission>,
     pub launch_worktrees: Vec<String>,
     pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
-    pub effective_role: crate::EffectiveRole,
+    pub capabilities: crate::ActorCapabilities,
     pub fork_effort: Option<crate::ForkEffort>,
     pub model: Option<crate::Model>,
     pub instructions: Option<String>,
@@ -3765,7 +3765,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             let keys = selected.effect_keys();
             if keys.iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
-                    !self.descriptor.effective_role().effect_keys().contains(key)
+                    !self.descriptor.capabilities().effect_keys().contains(key)
                 }
                 exomonad_tool::ToolEffectKey::ContextReadWrite => {
                     selected.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
@@ -4189,13 +4189,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 };
                 if view == StatusView::Concise {
                     return Some((key, format!(
-                        "  - {:?} ({}@{}) supervisor={} role={:?} bound_worktree={:?} state={state} {}{delivery}",
+                        "  - {:?} ({}@{}) supervisor={} bound_worktree={:?} state={state} {}{delivery}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent().map_or_else(
                             || "none".to_owned(),
                             |parent| format!("{}@{}", parent.id.0, parent.incarnation.0),
                         ),
-                        record.descriptor.effective_role().role(),
                         record.bound_worktree,
                         runtime.usage_summary_display(),
                     )));
@@ -4216,14 +4215,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     )));
                 }
                 Some((key, format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
                     record.descriptor.supervisor_parent(),
                     record.descriptor.context_parent(),
                     record.descriptor.fork_group(),
-                    record.descriptor.effective_role().role(),
                     record.bound_worktree,
                     runtime.provider_thread,
                     runtime.provider_parent_thread,
@@ -4303,7 +4301,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let current = if view == StatusView::Concise {
             format!(
-                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  jobs: running={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  jobs: running={:?}\n  descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
                 self.descriptor.label(),
                 actor.id.0,
                 actor.incarnation.0,
@@ -4320,12 +4318,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 unavailable_watches,
                 requests.pending_watches,
                 requests.running_jobs,
-                self.descriptor.effective_role().role(),
-                self.descriptor.effective_role().workspace(),
-                self.descriptor.effective_role().descendants().maximum_depth,
+                self.descriptor.capabilities().descendants().maximum_depth,
                 crate::render_child_budget(
                     self.descriptor
-                        .effective_role()
+                        .capabilities()
                         .descendants()
                         .maximum_active_children,
                 ),
@@ -4335,7 +4331,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
+                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
                 actor.id.0,
                 actor.incarnation.0,
                 self.descriptor.label(),
@@ -4351,15 +4347,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 usage.map(|sample| sample.cache_boundary),
                 runtime.activation_kind,
                 runtime.event_watermark,
-                self.descriptor.effective_role().role(),
-                self.descriptor.effective_role().haskell_effects_type(),
-                self.descriptor.effective_role().native_tools(),
-                self.descriptor.effective_role().workspace(),
-                self.descriptor.effective_role().descendants(),
-                runtime
-                    .prompt_profile
-                    .as_deref()
-                    .unwrap_or(self.descriptor.effective_role().prompt_profile()),
+                self.descriptor.capabilities().haskell_effects_type(),
+                self.descriptor.capabilities().descendants(),
                 prompt_identity,
                 if self.policy_installed {
                     "attached"
@@ -4463,16 +4452,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .and_then(|actor| actor.terminal().get())
                     .is_none()
         };
-        let operator_checkout = if self.descriptor.effective_role().role() == crate::ActorRole::Root
-        {
+        let operator_checkout = if self.descriptor.is_root() {
             own.source_drift.checkout.clone()
         } else {
             records
                 .iter()
-                .filter(|(identity, record)| {
-                    record.descriptor.effective_role().role() == crate::ActorRole::Root
-                        && live(identity, record)
-                })
+                .filter(|(identity, record)| record.descriptor.is_root() && live(identity, record))
                 .map(|(_, record)| record.runtime_observation.snapshot().source_drift.checkout)
                 .next()
                 .unwrap_or_default()
@@ -5061,33 +5046,20 @@ where
                     descriptor.profile()
                 )));
             }
-            let role = if descriptor.fork_group().is_some() {
-                self.descriptor
-                    .effective_role()
-                    .preview_child(
-                        descriptor.effective_role().clone(),
-                        descriptor.fork_budget(),
-                    )
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?
-            } else {
-                if !descriptor.effective_role().respects_role_ceiling() {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "requested effect row exceeds or duplicates the role ceiling".into(),
-                    ));
-                }
-                self.descriptor
-                    .effective_role()
-                    .attenuate_child(descriptor.effective_role().clone())
-            };
-            let role = if let Some(lease) = &checkpoint_lease {
+            let capabilities = self
+                .descriptor
+                .capabilities()
+                .preview_child(descriptor.capabilities().clone(), descriptor.fork_budget())
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            let capabilities = if let Some(lease) = &checkpoint_lease {
                 lease
-                    .issuer_role
-                    .preview_child(role, descriptor.fork_budget())
+                    .issuer_capabilities
+                    .preview_child(capabilities, descriptor.fork_budget())
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?
             } else {
-                role
+                capabilities
             };
-            descriptor = descriptor.with_effective_role(role);
+            descriptor = descriptor.with_capabilities(capabilities);
             if fork_group.is_some() {
                 let policy = checkpoint_lease.as_ref().map_or_else(
                     || self.descriptor.persistence_policy(),
@@ -5589,7 +5561,7 @@ where
                         .map(crate::ActorPathSegment::new)
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|error| error.to_string())?;
-                    let budget = descriptor.effective_role().descendants();
+                    let budget = descriptor.capabilities().descendants();
                     if budget.maximum_depth == 0 {
                         return Err(
                             "cannot unfold context: descendant depth budget is exhausted".into(),
@@ -6779,7 +6751,7 @@ where
                         .capture_checkpoint_with_retained_scope(
                             name,
                             context.actor,
-                            self.descriptor.effective_role().clone(),
+                            self.descriptor.capabilities().clone(),
                             self.descriptor.model().cloned(),
                             self.descriptor.fork_effort(),
                             before,
@@ -6878,11 +6850,10 @@ where
                 let preview = self
                     .validate_worker_context(lifetime, fork_context)
                     .and_then(|()| {
-                        let child = role
-                            .effective_role(true)
+                        let child = crate::ActorCapabilities::default()
                             .with_effect_keys(effect_keys.into_iter().map(Into::into).collect());
                         self.descriptor
-                            .effective_role()
+                            .capabilities()
                             .preview_child(child, budget)
                             .map(|role| {
                                 let budget = role.descendants();
@@ -7194,7 +7165,7 @@ where
                 );
                 let permitted = self
                     .descriptor
-                    .effective_role()
+                    .capabilities()
                     .effect_keys()
                     .contains(&crate::ActorEffectKey::Notifications);
                 // `message` here is a decoded `String` (see
@@ -7237,7 +7208,7 @@ where
             } => Box::pin(async move {
                 let permitted = self
                     .descriptor
-                    .effective_role()
+                    .capabilities()
                     .effect_keys()
                     .contains(&crate::ActorEffectKey::Notifications);
                 let prepared = if permitted {
@@ -7728,7 +7699,7 @@ where
                             spawn_admission: self.spawn_admission.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                             worktree_custody: self.worktree_custody.clone(),
-                            effective_role: self.descriptor.effective_role().clone(),
+                            capabilities: self.descriptor.capabilities().clone(),
                             fork_effort: self.descriptor.fork_effort(),
                             model: self.descriptor.model().cloned(),
                             instructions: self.descriptor.instructions().map(str::to_owned),
@@ -8245,7 +8216,7 @@ where
             .scope(application_workbench.prepare_tools(
                 compile_context.clone(),
                 self.spec_installs,
-                self.descriptor.effective_role().effect_keys().to_vec(),
+                self.descriptor.capabilities().effect_keys().to_vec(),
             ))
             .await;
         tracing::info!(
@@ -8257,26 +8228,6 @@ where
             "agent spec preparation"
         );
         let compiled_tools = Arc::new(compiled_tools?);
-        if self.descriptor.effective_role().role() == crate::ActorRole::Root {
-            for row in application_workbench.preparation_rows() {
-                let row = row.clone();
-                let workbench = Arc::clone(&application_workbench);
-                let context = compile_context.clone();
-                let compiler_owner = compiler_owner.clone();
-                tokio::spawn(async move {
-                    let outcome = compiler_owner
-                        .scope(workbench.prepare_toolset_only(
-                            context,
-                            tidepool_toolchain::artifacts::CompileWorkload::Preparation,
-                            row,
-                        ))
-                        .await;
-                    if let Err(error) = outcome {
-                        tracing::info!(%error, "optional configured toolset preparation did not complete");
-                    }
-                });
-            }
-        }
         #[cfg(test)]
         if let Some(observer) = &self.activation_preview_observer {
             observer(
@@ -8319,7 +8270,7 @@ where
             spawn_admission: self.spawn_admission.clone(),
             launch_worktrees: self.launch_worktrees.clone(),
             worktree_custody: self.worktree_custody.clone(),
-            effective_role: self.descriptor.effective_role().clone(),
+            capabilities: self.descriptor.capabilities().clone(),
             fork_effort: self.descriptor.fork_effort(),
             model: self.descriptor.model().cloned(),
             instructions: self.descriptor.instructions().map(str::to_owned),
@@ -8383,7 +8334,7 @@ where
                             refuse("pre-bootstrap worktree custody is unavailable")
                         })?,
                         worktree: worktree.clone(),
-                        role: self.descriptor.effective_role().role(),
+                        access: crate::WorkspaceAccess::ReadWrite,
                     },
                     _ => return Err(refuse("actor bootstrap requires at most one worktree")),
                 },
@@ -8876,10 +8827,10 @@ where
                     let admission = admission.clone();
                     let actor = context.actor;
                     let worktree = worktree.clone();
-                    let role = self.descriptor.effective_role().role();
+                    let access = crate::WorkspaceAccess::ReadWrite;
                     self.worktree_custody = Some(
                         tidepool_runtime::spawn_blocking_in_span(move || {
-                            admission.install_custody(actor, &worktree, role)
+                            admission.install_custody(actor, &worktree, access)
                         })
                         .await
                         .map_err(ResidentActorWorkbenchError::Join)?
@@ -9763,7 +9714,7 @@ where
                                         | OwnedWorkbenchWait::Drain { .. }
                                 ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
                                     if commands::waits_for_completion(request)
-                                        && self.descriptor.effective_role().effect_keys().contains(&crate::ActorEffectKey::Commands))
+                                        && self.descriptor.capabilities().effect_keys().contains(&crate::ActorEffectKey::Commands))
                                 {
                                     execution_state
                                         .control
@@ -9987,7 +9938,7 @@ where
                                         display_remaining: *unit.display_remaining,
                                     },
                                     self.descriptor
-                                        .effective_role()
+                                        .capabilities()
                                         .effect_keys()
                                         .contains(&crate::ActorEffectKey::Commands),
                                 )
@@ -14861,7 +14812,7 @@ where
     pub async fn new_program_root(
         &self,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
@@ -14877,7 +14828,7 @@ where
     pub async fn recover_durable_program_root(
         &self,
         durable: &crate::DurableActorAdmission,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
         worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     ) -> Result<
@@ -14898,7 +14849,7 @@ where
             incarnation: self.incarnation,
         };
         let mut descriptor = ActorDescriptor::new(&durable.label, placement)
-            .with_effective_role(role)
+            .with_capabilities(role)
             .with_model(durable.model.clone().map(crate::Model::Literal))
             .with_instructions(durable.instructions.clone())
             .with_fork_effort(durable.effort)
@@ -14951,7 +14902,7 @@ where
         &self,
         predecessor: ActorRef,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
@@ -15021,7 +14972,7 @@ where
     async fn new_program_root_with_replay(
         &self,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
         replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
         identity: Option<ActorRef>,
@@ -15040,7 +14991,7 @@ where
             .await?;
         match self
             .admit_prepared_root(
-                ActorDescriptor::new(label, placement).with_effective_role(role),
+                ActorDescriptor::new(label, placement).with_capabilities(role),
                 outcome,
                 &admission,
                 PreparedRootAdmission {
@@ -15085,7 +15036,7 @@ where
     pub async fn new_workbench(
         &self,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
     ) -> Result<LocalActorRef, Box<dyn std::error::Error + Send + Sync>> {
         let admission = self.environment.root_admission_closed.read().await;
         if *admission {
@@ -15096,7 +15047,7 @@ where
             .runner
             .provision_root_scope(self.session)
             .await?;
-        let descriptor = ActorDescriptor::new(label, placement).with_effective_role(role);
+        let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
         let mut behavior = ResidentKernelBehavior::with_boot(
             descriptor,
             self.environment.clone(),
