@@ -26,7 +26,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     .expect("the shipped workspace starts through its production host");
     host.run_scenario(|host| {
         Box::pin(async move {
-            host.input("Pass a workspace Task to a selected coding child and return its typed candidate.")
+            host.input("Pass a workspace Task to the supplied child spec and return its typed candidate.")
                 .await
                 .unwrap();
             let root_id = host.context.actor.identity();
@@ -56,7 +56,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                         .forest
                         .inspect_host_graph()
                         .into_iter()
-                        .find(|node| node.label == "typed-source/coding/worker")
+                        .find(|node| node.label == "worker")
                     {
                         assert!(child.terminal.is_none(), "{child:?}");
                         assert_eq!(child.creator, Some(root_id));
@@ -80,10 +80,26 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                 .tools
                 .iter()
                 .find(|tool| tool.name() == "haskell_sync")
-                .expect("coding child notebook");
-            assert!(child_notebook
+                .expect("supplied child spec notebook");
+            let supplied_effects = [
+                ActorEffectKey::Replies,
+                ActorEffectKey::Commands,
+                ActorEffectKey::Lookup,
+                ActorEffectKey::BoundWorktree,
+            ]
+            .into_iter()
+            .map(exomonad_tool::ToolEffectKey::from)
+            .collect::<std::collections::HashSet<_>>();
+            let actual_effects = child_notebook
                 .effect_keys()
-                .contains(&ActorEffectKey::WorktreeAllocation.into()));
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                actual_effects,
+                supplied_effects,
+                "the child's notebook exposes the caller's supplied spec effect row"
+            );
             assert!(!child_notebook
                 .effect_keys()
                 .contains(&ActorEffectKey::Journal.into()));
@@ -175,6 +191,7 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         "the explicit fresh-context launch must own its own machine"
     );
 
+    campaign.acknowledge_native_spawn(&installation);
     let setup = setup.await.unwrap();
     assert_eq!(setup["status"], "committed", "{setup}");
     campaign
