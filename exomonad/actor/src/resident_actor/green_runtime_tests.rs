@@ -14,6 +14,7 @@ enum Scenario {
     CancelSibling,
     CancelParent,
     Single,
+    EvaluationFailure,
 }
 
 #[derive(Default)]
@@ -88,7 +89,7 @@ impl FormHost for Host {
         let ready = match self.scenario {
             Scenario::Single => true,
             Scenario::CancelParent => false,
-            Scenario::Reverse => {
+            Scenario::Reverse | Scenario::EvaluationFailure => {
                 state.awaited.len() == 2
                     && (name == "two" || state.committed.iter().any(|name| name == "two"))
             }
@@ -224,12 +225,12 @@ impl Fixture {
         actor
     }
 
-    async fn execute(
+    fn admit(
         &self,
         actor: &LocalActorRef,
         source: &str,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
-    ) -> crate::KernelWorkbenchReply {
+    ) -> tokio::sync::oneshot::Receiver<crate::KernelWorkbenchReply> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         actor
             .address()
@@ -237,26 +238,42 @@ impl Fixture {
                 invocation: crate::ActorWorkbenchInvocation::unbound(
                     WorkbenchRequest::from_cell_input(source),
                 ),
-                control: control.clone(),
+                control,
                 reply: reply.into(),
             })
             .expect("actual native workbench admission");
+        receive
+    }
+
+    async fn execute(
+        &self,
+        actor: &LocalActorRef,
+        source: &str,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> crate::KernelWorkbenchReply {
+        tokio::time::timeout(Duration::from_secs(240), self.admit(actor, source, control))
+            .await
+            .expect("bounded compiled native fixture")
+            .expect("actual resident settlement")
+    }
+
+    async fn execute_cancel_after_two_waits(
+        &self,
+        actor: &LocalActorRef,
+        source: &str,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    ) -> crate::KernelWorkbenchReply {
+        let mut receive = self.admit(actor, source, Some(control.clone()));
         tokio::time::timeout(Duration::from_secs(240), async {
-            match control {
-                Some(control) => {
-                    tokio::pin!(receive);
-                    tokio::select! {
-                        reply = &mut receive => reply.expect("actual resident settlement"),
-                        waiting = self.host.both_waiting.acquire() => {
-                            waiting.unwrap().forget();
-                            assert!(control.request_cancellation(), "parent cancellation wins before either answer");
-                            receive.await.expect("cancelled native settlement")
-                        }
-                    }
+            tokio::select! {
+                reply = &mut receive => panic!("fixture settled before both native form waits: {reply:?}"),
+                waiting = self.host.both_waiting.acquire() => {
+                    waiting.unwrap().forget();
+                    assert!(control.request_cancellation(), "parent cancellation wins before either answer");
+                    receive.await.expect("cancelled native settlement")
                 }
-                None => receive.await.expect("actual resident settlement"),
             }
-        }).await.expect("bounded compiled native fixture")
+        }).await.expect("bounded compiled parent cancellation")
     }
 
     fn assert_live_leases_released(&self) {
@@ -334,10 +351,10 @@ async fn compiled_green_parent_cancellation_releases_both_pending_native_forms()
     let actor = fixture.parent().await;
     let control = crate::WorkbenchExecutionControl::untracked();
     let result = fixture
-        .execute(
+        .execute_cancel_after_two_waits(
             &actor,
             include_str!("green_runtime_parent_cancel.hs"),
-            Some(control.clone()),
+            control.clone(),
         )
         .await;
     assert!(
@@ -375,7 +392,7 @@ async fn compiled_single_form_uses_original_non_green_frontier() {
 
 #[tokio::test]
 async fn compiled_green_evaluation_failure_is_not_success_or_authored_cancellation() {
-    let fixture = Fixture::new(749, Scenario::Single);
+    let fixture = Fixture::new(749, Scenario::EvaluationFailure);
     let actor = fixture.parent().await;
     let control = crate::WorkbenchExecutionControl::untracked();
     let result = fixture
@@ -386,11 +403,19 @@ async fn compiled_green_evaluation_failure_is_not_success_or_authored_cancellati
         )
         .await;
     assert!(
-        result
-            .as_ref()
-            .map_or(true, |reply| reply.status != WorkbenchRunStatus::Committed),
-        "{result:?}"
+        matches!(
+            &result,
+            Err(KernelInvocationFailure::Failed { diagnostic: Some(diagnostic), .. })
+                if diagnostic.class == tidepool_toolchain::failclass::FailureClass::Runtime
+                    && diagnostic.phase == tidepool_toolchain::failclass::Phase::Run
+        ),
+        "expected native evaluation failure after actual Green execution: {result:?}"
     );
+    assert_eq!(
+        fixture.host.state.lock().awaited,
+        BTreeSet::from(["one".to_string(), "two".to_string()])
+    );
+    assert_eq!(fixture.host.state.lock().committed, ["two", "one"]);
     assert!(!control.cancellation_requested());
     fixture.assert_live_leases_released();
     fixture.finish().await;
