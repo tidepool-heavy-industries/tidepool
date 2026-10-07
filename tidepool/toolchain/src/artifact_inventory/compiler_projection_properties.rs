@@ -458,7 +458,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
     let mut islands = Vec::new();
     for version in 0..VERSIONS {
         let island = view
-            .select_roots(&[catalog.original(0, version).descriptor.id])
+            .select_roots(vec![catalog.original(0, version).descriptor.id])
             .unwrap();
         let expected = catalog
             .closure(ORDINALS.map(|ordinal| (0, version, ordinal)))

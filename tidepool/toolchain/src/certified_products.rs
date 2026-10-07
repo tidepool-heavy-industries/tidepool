@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use tidepool_repr::execution_schema::parse_module_products;
 use tidepool_repr::execution_schema::{
-    parse_module_products, CachedHomeOwner, GlobalDecl, InventoryOperation, ModuleVersion,
-    PreparedProgram, ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature,
-    SymbolIdentity,
+    CachedHomeOwner, GlobalDecl, InventoryOperation, ModuleVersion, PreparedProgram,
+    ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
 mod finalized_module;

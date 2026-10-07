@@ -2487,7 +2487,7 @@ impl ExactCompilationRequest {
                     }
                 } else if retained_source_input
                     .get(owner)
-                    .is_some_and(|entry| entry.is_native())
+                    .is_some_and(|entry| matches!(&entry.payload, ArtifactPayload::Original(_)))
                 {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
@@ -3587,8 +3587,12 @@ impl ExactDeclarationContext {
                     .collect(),
             ));
         }
+        let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
+        self.inventory = self
+            .inventory
+            .inventory()
+            .admit_shared(&self.inventory, entries)?;
         self.compiler_projection = self.compiler_projection.merge(&issued)?;
         self.lexical = lexical;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
@@ -3662,8 +3666,12 @@ impl ExactDeclarationContext {
                 &mut validation,
             )?);
         }
+        let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
+        self.inventory = self
+            .inventory
+            .inventory()
+            .admit_shared(&self.inventory, entries)?;
         let types = CompilerInputProjection::from_interface_view(&self.inventory)?;
         self.compiler_projection = self.compiler_projection.merge(&types)?.merge(&issued)?;
         self.normalize()?;
@@ -4112,8 +4120,12 @@ impl ExactDeclarationContext {
                 value.requirements().to_vec(),
             ));
         }
+        let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
+        self.inventory = self
+            .inventory
+            .inventory()
+            .admit_shared(&self.inventory, entries)?;
         self.compiler_projection = self.compiler_projection.merge(&issued)?;
         self.lexical = lexical;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
@@ -5889,7 +5901,8 @@ mod tests {
                     &fixture.projection,
                     &fixture.artifacts.metadata_snapshot(),
                     &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )?;
+                )
+                .map_err(compiler_evidence_failure)?;
             self.admit_program_support_with_selection(
                 context,
                 &fixture.artifacts,
@@ -5911,7 +5924,8 @@ mod tests {
                     &fixture.projection,
                     &fixture.artifacts.metadata_snapshot(),
                     &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )?;
+                )
+                .map_err(compiler_evidence_failure)?;
             self.admit_program_segment_support_with_selection(
                 context,
                 &fixture.artifacts,
