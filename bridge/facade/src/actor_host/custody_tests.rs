@@ -362,6 +362,11 @@ async fn custody_assert_request(
 
 #[tokio::test]
 async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
+    // Each effectful assertion must evaluate its typed observation/value and
+    // fail on a mismatch before committing; pure notebook values stay opaque.
+    let assert_committed = |response: &serde_json::Value| {
+        assert_eq!(response["status"], "committed", "{response:?}");
+    };
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let producer_dispatch = tokio::spawn(async move {
@@ -442,11 +447,10 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     assert_eq!(watch["status"], "committed", "{watch:?}");
     let pending = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "inspectFull =<< pollWatch inheritedWatch",
+        "import qualified Tidepool.Effects as Effects\npending <- pollWatch inheritedWatch\n_ <- case pending of { WatchPending _ -> pure (); _ -> Effects.error \"inherited watch was not pending\" }",
     )
     .await;
-    assert_eq!(pending["status"], "committed", "{pending:?}");
-    assert!(pending.to_string().contains("WatchPending"), "{pending:?}");
+    assert_committed(&pending);
 
     let reply = tests::dispatch_haskell_script(
         producer.policy.as_ref(),
@@ -521,61 +525,30 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     ).await;
     assert_eq!(returned["status"], "committed", "{returned:?}");
 
-    let released =
-        tests::dispatch_haskell_script(root.as_ref(), "inspectFull =<< forgetResponse worker")
-            .await;
-    assert_eq!(released["status"], "committed", "{released:?}");
-    assert!(
-        released.to_string().contains("ResponseForgotten"),
-        "{released:?}"
-    );
+    let released = tests::dispatch_haskell_script(root.as_ref(),
+        "import qualified Tidepool.Effects as Effects\nreleased <- forgetResponse worker\n_ <- case released of { ResponseForgotten -> pure (); _ -> Effects.error \"source response was not forgotten\" }").await;
+    assert_committed(&released);
     let expired = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "expired <- pollResponse worker\ninspectFull expired\ninspectFull (fst retained, snd retained 41)",
+        "expired <- pollResponse worker\n_ <- case expired of { ResponseUnavailable (ResponseRejected ReplyStale) -> if fst retained == \"custody\" && snd retained 41 == 42 then pure () else Effects.error \"released lazy result changed\"; _ -> Effects.error \"released response did not refuse observation\" }",
     )
     .await;
-    assert_eq!(expired["status"], "committed", "{expired:?}");
-    assert!(expired.to_string().contains("ReplyStale"), "{expired:?}");
-    assert!(expired.to_string().contains("custody"), "{expired:?}");
-    assert!(expired.to_string().contains("42"), "{expired:?}");
+    assert_committed(&expired);
     let watch_expired = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "inspectFull =<< pollWatch inheritedWatch",
+        "expiredWatch <- pollWatch inheritedWatch\n_ <- case expiredWatch of { WatchUnavailable (AwaitRejected ReplyStale) -> pure (); _ -> Effects.error \"released public watch did not refuse observation\" }",
     )
     .await;
-    assert_eq!(watch_expired["status"], "committed", "{watch_expired:?}");
-    assert!(
-        watch_expired.to_string().contains("ReplyStale"),
-        "{watch_expired:?}"
-    );
-    let forwarded_expired =
-        tests::dispatch_haskell_script(root.as_ref(), "inspectFull =<< pollResponse forwarded")
-            .await;
-    assert_eq!(
-        forwarded_expired["status"], "committed",
-        "{forwarded_expired:?}"
-    );
-    assert!(
-        forwarded_expired.to_string().contains("ReplyStale"),
-        "{forwarded_expired:?}"
-    );
+    assert_committed(&watch_expired);
+    let forwarded_expired = tests::dispatch_haskell_script(root.as_ref(),
+        "expiredForwarded <- pollResponse forwarded\n_ <- case expiredForwarded of { ResponseUnavailable (ResponseRejected ReplyStale) -> pure (); _ -> Effects.error \"borrowed released response did not refuse observation\" }").await;
+    assert_committed(&forwarded_expired);
     // A different watch captured successful settlement before source release.
     // Its decision and the filled Haskell cell remain independently readable.
     let queued_after_release =
         tests::dispatch_haskell_script(observer.policy.as_ref(),
-            "queuedState <- pollWatch queuedWatch\ninspectFull (case queuedState of { WatchReady answer -> let (label, run) = answer in (label, run 41); _ -> error \"settled watch lost its captured result\" })").await;
-    assert_eq!(
-        queued_after_release["status"], "committed",
-        "{queued_after_release:?}"
-    );
-    assert!(
-        queued_after_release.to_string().contains("custody"),
-        "{queued_after_release:?}"
-    );
-    assert!(
-        queued_after_release.to_string().contains("42"),
-        "{queued_after_release:?}"
-    );
+            "queuedState <- pollWatch queuedWatch\n_ <- case queuedState of { WatchReady answer -> let (label, run) = answer in if label == \"custody\" && run 41 == 42 then pure () else Effects.error \"settled watch result changed\"; _ -> Effects.error \"settled watch lost its captured result\" }").await;
+    assert_committed(&queued_after_release);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
