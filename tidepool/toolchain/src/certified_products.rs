@@ -522,6 +522,25 @@ pub enum EvidenceReadFailure {
     LengthChanged { expected: u64, actual: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceBinderPhase {
+    NativePromotion,
+    SelectedGroups,
+    InheritedNativeWitness,
+    InheritedInventory,
+    CurrentReceipt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceBinderConflict {
+    pub phase: SourceBinderPhase,
+    pub owner: CachedHomeOwner,
+    pub original_ordinal: u32,
+    pub binder: SymbolIdentity,
+    pub existing_origin: ProductOrigin,
+    pub incoming_origin: ProductOrigin,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
     #[error("unsupported {format:?} version {found}; expected {expected}")]
@@ -540,6 +559,8 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("compiler product certificate duplicate source binder: {0:?}")]
+    DuplicateSourceBinder(Box<SourceBinderConflict>),
     #[error("finalized module payload capture failed: {0}")]
     CapturedModulePayload(#[source] crate::recovery_artifacts::RecoveryArtifactError),
     #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
@@ -1510,6 +1531,22 @@ fn fresh_module_version(
 
 type SourceGroupKey = (CachedHomeOwner, u32, SymbolIdentity);
 
+fn duplicate_source_binder(
+    phase: SourceBinderPhase,
+    key: &SourceGroupKey,
+    existing_origin: ProductOrigin,
+    incoming_origin: ProductOrigin,
+) -> CertificationError {
+    CertificationError::DuplicateSourceBinder(Box::new(SourceBinderConflict {
+        phase,
+        owner: key.0.clone(),
+        original_ordinal: key.1,
+        binder: key.2.clone(),
+        existing_origin,
+        incoming_origin,
+    }))
+}
+
 /// The native namespace actually offered to one compiler request, completed by
 /// that request's validated output rows. Full retained custody is not an offer.
 #[derive(Clone, Debug, Default)]
@@ -1725,6 +1762,26 @@ impl SourceGroupMap {
         self.groups.get(key)
     }
 
+    fn insert_unique(
+        &mut self,
+        key: SourceGroupKey,
+        owner: (CachedHomeOwner, ProductOrigin),
+        phase: SourceBinderPhase,
+    ) -> CertResult<()> {
+        self.modules.insert(&key.0.unit, &key.0.module);
+        match self.groups.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(owner);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let conflict = duplicate_source_binder(phase, entry.key(), entry.get().1, owner.1);
+                entry.insert(owner);
+                Err(conflict)
+            }
+        }
+    }
+
     fn contains_module(&self, unit: &str, module: &str) -> bool {
         self.modules.contains(unit, module)
     }
@@ -1736,13 +1793,11 @@ impl SourceGroupMap {
                 owner.module_version = version.clone();
                 key_owner.module_version = version.clone();
             }
-            if self
-                .groups
-                .insert((key_owner, ordinal, binder), (owner, origin))
-                .is_some()
-            {
-                return Err(CertificationError::Mismatch("duplicate source binder"));
-            }
+            self.insert_unique(
+                (key_owner, ordinal, binder),
+                (owner, origin),
+                SourceBinderPhase::NativePromotion,
+            )?;
         }
         Ok(())
     }
@@ -2133,12 +2188,11 @@ fn certified_source_map(groups: &[PendingCertifiedGroup]) -> CertResult<SourceGr
                 group.group.original_ordinal(),
                 binder.clone(),
             );
-            if sources
-                .insert(key, (group.owner.clone(), group.origin))
-                .is_some()
-            {
-                return Err(CertificationError::Mismatch("duplicate source binder"));
-            }
+            sources.insert_unique(
+                key,
+                (group.owner.clone(), group.origin),
+                SourceBinderPhase::SelectedGroups,
+            )?;
         }
     }
     Ok(sources)
@@ -3969,19 +4023,15 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
         } else {
             for group in witness.groups.iter() {
                 for binder in group.group.binders() {
-                    if sources
-                        .insert(
-                            (
-                                witness.owner.clone(),
-                                group.group.original_ordinal(),
-                                binder.clone(),
-                            ),
-                            (witness.owner.clone(), ProductOrigin::Cached),
-                        )
-                        .is_some()
-                    {
-                        return Err(CertificationError::Mismatch("duplicate source binder"));
-                    }
+                    sources.insert_unique(
+                        (
+                            witness.owner.clone(),
+                            group.group.original_ordinal(),
+                            binder.clone(),
+                        ),
+                        (witness.owner.clone(), ProductOrigin::Cached),
+                        SourceBinderPhase::InheritedNativeWitness,
+                    )?;
                 }
             }
         }
@@ -4506,15 +4556,11 @@ fn certify_inherited_inventory_with_validation(
                 if shared.contains(&(owner.unit.clone(), owner.module.clone())) {
                     continue;
                 }
-                if sources
-                    .insert(
-                        (owner.clone(), *ordinal, binder.clone()),
-                        (owner.clone(), ProductOrigin::Cached),
-                    )
-                    .is_some()
-                {
-                    return Err(CertificationError::Mismatch("duplicate source binder"));
-                }
+                sources.insert_unique(
+                    (owner.clone(), *ordinal, binder.clone()),
+                    (owner.clone(), ProductOrigin::Cached),
+                    SourceBinderPhase::InheritedInventory,
+                )?;
             }
         }
     }
@@ -5917,9 +5963,14 @@ pub(crate) fn certify_products_with_validation(
     for (origin, owner, group, _) in &groups {
         for binder in group.binders() {
             let key = (owner.clone(), group.original_ordinal(), binder.clone());
-            if source_groups.get(&key).is_some() {
+            if let Some((_, existing_origin)) = source_groups.get(&key) {
                 if *origin != ProductOrigin::Cached {
-                    return Err(CertificationError::Mismatch("duplicate source binder"));
+                    return Err(duplicate_source_binder(
+                        SourceBinderPhase::CurrentReceipt,
+                        &key,
+                        *existing_origin,
+                        *origin,
+                    ));
                 }
                 // The complete body and imports are checked against the original
                 // below, after every current source owner has entered the map.
@@ -7910,12 +7961,25 @@ pub(crate) mod tests {
             &operation
         )
         .is_err());
-        assert!(available_original_source_map(
+        let duplicate = available_original_source_map(
             std::slice::from_ref(&original),
-            &[selected.clone(), selected],
+            &[selected.clone(), selected.clone()],
             &operation,
-        )
-        .is_err());
+        );
+        let Err(CertificationError::DuplicateSourceBinder(conflict)) = duplicate else {
+            panic!("duplicate selected groups must retain their exact conflict");
+        };
+        assert_eq!(
+            *conflict,
+            SourceBinderConflict {
+                phase: SourceBinderPhase::SelectedGroups,
+                owner: selected.owner.clone(),
+                original_ordinal: selected.group.original_ordinal(),
+                binder: selected.group.binders()[0].clone(),
+                existing_origin: selected.origin,
+                incoming_origin: selected.origin,
+            }
+        );
         assert!(available_original_source_map(
             &[original.clone(), original.clone()],
             &[],
@@ -8362,6 +8426,36 @@ pub(crate) mod tests {
                 binder
             }
         );
+    }
+
+    #[test]
+    fn retained_promotion_conflict_reports_exact_identity_and_provenance() {
+        let original = inherited_owner("Promoted");
+        let mut staged = original.clone();
+        staged.module_version = ModuleVersion([0; 32]);
+        let binder = testing::identity("Promoted", "entry");
+        let mut sources = SourceGroupMap::new();
+        sources.insert(
+            (original.clone(), 3, binder.clone()),
+            (original.clone(), ProductOrigin::Cached),
+        );
+        sources.insert(
+            (staged.clone(), 3, binder.clone()),
+            (staged.clone(), ProductOrigin::RetainedCore),
+        );
+        let failure = sources.promote(&BTreeMap::from([(staged, original.module_version.clone())]));
+        let Err(CertificationError::DuplicateSourceBinder(conflict)) = failure else {
+            panic!("convergent promotion must retain its exact conflict");
+        };
+        assert_eq!(conflict.phase, SourceBinderPhase::NativePromotion);
+        assert_eq!(conflict.owner, original);
+        assert_eq!(conflict.original_ordinal, 3);
+        assert_eq!(conflict.binder, binder);
+        assert!(matches!(
+            (conflict.existing_origin, conflict.incoming_origin),
+            (ProductOrigin::Cached, ProductOrigin::RetainedCore)
+                | (ProductOrigin::RetainedCore, ProductOrigin::Cached)
+        ));
     }
 
     #[test]
