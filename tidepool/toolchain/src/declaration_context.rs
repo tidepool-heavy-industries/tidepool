@@ -122,6 +122,74 @@ struct ProtectedScaffoldRequirements {
     native: Vec<(NativeScaffoldRole, Arc<[String]>)>,
 }
 
+/// Complete private compiler inputs from one already certified output.
+/// This retains exact native roles and their custody without publishing either
+/// authored lexical rights or persistent source-reuse roles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OriginalCompilerInputs {
+    projection: CompilerInputProjection,
+    artifacts: ArtifactView,
+}
+
+impl OriginalCompilerInputs {
+    pub(crate) fn from_selection(
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            projection: selection
+                .compiler_projection(artifacts)
+                .map_err(compiler_evidence_failure)?,
+            artifacts: artifacts.clone(),
+        })
+    }
+
+    pub(crate) fn for_program_continuation(
+        &self,
+        support: &ArtifactView,
+        admissions: &[ExactSourceAdmission],
+        source: &str,
+    ) -> Result<Self, CompileError> {
+        let generated = ExactSourceAdmission::matching_generated_source_owner(admissions, source)?;
+        let metadata = support.metadata_snapshot();
+        let original = self.artifacts.metadata_snapshot();
+        for role in self.projection.roles() {
+            let owner = &original
+                .artifacts
+                .get(&role.interface())
+                .ok_or_else(|| failure("private compiler input lost its issued interface"))?
+                .descriptor
+                .owner;
+            if owner != &generated
+                && (!metadata.artifacts.contains_key(&role.interface())
+                    || role
+                        .original()
+                        .is_some_and(|id| !metadata.artifacts.contains_key(&id)))
+            {
+                return Err(failure(
+                    "private compiler continuation omitted a selected original",
+                ));
+            }
+        }
+        let projection = self.projection.within_view(support);
+        projection.validate(support)?;
+        Ok(Self {
+            projection,
+            artifacts: support.clone(),
+        })
+    }
+
+    fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        let projection = self.projection.merge(&other.projection)?;
+        let artifacts = self.artifacts.merge(&other.artifacts)?;
+        projection.validate(&artifacts)?;
+        Ok(Self {
+            projection,
+            artifacts,
+        })
+    }
+}
+
 pub(crate) struct RequestCompilerInputs {
     pub(crate) projection: CompilerInputProjection,
     pub(crate) metadata: ArtifactMetadataSnapshot,
@@ -132,10 +200,21 @@ impl ProtectedScaffoldRequirements {
     fn compiler_inputs(
         &self,
         context: &ExactDeclarationContext,
+        private: Option<&OriginalCompilerInputs>,
     ) -> Result<RequestCompilerInputs, CompileError> {
-        let metadata = context.compiler_metadata_snapshot()?;
-        let declaration_semantic_sha256 = context.semantic_sha256_from_metadata(&metadata);
-        let projection = context.compiler_projection.merge(&self.projection)?;
+        let baseline = context.compiler_metadata_snapshot()?;
+        let declaration_semantic_sha256 = context.semantic_sha256_from_metadata(&baseline);
+        let mut projection = context.compiler_projection.merge(&self.projection)?;
+        let metadata = match private {
+            Some(private) => {
+                projection = projection.merge(&private.projection)?;
+                context
+                    .artifact_view()
+                    .merge(&private.artifacts)?
+                    .metadata_snapshot()
+            }
+            None => baseline,
+        };
         let metadata = projection.project_metadata(metadata)?;
         Ok(RequestCompilerInputs {
             projection,
@@ -1204,6 +1283,7 @@ pub(crate) struct ExactCompilationRequest {
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
     generated_scaffold_imports: Vec<GeneratedScaffoldImportAuthority>,
     protected_scaffold: ProtectedScaffoldRequirements,
+    private_compiler_input: Option<OriginalCompilerInputs>,
 }
 
 /// Same-offer support keeps the consumed import graph with its exact custody.
@@ -1975,12 +2055,51 @@ impl ExactSourceAdmission {
 }
 
 impl ExactProductAdmission<'_> {
-    /// Retain the full consumed original interface graph before native support
-    /// selection. Generated owners remain in this private execution evidence.
-    pub(crate) fn original_execution_context(
+    // Fixture roles are explicit request/support roles plus the authenticated
+    // generated target. They enter the same native issuer as production output.
+    #[cfg(test)]
+    pub(crate) fn original_execution_fixture(
         &self,
         artifacts: &ArtifactView,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let generated = self.source.generated_source_owner()?;
+        let entries = artifacts
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.descriptor.owner == generated
+                    && matches!(entry.payload, ArtifactPayload::Original(_))
+            })
+            .collect::<Vec<_>>();
+        let mut projection = self
+            .request
+            .compiler_inputs()?
+            .projection
+            .within_view(artifacts)
+            .merge(&CompilerInputProjection::from_interface_view(artifacts)?)?
+            .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
+        if let Some(support) = &self.request.program_support {
+            projection = projection.merge(&support.compiler_projection.within_view(artifacts))?;
+        }
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .map_err(compiler_evidence_failure)?;
+        self.original_execution_context(&OriginalCompilerInputs::from_selection(
+            &selection, artifacts,
+        )?)
+    }
+
+    /// Retain the complete original compiler selection before publication.
+    /// The output issuer owns every exact native role, including cached support.
+    pub(crate) fn original_execution_context(
+        &self,
+        inputs: &OriginalCompilerInputs,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let artifacts = &inputs.artifacts;
         let imports = self.source.home_imports()?;
         let inherited = self.request.context.as_ref();
         let exact_roots = self
@@ -2111,32 +2230,12 @@ impl ExactProductAdmission<'_> {
             self.source.generated_source_owner()?,
             &required.into_iter().collect::<Vec<_>>(),
         )?;
-        let generated = self.source.generated_source_owner()?;
-        let generated_entries = artifacts
-            .entries()
-            .into_iter()
-            .filter(|entry| {
-                entry.descriptor.owner == generated
-                    && matches!(entry.payload, ArtifactPayload::Original(_))
-            })
-            .collect::<Vec<_>>();
-        if generated_entries.len() > 1 {
-            return Err(failure(
-                "original execution has conflicting generated originals",
-            ));
-        }
-        let mut projection = self
+        let projection = self
             .request
             .compiler_inputs()?
             .projection
             .within_view(artifacts)
-            .merge(&CompilerInputProjection::from_interface_view(artifacts)?)?;
-        if let Some(support) = &self.request.program_support {
-            projection = projection.merge(&support.compiler_projection.within_view(artifacts))?;
-        }
-        projection = projection.merge(&CompilerInputProjection::from_issued_entries(
-            &generated_entries,
-        )?)?;
+            .merge(&inputs.projection)?;
         let context = context.with_compiler_input_projection(projection)?;
         Ok(Arc::new(context))
     }
@@ -2144,8 +2243,24 @@ impl ExactProductAdmission<'_> {
 
 impl ExactCompilationRequest {
     pub(crate) fn compiler_inputs(&self) -> Result<RequestCompilerInputs, CompileError> {
-        self.protected_scaffold.compiler_inputs(&self.context)
+        self.protected_scaffold
+            .compiler_inputs(&self.context, self.private_compiler_input.as_ref())
     }
+    /// Grow a same-offer request from its already certified private selection.
+    /// New roles materialize in the same atomic transition as declaration growth.
+    pub(crate) fn in_program_context_with_private_input(
+        &self,
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+        input: &OriginalCompilerInputs,
+    ) -> Result<Self, CompileError> {
+        let private = match &self.private_compiler_input {
+            Some(previous) => previous.merge(input)?,
+            None => input.clone(),
+        };
+        self.in_program_context_with_inputs(root, context, Some(private))
+    }
+
     /// Original offers authenticated by this request's compiler namespace.
     /// Full retained recovery custody is deliberately a separate inventory.
     pub(crate) fn compiler_original_products(
@@ -2340,6 +2455,15 @@ impl ExactCompilationRequest {
         root: &Path,
         context: Arc<ExactDeclarationContext>,
     ) -> Result<Self, CompileError> {
+        self.in_program_context_with_inputs(root, context, self.private_compiler_input.clone())
+    }
+
+    fn in_program_context_with_inputs(
+        &self,
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+        private: Option<OriginalCompilerInputs>,
+    ) -> Result<Self, CompileError> {
         if context.toolchain_identity_sha256() != self.producer_sha256
             && !(context.toolchain_identity_sha256() == [0; 32]
                 && context.artifact_view().is_empty())
@@ -2350,7 +2474,17 @@ impl ExactCompilationRequest {
         // inputs follow its selected owner projection. An original product can
         // become available for an already retained canonical interface.
         let baseline = self.compiler_inputs()?.metadata;
-        let current = self.protected_scaffold.compiler_inputs(&context)?.metadata;
+        let current = self
+            .protected_scaffold
+            .compiler_inputs(&context, private.as_ref())?
+            .metadata;
+        if current
+            .entries
+            .values()
+            .any(|entry| entry.descriptor.producer_sha256 != self.producer_sha256)
+        {
+            return Err(failure("private compiler input has another producer"));
+        }
         if self
             .context
             .compiler_projection
@@ -2400,7 +2534,9 @@ impl ExactCompilationRequest {
         }
         let delta_start = std::time::Instant::now();
         let mut validation = PackageInterfaceValidation::default();
-        let (mut materialized, _) = context.materialize_entries_with_validation(
+        let mut materializer = (*context).clone();
+        materializer.admit_producer(self.producer_sha256)?;
+        let (mut materialized, _) = materializer.materialize_entries_with_validation(
             root,
             &new_entries,
             &mut validation,
@@ -2471,6 +2607,7 @@ impl ExactCompilationRequest {
             checked_value_imports: self.checked_value_imports.clone(),
             generated_scaffold_imports: self.generated_scaffold_imports.clone(),
             protected_scaffold: self.protected_scaffold.clone(),
+            private_compiler_input: private,
         })
     }
 
@@ -2658,25 +2795,13 @@ impl ExactCompilationRequest {
         for descriptor in support.descriptors() {
             context.admit_producer(descriptor.producer_sha256)?;
         }
-        // A protected request role keeps its native proof in custody without
-        // promoting a persistent compiler role. An already issued persistent
-        // Original survives the merge with its unchanged interface role; actual
-        // fresh or source-selected admissions independently retain their roles.
-        let protected_originals = self
-            .protected_scaffold
-            .projection
-            .roles()
-            .iter()
-            .filter_map(CompilerInputRole::original)
-            .collect::<BTreeSet<_>>();
-        let persistent_owners = supplied
-            .iter()
-            .filter_map(|(owner, entry)| {
-                (!protected_originals.contains(&entry.descriptor.id)
-                    || imports.contains_key(owner)
-                    || selected_originals.contains_key(owner))
-                .then_some(owner.clone())
-            })
+        // Only authenticated current source owners publish Original roles.
+        // Private compiler inputs keep exact custody independently; merging
+        // preserves every legitimate Original already issued persistently.
+        let persistent_owners = imports
+            .keys()
+            .chain(selected_originals.keys())
+            .cloned()
             .collect::<BTreeSet<_>>();
         let compiler_projection = context
             .compiler_projection
@@ -2832,11 +2957,17 @@ impl ExactCompilationRequest {
     pub(crate) fn validate_outputs_with_planned(
         &self,
         root: &Path,
-        planned: Option<&CertifiedAuthoredDeclaration>,
+        planned: Option<&crate::checked_cell::PlannedCheckedDeclaration>,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         let Some(planned) = planned else {
             return self.validate_outputs_selected(root, None, &self.context);
         };
+        let mut request = self.in_program_context_with_private_input(
+            &root.join("private-compiler-inputs"),
+            self.context.clone(),
+            &planned.compiler_input,
+        )?;
+        let planned = &planned.certificate;
         if planned.toolchain_identity_sha256() != self.producer_sha256 {
             return Err(failure("planned source support has another producer"));
         }
@@ -2859,7 +2990,6 @@ impl ExactCompilationRequest {
             .collect::<BTreeMap<_, _>>();
         let support =
             view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
-        let mut request = self.clone();
         request.program_support = Some(ProgramSourceSupport::extend(
             self.program_support.as_ref(),
             support.clone(),
@@ -4963,7 +5093,7 @@ impl ExactDeclarationContext {
         authorization: Option<Value>,
         scaffold: &ProtectedScaffoldRequirements,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let inputs = scaffold.compiler_inputs(self)?;
+        let inputs = scaffold.compiler_inputs(self, None)?;
         inputs.metadata.validate_native_selection()?;
         self.prepare_compilation_from_metadata(
             root,
@@ -4999,7 +5129,7 @@ impl ExactDeclarationContext {
         scaffold: &ProtectedScaffoldRequirements,
         authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let inputs = scaffold.compiler_inputs(self)?;
+        let inputs = scaffold.compiler_inputs(self, None)?;
         inputs.metadata.validate_native_selection()?;
         let authorization = authorize(inputs.declaration_semantic_sha256)?;
         self.prepare_compilation_from_metadata(
@@ -5369,6 +5499,7 @@ impl ExactDeclarationContext {
                 })
                 .collect(),
             protected_scaffold: scaffold.clone(),
+            private_compiler_input: None,
         })
     }
 }
@@ -7403,6 +7534,7 @@ mod tests {
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
             protected_scaffold: Default::default(),
+            private_compiler_input: None,
         }
     }
 
@@ -8591,7 +8723,7 @@ mod tests {
             request: &effective,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert!(matches!(original.original_instance_environment(),
             OriginalInstanceEnvironment::Complete { target }
@@ -8621,7 +8753,7 @@ mod tests {
             request: &incomplete,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert!(
             matches!(incomplete.original_instance_environment(),
@@ -9238,7 +9370,7 @@ mod tests {
             request: &current,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert!(matches!(
             original.original_instance_environment(),
@@ -9438,6 +9570,7 @@ mod tests {
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
             protected_scaffold: Default::default(),
+            private_compiler_input: None,
         };
         let root = directory.path().join("program-inputs");
         assert!(!root.exists());
@@ -9500,6 +9633,7 @@ mod tests {
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
             protected_scaffold: Default::default(),
+            private_compiler_input: None,
         };
         let support = request
             .artifacts
@@ -9642,6 +9776,7 @@ mod tests {
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
             protected_scaffold: Default::default(),
+            private_compiler_input: None,
         };
         let materialization_root = directory.path().join("program-inputs");
         let effective = request
@@ -10134,7 +10269,7 @@ mod tests {
             request: &request,
             source: &segment.admissions()[0],
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert_eq!(
             private.compiler_metadata_snapshot().unwrap().entries
@@ -10144,7 +10279,7 @@ mod tests {
             resume_id
         );
         let inputs = ProtectedScaffoldRequirements::default()
-            .compiler_inputs(&private)
+            .compiler_inputs(&private, None)
             .unwrap();
         let selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
@@ -10232,7 +10367,7 @@ mod tests {
         assert_eq!(
             compile
                 .protected_scaffold
-                .compiler_inputs(&selected)
+                .compiler_inputs(&selected, None)
                 .unwrap()
                 .metadata
                 .entries[&identity("main", "Tidepool.Internal.Resume")]

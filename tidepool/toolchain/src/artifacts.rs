@@ -1483,10 +1483,7 @@ impl ModuleCandidateOffer {
             self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
-            exact.validate_outputs_with_planned(
-                root,
-                planned.as_ref().map(|planned| planned.certificate.as_ref()),
-            )?,
+            exact.validate_outputs_with_planned(root, planned.as_ref())?,
             &self.include,
             planned,
             self.checked_values.clone().ok_or_else(|| {
@@ -1653,6 +1650,11 @@ impl ModuleCandidateOffer {
                             .collect(),
                     )?,
                 );
+                program_request = program_request.in_program_context_with_private_input(
+                    &root.join("program-inputs"),
+                    context.clone(),
+                    &original.compiler_input,
+                )?;
                 declarations.insert(index, original);
                 index += 1;
             } else {
@@ -1907,7 +1909,22 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             &generated,
         )?;
-        request.admit_program_segment_support_with_selection(
+        let sealed = output.products.as_ref().expect("program output was sealed");
+        let private = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &sealed.source_selection,
+            &sealed.artifact_view,
+        )?
+        .for_program_continuation(
+            &support,
+            source_segment.admissions(),
+            &output.source,
+        )?;
+        let mut continued = request.in_program_context_with_private_input(
+            &output.directory.join("private-compiler-inputs"),
+            context.clone(),
+            &private,
+        )?;
+        let published = continued.admit_program_segment_support_with_selection(
             context,
             &support,
             source_segment,
@@ -1917,7 +1934,9 @@ impl ModuleCandidateOffer {
                 .as_ref()
                 .expect("program output was sealed")
                 .source_selection,
-        )
+        )?;
+        *request = continued;
+        Ok(published)
     }
 
     fn admit_program_value(
@@ -2082,6 +2101,10 @@ impl ModuleCandidateOffer {
             interface_fingerprint,
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
+            compiler_input: crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &sealed.source_selection,
+                &sealed.artifact_view,
+            )?,
         }))
     }
 
@@ -2785,7 +2808,12 @@ fn seal_turn_outputs_with_validation(
             None
         };
     let original_execution = match exact.as_ref() {
-        Some(admission) => Some(admission.original_execution_context(&artifact_view)?),
+        Some(admission) => Some(admission.original_execution_context(
+            &crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &certified.source_selection,
+                &artifact_view,
+            )?,
+        )?),
         None => original_compile_input
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
@@ -6717,7 +6745,7 @@ mod module_product_tests {
                     request: &request,
                     source: admission,
                 }
-                .original_execution_context(&compiled.artifact_view)
+                .original_execution_fixture(&compiled.artifact_view)
                 .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(

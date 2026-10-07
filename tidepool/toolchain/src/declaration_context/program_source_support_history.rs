@@ -103,7 +103,7 @@ mod program_source_support_history {
             request: &request,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
 
         let reached = reachable(graph, selected);

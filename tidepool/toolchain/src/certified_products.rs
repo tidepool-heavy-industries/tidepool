@@ -1559,6 +1559,39 @@ impl CertifiedSourceSelection {
         self.owners.values().map(|selected| &selected.owner)
     }
 
+    /// Convert this transaction's issued complete owner identities to exact
+    /// artifact roles. Native availability alone cannot issue this selection.
+    pub(crate) fn compiler_projection(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+    ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
+        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
+        let metadata = view.metadata_snapshot();
+        let mut originals = Vec::new();
+        for owner in self.selected_original_owners() {
+            let matching = metadata.artifacts.values().filter(|entry| {
+                matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
+            }).collect::<Vec<_>>();
+            let [entry] = matching.as_slice() else {
+                return Err(CertificationError::Mismatch(
+                    "issued compiler original artifact",
+                ));
+            };
+            originals.push(Arc::clone(entry));
+        }
+        let projection = CompilerInputProjection::from_interface_view(view)
+            .and_then(|interfaces| {
+                interfaces.merge(&CompilerInputProjection::from_issued_entries(&originals)?)
+            })
+            .map_err(|_| CertificationError::Mismatch("issued compiler original projection"))?;
+        Self::from_compiler_projection(
+            &projection,
+            &metadata,
+            &InventoryOperation::new(Default::default()),
+        )?;
+        Ok(projection)
+    }
+
     fn from_projected_originals(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         operation: &InventoryOperation,
