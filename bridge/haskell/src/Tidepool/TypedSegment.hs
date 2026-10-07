@@ -26,7 +26,7 @@ import Data.Data (Data, Typeable, cast, gmapQ)
 import Data.List (foldl', nub, partition)
 import GHC (GhcTc, GhcRn, HsExpr(..), HsBind, HsBindLR(..), Pat(..), FixitySig(..), unLoc)
 import GHC.Hs (HsLocalBinds, HsLocalBindsLR(..), LHsExpr, LPat, ABExport(..), AbsBinds(..), XXExprGhcTc(..), MatchGroup(..), Match(..), GRHSs(..), GRHS(..))
-import GHC.Hs.Utils (collectHsBindBinders, collectPatBinders, CollectFlag(..))
+import GHC.Hs.Utils (collectHsBindBinders, collectHsBindsBinders, collectPatBinders, CollectFlag(..))
 import GHC.Tc.Types.Evidence (HsWrapper(..), EvBind(..))
 import GHC.HsToCore.Expr (dsLExpr, dsLocalBinds)
 import GHC.HsToCore.Binds (dsTcEvBinds_s, dsEvBinds)
@@ -264,7 +264,7 @@ captureTypedSegment plan environment admitted checked = do
   let fixities = Map.fromList
         [(unLoc name, fixity) | FixitySig _ names fixity <- (collect renamed :: [FixitySig GhcRn])
           , name <- names]
-      tops = collectHsBindBinders CollNoDictBinders (tcg_binds checked)
+      tops = collectHsBindsBinders CollNoDictBinders (tcg_binds checked)
       known = tops ++ typeEnvIds (tcg_type_env checked) ++ map eb_lhs (bagToList (tcg_ev_binds checked))
   items <- forM (zip retained (scanl (++) [] (map retainedCaptures retained))) $ \(item, previous) -> do
     let itemPlan = retainedPlan item
