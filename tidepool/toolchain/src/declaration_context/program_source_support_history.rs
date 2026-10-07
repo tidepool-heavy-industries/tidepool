@@ -3,6 +3,40 @@
 mod program_source_support_history {
     use super::*;
 
+    // The fixture originals issue roles before custody can add dependencies.
+    fn original_offer(
+        products: &[CertifiedRecoveryProduct],
+    ) -> (ArtifactView, CompilerInputProjection) {
+        let originals = products
+            .iter()
+            .map(|product| {
+                Arc::new(
+                    crate::artifact_inventory::ArtifactEntry::original(
+                        product.module_interface().unwrap().producer_sha256(),
+                        product.clone(),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::from_issued_entries(&originals).unwrap();
+        let custody = support_view(products);
+        projection.validate(&custody).unwrap();
+        (custody, projection)
+    }
+
+    fn source_selection(
+        projection: &CompilerInputProjection,
+        custody: &ArtifactView,
+    ) -> crate::certified_products::CertifiedSourceSelection {
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            projection,
+            custody,
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap()
+    }
+
     type Graph = BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>;
 
     #[derive(Default, Debug)]
@@ -126,7 +160,7 @@ mod program_source_support_history {
         let owners = ["A", "B", "C"].map(|module| identity("fixture", module));
         let unrelated = identity("fixture", "Unrelated");
         let products = ["A", "B", "C", "Unrelated"].map(support_product);
-        let all_artifacts = support_view(&products);
+        let (all_artifacts, all_projection) = original_offer(&products);
         // These interfaces intentionally have no nominal/type requirements.
         assert!(all_artifacts
             .entries()
@@ -170,9 +204,12 @@ mod program_source_support_history {
                 let initial_graph =
                     Graph::from([(first_owner.clone(), graph[&first_owner].clone())]);
                 let initial_owners = BTreeSet::from([first_owner.clone()]);
+                let (initial_artifacts, initial_projection) =
+                    original_offer(&[products[first].clone()]);
                 let initial = ProgramSourceSupport::extend(
                     None,
-                    support_view(&[products[first].clone()]),
+                    initial_artifacts,
+                    initial_projection,
                     [(
                         first_owner.clone(),
                         graph[&first_owner].iter().cloned().collect(),
@@ -203,6 +240,7 @@ mod program_source_support_history {
                 let current = ProgramSourceSupport::extend(
                     Some(&initial),
                     all_artifacts.clone(),
+                    all_projection.clone(),
                     rows.clone(),
                 )
                 .unwrap();
@@ -229,9 +267,13 @@ mod program_source_support_history {
                     edges.extend(edges.clone());
                 }
                 rows.reverse();
-                let reordered =
-                    ProgramSourceSupport::extend(Some(&current), all_artifacts.clone(), rows)
-                        .unwrap();
+                let reordered = ProgramSourceSupport::extend(
+                    Some(&current),
+                    all_artifacts.clone(),
+                    all_projection.clone(),
+                    rows,
+                )
+                .unwrap();
                 coverage.extensions += 1;
                 assert_eq!(reordered.imports, current.imports);
                 assert_query(
@@ -257,6 +299,7 @@ mod program_source_support_history {
                 assert!(ProgramSourceSupport::extend(
                     Some(&current),
                     all_artifacts.clone(),
+                    all_projection.clone(),
                     [(first_owner.clone(), changed)]
                 )
                 .is_err());
@@ -299,6 +342,7 @@ mod program_source_support_history {
                     let repaired = ProgramSourceSupport::extend(
                         Some(&incomplete),
                         all_artifacts.clone(),
+                        all_projection.clone(),
                         [(omitted.clone(), graph[omitted].iter().cloned().collect())],
                     )
                     .unwrap();
@@ -325,18 +369,27 @@ mod program_source_support_history {
                 request.program_support = Some(current.clone());
                 let before_graph = Arc::clone(&current.imports);
                 let before_artifacts = current.artifacts.descriptors();
-                let conflict = support_view(&[support_product_with_interface(
-                    "fixture",
-                    &first_owner.module,
-                    b"replacement interface".to_vec(),
-                )]);
+                let before_projection = current.compiler_projection.clone();
+                let (conflict, conflict_projection) =
+                    original_offer(&[support_product_with_interface(
+                        "fixture",
+                        &first_owner.module,
+                        b"replacement interface".to_vec(),
+                    )]);
                 assert!(request
-                    .admit_program_support(context.clone(), &conflict, &[], None)
+                    .admit_program_support_with_selection(
+                        context.clone(),
+                        &conflict,
+                        &[],
+                        None,
+                        &source_selection(&conflict_projection, &conflict),
+                    )
                     .is_err());
                 coverage.artifact_refusals += 1;
                 let after = request.program_support.as_ref().unwrap();
                 assert!(Arc::ptr_eq(&after.imports, &before_graph));
                 assert_eq!(after.artifacts.descriptors(), before_artifacts);
+                assert_eq!(after.compiler_projection, before_projection);
                 assert_query(
                     directory.path(),
                     after,
@@ -346,7 +399,13 @@ mod program_source_support_history {
                     &mut coverage,
                 );
                 let retried = request
-                    .admit_program_support(context.clone(), &all_artifacts, &[], None)
+                    .admit_program_support_with_selection(
+                        context.clone(),
+                        &all_artifacts,
+                        &[],
+                        None,
+                        &source_selection(&all_projection, &all_artifacts),
+                    )
                     .unwrap();
                 coverage.extensions += 1;
                 assert_eq!(retried.as_ref(), context.as_ref());
