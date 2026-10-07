@@ -3358,6 +3358,12 @@ mod tests {
         for retired in [
             "[preparation]\nroles = ['research']\n",
             "[research]\nmaximum_depth = 3\n",
+            "[prompts]\nroot = 'root.md'\n",
+            "[prompts]\nresearch = 'research.md'\n",
+            "[prompts]\ncoding = 'coding.md'\n",
+            "[prompts]\nscaffolding = 'scaffolding.md'\n",
+            "[prompts]\nintegration = 'integration.md'\n",
+            "[prompts]\ncore = 'core.md'\n",
         ] {
             std::fs::write(&path, format!("{base}{retired}")).unwrap();
             assert!(

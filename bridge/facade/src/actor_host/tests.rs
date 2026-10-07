@@ -29,13 +29,15 @@ async fn finished_application_task() -> tokio::task::JoinHandle<Result<(), Strin
 #[tokio::test]
 async fn application_handoff_keeps_both_typed_failures_and_primary_source() {
     let owners = Arc::new(Mutex::new(HashMap::new()));
-    assert!(handoff_application_owners(
-        owners.clone(),
-        finished_application_task().await,
-        Ok(()),
-        Ok(()),
-    )
-    .is_ok());
+    assert!(
+        handoff_application_owners(
+            owners.clone(),
+            finished_application_task().await,
+            Ok(()),
+            Ok(()),
+        )
+        .is_ok()
+    );
 
     let cleanup_only = handoff_application_owners(
         owners.clone(),
@@ -310,9 +312,11 @@ fn driver_sources_keep_policy_private_and_preserve_explicit_public_modules() {
         assert!(!notebook.contains("import AgentSpec"));
         assert!(!notebook.contains("import qualified AgentSpec"));
         assert!(!sources.bootstrap_preamble.contains("ConfiguredSpec"));
-        assert!(!sources
-            .bootstrap_preamble
-            .contains("Project.BootstrapWitness"));
+        assert!(
+            !sources
+                .bootstrap_preamble
+                .contains("Project.BootstrapWitness")
+        );
     }
 }
 
@@ -352,12 +356,16 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
             "ConfiguredSpec" | "Project.BootstrapWitness"
         )
     }));
-    assert!(bootstrap
-        .preamble
-        .contains("import Project.BootstrapWitness"));
-    assert!(!bootstrap
-        .preamble
-        .contains("import qualified ConfiguredSpec"));
+    assert!(
+        bootstrap
+            .preamble
+            .contains("import Project.BootstrapWitness")
+    );
+    assert!(
+        !bootstrap
+            .preamble
+            .contains("import qualified ConfiguredSpec")
+    );
     let sources = driver_sources(
         Path::new("unused-live-actors"),
         Some(&invalid),
@@ -502,11 +510,13 @@ fn later_host_requires_missing_journals_when_prior_evidence_exists() {
         actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
         JournalOpenMode::Resume
     );
-    assert!(exomonad_actor::ActorRecoveryJournal::open_existing(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "actor-lifecycle.v2.jsonl"
-    )
-    .is_err());
+    assert!(
+        exomonad_actor::ActorRecoveryJournal::open_existing(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+            "actor-lifecycle.v2.jsonl"
+        )
+        .is_err()
+    );
     assert_eq!(
         run_journal_mode(incarnation, &binding, &run, true).unwrap(),
         JournalOpenMode::Resume
@@ -569,22 +579,14 @@ fn embedded_application_binding_does_not_require_native_launch_proof() {
 }
 
 #[test]
-fn operator_role_has_journal_without_widening_child_roles() {
-    let operator = operator_effective_role(exomonad_actor::ResearchPolicy::default());
-    assert!(operator
-        .effect_keys()
-        .contains(&exomonad_actor::ActorEffectKey::Journal));
-    assert!(operator.haskell_effects_type().contains("Journal"));
-
-    for child in [
-        exomonad_actor::EffectiveRole::research(),
-        exomonad_actor::EffectiveRole::coding(),
-        exomonad_actor::EffectiveRole::integration(),
-    ] {
-        assert!(!child
+fn default_capabilities_include_journal() {
+    let capabilities = exomonad_actor::ActorCapabilities::default();
+    assert!(
+        capabilities
             .effect_keys()
-            .contains(&exomonad_actor::ActorEffectKey::Journal));
-    }
+            .contains(&exomonad_actor::ActorEffectKey::Journal)
+    );
+    assert!(capabilities.haskell_effects_type().contains("Journal"));
 }
 
 #[test]
@@ -687,7 +689,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         .forest
         .new_workbench(
             "notification-target".into(),
-            exomonad_actor::EffectiveRole::root(),
+            exomonad_actor::ActorCapabilities::default(),
         )
         .await
         .unwrap();
@@ -755,22 +757,24 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         .recover_program_root(
             campaign.actor.identity(),
             "recovered-root".into(),
-            exomonad_actor::EffectiveRole::root(),
+            exomonad_actor::ActorCapabilities::default(),
             campaign.program.clone(),
         )
         .await
         .unwrap();
     assert_ne!(successor.identity(), campaign.actor.identity());
-    assert!(campaign
-        .forest
-        .recover_program_root(
-            campaign.actor.identity(),
-            "duplicate-recovery".into(),
-            exomonad_actor::EffectiveRole::root(),
-            campaign.program.clone(),
-        )
-        .await
-        .is_err());
+    assert!(
+        campaign
+            .forest
+            .recover_program_root(
+                campaign.actor.identity(),
+                "duplicate-recovery".into(),
+                exomonad_actor::ActorCapabilities::default(),
+                campaign.program.clone(),
+            )
+            .await
+            .is_err()
+    );
     let successor_policy = exomonad_actor::ResidentInteractivePolicy::local(successor.clone());
     let mut retry = tokio::spawn(successor_policy.dispatch_json_boxed(request.clone()));
     let replay = tokio::time::timeout(Duration::from_secs(60), async {
@@ -946,7 +950,9 @@ fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
             supervisor_parent: None,
             context_parent: None,
             actor_path: None,
-            role: exomonad_actor::ActorRole::Root,
+            effect_keys: exomonad_actor::ActorCapabilities::default()
+                .effect_keys()
+                .to_vec(),
             descendant_depth: 8,
             descendant_active_children: None,
             model: None,
@@ -1291,7 +1297,7 @@ fn root_and_worker_share_git_metadata_but_not_working_tree_authority() {
     assert_eq!(
         writable_repository_roots(
             true,
-            exomonad_actor::WorkspaceAccess::WritableBound,
+            exomonad_actor::WorkspaceAccess::ReadWrite,
             source,
             None,
             common,
@@ -1302,7 +1308,7 @@ fn root_and_worker_share_git_metadata_but_not_working_tree_authority() {
     assert_eq!(
         writable_repository_roots(
             false,
-            exomonad_actor::WorkspaceAccess::WritableBound,
+            exomonad_actor::WorkspaceAccess::ReadWrite,
             source,
             Some(worker),
             common,
@@ -1313,7 +1319,7 @@ fn root_and_worker_share_git_metadata_but_not_working_tree_authority() {
     assert_eq!(
         writable_repository_roots(
             false,
-            exomonad_actor::WorkspaceAccess::InspectOnly,
+            exomonad_actor::WorkspaceAccess::ReadOnly,
             source,
             Some(worker),
             common,
@@ -1335,7 +1341,7 @@ fn the_root_may_build_in_its_own_worktrees_but_not_in_a_child_s() {
 
     let writable = writable_repository_roots(
         true,
-        exomonad_actor::WorkspaceAccess::WritableBound,
+        exomonad_actor::WorkspaceAccess::ReadWrite,
         source,
         None,
         common,
@@ -1356,7 +1362,7 @@ fn the_root_may_build_in_its_own_worktrees_but_not_in_a_child_s() {
     assert!(
         !writable_repository_roots(
             false,
-            exomonad_actor::WorkspaceAccess::WritableBound,
+            exomonad_actor::WorkspaceAccess::ReadWrite,
             source,
             Some(&managed.join("wt-child")),
             common,
@@ -2405,16 +2411,9 @@ async fn composition_root_child_session_factory_runs_a_cell() {
 
 #[tokio::test]
 async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
-    // Two fork levels: the research policy's depth budget of 1 lets the
-    // child itself unfold one further generation (the grandchild), which
-    // then has none left.
-    let mut campaign =
-        test_campaign::TestCampaign::start_with_research_policy(exomonad_actor::ResearchPolicy {
-            maximum_depth: 1,
-            maximum_active_children: Some(1),
-            default_depth: 1,
-        })
-        .await;
+    // Two fork levels: the child can launch one further generation, which
+    // then has no descendant budget left.
+    let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let root_id = campaign.actor.identity();
 
@@ -2439,7 +2438,11 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     let child_id = child_installation.actor.identity();
     campaign.authority.install_grant(
         child_id.into(),
-        worktree_grant(child_installation.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     child_installation
         .fork_gate
@@ -2470,7 +2473,11 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
         .await;
     campaign.authority.install_grant(
         grandchild_installation.actor.identity().into(),
-        worktree_grant(grandchild_installation.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     grandchild_installation
         .fork_gate
@@ -2530,7 +2537,10 @@ async fn forest_operator_survives_model_root_recovery() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let operator = campaign
         .forest
-        .new_workbench("operator".into(), exomonad_actor::EffectiveRole::root())
+        .new_workbench(
+            "operator".into(),
+            exomonad_actor::ActorCapabilities::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -2627,7 +2637,7 @@ async fn forest_operator_survives_model_root_recovery() {
         .recover_program_root(
             campaign.actor.identity(),
             "replacement".into(),
-            exomonad_actor::EffectiveRole::root(),
+            exomonad_actor::ActorCapabilities::default(),
             campaign.program.clone(),
         )
         .await
@@ -2649,12 +2659,14 @@ async fn forest_operator_survives_model_root_recovery() {
             .len(),
         1
     );
-    assert!(campaign
-        .forest
-        .inspect_graph(operator.identity())
-        .unwrap()
-        .iter()
-        .any(|node| node.actor == replacement.identity()));
+    assert!(
+        campaign
+            .forest
+            .inspect_graph(operator.identity())
+            .unwrap()
+            .iter()
+            .any(|node| node.actor == replacement.identity())
+    );
     campaign.forest.shutdown().await;
     task.await.unwrap();
     assert!(operator.terminal().get().is_some());

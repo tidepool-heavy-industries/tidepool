@@ -135,7 +135,6 @@ fn configuration(root: &Path) -> ActorHostConfig {
         tmux_session: "unused-for-embedded-recovery".into(),
         model: "test-model".into(),
         effort: ForkEffort::Low,
-        research_policy: exomonad_actor::ResearchPolicy::default(),
 
         pane_environment: BTreeMap::new(),
         jev: Some(exomonad_actor::unconfigured_jev()),

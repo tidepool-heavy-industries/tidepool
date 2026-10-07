@@ -136,7 +136,6 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_shell_component_refuses_expired_retained_output_without_rerun() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         scaffold,
     )

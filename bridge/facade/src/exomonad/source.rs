@@ -2962,7 +2962,9 @@ mod tests {
             original: original_selection,
             revision: original.identity.clone(),
             coverage: vec![super::super::workspace::PreparedToolsetCoverage {
-                requested_effects: exomonad_actor::EffectiveRole::root().effect_keys().to_vec(),
+                requested_effects: exomonad_actor::ActorCapabilities::default()
+                    .effect_keys()
+                    .to_vec(),
                 effective_effects: Vec::new(),
                 recipe: "a".repeat(64),
                 original: original_selection,

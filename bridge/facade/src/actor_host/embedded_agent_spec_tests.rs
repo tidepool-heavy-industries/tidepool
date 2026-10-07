@@ -27,7 +27,6 @@ async fn probe(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
 async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
     let before_install = tidepool_extract_cmd::extract_spawn_count();
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_spec(&config.workspace, "old-handler", "old slot");

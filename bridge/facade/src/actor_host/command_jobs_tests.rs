@@ -813,7 +813,7 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     let _custody = child
         .worktree_custody
@@ -944,7 +944,7 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     campaign
@@ -1026,7 +1026,7 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         .await;
     campaign.authority.install_grant(
         producer.actor.identity().into(),
-        worktree_grant(producer.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     producer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     campaign
@@ -1053,7 +1053,7 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         .await;
     campaign.authority.install_grant(
         observer.actor.identity().into(),
-        worktree_grant(observer.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     campaign
@@ -2622,7 +2622,7 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     let _custody = child
         .worktree_custody

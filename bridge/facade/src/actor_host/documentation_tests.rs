@@ -772,7 +772,7 @@ fn open_test_fork(
 ) -> Arc<dyn exomonad_actor::ForkWorkspaceCustody> {
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     let [worktree_id] = child.launch_worktrees.as_slice() else {
         panic!("child must have one worktree")
@@ -812,7 +812,6 @@ async fn published_unfold_watch_and_request_examples_execute() {
 #[tokio::test]
 async fn record_actor_unfold_publishes_and_routes_child_reply() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -1045,7 +1044,6 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     // The guide's command/judgment example reads `J`, which a run gets from the
     // Jev library its workspace pins, so this campaign selects that workspace.
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         super::test_campaign::pinned_jev_workspace,
     )
@@ -2255,7 +2253,6 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
 #[tokio::test]
 async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -2359,7 +2356,6 @@ async fn workspace_campaign() -> TestCampaign {
 
 async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -2738,7 +2734,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .forest
         .new_workbench(
             "after-swarm-stop".into(),
-            exomonad_actor::EffectiveRole::root()
+            exomonad_actor::ActorCapabilities::default()
         )
         .await
         .is_err());
@@ -2820,7 +2816,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         include_str!("../../../../exomonad/examples/workspace/.exomonad/prompts/review.md");
     assert_eq!(reviewer.instructions.as_deref(), Some(review_instructions));
     let launched = super::developer_instructions_selected(
-        &reviewer.effective_role,
+        &reviewer.capabilities,
         None,
         reviewer.instructions.as_deref(),
     );
@@ -3632,7 +3628,6 @@ async fn attention_actor_recipe_retains_independent_sources_through_closure() {
 #[tokio::test]
 async fn work_router_queries_receipts_as_the_issuing_actor() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let package = Path::new(env!("CARGO_MANIFEST_DIR"))

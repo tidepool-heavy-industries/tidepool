@@ -402,72 +402,49 @@ impl TestCampaign {
     }
 
     pub async fn start() -> Self {
-        Self::start_with_research_policy(exomonad_actor::ResearchPolicy::default()).await
+        Self::start_with_admission(|admission| admission).await
     }
 
     /// Opt into the existing dedicated-machine factory. Ordinary campaigns
     /// retain the production host's shared-machine policy.
     pub async fn start_with_child_sessions() -> Self {
-        Self::start_configured(
-            exomonad_actor::ResearchPolicy::default(),
-            |admission| admission,
-            |_| {},
-            CampaignRoot::Dedicated,
-        )
-        .await
+        Self::start_configured(|admission| admission, |_| {}, CampaignRoot::Dedicated).await
     }
 
     pub async fn start_with_shell() -> Self {
-        Self::start_with_config(
-            exomonad_actor::ResearchPolicy::default(),
-            |admission| admission,
-            configure_shell_workspace,
-        )
-        .await
-    }
-
-    pub async fn start_with_research_policy(
-        research_policy: exomonad_actor::ResearchPolicy,
-    ) -> Self {
-        Self::start_with_admission(research_policy, |admission| admission).await
+        Self::start_with_config(|admission| admission, configure_shell_workspace).await
     }
 
     pub async fn start_with_admission(
-        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
     ) -> Self {
-        Self::start_with_config(research_policy, transform, |_| {}).await
+        Self::start_with_config(transform, |_| {}).await
     }
 
     pub async fn start_with_config(
-        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Self {
-        Self::start_with_conversation(research_policy, transform, configure, None).await
+        Self::start_with_conversation(transform, configure, None).await
     }
 
     /// A campaign whose root can read its own conversation, so `reflect`
     /// returns the supplied turns instead of reporting the context unbound.
     pub async fn start_with_conversation(
-        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Self {
-        Self::start_with_model_factory(research_policy, transform, configure, conversation, None)
-            .await
+        Self::start_with_model_factory(transform, configure, conversation, None).await
     }
 
     pub(super) async fn start_with_model_factory(
-        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     ) -> Self {
         Self::start_configured(
-            research_policy,
             transform,
             configure,
             CampaignRoot::Shared {
@@ -479,7 +456,6 @@ impl TestCampaign {
     }
 
     async fn start_configured(
-        research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         root: CampaignRoot,
@@ -511,7 +487,6 @@ impl TestCampaign {
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
             effort: ForkEffort::Low,
-            research_policy,
 
             pane_environment: BTreeMap::new(),
             jev: Some(exomonad_actor::unconfigured_jev()),

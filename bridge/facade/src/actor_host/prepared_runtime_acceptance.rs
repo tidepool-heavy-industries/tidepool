@@ -242,7 +242,6 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             // This module supplies private installer policy, not notebook imports.
             project.haskell.modules = Vec::new();
             project.haskell.spec = Some("PreparedRuntimeSpec.agentSpec".into());
-            project.preparation.roles = vec![exomonad_actor::ActorRole::Research];
         });
         commit_workspace(&config.workspace);
     })
@@ -279,13 +278,14 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             .expect("the actual host selected its completed workspace");
         let completed_entries = frozen.completed_entry_selections().expect("completed installer inventory");
         assert!(!completed_entries.is_empty());
-        let research_coverage = frozen.prepared_toolset_coverage()
-            .expect("completed toolset coverage")
-            .iter().find(|entry| entry.profile == crate::exomonad::PreparationProfile::Public(
-                exomonad_tool::PublicActorProfile::Research))
-            .expect("the configured public research profile was prepared");
-        assert_eq!(research_coverage.requested_effects,
-            exomonad_tool::PublicActorProfile::Research.effect_keys());
+        let coverage = frozen.prepared_toolset_coverage()
+            .expect("completed root toolset coverage");
+        assert_eq!(coverage.len(), 1, "one actual root toolset is prepared");
+        let root_coverage = &coverage[0];
+        assert_eq!(
+            root_coverage.requested_effects,
+            exomonad_actor::ActorCapabilities::default().effect_keys()
+        );
         let prepared_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         assert!(!prepared_executions.is_empty(), "the original producer executed the real quoter");
         progress.quotation_executions_before = Some(prepared_executions.lines().count());
@@ -354,15 +354,14 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
                 "the private installer policy must retain its original quotation after input changes to 42: {current_executions}");
             assert!(!installed.checkpoint);
             assert_eq!(installed.context_parent, None, "selected provider context");
-            assert_eq!(installed.role, exomonad_actor::ActorRole::Research);
             let acquisition = installed.acquisition.as_ref().expect("installed source acquisition");
             let exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } = acquisition else {
                 panic!("prepared child must load its deployment original: {acquisition:?}");
             };
             assert_eq!(completed_entries.get(recipe), Some(original),
                 "the actual installed original belongs to the frozen completed inventory");
-            assert_eq!((recipe, original), (&research_coverage.recipe, &research_coverage.original),
-                "the child selects the configured research specialization");
+            assert_eq!((recipe, original), (&root_coverage.recipe, &root_coverage.original),
+                "the child selects the root's prepared toolset");
             progress.deployment_originals_verified += 1;
             progress.report();
             assert!(installed.tools.iter().any(|tool| matches!(tool,

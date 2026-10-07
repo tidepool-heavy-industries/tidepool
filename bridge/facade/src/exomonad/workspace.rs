@@ -62,12 +62,8 @@ impl<'de> Deserialize<'de> for HaskellConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct PromptConfig {
-    pub core: Option<PathBuf>,
-    pub root: Option<PathBuf>,
-    pub research: Option<PathBuf>,
-    pub coding: Option<PathBuf>,
-    pub scaffolding: Option<PathBuf>,
-    pub integration: Option<PathBuf>,
+    pub base: Option<PathBuf>,
+    pub agent: Option<PathBuf>,
     pub files: BTreeMap<String, PathBuf>,
 }
 
@@ -154,8 +150,8 @@ pub(crate) enum WorkspacePreparation {
     },
 }
 
-/// The required profile and the exact specialization its producer completed.
-/// These records are the primary inventory; recipe selections are derived.
+/// The root's requested effects and the exact specialization its producer
+/// completed. Recipe selections are derived from this single primary record.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedToolsetCoverage {
@@ -498,12 +494,8 @@ impl FrozenWorkspace {
         }
         let mut prompts = BTreeMap::new();
         for (name, path) in [
-            ("core", config.prompts.core),
-            ("root", config.prompts.root),
-            ("research", config.prompts.research),
-            ("coding", config.prompts.coding),
-            ("scaffolding", config.prompts.scaffolding),
-            ("integration", config.prompts.integration),
+            ("base", config.prompts.base),
+            ("agent", config.prompts.agent),
         ] {
             if let Some(path) = path {
                 let text = std::fs::read_to_string(base.join(path))?;
@@ -514,12 +506,7 @@ impl FrozenWorkspace {
             }
         }
         for (name, path) in config.prompts.files {
-            if name.trim().is_empty()
-                || matches!(
-                    name.as_str(),
-                    "core" | "root" | "research" | "coding" | "scaffolding" | "integration"
-                )
-            {
+            if name.trim().is_empty() || matches!(name.as_str(), "base" | "agent") {
                 return Err(format!("project prompt name is empty or reserved: {name:?}").into());
             }
             let text = std::fs::read_to_string(base.join(path))?;
@@ -827,12 +814,8 @@ impl FrozenWorkspace {
         }
         let base = workspace.join(".exomonad");
         for (name, path) in [
-            ("core", config.prompts.core),
-            ("root", config.prompts.root),
-            ("research", config.prompts.research),
-            ("coding", config.prompts.coding),
-            ("scaffolding", config.prompts.scaffolding),
-            ("integration", config.prompts.integration),
+            ("base", config.prompts.base),
+            ("agent", config.prompts.agent),
         ]
         .into_iter()
         .filter_map(|(name, path)| path.map(|path| (name.to_owned(), path)))
@@ -1691,7 +1674,7 @@ mod tests {
     fn preparing_retry_preserves_original_nonce_and_refuses_mutable_source_drift() {
         let (_libraries, selection) = deployment_fixture();
         let project = deployment_project(
-            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['src']\n[prompts]\nroot = 'root.md'\n",
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['src']\n[prompts]\nagent = 'agent.md'\n",
         );
         let authored = project.path().join(".exomonad/src");
         std::fs::create_dir_all(&authored).unwrap();
@@ -1700,8 +1683,8 @@ mod tests {
             "module Original where\noriginal = (37 :: Int)\n",
         )
         .unwrap();
-        let prompt = project.path().join(".exomonad/root.md");
-        std::fs::write(&prompt, "original root prompt").unwrap();
+        let prompt = project.path().join(".exomonad/agent.md");
+        std::fs::write(&prompt, "original agent prompt").unwrap();
         let directory = tempfile::tempdir().unwrap();
         let mut frozen = FrozenWorkspace::load_with_deployment(
             project.path(),
@@ -2232,7 +2215,7 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         let authored = project.path().join(".exomonad");
         std::fs::create_dir_all(authored.join("Project")).unwrap();
-        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n[prompts]\ncore = 'core.md'\n").unwrap();
+        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n[prompts]\nbase = 'base.md'\n").unwrap();
         std::fs::write(
             authored.join("Project/Work.hs"),
             "module Project.Work where\nimport Project.Types\n",
@@ -2243,7 +2226,7 @@ mod tests {
             "module Project.Types where\ndata Result = Old\n",
         )
         .unwrap();
-        std::fs::write(authored.join("core.md"), "Original guidance").unwrap();
+        std::fs::write(authored.join("base.md"), "Original guidance").unwrap();
         let frozen = FrozenWorkspace::load(project.path(), first.path()).unwrap();
         let identical_run = tempfile::tempdir().unwrap();
         let identical = FrozenWorkspace::load(project.path(), identical_run.path()).unwrap();
@@ -2253,7 +2236,7 @@ mod tests {
             "module Project.Types where\ndata Result = New\n",
         )
         .unwrap();
-        std::fs::write(authored.join("core.md"), "Revised guidance").unwrap();
+        std::fs::write(authored.join("base.md"), "Revised guidance").unwrap();
         let reused = FrozenWorkspace::load(project.path(), first.path()).unwrap();
         assert_eq!(reused.prompts, frozen.prompts);
         assert!(
@@ -2263,7 +2246,7 @@ mod tests {
         );
         let next = FrozenWorkspace::load(project.path(), second.path()).unwrap();
         assert_ne!(next.identity, frozen.identity);
-        assert_eq!(next.prompts["core"], "Revised guidance");
+        assert_eq!(next.prompts["base"], "Revised guidance");
         assert!(
             std::fs::read_to_string(next.include[0].join("Project/Types.hs"))
                 .unwrap()

@@ -329,7 +329,6 @@ async fn lookup_campaign() -> (TestCampaign, Arc<LookupScoreJev>) {
         score: Mutex::new(3),
     });
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -497,7 +496,6 @@ pub(super) use super::test_campaign::pinned_jev_workspace;
 
 async fn campaign_with<B: JevBackend + 'static>(backend: Arc<B>) -> TestCampaign {
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(backend as exomonad_actor::JevBackendHandle);
@@ -542,7 +540,6 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -670,7 +667,6 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -737,7 +733,6 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -864,7 +859,6 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -939,7 +933,6 @@ async fn template_bash_accepts_undersized_max_output_bytes() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -1195,7 +1188,6 @@ async fn live_jev_from_a_haskell_cell() {
         "TYPESAFE_API_KEY is not set"
     );
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = None;
@@ -1422,8 +1414,7 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
     let campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
-            exomonad_actor::ResearchPolicy::default(),
-            |admission| admission,
+                |admission| admission,
             |config| {
                 config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
                 pinned_jev_agent_spec_workspace(config);
@@ -1657,7 +1648,7 @@ async fn next_watchdog_child(
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
     child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     child
@@ -1706,8 +1697,7 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     let mut campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
-            exomonad_actor::ResearchPolicy::default(),
-            |admission| admission,
+                |admission| admission,
             |config| {
                 config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
                 pinned_watchdog_workspace(config);

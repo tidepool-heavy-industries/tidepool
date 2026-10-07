@@ -141,7 +141,6 @@ async fn reflect_binds_history_larger_than_the_observation_budget() {
         Box::pin(async move { Ok(turns.into_iter().take(count).collect()) })
     });
     let campaign = TestCampaign::start_with_conversation(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |_| {},
         Some(reader),
@@ -190,7 +189,6 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         Box::pin(async move { Ok(turns.into_iter().take(count).collect()) })
     });
     let mut campaign = TestCampaign::start_with_conversation(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         super::test_campaign::configure_shell_workspace,
         Some(reader),
@@ -305,7 +303,6 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
         requests: Mutex::new(Vec::new()),
     });
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
