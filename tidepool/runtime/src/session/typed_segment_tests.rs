@@ -773,7 +773,7 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
         .unwrap();
     try_execute_cell_with_authority_checks(
         &mut session.resident, session.public, &session.effects, &session.images, (0, 0),
-        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); secondPlannedValue <- pure (firstPlannedValue + 1); segmentRecord secondPlannedValue", 0,
+        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); boundaryCapture :: Int; boundaryCapture = firstPlannedValue; secondPlannedValue <- pure (boundaryCapture + 1); segmentRecord secondPlannedValue", 1,
         &ScalePublication::Ephemeral, AuthorityChecks::TypedEntryRefusalBranches,
     ).unwrap();
     assert_eq!(session.observed(), [4]);

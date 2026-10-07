@@ -3204,7 +3204,39 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         .iter()
         .position(|row| row.as_array().unwrap()[1].as_text() == Some(output_module))
         .expect("the finalization packet carries the produced capture type");
-    for mutation in 0..3 {
+    let declaration = valid
+        .items()
+        .iter()
+        .position(|item| item.native().is_none())
+        .expect("future-output control requires a genuine declaration barrier");
+    assert!(declaration > index);
+    let future = valid.items()[declaration + 1..]
+        .iter()
+        .find(|item| {
+            item.native()
+                .and_then(|native| native.value_interface())
+                .is_some()
+        })
+        .expect("the later segment must produce a real reserved capture");
+    let future_module = future.native().unwrap().value_interface().unwrap().0;
+    let future_directory = root.join(format!("item-{}", future.checked_item().index()));
+    let future_bytes = std::fs::read(future_directory.join("certified-products.cbor")).unwrap();
+    let future_products: CborValue = ciborium::de::from_reader(future_bytes.as_slice()).unwrap();
+    let future_row = future_products.as_array().unwrap()[6].as_array().unwrap()[3]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row.as_array().unwrap()[1].as_text() == Some(future_module))
+        .expect("the later capture must have genuine completed type evidence")
+        .clone();
+    assert_ne!(future_module, output_module);
+    assert!(
+        value_rows
+            .iter()
+            .all(|row| { row.as_array().unwrap()[1].as_text() != Some(future_module) }),
+        "the first segment must not already emit later capture evidence"
+    );
+    for mutation in 0..4 {
         let restore_products = RestoreReceipt {
             path: products_path.clone(),
             original: products_original.clone(),
@@ -3219,14 +3251,25 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             0 => {
                 rows.remove(output_index);
             }
-            1 => {
-                let mut foreign = rows[output_index].clone();
+            1 | 3 => {
+                let mut foreign = if mutation == 3 {
+                    future_row.clone()
+                } else {
+                    rows[output_index].clone()
+                };
                 let row = foreign.as_array_mut().unwrap();
-                row[1] = CborValue::Text(format!("Tidepool.Session.Val.G{}", u64::MAX));
+                if mutation == 1 {
+                    row[1] = CborValue::Text(format!("Tidepool.Session.Val.G{}", u64::MAX));
+                }
                 let parent = products_path.parent().unwrap();
+                let payload_parent: &Path = if mutation == 3 {
+                    &future_directory
+                } else {
+                    parent
+                };
                 let directory = tempfile::tempdir_in(parent).unwrap();
                 for (field, name) in [(2, "foreign.hi"), (5, "foreign.packages.cbor")] {
-                    let original = parent.join(row[field].as_text().unwrap());
+                    let original = payload_parent.join(row[field].as_text().unwrap());
                     std::fs::copy(original, directory.path().join(name)).unwrap();
                     row[field] = CborValue::Text(format!(
                         "{}/{name}",
@@ -3263,9 +3306,9 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
         std::fs::write(&products_path, bytes).unwrap();
-        let refusal = offer
-            .admit_cell_program(root)
-            .expect_err("missing, foreign or substituted produced type evidence must refuse");
+        let refusal = offer.admit_cell_program(root).expect_err(
+            "missing, foreign, future or substituted produced type evidence must refuse",
+        );
         assert!(
             matches!(&refusal, CompileError::CompilerEvidence(error)
             if matches!(error.as_ref(), CertificationError::Mismatch(_))),
