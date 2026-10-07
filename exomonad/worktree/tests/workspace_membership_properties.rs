@@ -12,6 +12,64 @@ struct Active {
     predecessor: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Operation {
+    Attach {
+        actor: usize,
+        tree: usize,
+        access: WorkspaceAccess,
+    },
+    Release {
+        actor: usize,
+    },
+    Complete {
+        actor: usize,
+    },
+    Reopen,
+    Recover {
+        actor: usize,
+    },
+    Transfer {
+        actor: usize,
+        successor: usize,
+    },
+}
+
+impl Operation {
+    fn support_index(self) -> usize {
+        match self {
+            Self::Attach { .. } => 0,
+            Self::Release { .. } => 1,
+            Self::Complete { .. } => 2,
+            Self::Reopen => 3,
+            Self::Recover { .. } => 4,
+            Self::Transfer { .. } => 5,
+        }
+    }
+}
+
+fn operation() -> impl Strategy<Value = Operation> {
+    prop_oneof![
+        (0usize..4, 0usize..3, any::<bool>()).prop_map(|(actor, tree, writable)| {
+            Operation::Attach {
+                actor,
+                tree,
+                access: if writable {
+                    WorkspaceAccess::ReadWrite
+                } else {
+                    WorkspaceAccess::ReadOnly
+                },
+            }
+        }),
+        (0usize..4).prop_map(|actor| Operation::Release { actor }),
+        (0usize..4).prop_map(|actor| Operation::Complete { actor }),
+        Just(Operation::Reopen),
+        (0usize..4).prop_map(|actor| Operation::Recover { actor }),
+        (0usize..4, 0usize..4)
+            .prop_map(|(actor, successor)| Operation::Transfer { actor, successor }),
+    ]
+}
+
 fn config() -> Config {
     let mut config = Config::default();
     if std::env::var_os("PROPTEST_CASES").is_none() {
@@ -91,7 +149,7 @@ fn check_model(table: &BindingTable, active: &BTreeMap<usize, Active>) {
     }
 }
 
-fn replay(history: &[(u8, u8, u8)]) {
+fn replay(history: &[Operation]) {
     let storage = tempfile::tempdir().expect("temporary binding storage");
     let anchor = DirectoryAnchor::open_existing(storage.path()).expect("storage anchor");
     let mut table = BindingTable::open(&anchor, "bindings").expect("open binding table");
@@ -102,31 +160,43 @@ fn replay(history: &[(u8, u8, u8)]) {
     // Every generated history begins with a witness for shared membership,
     // the per-actor workspace limit, settlement isolation, and restart custody.
     let mut ops = vec![
-        (0, 0, 3), // actor 0 attaches read-write to tree 0
-        (0, 1, 0), // actor 1 joins the same tree read-only
-        (0, 0, 1), // actor 0 cannot acquire a different active workspace
-        (5, 1, 2), // transfer actor 1 to actor 2; actor 0 remains attached
-        (3, 0, 0), // restart revokes process-local memberships
-        (4, 2, 0), // reclaim transfer only with exact predecessor provenance
-        (4, 0, 0), // independently recover the surviving peer
-        (1, 2, 0), // release transferred membership
-        (2, 0, 0), // complete surviving peer
+        Operation::Attach {
+            actor: 0,
+            tree: 0,
+            access: WorkspaceAccess::ReadWrite,
+        },
+        Operation::Attach {
+            actor: 1,
+            tree: 0,
+            access: WorkspaceAccess::ReadOnly,
+        },
+        Operation::Attach {
+            actor: 0,
+            tree: 1,
+            access: WorkspaceAccess::ReadWrite,
+        },
+        Operation::Transfer {
+            actor: 1,
+            successor: 2,
+        },
+        Operation::Reopen,
+        Operation::Recover { actor: 2 },
+        Operation::Recover { actor: 0 },
+        Operation::Release { actor: 2 },
+        Operation::Complete { actor: 0 },
     ];
     ops.extend_from_slice(history);
 
-    for (op, actor_index, raw_tree_access) in ops {
-        support[(op % 6) as usize] += 1;
-        let actor_index = actor_index as usize % 4;
-        let tree_index = raw_tree_access as usize % 3;
-        let access = if raw_tree_access % 2 == 0 {
-            WorkspaceAccess::ReadOnly
-        } else {
-            WorkspaceAccess::ReadWrite
-        };
-        let tree = worktree(tree_index);
-        let actor = agent(actor_index);
-        match op % 6 {
-            0 => {
+    for operation in ops {
+        support[operation.support_index()] += 1;
+        match operation {
+            Operation::Attach {
+                actor: actor_index,
+                tree: tree_index,
+                access,
+            } => {
+                let actor = agent(actor_index);
+                let tree = worktree(tree_index);
                 if active.contains_key(&actor_index) {
                     assert!(table.bind(&tree, &actor, access, 100).is_err());
                 } else {
@@ -143,14 +213,16 @@ fn replay(history: &[(u8, u8, u8)]) {
                     leases.insert(actor_index, lease);
                 }
             }
-            1 | 2 => {
+            Operation::Release { actor: actor_index }
+            | Operation::Complete { actor: actor_index } => {
+                let actor = agent(actor_index);
                 if active
                     .get(&actor_index)
                     .is_some_and(|membership| membership.authorized)
                 {
                     let membership = active.remove(&actor_index).expect("active actor");
                     let lease = leases.remove(&actor_index).expect("issued lease");
-                    if op % 6 == 1 {
+                    if matches!(operation, Operation::Release { .. }) {
                         lease.release(&mut table).expect("release membership");
                     } else {
                         lease.complete(&mut table).expect("complete membership");
@@ -160,7 +232,7 @@ fn replay(history: &[(u8, u8, u8)]) {
                         .is_none());
                 }
             }
-            3 => {
+            Operation::Reopen => {
                 leases.clear();
                 for membership in active.values_mut() {
                     membership.authorized = false;
@@ -168,43 +240,50 @@ fn replay(history: &[(u8, u8, u8)]) {
                 drop(table);
                 table = BindingTable::open(&anchor, "bindings").expect("reopen binding table");
             }
-            4 => match active.get_mut(&actor_index) {
-                Some(membership) if !membership.authorized => {
-                    let predecessor_index = membership.predecessor.unwrap_or(actor_index);
-                    let wrong_index = (0..4)
-                        .find(|candidate| {
-                            *candidate != predecessor_index && *candidate != actor_index
-                        })
-                        .expect("actor domain has a distinct incorrect predecessor");
-                    let wrong_predecessor = agent(wrong_index);
-                    assert!(table
-                        .recover_active(
-                            &worktree(membership.worktree),
-                            &wrong_predecessor,
-                            &actor,
-                            99,
-                        )
-                        .is_err());
-                    let lease = table
-                        .recover_active(
-                            &worktree(membership.worktree),
-                            &agent(predecessor_index),
-                            &actor,
-                            100,
-                        )
-                        .expect("recover retained exact actor");
-                    membership.authorized = true;
-                    leases.insert(actor_index, lease);
+            Operation::Recover { actor: actor_index } => {
+                let actor = agent(actor_index);
+                match active.get_mut(&actor_index) {
+                    Some(membership) if !membership.authorized => {
+                        let predecessor_index = membership.predecessor.unwrap_or(actor_index);
+                        let wrong_index = (0..4)
+                            .find(|candidate| {
+                                *candidate != predecessor_index && *candidate != actor_index
+                            })
+                            .expect("actor domain has a distinct incorrect predecessor");
+                        let wrong_predecessor = agent(wrong_index);
+                        assert!(table
+                            .recover_active(
+                                &worktree(membership.worktree),
+                                &wrong_predecessor,
+                                &actor,
+                                99,
+                            )
+                            .is_err());
+                        let lease = table
+                            .recover_active(
+                                &worktree(membership.worktree),
+                                &agent(predecessor_index),
+                                &actor,
+                                100,
+                            )
+                            .expect("recover retained exact actor");
+                        membership.authorized = true;
+                        leases.insert(actor_index, lease);
+                    }
+                    Some(membership) => {
+                        assert!(table
+                            .recover_active(&worktree(membership.worktree), &actor, &actor, 100)
+                            .is_err());
+                    }
+                    None => assert!(table
+                        .recover_active(&worktree(0), &actor, &actor, 100)
+                        .is_err()),
                 }
-                Some(membership) => {
-                    assert!(table
-                        .recover_active(&worktree(membership.worktree), &actor, &actor, 100)
-                        .is_err());
-                }
-                None => assert!(table.recover_active(&tree, &actor, &actor, 100).is_err()),
-            },
-            5 => {
-                let successor_index = raw_tree_access as usize % 4;
+            }
+            Operation::Transfer {
+                actor: actor_index,
+                successor: successor_index,
+            } => {
                 let Some(membership) = active.get(&actor_index).copied() else {
                     check_model(&table, &active);
                     continue;
@@ -256,7 +335,7 @@ proptest! {
 
     #[test]
     fn generated_membership_history_matches_independent_model(
-        history in proptest::collection::vec((0u8..6, 0u8..4, 0u8..6), 1..80)
+        history in proptest::collection::vec(operation(), 1..80)
     ) {
         replay(&history);
     }
