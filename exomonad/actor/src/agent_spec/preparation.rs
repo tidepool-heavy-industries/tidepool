@@ -524,7 +524,7 @@ fn compile_installer(
     }))
 }
 
-fn durable_recipe_key(recipe: &InstallerRecipe) -> Result<String, PreparationFailure> {
+pub(crate) fn durable_recipe_key(recipe: &InstallerRecipe) -> Result<String, PreparationFailure> {
     Ok(blake3::hash(
         &serde_json::to_vec(recipe)
             .map_err(|error| PreparationFailure::Source(error.to_string()))?,

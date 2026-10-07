@@ -522,6 +522,16 @@ pub struct PreparedSourceToolset {
     effects: Vec<crate::ActorEffectKey>,
 }
 
+/// Observations of the exact installer recipe built by the preparation owner.
+/// These fields describe coverage; they do not issue compiler or source custody.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceToolsetRecipe {
+    pub requested_effects: Vec<crate::ActorEffectKey>,
+    pub effective_effects: Vec<crate::ActorEffectKey>,
+    pub source_revision: String,
+    pub recipe: String,
+}
+
 impl PreparedSourceToolset {
     #[must_use]
     pub fn source_revision(&self) -> &str {
@@ -567,6 +577,63 @@ impl ActorWorkbenchSource {
         supported_effects: &[exomonad_tool::ToolEffectKey],
         registry: Arc<tidepool_runtime::session::ImageRegistry>,
     ) -> Result<PreparedSourceToolset, ResidentActorWorkbenchError> {
+        let (recipe, resolved) =
+            self.installer_recipe(&source, granted_effects, supported_effects)?;
+        let effects = recipe.effects.clone();
+        let prepared = self
+            .toolset_preparation
+            .prepare(workload, recipe, resolved, source, registry)
+            .await
+            .map_err(|failure| match failure {
+                crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => {
+                    ResidentActorWorkbenchError::PreparedEntryAbsent { recipe }
+                }
+                crate::agent_spec::preparation::PreparationFailure::Admission(error) => {
+                    ResidentActorWorkbenchError::PreparationAdmission(error)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) => {
+                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
+                }
+                crate::agent_spec::preparation::PreparationFailure::Source(detail)
+                | crate::agent_spec::preparation::PreparationFailure::Native(detail) => {
+                    ResidentActorWorkbenchError::ActorProtocol(detail)
+                }
+            })?;
+        Ok(PreparedSourceToolset { prepared, effects })
+    }
+
+    /// Recompute deployment coverage against the same source, imports and
+    /// actual interpreter support used by installer acquisition, without
+    /// looking up readiness or admitting compiler work.
+    pub fn source_toolset_recipe(
+        &self,
+        source: &crate::CheckpointSourceLayer,
+        requested_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+    ) -> Result<SourceToolsetRecipe, ResidentActorWorkbenchError> {
+        let (recipe, _) = self.installer_recipe(source, requested_effects, supported_effects)?;
+        let digest = crate::agent_spec::preparation::durable_recipe_key(&recipe)
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("{error:?}")))?;
+        Ok(SourceToolsetRecipe {
+            requested_effects: requested_effects.to_vec(),
+            effective_effects: recipe.effects,
+            source_revision: recipe.source_revision,
+            recipe: digest,
+        })
+    }
+
+    fn installer_recipe(
+        &self,
+        source: &crate::CheckpointSourceLayer,
+        granted_effects: &[crate::ActorEffectKey],
+        supported_effects: &[exomonad_tool::ToolEffectKey],
+    ) -> Result<
+        (
+            crate::agent_spec::preparation::InstallerRecipe,
+            crate::agent_spec::ResolvedSpec,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         let mut effects = Vec::new();
         for key in granted_effects {
             if supported_effects.contains(&exomonad_tool::ToolEffectKey::Actor(*key))
@@ -634,40 +701,18 @@ impl ActorWorkbenchSource {
         imports.extend_text("qualified Tidepool.Effects.Core");
         imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
         imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
-        let prepared = self
-            .toolset_preparation
-            .prepare(
-                workload,
-                crate::agent_spec::preparation::InstallerRecipe {
-                    source_authority: source.semantic_digest(),
-                    source_revision,
-                    roots,
-                    preamble: self.preamble.to_string(),
-                    imports: imports.template_text(),
-                    entry,
-                    effects: effects.clone(),
-                },
-                resolved,
-                source,
-                registry,
-            )
-            .await
-            .map_err(|failure| match failure {
-                crate::agent_spec::preparation::PreparationFailure::AbsentSelection { recipe } => {
-                    ResidentActorWorkbenchError::PreparedEntryAbsent { recipe }
-                }
-                crate::agent_spec::preparation::PreparationFailure::Admission(error) => {
-                    ResidentActorWorkbenchError::PreparationAdmission(error)
-                }
-                crate::agent_spec::preparation::PreparationFailure::Compiler(diagnostic) => {
-                    ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
-                }
-                crate::agent_spec::preparation::PreparationFailure::Source(detail)
-                | crate::agent_spec::preparation::PreparationFailure::Native(detail) => {
-                    ResidentActorWorkbenchError::ActorProtocol(detail)
-                }
-            })?;
-        Ok(PreparedSourceToolset { prepared, effects })
+        Ok((
+            crate::agent_spec::preparation::InstallerRecipe {
+                source_authority: source.semantic_digest(),
+                source_revision,
+                roots,
+                preamble: self.preamble.to_string(),
+                imports: imports.template_text(),
+                entry,
+                effects,
+            },
+            resolved,
+        ))
     }
 
     fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
