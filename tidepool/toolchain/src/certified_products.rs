@@ -1511,18 +1511,18 @@ type SourceGroupKey = (CachedHomeOwner, u32, SymbolIdentity);
 
 /// The native namespace actually offered to one compiler request, completed by
 /// that request's validated output rows. Full retained custody is not an offer.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CertifiedSourceSelection {
     owners: BTreeMap<(String, String), ReceiptSourceSelection>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ReceiptSourceSelection {
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ReceiptSourceVersion {
     Original,
     Fresh,
@@ -5233,15 +5233,48 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let inherited_module_interfaces = exact
-        .map(|admission| admission.request.context.module_interfaces())
-        .unwrap_or_default();
+    let projected_metadata = exact
+        .map(|admission| admission.request.context.compiler_metadata_snapshot())
+        .transpose()
+        .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
+    let inherited_module_interfaces =
+        projected_metadata
+            .as_ref()
+            .map_or_else(Vec::new, |metadata| {
+                metadata
+                    .entries
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        crate::artifact_inventory::ArtifactPayload::Canonical(interface) => {
+                            Some(interface.clone())
+                        }
+                        crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                            product.module_interface().cloned()
+                        }
+                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) => None,
+                    })
+                    .collect()
+            });
+    let projected_originals = projected_metadata
+        .as_ref()
+        .map_or_else(Vec::new, |metadata| {
+            metadata
+                .entries
+                .values()
+                .filter_map(|entry| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                        Some(product.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
     let inherited_products = exact
         .map(|admission| admission.request.context.recovery_products())
         .unwrap_or_default();
     let mut retained_seals = BTreeMap::new();
     for interface in inherited_module_interfaces.iter().chain(
-        inherited_products
+        projected_originals
             .iter()
             .filter_map(|product| product.module_interface()),
     ) {
@@ -5533,7 +5566,7 @@ pub(crate) fn certify_products_with_validation(
                 exact.ok_or(CertificationError::Mismatch(
                     "retained core requires exact request",
                 ))?;
-                if inherited_products
+                if projected_originals
                     .iter()
                     .any(|product| product.owner().unit == key.0 && product.owner().module == key.1)
                 {
@@ -5799,13 +5832,6 @@ pub(crate) fn certify_products_with_validation(
         }
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
-    let projected_originals = match exact {
-        Some(admission) => admission
-            .request
-            .compiler_original_products()
-            .map_err(|_| CertificationError::Mismatch("compiler original projection"))?,
-        None => Vec::new(),
-    };
     let mut source_selection = CertifiedSourceSelection::from_projected_originals(
         &projected_originals,
         &validation.inventory,
@@ -5813,9 +5839,7 @@ pub(crate) fn certify_products_with_validation(
     for (owner, _, _, _, _, origin) in &module_bytes {
         source_selection.admit_current(owner, *origin, &validation.inventory)?;
     }
-    let available_originals = exact.map_or_else(Vec::new, |admission| {
-        admission.request.context.recovery_products()
-    });
+    let available_originals = inherited_products;
     let mut source_groups = match exact {
         Some(admission) => available_original_source_map(
             &available_originals,
@@ -5994,12 +6018,15 @@ pub(crate) fn certify_products_with_validation(
     let execution_graph = if let Some(recipe) =
         source_recipe.filter(|_| final_evidence.cache_safe && final_evidence.selection_complete)
     {
-        let mut owners = BTreeMap::new();
-        let mut unambiguous = true;
-        let inherited_products = exact
-            .map(|admission| admission.request.context.recovery_products())
-            .unwrap_or_default();
-        let mut retained_sources: BTreeMap<_, _> = inherited_products
+        // A new recipe describes this compiler request's namespace. Older
+        // original graphs stay attached to their exact retained carriers.
+        let owners: Vec<_> = source_selection
+            .owners
+            .values()
+            .filter(|selected| !matches!(selected.version, ReceiptSourceVersion::RetainedCore))
+            .map(|selected| selected.owner.clone())
+            .collect();
+        let mut retained_sources: BTreeMap<_, _> = projected_originals
             .iter()
             .filter_map(|product| {
                 product.execution_source().map(|graph| {
@@ -6024,34 +6051,24 @@ pub(crate) fn certify_products_with_validation(
                     .filter(|bundle| bundle.owner == *owner)
                     .and_then(|bundle| bundle.original_execution.as_ref())
                 {
-                    retained_sources.insert(
-                        crate::declaration_join::ExactModuleIdentity {
-                            unit: owner.unit.clone(),
-                            module: owner.module.clone(),
-                        },
-                        proof.graph.digest(),
-                    );
+                    let identity = crate::declaration_join::ExactModuleIdentity {
+                        unit: owner.unit.clone(),
+                        module: owner.module.clone(),
+                    };
+                    if retained_sources
+                        .insert(identity, proof.graph.digest())
+                        .is_some_and(|original| original != proof.graph.digest())
+                    {
+                        return Err(CertificationError::Mismatch(
+                            "cached original execution graph",
+                        ));
+                    }
                 }
             }
         }
-        for owner in module_bytes
-            .iter()
-            .filter(|row| row.5 != ProductOrigin::RetainedCore)
-            .map(|row| &row.0)
-            .chain(inherited_products.iter().map(|product| product.owner()))
-        {
-            let key = (owner.unit.clone(), owner.module.clone());
-            if owners
-                .insert(key, owner.clone())
-                .is_some_and(|previous| previous != *owner)
-            {
-                unambiguous = false;
-            }
-        }
         match <[u8; 32]>::try_from(endpoint_identity) {
-            Ok(raw_producer) if unambiguous && raw_producer != [0; 32] => {
+            Ok(raw_producer) if raw_producer != [0; 32] => {
                 let empty_imports = BTreeMap::new();
-                let owners: Vec<_> = owners.into_values().collect();
                 let input = crate::execution_source::ExecutionSourceGraphInput {
                     producer:
                         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -10756,6 +10773,220 @@ pub(crate) mod tests {
         if !exact_mode && std::env::var_os("TIDEPOOL_CANDIDATE_PROVENANCE_OUTPUT").is_some() {
             let _retained = root.keep();
         }
+    }
+
+    #[test]
+    fn exact_source_recipe_selects_current_owner_with_two_retained_versions() {
+        use crate::artifact_inventory::CanonicalProducerIdentity;
+        use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        use crate::execution_source::{
+            CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = "module Target where";
+        let support_source = "module Fresh where";
+        let support = root.path().join("Fresh.hs");
+        std::fs::write(&support, support_source).unwrap();
+        let mut admitted = evidence(support_source);
+        admitted.sources[0].path = support.clone();
+        admitted.modules[0].source = support;
+        admitted.sources.push(SourceEvidence {
+            path: "@generated-source".into(),
+            sha256: hex(&sha(source.as_bytes())),
+        });
+        let producer = [3; 32];
+        let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(&producer).sha256();
+        let include = [root.path().to_path_buf()];
+        let bytes = sidecar();
+        let parsed = ParsedModuleProducts::decode(&bytes, &empty_package_bundle()).unwrap();
+        let normalized =
+            CompletedSourceEvidence::from_normalized(admitted.clone(), source).unwrap();
+        let initial_input = root.path().join("Target.hs");
+        std::fs::write(&initial_input, source).unwrap();
+        let mut worker = admitted.clone();
+        worker.sources[1].path = initial_input.clone();
+        let initial_evidence = serde_json::to_vec(&worker).unwrap();
+        let mut accepted = receipt(&bytes, &admitted, support_source);
+        accepted.dependency_witness_sha256 = sha(&initial_evidence);
+        let mut packet = CertifiedReceipt {
+            source_recipe: WorkerExecutionSource::Ordinary,
+            finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
+            modules: vec![accepted],
+            targets: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        };
+        let initial = certify_products(
+            None,
+            &packet,
+            &parsed,
+            &initial_evidence,
+            &initial_input,
+            root.path(),
+            &normalized,
+            source,
+            &producer,
+            &include,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut prior = vec![initial.recovery_products[0].clone()];
+        let mut context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(canonical_producer, &prior)
+            .unwrap();
+        for index in 0..2 {
+            let projection = context.compiler_input_projection().interface_only();
+            context = context.with_compiler_input_projection(projection).unwrap();
+            assert_eq!(context.recovery_products().len(), prior.len());
+            let directory = root.path().join(format!("request-{index}"));
+            std::fs::create_dir(&directory).unwrap();
+            let input = directory.join("Target.hs");
+            std::fs::write(&input, source).unwrap();
+            let request = context
+                .prepare_compilation(&directory.join("inputs"), &producer)
+                .unwrap();
+            assert!(request.compiler_original_products().unwrap().is_empty());
+            let mut worker = admitted.clone();
+            worker.sources[1].path = input.clone();
+            let complete_evidence = serde_json::to_vec(&worker).unwrap();
+            let receipt_root = directory.join(".exact-compilations/current");
+            std::fs::create_dir_all(&receipt_root).unwrap();
+            let snapshot = receipt_root.join("source.hs");
+            std::fs::write(&snapshot, source).unwrap();
+            let exact_receipt = Value::Array(vec![
+                Value::Text("TPEXACTCOMPILE".into()),
+                Value::Text("3".into()),
+                Value::Text(request.request_sha256.clone()),
+                Value::Text(hex(&request.semantic_sha256)),
+                Value::Text(input.to_string_lossy().into_owned()),
+                Value::Text(hex(&sha(source.as_bytes()))),
+                Value::Text(snapshot.to_string_lossy().into_owned()),
+                Value::Text(String::from_utf8(complete_evidence).unwrap()),
+                Value::Array(vec![Value::Array(vec![
+                    Value::Text("main".into()),
+                    Value::Text("Fresh".into()),
+                    Value::Bool(false),
+                    Value::Array(vec![]),
+                ])]),
+                Value::Array(vec![Value::Array(vec![]), Value::Null]),
+            ]);
+            std::fs::write(
+                receipt_root.join("receipt.cbor"),
+                receipt_bytes(&exact_receipt),
+            )
+            .unwrap();
+            worker.cache_safe = false;
+            worker.selection_complete = false;
+            let evidence_bytes = serde_json::to_vec(&worker).unwrap();
+            packet.modules[0].dependency_witness_sha256 = sha(&evidence_bytes);
+            let source_admission = request
+                .admit_source(&input, source, &evidence_bytes)
+                .unwrap();
+            let exact = ExactProductAdmission {
+                request: &request,
+                source: &source_admission,
+            };
+            let native = &parsed.sidecars[0];
+            let package_bytes =
+                &parsed.package_imports.as_ref().unwrap()[&("main".into(), "Fresh".into())];
+            let owner = CachedHomeOwner {
+                unit: "main".into(),
+                module: "Fresh".into(),
+                module_version: crate::module_candidates::exact_module_version_for_product(
+                    &producer,
+                    &request.semantic_sha256,
+                    "main",
+                    "Fresh",
+                    &packet.modules[0].source_sha256,
+                    &parsed.products()[0].interface,
+                    native,
+                    package_bytes,
+                ),
+                skinny_iface_sha256: packet.modules[0].skinny_iface_sha256,
+                product_sha256: sha(native),
+            };
+            assert!(prior.iter().all(|product| product.owner() != &owner));
+            let owners = [owner.clone()];
+            let fresh = BTreeSet::from([crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: "Fresh".into(),
+            }]);
+            let ExecutionSourceAdmission::Available(issued) =
+                CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
+                    producer: CanonicalProducerIdentity::from_producer_bytes(&producer),
+                    semantic_sha256: Some(request.semantic_sha256),
+                    include: &include,
+                    source_path: &input,
+                    source,
+                    evidence: &admitted,
+                    exact_imports: &source_admission.exact_imports,
+                    owners: &owners,
+                    fresh_owners: &fresh,
+                    retained_sources: &BTreeMap::new(),
+                    packages: &BTreeMap::new(),
+                })
+                .unwrap()
+            else {
+                panic!("complete current source recipe")
+            };
+            packet.source_recipe = WorkerExecutionSource::ExactAvailable {
+                digest: issued.digest(),
+                bytes: issued.bytes().into(),
+            };
+            let certified = certify_products(
+                None,
+                &packet,
+                &parsed,
+                &evidence_bytes,
+                &input,
+                root.path(),
+                &normalized,
+                source,
+                &producer,
+                &include,
+                Some(&exact),
+                None,
+            )
+            .unwrap();
+            let current = certified
+                .recovery_products
+                .iter()
+                .find(|product| product.owner() == &owner)
+                .unwrap();
+            assert_eq!(current.execution_source().unwrap().bytes(), issued.bytes());
+            assert_eq!(
+                certified
+                    .source_selection
+                    .selected_original_owners()
+                    .collect::<Vec<_>>(),
+                vec![&owner]
+            );
+            for old in &prior {
+                let retained = certified
+                    .recovery_products
+                    .iter()
+                    .find(|product| product.owner() == old.owner())
+                    .unwrap();
+                assert!(old
+                    .original_byte_anchors()
+                    .iter()
+                    .zip(retained.original_byte_anchors())
+                    .all(|(old, current)| Arc::ptr_eq(old, current)));
+                assert!(Arc::ptr_eq(
+                    old.execution_source().unwrap(),
+                    retained.execution_source().unwrap()
+                ));
+            }
+            let projection = context.compiler_input_projection().interface_only();
+            context = context
+                .with_compiler_input_projection(projection)
+                .unwrap()
+                .extend_checked_original_products(canonical_producer, std::slice::from_ref(current))
+                .unwrap();
+            prior.push(current.clone());
+        }
+        assert_eq!(prior.len(), 3);
     }
 
     #[test]
