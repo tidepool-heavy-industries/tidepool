@@ -874,7 +874,7 @@ impl Fixture {
             actors: Default::default(),
             fork_workspaces: None,
             root_admission_closed: Default::default(),
-            launch_resolver: None,
+            actor_admissions: crate::ActorAdmissionRegistry::new(),
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
