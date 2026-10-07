@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc aed7997d33540d66f96cee1a35a5ae3d4dff5e9ecf807e5d316c311d43adbc16 # shrinks to history = [Attach { actor: 0, tree: 0, access: ReadOnly }, Transfer { actor: 0, successor: 3 }, Reopen, Attach { actor: 0, tree: 0, access: ReadOnly }, Attach { actor: 0, tree: 0, access: ReadOnly }, Recover { actor: 3 }]

@@ -268,15 +268,24 @@ impl BindingTable {
         now_ms: i64,
     ) -> Result<ActiveBinding, WorktreeError> {
         self.ensure_writable()?;
+        // A transferred predecessor may later reattach as an independent
+        // peer. Reclaim the exact published successor before considering a
+        // predecessor row that would require a new transfer.
         let current = self
             .bindings
             .iter()
             .rposition(|entry| {
                 entry.binding.worktree() == worktree
                     && entry.binding.state() == BindingState::Active
-                    && (entry.binding.agent() == predecessor
-                        || (entry.binding.agent() == successor
-                            && entry.binding.predecessor() == Some(predecessor)))
+                    && entry.binding.agent() == successor
+                    && entry.binding.predecessor() == Some(predecessor)
+            })
+            .or_else(|| {
+                self.bindings.iter().rposition(|entry| {
+                    entry.binding.worktree() == worktree
+                        && entry.binding.state() == BindingState::Active
+                        && entry.binding.agent() == predecessor
+                })
             })
             .ok_or_else(|| WorktreeError::StorageFailure {
                 path: self.path_for(worktree),

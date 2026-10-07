@@ -330,6 +330,49 @@ fn replay(history: &[Operation]) {
     );
 }
 
+#[test]
+fn transferred_successor_recovery_preserves_a_reattached_predecessor_peer() {
+    let mut history = [
+        Operation::Attach {
+            actor: 0,
+            tree: 0,
+            access: WorkspaceAccess::ReadOnly,
+        },
+        Operation::Transfer {
+            actor: 0,
+            successor: 3,
+        },
+        Operation::Reopen,
+        Operation::Attach {
+            actor: 0,
+            tree: 0,
+            access: WorkspaceAccess::ReadOnly,
+        },
+        Operation::Attach {
+            actor: 0,
+            tree: 0,
+            access: WorkspaceAccess::ReadOnly,
+        },
+        Operation::Recover { actor: 3 },
+    ];
+    // Replay the minimized failing history, then distinguish the independent
+    // peer's access from the transferred successor's retained read-only grant.
+    replay(&history);
+    history[3] = Operation::Attach {
+        actor: 0,
+        tree: 0,
+        access: WorkspaceAccess::ReadWrite,
+    };
+    replay(&history);
+    let mut reopened_peer = history[..5].to_vec();
+    reopened_peer.extend([
+        Operation::Reopen,
+        Operation::Recover { actor: 3 },
+        Operation::Recover { actor: 0 },
+    ]);
+    replay(&reopened_peer);
+}
+
 proptest! {
     #![proptest_config(config())]
 
