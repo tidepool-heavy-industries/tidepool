@@ -10773,11 +10773,18 @@ where
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        result: Result<(i64, i64, Option<tidepool_bridge_effects::WtWorktreeHandle>), crate::start::SpawnError>,
+        result: Result<
+            (i64, i64, Option<tidepool_bridge_effects::WtWorktreeHandle>),
+            crate::start::SpawnError,
+        >,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access.with_machine(context, move |session, _, _| {
-            session.resume_classified(hole, result).map_err(classify_resumption)
-        }).await
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .resume_classified(hole, result)
+                    .map_err(classify_resumption)
+            })
+            .await
     }
 
     pub async fn resume_starting_parent(

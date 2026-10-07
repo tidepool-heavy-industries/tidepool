@@ -15,6 +15,7 @@ pub(super) struct ChildLaunchContinuation {
     pub parent_hole: ResidentHole,
     pub fork_reply: ForkReply,
     pub spawn_reply: bool,
+    pub spawn_admission: Option<crate::SpawnAdmission>,
     pub fork_group: Option<crate::ForkGroupId>,
     pub original_placement: crate::ActorPlacement,
 }
@@ -52,6 +53,7 @@ pub(super) struct ChildLaunchResume {
     parent_hole: ResidentHole,
     fork_reply: ForkReply,
     spawn_reply: bool,
+    spawn_admission: Option<crate::SpawnAdmission>,
     fork_group: Option<crate::ForkGroupId>,
     invocation_work: Option<Arc<InvocationWork>>,
     original_placement: crate::ActorPlacement,
@@ -110,9 +112,10 @@ where
                 let admission = environment.fork_workspaces.as_ref().ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol("workspace admission is unavailable".into())
                 })?;
-                let prepared = admission.prepare(context.actor, definition.workspace.clone(), crate::WorkspaceAccess::ReadWrite)
+                let prepared = admission.prepare(context.actor, definition.workspace.clone(), None)
                     .await.map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
                 launch_worktrees = vec![prepared.handle().handle_receipt.tree_id.raw.clone()];
+                if let Some(authority) = &spawn_admission { authority.retain_workspace(prepared.handle().clone()); }
                 Some(prepared)
             } else if let Some(seed) = fork_workspace {
                 let admission = environment.fork_workspaces.clone().ok_or_else(|| {
@@ -151,13 +154,11 @@ where
             let source_layers = environment.source_layers.clone();
             let helper_branch = if let Some(layers) = &source_layers {
                 Some(
-                    layers
-                        .prepare_helpers(
-                            context.actor.into(),
-                            &launch_worktrees,
-                            prepared_workspace.is_some(),
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                    if checkpoint_lease.is_some() || inherited_source.is_some() {
+                        layers.retain_helpers(context.actor.into())
+                    } else {
+                        layers.prepare_helpers(context.actor.into(), &launch_worktrees, prepared_workspace.is_some())
+                    }.map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                 )
             } else {
                 None
@@ -264,6 +265,8 @@ where
                 );
                 behavior.explicit_installer = Some(Arc::new(entry));
                 behavior.spawn_admission = spawn_admission.clone();
+                behavior.spawn_source = inherited_source.clone();
+                behavior.spawn_helper_branch = helper_branch.clone();
                 behavior.fresh_context_seed = match definition.context {
                     crate::start::SpawnContextWire::FreshSpawn(prompt) => Some(prompt),
                     crate::start::SpawnContextWire::CapturedSpawn(_) => None,
@@ -277,14 +280,14 @@ where
             behavior.prepared_workspace = prepared_workspace;
             behavior.child_session_startup = child_session_startup;
             let startup_admission = match lifetime {
-                crate::WorkerLifetime::InvocationOwned => Some(
+                crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::InScope(_) => Some(
                     invocation_work.clone().ok_or_else(|| {
                         ResidentActorWorkbenchError::ActorProtocol(
                             "invocation-owned worker has no request owner".into(),
                         )
                     })?,
                 ),
-                crate::WorkerLifetime::ActorOwned | crate::WorkerLifetime::SwarmOwned => None,
+                crate::WorkerLifetime::ActorOwned | crate::WorkerLifetime::RunOwned => None,
             };
             let child_result = match startup_admission {
                 Some(admission) => {
@@ -298,7 +301,12 @@ where
             let child = match child_result {
                 Ok(child) => child,
                 Err(error) => {
-                    if let Some(admission) = &spawn_admission { admission.fail(error.to_string()); }
+                    if let Some(admission) = &spawn_admission {
+                        admission.fail(error.to_string());
+                        admission.retain_cleanup(crate::lineage::SpawnCleanupOutcome::Unconfirmed(
+                            "startup cleanup remains with the kernel owner".into(),
+                        ));
+                    }
                     if checkpoint_lease.is_some() {
                         if let Err(cleanup) = environment
                             .runner
@@ -318,9 +326,13 @@ where
             };
             if let Some(admission) = &spawn_admission {
                 if let Err(detail) = admission.wait_ready().await {
-                    let _ = child.shutdown(ActorTerminal {
+                    let cleanup = child.shutdown(ActorTerminal {
                         kind: ActorExitKind::Cancelled, summary: "spawn attachment failed".into(), diagnostic: None,
                     }).await;
+                    admission.retain_cleanup(match cleanup {
+                        Ok(_) => crate::lineage::SpawnCleanupOutcome::Confirmed,
+                        Err(error) => crate::lineage::SpawnCleanupOutcome::Unconfirmed(error.to_string()),
+                    });
                     return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
                 }
             }
@@ -329,6 +341,9 @@ where
                 checkpoint_admission, inherited_source, source_layers, helper_branch, bound_worktrees,
             })
     }).await;
+    if let (Err(error), Some(authority)) = (&result, &continuation.spawn_admission) {
+        authority.fail(error.to_string());
+    }
     CompletedChildLaunch {
         continuation,
         result,
@@ -462,6 +477,7 @@ where
         parent_hole: continuation.parent_hole,
         fork_reply: continuation.fork_reply,
         spawn_reply: continuation.spawn_reply,
+        spawn_admission: continuation.spawn_admission,
         fork_group: continuation.fork_group,
         invocation_work: continuation.invocation_work,
         original_placement: continuation.original_placement,
@@ -484,6 +500,7 @@ where
         parent_hole,
         fork_reply,
         spawn_reply,
+        spawn_admission,
         fork_group,
         invocation_work,
         original_placement,
@@ -494,14 +511,20 @@ where
         if let Some(invocation) = &invocation_work {
             invocation.retain_aborted_children(&kernel, &[child.identity()]);
         }
-        if let Err(error) = child
+        let cleanup = child
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "child launch parent admission unavailable".into(),
                 diagnostic: None,
             })
-            .await
-        {
+            .await;
+        if let Some(authority) = &spawn_admission {
+            authority.retain_cleanup(match &cleanup {
+                Ok(_) => crate::lineage::SpawnCleanupOutcome::Confirmed,
+                Err(error) => crate::lineage::SpawnCleanupOutcome::Unconfirmed(error.to_string()),
+            });
+        }
+        if let Err(error) = cleanup {
             tracing::warn!(child = ?child.identity(), %error, "failed child launch cleanup retained");
         }
     }
@@ -519,10 +542,22 @@ where
         }
     }
     if spawn_reply {
-        let result = result.map(|(child, _, workspace)| (
-            child.identity().id.0 as i64, child.identity().incarnation.0 as i64, workspace,
-        )).map_err(|error| crate::start::SpawnError::SpawnRefused(error.to_string()));
-        return environment.runner.resume_spawn_parent(context, parent_hole, result).await;
+        let result = result
+            .map(|(child, _, workspace)| {
+                (
+                    child.identity().id.0 as i64,
+                    child.identity().incarnation.0 as i64,
+                    workspace,
+                )
+            })
+            .map_err(|error| match &spawn_admission {
+                Some(admission) => admission.error(error.to_string()),
+                None => crate::start::SpawnError::SpawnRefused(error.to_string()),
+            });
+        return environment
+            .runner
+            .resume_spawn_parent(context, parent_hole, result)
+            .await;
     }
     let (child, allocated_label, admitted_worktree) = match result {
         Ok(started) => started,

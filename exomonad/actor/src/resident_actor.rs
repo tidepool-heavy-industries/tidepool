@@ -2730,6 +2730,8 @@ pub struct ResidentKernelBehavior<H, O> {
     boot: Option<ResidentBoot>,
     explicit_installer: Option<Arc<RootCustody>>,
     fresh_context_seed: Option<String>,
+    spawn_source: Option<crate::CheckpointSourceLayer>,
+    spawn_helper_branch: Option<String>,
     spawn_admission: Option<crate::SpawnAdmission>,
     root_startup: Option<(crate::RootStartupIntent, Arc<Mutex<RootStartupState>>)>,
     standing: ResidentStanding,
@@ -3650,6 +3652,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             boot: Some(boot),
             explicit_installer: None,
             fresh_context_seed: None,
+            spawn_source: None,
+            spawn_helper_branch: None,
             spawn_admission: None,
             root_startup: None,
             standing: ResidentStanding::Boot,
@@ -4087,7 +4091,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
-        if let Some(admission) = &self.spawn_admission { admission.fail(terminal.summary.clone()); }
+        if let Some(admission) = &self.spawn_admission {
+            admission.fail(terminal.summary.clone());
+        }
         publish_retired(&self.environment, actor, terminal);
     }
 
@@ -5003,6 +5009,7 @@ where
         let fork_group = child.descriptor.fork_group();
         let original_placement = child.descriptor.placement();
         let invocation_work = effect_owner.invocation_work();
+        let mut retained_spawn_admission = None;
         let admission = (|| {
             let crate::start::CapturedChildLaunch {
                 lifetime,
@@ -5123,16 +5130,31 @@ where
             let mut checkpoint_admission = None;
             let mut spawn_admission = None;
             if spawn.is_some() {
-                let claimed = self.environment.fork_groups.claim_spawn(
-                    context.actor, context.placement.session, descriptor.checkpoint_token(),
-                ).map_err(|refusal| ResidentActorWorkbenchError::ActorProtocol(
-                    format!("checkpoint refusal: {refusal:?}"),
-                ))?;
+                let claimed = self
+                    .environment
+                    .fork_groups
+                    .claim_spawn(
+                        context.actor,
+                        context.placement.session,
+                        descriptor.checkpoint_token(),
+                        self.descriptor
+                            .capabilities()
+                            .descendants()
+                            .maximum_active_children
+                            .map(usize::from),
+                    )
+                    .map_err(|refusal| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "checkpoint refusal: {refusal:?}"
+                        ))
+                    })?;
                 descriptor = descriptor.with_actor_path(claimed.path);
                 checkpoint_admission = claimed.checkpoint;
+                retained_spawn_admission = Some(claimed.authority.clone());
                 spawn_admission = Some(claimed.authority);
                 if let Some((lease, _)) = &checkpoint_admission {
-                    descriptor = descriptor.with_context_parent(lease.issuer)
+                    descriptor = descriptor
+                        .with_context_parent(lease.issuer)
                         .with_fork_boundary(Some(lease.boundary.clone()));
                 }
             }
@@ -5177,20 +5199,21 @@ where
             let inherited_host_attachment = effect_owner
                 .publication()
                 .capture_inherited_child(&descriptor)?;
-            let inherited_source = if descriptor.source_imports().inherited_scope()?.is_some() {
-                let source = match effect_owner.admitted_source() {
-                    Some(source) => source.clone(),
-                    None => self.freeze_installed_source(context.actor)?,
+            let inherited_source =
+                if spawn.is_some() || descriptor.source_imports().inherited_scope()?.is_some() {
+                    let source = match effect_owner.admitted_source() {
+                        Some(source) => source.clone(),
+                        None => self.freeze_installed_source(context.actor)?,
+                    };
+                    if let Some(layers) = &self.environment.source_layers {
+                        layers
+                            .validate_source_authority(&source)
+                            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                    }
+                    Some(source)
+                } else {
+                    None
                 };
-                if let Some(layers) = &self.environment.source_layers {
-                    layers
-                        .validate_source_authority(&source)
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                }
-                Some(source)
-            } else {
-                None
-            };
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
                     lifetime,
@@ -5210,6 +5233,10 @@ where
                 invocation_work: invocation_work.clone(),
             })
         })();
+        if let (Err(error), Some(authority)) = (&admission, &retained_spawn_admission) {
+            authority.fail(error.to_string());
+        }
+        let spawn_admission = retained_spawn_admission;
         child_launch::PreparedChildLaunch {
             continuation: child_launch::ChildLaunchContinuation {
                 context: context.clone(),
@@ -5219,6 +5246,7 @@ where
                 parent_hole,
                 fork_reply,
                 spawn_reply,
+                spawn_admission,
                 fork_group,
                 original_placement,
             },
@@ -8960,7 +8988,9 @@ where
             });
         }
         if matches!(boot, ResidentBoot::Workbench) && self.explicit_installer.is_some() {
-            let installation = self.prepare_interactive_policy(kernel, context, None).await?;
+            let installation = self
+                .prepare_interactive_policy(kernel, context, None)
+                .await?;
             self.commit_interactive_installation(kernel, context, installation)?;
             self.set_standing(context.actor, ResidentStanding::Workbench);
             return Ok(KernelStep::Continue(()));
@@ -12274,12 +12304,27 @@ where
                 },
             );
             if let Some(admission) = &self.spawn_admission {
-                admission.bind(self.descriptor.creator().ok_or_else(|| Self::failure(
-                    "spawn has no creating actor",
-                ))?, context.actor).map_err(Self::failure)?;
+                admission
+                    .bind(
+                        self.descriptor
+                            .creator()
+                            .ok_or_else(|| Self::failure("spawn has no creating actor"))?,
+                        context.actor,
+                    )
+                    .map_err(Self::failure)?;
                 if let Some(layers) = &self.environment.source_layers {
-                    if let Some((lease, _)) = &self.admitted_checkpoint {
-                        layers.bind_checkpoint_for(context.actor.into(), "", &lease.issuer_source_layer)
+                    let source = self
+                        .admitted_checkpoint
+                        .as_ref()
+                        .map(|(lease, _)| &lease.issuer_source_layer)
+                        .or(self.spawn_source.as_ref());
+                    if let Some(source) = source {
+                        layers
+                            .bind_checkpoint_for(
+                                context.actor.into(),
+                                self.spawn_helper_branch.as_deref().unwrap_or_default(),
+                                source,
+                            )
                             .map_err(Self::failure)?;
                     } else {
                         layers.bind_for(context.actor.into(), "", &self.launch_worktrees);

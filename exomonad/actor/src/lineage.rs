@@ -13,7 +13,7 @@ use crate::ActorRef;
 use crate::HostedCheckpointAttachment;
 
 mod spawn_admission;
-pub use spawn_admission::{SpawnAdmission, SpawnAdmissionOutcome};
+pub use spawn_admission::{SpawnAdmission, SpawnAdmissionOutcome, SpawnCleanupOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorPathReservation {
@@ -391,7 +391,7 @@ pub struct CheckpointLease {
     pub name: String,
     pub issuer: ActorRef,
     budget_sponsors: Vec<ActorRef>,
-    pub issuer_role: crate::EffectiveRole,
+    pub issuer_capabilities: crate::ActorCapabilities,
     pub(crate) issuer_persistence_policy: crate::ActorPersistencePolicy,
     pub issuer_model: Option<crate::Model>,
     pub issuer_effort: Option<crate::ForkEffort>,
@@ -533,7 +533,7 @@ impl ForkGroupRegistry {
         &self,
         name: String,
         issuer: ActorRef,
-        issuer_role: crate::EffectiveRole,
+        issuer_capabilities: crate::ActorCapabilities,
         issuer_model: Option<crate::Model>,
         issuer_effort: Option<crate::ForkEffort>,
         issuer_source_layer: crate::CheckpointSourceLayer,
@@ -544,7 +544,7 @@ impl ForkGroupRegistry {
         self.capture_checkpoint_with_host_attachment(
             name,
             issuer,
-            issuer_role,
+            issuer_capabilities,
             issuer_model,
             issuer_effort,
             issuer_source_layer,
@@ -559,7 +559,7 @@ impl ForkGroupRegistry {
         &self,
         name: String,
         issuer: ActorRef,
-        issuer_role: crate::EffectiveRole,
+        issuer_capabilities: crate::ActorCapabilities,
         issuer_model: Option<crate::Model>,
         issuer_effort: Option<crate::ForkEffort>,
         issuer_source_layer: crate::CheckpointSourceLayer,
@@ -571,7 +571,7 @@ impl ForkGroupRegistry {
         self.capture_checkpoint_inner(
             name,
             issuer,
-            issuer_role,
+            issuer_capabilities,
             issuer_model,
             issuer_effort,
             issuer_source_layer,
@@ -590,7 +590,7 @@ impl ForkGroupRegistry {
         &self,
         name: String,
         issuer: ActorRef,
-        issuer_role: crate::EffectiveRole,
+        issuer_capabilities: crate::ActorCapabilities,
         issuer_model: Option<crate::Model>,
         issuer_effort: Option<crate::ForkEffort>,
         issuer_source_layer: crate::CheckpointSourceLayer,
@@ -604,7 +604,7 @@ impl ForkGroupRegistry {
         self.capture_checkpoint_inner(
             name,
             issuer,
-            issuer_role,
+            issuer_capabilities,
             issuer_model,
             issuer_effort,
             issuer_source_layer,
@@ -621,7 +621,7 @@ impl ForkGroupRegistry {
         &self,
         name: String,
         issuer: ActorRef,
-        issuer_role: crate::EffectiveRole,
+        issuer_capabilities: crate::ActorCapabilities,
         issuer_model: Option<crate::Model>,
         issuer_effort: Option<crate::ForkEffort>,
         issuer_source_layer: crate::CheckpointSourceLayer,
@@ -641,7 +641,7 @@ impl ForkGroupRegistry {
             budget_sponsors.push(actor);
             ancestor = state.parents.get(&actor).copied();
         }
-        if let Some(limit) = issuer_role.descendants().maximum_active_children {
+        if let Some(limit) = issuer_capabilities.descendants().maximum_active_children {
             state
                 .descendant_limits
                 .entry(issuer)
@@ -654,7 +654,7 @@ impl ForkGroupRegistry {
                 name,
                 issuer,
                 budget_sponsors,
-                issuer_role,
+                issuer_capabilities,
                 issuer_persistence_policy,
                 issuer_model,
                 issuer_effort,
@@ -2170,7 +2170,7 @@ mod tests {
         let token = groups.capture_checkpoint_with_host_attachment(
             "captured".into(),
             issuer,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::root(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -2401,7 +2401,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "research".into(),
             issuer,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::root(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -2443,7 +2443,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "research".into(),
             issuer,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::root(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -2481,7 +2481,7 @@ mod tests {
             groups.capture_checkpoint(
                 name.into(),
                 issuer,
-                crate::EffectiveRole::root(),
+                crate::ActorCapabilities::root(),
                 None,
                 None,
                 crate::CheckpointSourceLayer::default(),
@@ -2529,7 +2529,7 @@ mod tests {
             groups.capture_checkpoint(
                 "seed".into(),
                 issuer,
-                crate::EffectiveRole::root(),
+                crate::ActorCapabilities::root(),
                 None,
                 None,
                 crate::CheckpointSourceLayer::default(),
@@ -2611,7 +2611,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "failed capture".into(),
             issuer,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::root(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -2667,7 +2667,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "limited".into(),
             issuer,
-            crate::EffectiveRole::root().with_descendant_budget(crate::DescendantBudget {
+            crate::ActorCapabilities::root().with_descendant_budget(crate::DescendantBudget {
                 maximum_depth: 3,
                 maximum_active_children: Some(1),
             }),
@@ -2750,7 +2750,7 @@ mod tests {
             .mark_ready()
             .unwrap();
         groups.publish_groups(&[issuer_group], root).unwrap();
-        let role = crate::EffectiveRole::root().with_descendant_budget(crate::DescendantBudget {
+        let role = crate::ActorCapabilities::root().with_descendant_budget(crate::DescendantBudget {
             maximum_depth: 3,
             maximum_active_children: Some(2),
         });
@@ -2871,7 +2871,7 @@ mod tests {
         let token = groups.capture_checkpoint(
             "research".into(),
             issuer,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::root(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),

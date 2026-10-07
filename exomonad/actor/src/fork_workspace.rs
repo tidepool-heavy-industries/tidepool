@@ -103,7 +103,9 @@ impl PreparedWorkspaceAttachment {
 
 pub type WorkspaceAdmissionFuture<'a> = Pin<
     Box<
-        dyn Future<Output = Result<PreparedWorkspaceAttachment, WorkspaceAdmissionError>> + Send + 'a,
+        dyn Future<Output = Result<PreparedWorkspaceAttachment, WorkspaceAdmissionError>>
+            + Send
+            + 'a,
     >,
 >;
 
@@ -112,11 +114,13 @@ pub trait WorkspaceAdmission: Send + Sync + 'static {
         &self,
         _owner: ActorRef,
         _selection: WorkspaceSelection,
-        _access: crate::WorkspaceAccess,
+        _access: Option<crate::WorkspaceAccess>,
     ) -> WorkspaceAdmissionFuture<'_> {
-        Box::pin(async { Err(WorkspaceAdmissionError {
-            detail: "workspace attachment admission is unavailable".into(),
-        }) })
+        Box::pin(async {
+            Err(WorkspaceAdmissionError {
+                detail: "workspace attachment admission is unavailable".into(),
+            })
+        })
     }
 
     /// Install owned resources before executing the child entry. This is separate from
