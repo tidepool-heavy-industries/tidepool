@@ -11,11 +11,26 @@ use std::task::Poll;
 mod tests;
 
 pub(crate) enum GreenBoundary {
-    Spawn { continuation: ResidentHole, callback: RootCustody },
-    Done { continuation: ResidentHole, token: i64 },
-    JoinAny { continuation: ResidentHole, threads: Vec<i64> },
-    Status { continuation: ResidentHole, thread: i64 },
-    Cancel { continuation: ResidentHole, thread: i64 },
+    Spawn {
+        continuation: ResidentHole,
+        callback: RootCustody,
+    },
+    Done {
+        continuation: ResidentHole,
+        token: i64,
+    },
+    JoinAny {
+        continuation: ResidentHole,
+        threads: Vec<i64>,
+    },
+    Status {
+        continuation: ResidentHole,
+        thread: i64,
+    },
+    Cancel {
+        continuation: ResidentHole,
+        thread: i64,
+    },
 }
 
 impl GreenBoundary {
@@ -31,7 +46,11 @@ impl GreenBoundary {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThreadStatus { Running, Settled, Cancelled }
+enum ThreadStatus {
+    Running,
+    Settled,
+    Cancelled,
+}
 
 struct Thread {
     parent: i64,
@@ -80,7 +99,9 @@ pub(super) struct GreenThreads {
 
 impl GreenThreads {
     pub(super) fn active_work(&self) -> Option<Arc<InvocationWork>> {
-        self.threads.get(&self.active).map(|thread| thread.work.clone())
+        self.threads
+            .get(&self.active)
+            .map(|thread| thread.work.clone())
     }
 
     pub(super) fn active_realm(&self) -> Option<RealmId> {
@@ -88,17 +109,22 @@ impl GreenThreads {
     }
 
     pub(super) fn active_wait_control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
-        self.threads.get(&self.active).map(|thread| thread.control.clone())
+        self.threads
+            .get(&self.active)
+            .map(|thread| thread.control.clone())
     }
 
     fn status(&self, thread: i64) -> Result<ThreadStatus, ResidentActorWorkbenchError> {
-        self.threads.get(&thread).map(|thread| thread.status).ok_or_else(|| protocol(
-            "async handle does not belong to this invocation",
-        ))
+        self.threads
+            .get(&thread)
+            .map(|thread| thread.status)
+            .ok_or_else(|| protocol("async handle does not belong to this invocation"))
     }
 
     fn winner(&self, threads: &[i64]) -> Result<Option<i64>, ResidentActorWorkbenchError> {
-        if threads.is_empty() { return Err(protocol("async join requires a nonempty list")); }
+        if threads.is_empty() {
+            return Err(protocol("async join requires a nonempty list"));
+        }
         let mut winner = None;
         for &thread in threads {
             if self.status(thread)? != ThreadStatus::Running && winner.is_none() {
@@ -114,16 +140,24 @@ impl GreenThreads {
         operation: BoxFuture<'static, Result<ResidentOutcome, ResidentActorWorkbenchError>>,
     ) {
         let thread = self.active;
-        self.pending.push(Pending { thread, future: Box::pin(async move {
-            let outcome = operation.await;
-            Completion {
-                thread, scopes, receipt: None, terminal: Vec::new(),
-                result: Some(commands::CommandResolution {
-                    disposition: WorkbenchOperationDisposition::Committed,
-                    outcome, started_job: None, retained_job_binding: None,
-                }),
-            }
-        }) });
+        self.pending.push(Pending {
+            thread,
+            future: Box::pin(async move {
+                let outcome = operation.await;
+                Completion {
+                    thread,
+                    scopes,
+                    receipt: None,
+                    terminal: Vec::new(),
+                    result: Some(commands::CommandResolution {
+                        disposition: WorkbenchOperationDisposition::Committed,
+                        outcome,
+                        started_job: None,
+                        retained_job_binding: None,
+                    }),
+                }
+            }),
+        });
     }
 
     pub(super) fn enqueue_effect(
@@ -133,15 +167,26 @@ impl GreenThreads {
         future: BoxFuture<'static, commands::CommandResolution>,
     ) {
         let thread = self.active;
-        self.pending.push(Pending { thread, future: Box::pin(async move {
-            Completion {
-                thread, scopes, result: Some(future.await), receipt: Some(receipt), terminal: Vec::new(),
-            }
-        }) });
+        self.pending.push(Pending {
+            thread,
+            future: Box::pin(async move {
+                Completion {
+                    thread,
+                    scopes,
+                    result: Some(future.await),
+                    receipt: Some(receipt),
+                    terminal: Vec::new(),
+                }
+            }),
+        });
     }
 
     pub(super) async fn next(&mut self) -> Result<Completion, ResidentActorWorkbenchError> {
-        if self.pending.is_empty() { return Err(protocol("async computations have no runnable effect frontier")); }
+        if self.pending.is_empty() {
+            return Err(protocol(
+                "async computations have no runnable effect frontier",
+            ));
+        }
         poll_fn(|cx| {
             for index in 0..self.pending.len() {
                 if let Poll::Ready(completion) = self.pending[index].future.as_mut().poll(cx) {
@@ -150,11 +195,14 @@ impl GreenThreads {
                 }
             }
             Poll::Pending
-        }).await
+        })
+        .await
     }
 
     pub(super) fn cancel_parent(&mut self) {
-        for thread in self.threads.values() { thread.work.close(); }
+        for thread in self.threads.values() {
+            thread.work.close();
+        }
         self.pending.clear();
         self.joins.clear();
     }
@@ -171,8 +219,10 @@ impl GreenThreads {
             }));
             index += 1;
         }
-        self.pending.retain(|pending| !descendants.contains(&pending.thread));
-        self.joins.retain(|join| !descendants.contains(&join.thread));
+        self.pending
+            .retain(|pending| !descendants.contains(&pending.thread));
+        self.joins
+            .retain(|join| !descendants.contains(&join.thread));
         descendants
     }
 }
@@ -180,19 +230,24 @@ impl GreenThreads {
 impl EffectReceipt {
     pub(super) fn split(pending: ParkedWorkbenchEffect) -> (OwnedWorkbenchWait, Self) {
         let observed_child = pending.wait.observe_after_resume();
-        (pending.wait, Self {
-            display: pending.display,
-            success_disposition: pending.success_disposition,
-            ordinal: pending.ordinal,
-            effect: pending.effect,
-            started: pending.started,
-            observed_child,
-        })
+        (
+            pending.wait,
+            Self {
+                display: pending.display,
+                success_disposition: pending.success_disposition,
+                ordinal: pending.ordinal,
+                effect: pending.effect,
+                started: pending.started,
+                observed_child,
+            },
+        )
     }
 }
 
 impl<H, O> ResidentKernelBehavior<H, O>
-where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static,
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
 {
     pub(super) fn prepare_green_boundary(
         &mut self,
@@ -206,77 +261,150 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static,
         let runner = self.environment.runner.clone();
         let resume_context = context.clone();
         match boundary {
-            GreenBoundary::Spawn { continuation, callback } => {
-                let (work, realm) = self.register_resource_scope(context, owner)
+            GreenBoundary::Spawn {
+                continuation,
+                callback,
+            } => {
+                let (work, realm) = self
+                    .register_resource_scope(context, owner)
                     .map_err(|detail| protocol(&detail))?;
                 let token = work.scope_token().expect("native child resource identity");
-                green.enqueue(std::mem::take(&mut current.scopes), Box::pin(async move {
-                    runner.resume_value(resume_context, continuation, token).await
-                }));
-                green.threads.insert(token, Thread {
-                    parent: green.active, work: work.clone(), realm, status: ThreadStatus::Running,
-                    control: crate::WorkbenchExecutionControl::untracked(),
-                });
+                green.enqueue(
+                    std::mem::take(&mut current.scopes),
+                    Box::pin(async move {
+                        runner
+                            .resume_value(resume_context, continuation, token)
+                            .await
+                    }),
+                );
+                green.threads.insert(
+                    token,
+                    Thread {
+                        parent: green.active,
+                        work: work.clone(),
+                        realm,
+                        status: ThreadStatus::Running,
+                        control: crate::WorkbenchExecutionControl::untracked(),
+                    },
+                );
                 green.active = token;
-                current.native_start = Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
-                    fragment: current.fragment.take().expect("async child borrows original fragment"),
-                    callback, realm, token, work,
-                });
+                current.native_start =
+                    Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
+                        fragment: current
+                            .fragment
+                            .take()
+                            .expect("async child borrows original fragment"),
+                        callback,
+                        realm,
+                        token,
+                        work,
+                    });
                 current.green = Some(green);
                 return Ok(FragmentAdvance::ParkNative);
             }
-            GreenBoundary::Done { continuation, token } => {
+            GreenBoundary::Done {
+                continuation,
+                token,
+            } => {
                 if green.active == 0 || token != green.active || !current.scopes.is_empty() {
-                    return Err(protocol("async completion does not match its current thread delimiter"));
+                    return Err(protocol(
+                        "async completion does not match its current thread delimiter",
+                    ));
                 }
                 let work = green.active_work().expect("active native thread");
                 let thread = green.active;
                 let descendants = green.remove_descendant_frontiers(thread);
                 let environment = self.environment.clone();
                 let kernel = kernel.clone();
-                green.pending.push(Pending { thread, future: Box::pin(async move {
-                    // Closing the native scope retires the payload-free Done frame.
-                    drop(continuation);
-                    let closed = close_thread(environment, kernel, work).await;
-                    Completion {
-                        thread, scopes: Vec::new(), receipt: None,
-                        terminal: if closed.is_ok() { descendants.into_iter().map(|id| {
-                            (id, if id == thread { ThreadStatus::Settled } else { ThreadStatus::Cancelled })
-                        }).collect() } else { Vec::new() },
-                        result: closed.err().map(|error| commands::CommandResolution {
-                            outcome: Err(error), disposition: WorkbenchOperationDisposition::Unknown,
-                            started_job: None, retained_job_binding: None,
-                        }),
-                    }
-                }) });
+                green.pending.push(Pending {
+                    thread,
+                    future: Box::pin(async move {
+                        // Closing the native scope retires the payload-free Done frame.
+                        drop(continuation);
+                        let closed = close_thread(environment, kernel, work).await;
+                        Completion {
+                            thread,
+                            scopes: Vec::new(),
+                            receipt: None,
+                            terminal: if closed.is_ok() {
+                                descendants
+                                    .into_iter()
+                                    .map(|id| {
+                                        (
+                                            id,
+                                            if id == thread {
+                                                ThreadStatus::Settled
+                                            } else {
+                                                ThreadStatus::Cancelled
+                                            },
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            },
+                            result: closed.err().map(|error| commands::CommandResolution {
+                                outcome: Err(error),
+                                disposition: WorkbenchOperationDisposition::Unknown,
+                                started_job: None,
+                                retained_job_binding: None,
+                            }),
+                        }
+                    }),
+                });
             }
-            GreenBoundary::Status { continuation, thread } => {
+            GreenBoundary::Status {
+                continuation,
+                thread,
+            } => {
                 let status = match green.status(thread)? {
                     ThreadStatus::Running => 0_i64,
                     ThreadStatus::Settled => 1,
                     ThreadStatus::Cancelled => 2,
                 };
-                green.enqueue(std::mem::take(&mut current.scopes), Box::pin(async move {
-                    runner.resume_value(resume_context, continuation, status).await
-                }));
+                green.enqueue(
+                    std::mem::take(&mut current.scopes),
+                    Box::pin(async move {
+                        runner
+                            .resume_value(resume_context, continuation, status)
+                            .await
+                    }),
+                );
             }
-            GreenBoundary::JoinAny { continuation, threads } => {
+            GreenBoundary::JoinAny {
+                continuation,
+                threads,
+            } => {
                 let winner = green.winner(&threads)?;
                 let scopes = std::mem::take(&mut current.scopes);
                 match winner {
-                    Some(winner) => green.enqueue(scopes, Box::pin(async move {
-                        runner.resume_value(resume_context, continuation, winner).await
-                    })),
+                    Some(winner) => green.enqueue(
+                        scopes,
+                        Box::pin(async move {
+                            runner
+                                .resume_value(resume_context, continuation, winner)
+                                .await
+                        }),
+                    ),
                     None => green.joins.push(Join {
-                        thread: green.active, continuation, threads, scopes,
+                        thread: green.active,
+                        continuation,
+                        threads,
+                        scopes,
                     }),
                 }
             }
-            GreenBoundary::Cancel { continuation, thread } => {
+            GreenBoundary::Cancel {
+                continuation,
+                thread,
+            } => {
                 if green.status(thread)? != ThreadStatus::Running {
-                    green.enqueue(std::mem::take(&mut current.scopes), Box::pin(async move {
-                        runner.resume_unit(resume_context, continuation).await
-                    }));
+                    green.enqueue(
+                        std::mem::take(&mut current.scopes),
+                        Box::pin(
+                            async move { runner.resume_unit(resume_context, continuation).await },
+                        ),
+                    );
                 } else {
                     let descendants = green.remove_descendant_frontiers(thread);
                     let work = green.threads[&thread].work.clone();
@@ -285,29 +413,48 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static,
                     let scopes = std::mem::take(&mut current.scopes);
                     let environment = self.environment.clone();
                     let kernel = kernel.clone();
-                    green.pending.push(Pending { thread: caller, future: Box::pin(async move {
-                        let closed = close_thread(environment, kernel, work).await;
-                        let terminal = if closed.is_ok() {
-                            descendants.into_iter().map(|id| (id, ThreadStatus::Cancelled)).collect()
-                        } else { Vec::new() };
-                        let result = if caller == thread {
-                            drop(continuation);
-                            closed.err().map(|error| commands::CommandResolution {
-                                outcome: Err(error), disposition: WorkbenchOperationDisposition::Unknown,
-                                started_job: None, retained_job_binding: None,
-                            })
-                        } else {
-                            Some(commands::CommandResolution {
-                                outcome: match closed {
-                                    Ok(()) => runner.resume_unit(resume_context, continuation).await,
-                                    Err(error) => Err(error),
-                                },
-                                disposition: WorkbenchOperationDisposition::Committed,
-                                started_job: None, retained_job_binding: None,
-                            })
-                        };
-                        Completion { thread: caller, scopes, result, receipt: None, terminal }
-                    }) });
+                    green.pending.push(Pending {
+                        thread: caller,
+                        future: Box::pin(async move {
+                            let closed = close_thread(environment, kernel, work).await;
+                            let terminal = if closed.is_ok() {
+                                descendants
+                                    .into_iter()
+                                    .map(|id| (id, ThreadStatus::Cancelled))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let result = if caller == thread {
+                                drop(continuation);
+                                closed.err().map(|error| commands::CommandResolution {
+                                    outcome: Err(error),
+                                    disposition: WorkbenchOperationDisposition::Unknown,
+                                    started_job: None,
+                                    retained_job_binding: None,
+                                })
+                            } else {
+                                Some(commands::CommandResolution {
+                                    outcome: match closed {
+                                        Ok(()) => {
+                                            runner.resume_unit(resume_context, continuation).await
+                                        }
+                                        Err(error) => Err(error),
+                                    },
+                                    disposition: WorkbenchOperationDisposition::Committed,
+                                    started_job: None,
+                                    retained_job_binding: None,
+                                })
+                            };
+                            Completion {
+                                thread: caller,
+                                scopes,
+                                result,
+                                receipt: None,
+                                terminal,
+                            }
+                        }),
+                    });
                 }
             }
         }
@@ -321,11 +468,22 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static,
         state: &mut WorkbenchExecutionState,
         mut completion: Completion,
     ) -> Result<bool, ResidentActorWorkbenchError> {
-        let current = state.cursor.running.as_mut().expect("original async fragment");
-        let green = current.green.as_mut().expect("invocation-local async frontiers");
+        let current = state
+            .cursor
+            .running
+            .as_mut()
+            .expect("original async fragment");
+        let green = current
+            .green
+            .as_mut()
+            .expect("invocation-local async frontiers");
         if !completion.terminal.is_empty() {
             for (thread, status) in completion.terminal {
-            green.threads.get_mut(&thread).expect("issued async thread").status = status;
+                green
+                    .threads
+                    .get_mut(&thread)
+                    .expect("issued async thread")
+                    .status = status;
             }
             let joins = std::mem::take(&mut green.joins);
             for join in joins {
@@ -335,41 +493,71 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static,
                         let context = state.effects.context.clone();
                         let previous = green.active;
                         green.active = join.thread;
-                        green.enqueue(join.scopes, Box::pin(async move {
-                            runner.resume_value(context, join.continuation, winner).await
-                        }));
+                        green.enqueue(
+                            join.scopes,
+                            Box::pin(async move {
+                                runner
+                                    .resume_value(context, join.continuation, winner)
+                                    .await
+                            }),
+                        );
                         green.active = previous;
                     }
                     None => green.joins.push(join),
                 }
             }
         }
-        let Some(mut result) = completion.result.take() else { return Ok(false); };
+        let Some(mut result) = completion.result.take() else {
+            return Ok(false);
+        };
         green.active = completion.thread;
         current.scopes = completion.scopes;
         current.inflight_effect = None;
         if let Some(receipt) = completion.receipt {
             if let Some(binding) = result.retained_job_binding.take() {
-                if !state.effects.control.as_ref().is_some_and(|control| control.cancellation_requested()) {
+                if !state
+                    .effects
+                    .control
+                    .as_ref()
+                    .is_some_and(|control| control.cancellation_requested())
+                {
                     match binding.accept() {
                         Ok(binding) => {
                             state.cursor.unit.recovered_bindings.push(binding.clone());
-                            current.fragment.as_mut().expect("original command fragment").retain_job_binding(binding);
+                            current
+                                .fragment
+                                .as_mut()
+                                .expect("original command fragment")
+                                .retain_job_binding(binding);
                         }
-                        Err(error) => { result.disposition = WorkbenchOperationDisposition::Unknown; result.outcome = Err(error); }
+                        Err(error) => {
+                            result.disposition = WorkbenchOperationDisposition::Unknown;
+                            result.outcome = Err(error);
+                        }
                     }
                 }
             }
             record_workbench_operation(
-                &mut state.cursor.unit.operations, state.request.execution_id(), state.cursor.index,
-                receipt.ordinal, &receipt.effect, receipt.display, receipt.started.elapsed(),
+                &mut state.cursor.unit.operations,
+                state.request.execution_id(),
+                state.cursor.index,
+                receipt.ordinal,
+                &receipt.effect,
+                receipt.display,
+                receipt.started.elapsed(),
                 scoped_operation_disposition(receipt.success_disposition, result.disposition),
             );
             if let Some(job) = result.started_job {
-                current.fragment.as_mut().expect("original command fragment").record_started_job(job);
+                current
+                    .fragment
+                    .as_mut()
+                    .expect("original command fragment")
+                    .record_started_job(job);
             }
             if result.outcome.is_ok() {
-                if let Some(child) = receipt.observed_child { self.record_child_observation(child); }
+                if let Some(child) = receipt.observed_child {
+                    self.record_child_observation(child);
+                }
             }
         }
         match result.outcome {
@@ -389,12 +577,16 @@ async fn close_thread<H, O>(
     kernel: KernelContext,
     work: Arc<InvocationWork>,
 ) -> Result<(), ResidentActorWorkbenchError>
-where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static,
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
 {
     work.close();
     let cleanup = work.cleanup(&environment, &kernel).await;
     match cleanup.uncertainty() {
         None => Ok(()),
-        Some(detail) => Err(protocol(&format!("async resource cleanup unconfirmed: {detail}"))),
+        Some(detail) => Err(protocol(&format!(
+            "async resource cleanup unconfirmed: {detail}"
+        ))),
     }
 }

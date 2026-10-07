@@ -3342,7 +3342,9 @@ impl CurrentEffectOwner<'_> {
 
     fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
-            Self::Scoped { base, wait_control, .. } => wait_control.clone().or_else(|| base.control()),
+            Self::Scoped {
+                base, wait_control, ..
+            } => wait_control.clone().or_else(|| base.control()),
 
             Self::Workbench(execution) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
@@ -8361,15 +8363,28 @@ where
                             continue;
                         }
                         None if !current.scopes.is_empty()
-                            || current.green.as_ref().and_then(green::GreenThreads::active_realm).is_some() => {
+                            || current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenThreads::active_realm)
+                                .is_some() =>
+                        {
                             owned_workbench::WorkbenchFragmentRequest::Scoped {
                                 fragment: current
                                     .fragment
                                     .take()
                                     .expect("scope retains parent fragment"),
                                 outcome: current.outcome.take().expect("scope owns body frontier"),
-                                realm: current.scopes.last().map(|scope| scope.realm)
-                                    .or_else(|| current.green.as_ref().and_then(green::GreenThreads::active_realm))
+                                realm: current
+                                    .scopes
+                                    .last()
+                                    .map(|scope| scope.realm)
+                                    .or_else(|| {
+                                        current
+                                            .green
+                                            .as_ref()
+                                            .and_then(green::GreenThreads::active_realm)
+                                    })
                                     .expect("active native resource scope"),
                             }
                         }
@@ -8431,12 +8446,23 @@ where
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
                     current.fragment = Some(fragment);
-                    let effect_owner = match current.scopes.last().map(|frame| frame.work.clone())
-                        .or_else(|| current.green.as_ref().and_then(green::GreenThreads::active_work)) {
+                    let effect_owner = match current
+                        .scopes
+                        .last()
+                        .map(|frame| frame.work.clone())
+                        .or_else(|| {
+                            current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenThreads::active_work)
+                        }) {
                         Some(work) => CurrentEffectOwner::Scoped {
                             base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
                             scope: work,
-                            wait_control: current.green.as_ref().and_then(green::GreenThreads::active_wait_control),
+                            wait_control: current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenThreads::active_wait_control),
                         },
                         None => CurrentEffectOwner::Workbench(execution_state),
                     };
@@ -8444,14 +8470,26 @@ where
                         ResidentActorBoundary::Green(boundary) => {
                             if !execution_state.park_effects {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "async requires an independently admitted notebook execution".into(),
+                                    "async requires an independently admitted notebook execution"
+                                        .into(),
                                 ));
                             }
-                            return self.prepare_green_boundary(kernel, context, &effect_owner, current, boundary);
+                            return self.prepare_green_boundary(
+                                kernel,
+                                context,
+                                &effect_owner,
+                                current,
+                                boundary,
+                            );
                         }
                         ResidentActorBoundary::Completed
-                            if current.green.as_ref().and_then(green::GreenThreads::active_realm).is_some()
-                                && current.scopes.is_empty() => {
+                            if current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenThreads::active_realm)
+                                .is_some()
+                                && current.scopes.is_empty() =>
+                        {
                             return Err(ResidentActorWorkbenchError::ActorProtocol(
                                 "async body completed without publishing its result marker".into(),
                             ));
@@ -9359,7 +9397,9 @@ where
                     .await?
                 {
                     FragmentAdvance::Settled(step) => step,
-                    FragmentAdvance::ParkEffect | FragmentAdvance::ParkNative | FragmentAdvance::ParkGreen => {
+                    FragmentAdvance::ParkEffect
+                    | FragmentAdvance::ParkNative
+                    | FragmentAdvance::ParkGreen => {
                         unreachable!("nested after-tool remains serial")
                     }
                 }
