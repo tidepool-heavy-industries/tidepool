@@ -3268,6 +3268,161 @@ mod tests {
             })
             .expect("compiler-issued original native product")
             .clone();
+        // The genuine published Join retains the same original native body.
+        // Projecting its execution selection to empty preserves availability
+        // and full-body lifetime requirements, rather than fabricating a proof.
+        let mut join_graph = graph.clone();
+        let join_index = join_graph
+            .nodes
+            .iter()
+            .position(|node| {
+                node.kind == RecoveryNodeKind::Join
+                    && node
+                        .exports
+                        .iter()
+                        .any(|export| export.identity.occurrence == "answer")
+            })
+            .expect("actual accepted published Join exports answer");
+        let original_join = join_graph.nodes[join_index].clone();
+        assert_eq!(original_join.live_dependencies, vec![exact.clone()]);
+        assert!(!original_join.native_groups.is_empty());
+        join_graph.nodes[join_index].native_groups.clear();
+        assert_eq!(join_graph.artifacts, graph.artifacts);
+        join_graph.seal().unwrap();
+        let join_snapshot = snapshot(&join_graph);
+        let join_inventory = join_snapshot.capture_inventory(root.path()).unwrap();
+        let projected_join = &join_graph.nodes[join_index];
+        assert_eq!(projected_join.artifact_refs, original_join.artifact_refs);
+        assert_eq!(projected_join.exports, original_join.exports);
+        assert_eq!(
+            projected_join.live_dependencies,
+            original_join.live_dependencies
+        );
+        let projected_context = join_inventory
+            .context(
+                &projected_join.artifact_refs,
+                &projected_join.native_groups,
+                projected_join.lexical.clone(),
+            )
+            .unwrap();
+        assert!(projected_context
+            .artifact_view()
+            .selected_native_groups()
+            .is_empty());
+        let originals = projected_context
+            .artifact_view()
+            .descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.kind
+                    == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+            })
+            .map(|descriptor| descriptor.id)
+            .collect();
+        let selected =
+            crate::session::selected_native_roots(projected_context.artifact_view(), &originals);
+        assert!(
+            crate::session::certified_native_dependencies(&projected_context, &selected)
+                .unwrap()
+                .is_empty()
+        );
+        crate::session::recovery_hydration::validate_recovery_native_markers(
+            projected_join,
+            &projected_context,
+        )
+        .unwrap();
+        let join_manifest = root.path().join("accepted-join.json");
+        assert!(matches!(
+            stage_v2(&join_manifest, root.path(), join_snapshot)
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let join_bytes = fs::read(&join_manifest).unwrap();
+        let reopened_join = read_v2(&join_manifest, root.path()).unwrap().unwrap();
+        assert!(reopened_join.artifact_losses.is_empty());
+        assert_eq!(
+            reopened_join
+                .graph
+                .node(original_join.id)
+                .unwrap()
+                .live_dependencies,
+            original_join.live_dependencies
+        );
+        let projection = reopened_join.projection(&owner("root")).unwrap();
+        assert!(projection.values().any(|head| matches!(head,
+            RecoveryHead::Tombstone(RecoveryTombstone { identity, reason: RecoveryLossReason::LiveValueDependency(_), .. })
+                if identity.occurrence == "answer")));
+        assert!(reopened_join
+            .graph
+            .public_binding_tombstones(&owner("root"))
+            .unwrap()
+            .iter()
+            .any(|binding| binding.name == "x"));
+        let mut recovered_lib = SessionLib::open(
+            SessionId(43),
+            root.path().join("accepted-join-session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        recovered_lib
+            .attach_owned_recovery_graph_v3(&join_manifest, run_owner.clone())
+            .unwrap();
+        let mut recovered = PersistentSession::new(Some(recovered_lib), 1024 * 1024);
+        assert!(recovered.prepared().is_none());
+        let recovered_scope = recovered.recover_public_scope(&owner("root")).unwrap();
+        let recovered_visibility = recovered
+            .public_visibility_snapshot_in(recovered_scope)
+            .unwrap();
+        assert!(recovered_visibility.bindings.is_empty());
+        assert!(recovered_visibility.source_instances.is_empty());
+        assert!(recovered.prepared().is_none());
+        assert_eq!(fs::read(&join_manifest).unwrap(), join_bytes);
+        let mut wrong_join_generation = exact.clone();
+        let RecoveryLiveDependency::NativeBinding { generation, .. } = &mut wrong_join_generation
+        else {
+            panic!("genuine Join retains native binding requirement");
+        };
+        *generation += 1;
+        let mut wrong_join_owner = exact.clone();
+        let RecoveryLiveDependency::NativeBinding { binding, .. } = &mut wrong_join_owner else {
+            panic!("genuine Join retains native binding requirement");
+        };
+        binding.module = original.owner().module;
+        for (index, markers) in [vec![], vec![wrong_join_generation], vec![wrong_join_owner]]
+            .into_iter()
+            .enumerate()
+        {
+            let mut refused = join_graph.clone();
+            refused.nodes[join_index].live_dependencies = markers;
+            if refused.nodes[join_index].live_dependencies.is_empty() {
+                refused.nodes[join_index].state = RecoveryNodeState::ExactArtifactClosure;
+            }
+            refused.seal().unwrap();
+            let path = root.path().join(format!("refused-join-{index}.json"));
+            assert!(matches!(
+                stage_v2(&path, root.path(), snapshot(&refused))
+                    .unwrap()
+                    .publish(),
+                RecoveryPublishOutcome::Durable { .. }
+            ));
+            let bytes = fs::read(&path).unwrap();
+            let mut lib = SessionLib::open(
+                SessionId(50 + index as u64),
+                root.path().join(format!("refused-join-session-{index}")),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+            assert!(
+                matches!(lib.attach_owned_recovery_graph_v3(&path, run_owner.clone()),
+                Err(crate::session::SessionError::RecoveryManifest { detail, .. })
+                    if detail.contains("live dependencies differ from verified original native requirements"))
+            );
+            assert_eq!(lib.generation(), Generation(0));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
         // Private hydration retains the original implementation and its exact
         // live requirements, without admitting a lexical public selector.
         graph.public_surfaces.clear();
