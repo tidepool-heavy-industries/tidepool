@@ -32,7 +32,8 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
-import GHC.Core.Type (Type, tyConsOfType, eqType)
+import GHC.Core.Type (Type, tyConsOfType)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Id (Id, idName, idType)
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Core.TyCon (tyConName)

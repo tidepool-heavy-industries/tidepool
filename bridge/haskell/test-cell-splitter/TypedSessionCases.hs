@@ -5,7 +5,7 @@ import Control.Exception
 import Control.Monad (forM_, unless, void)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.ByteString as BS
-import GHC.Core.Type (eqType)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Types.Fixity (Fixity(..), FixityDirection(..))
 import GHC.Types.Id (Id, idName, idType)
@@ -74,7 +74,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
                   typedSegmentSessionGlobals prepared, typedSegmentSessionInterfaces prepared)
           result <- compiler
             (WithTypedSegmentPreparation complete (PreparedSegmentProducts plan Nothing))
-            mempty GeneralCompile Nothing target includes Nothing
+            mempty (TypedSegmentCompile plan GeneralCompile) Nothing target includes Nothing
           case typedSegmentItems (preparedSegmentCaptures result) of
             [_, _] -> pure ()
             _ -> fail "Session control did not receive two compiler-issued items"
