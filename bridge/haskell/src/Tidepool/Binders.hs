@@ -46,7 +46,7 @@ module Tidepool.Binders
   , analyzeCell
   , analyzeOrderedCell, analyzeOrderedCellWithFlags
   , defaultParserDynFlags, templateParserFlags
-  , renderCellCheckSource
+  , renderCellCheckSource, renderCellCheckSourceWithLineOffset
   , CellExpressionPlan(..), ExpressionLiftPlan(..)
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
@@ -103,7 +103,8 @@ import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 import Tidepool.TurnSource
   ( spliceTemplate, CompilerDefaultRecipe, emptyCompilerDefaultRecipe
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, importQualifierNamespaces
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, qualifyCompilerDefaultWithLineOffset
+  , importQualifierNamespaces
   , prepareDeclarationTemplate, renderPreparedDeclaration )
 
 -- | A binder a declaration introduces.
@@ -870,14 +871,18 @@ renderDeclarationForTemplate template source = do
 -- vocabulary. Missing or duplicate placeholders are rejected by the worker
 -- entry point before compilation.
 renderCellCheckSource :: String -> CellSourcePlan -> Either String String
-renderCellCheckSource template plan = do
+renderCellCheckSource template plan = fst <$> renderCellCheckSourceWithLineOffset template plan
+
+renderCellCheckSourceWithLineOffset :: String -> CellSourcePlan -> Either String (String,Int)
+renderCellCheckSourceWithLineOffset template plan = do
   withPragmas <- replaceOnce "{{CELL_PRAGMAS}}" pragmas template
   withImports <- replaceOnce "{{CELL_IMPORTS}}" imports withPragmas
-  prepared <- qualifyCompilerDefault (prologueCompilerDefault (cellPlanPrologue plan))
+  (prepared, defaultLineOffset) <- qualifyCompilerDefaultWithLineOffset (prologueCompilerDefault (cellPlanPrologue plan))
     (concatMap locatedImportNamespaces (prologueImports (cellPlanPrologue plan))) withImports
   withDecls <- replaceOnce "{{CELL_DECLS}}" declarations prepared
   renderedBody <- body
-  replaceOnce "{{CELL_BODY}}" renderedBody withDecls
+  rendered <- replaceOnce "{{CELL_BODY}}" renderedBody withDecls
+  pure (rendered, length (filter (== '\n') pragmas) + defaultLineOffset)
   where
     items = cellPlanItems plan
     prologue = cellPlanPrologue plan

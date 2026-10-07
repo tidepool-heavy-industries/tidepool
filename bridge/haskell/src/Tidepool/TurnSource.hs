@@ -14,7 +14,8 @@ module Tidepool.TurnSource
   , generatedScaffoldModuleName
   , renameScaffoldModuleHeader
   , CompilerDefaultRecipe, emptyCompilerDefaultRecipe, captureCompilerDefaultRecipe
-  , qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, importQualifierNamespaces
+  , qualifyCompilerDefault, qualifyCompilerDefaultWithLineOffset
+  , preambleDefaultDeclaration, preambleImportMarker, importQualifierNamespaces
   , PreparedDeclarationTemplate, prepareDeclarationTemplate, renderPreparedDeclaration
   ) where
 
@@ -89,8 +90,11 @@ captureCompilerDefaultRecipe flags template =
                 ++ concatMap (importQualifierNamespaces . unLoc) (hsmodImports (unLoc parsed))))
 
 qualifyCompilerDefault :: CompilerDefaultRecipe -> [ModuleName] -> String -> Either String String
-qualifyCompilerDefault NoCompilerDefault _ template = Right template
-qualifyCompilerDefault (PrimitiveCompilerDefault templateNamespaces) importedNamespaces template = do
+qualifyCompilerDefault recipe namespaces template = fst <$> qualifyCompilerDefaultWithLineOffset recipe namespaces template
+
+qualifyCompilerDefaultWithLineOffset :: CompilerDefaultRecipe -> [ModuleName] -> String -> Either String (String,Int)
+qualifyCompilerDefaultWithLineOffset NoCompilerDefault _ template = Right (template,0)
+qualifyCompilerDefaultWithLineOffset (PrimitiveCompilerDefault templateNamespaces) importedNamespaces template = do
   let occupied = Set.fromList (templateNamespaces ++ importedNamespaces)
       fresh candidate namespaces
         | candidate `Set.member` namespaces = fresh (mkModuleName (moduleNameString candidate ++ "X")) namespaces
@@ -106,7 +110,8 @@ qualifyCompilerDefault (PrimitiveCompilerDefault templateNamespaces) importedNam
         ++ preambleImportMarker ++ "default (" ++ qualified intAlias intTyConName ++ ", " ++ qualified doubleAlias doubleTyConName
         ++ ", " ++ moduleNameString textAlias ++ ".Text)\n"
   prepared <- replaceTemplateMarker preambleDefaultDeclaration replacement template
-  pure ("{-# LANGUAGE PackageImports #-}\n" ++ prepared)
+  let prefix = "{-# LANGUAGE PackageImports #-}\n"
+  pure (prefix ++ prepared, length (filter (== '\n') prefix))
 
 -- The header transition owns both import placement and default qualification.
 -- Body rendering cannot qualify the default again or move imports past it.

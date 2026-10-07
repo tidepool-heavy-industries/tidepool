@@ -43,7 +43,8 @@ import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 import Tidepool.Binders
   ( extractBindersNamedGhc
   , classifyWithFlags, exportItemName, templateParserFlags
-  , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
+  , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
+  , renderCellCheckSource, renderCellCheckSourceWithLineOffset, CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
@@ -61,7 +62,7 @@ import Tidepool.GhcPipeline
   , CompilerScope(..), CompilerRecoveryCaches(..), withResidentCompilerScopes, withScopedExactInterfaceTransaction
   , checkCellInstances, cellGeneratedInstanceRecipe
   , cellExpressionEvidence, cellCheckedBinderSignatures
-  , satisfiesCapturedConstraint, generatedScaffoldRecipe, activationPreviewInputType )
+  , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
@@ -93,7 +94,10 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
-  , originalInterfaceBytes, generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe)
+  , originalInterfaceBytes, generatedActivationPreviewRecipe
+  , RenderedProtectedTemplateImports
+  , captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , generatedScaffoldRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports)
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..), WorkerExecutionSource(..)
@@ -110,7 +114,7 @@ import Tidepool.DiagJson
 import Tidepool.CheckedAdmission
   ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission )
 import Tidepool.CheckedRecipe
-  ( checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
+  ( checkedItemCompilePurpose, checkedRecipeSourceWithLineOffset, replaceRecipeMarker, writeCheckedItemReceipt )
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
@@ -151,7 +155,7 @@ import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 import Tidepool.TurnSource
   ( extractModuleName, spliceTemplate, renderImportBinder
   , generatedScaffoldModuleName, renameScaffoldModuleHeader
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleImportMarker )
+  , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset, preambleImportMarker )
 import Tidepool.DependencyEvidence
   ( validateDependencyEvidence )
 
@@ -963,7 +967,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         -- The scratch basename must match the header because
         -- 'runPipelineSessionSelected' resolves the compiled module by
         -- @capitalize (takeBaseName path)@ (GhcPipeline.hs).
-        spliceInto :: FilePath -> IO (String, String, String, FilePath)
+        spliceInto :: FilePath -> IO (String, String, RenderedProtectedTemplateImports, String, FilePath)
         spliceInto tmplFile = do
           originalTemplate <- readFile tmplFile
           verifyProtectedTemplate tmplFile originalTemplate
@@ -971,35 +975,39 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           defaults <- either fail pure (captureCompilerDefaultRecipe selectedFlags originalTemplate)
           let original = admitted >>= itemPlannedDeclaration
           let prepareTemplate template = do
+                let pragmaPrefix = maybe "" (concatMap ((++ "\n") . locatedPragmaSource) . prologuePragmas) prologue
                 tmplSrc <- case prologue of
                   Nothing -> pure template
                   Just authored -> do
-                    withImports <- replaceRecipeMarker preambleImportMarker
+                    replaceRecipeMarker preambleImportMarker
                       (concatMap ((++ "\n") . locatedImportSource) (prologueImports authored)
                         ++ preambleImportMarker) template
-                    pure (concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas authored) ++ withImports)
                 withOriginal <- case original of
                   Nothing -> pure tmplSrc
                   Just ((_, owner), _) -> replaceRecipeMarker preambleImportMarker
                     ("import " ++ owner ++ "\n" ++ preambleImportMarker) tmplSrc
-                if null programImports then pure withOriginal else
+                withProgram <- if null programImports then pure withOriginal else
                   replaceRecipeMarker preambleImportMarker
                     (concatMap (\owner -> "import " ++ owner ++ "\n") programImports ++ preambleImportMarker) withOriginal
+                pure (pragmaPrefix ++ withProgram, length (filter (== '\n') pragmaPrefix))
               namespaces = maybe [] (concatMap locatedImportNamespaces . prologueImports) prologue
                 ++ map mkModuleName programImports
                 ++ maybe [] (\((_,owner),_) -> [mkModuleName owner]) original
                 ++ maybe [] (map (mkModuleName . fst) . itemValueImports) admitted
-              renderRecipe withProgram = do
+              renderRecipe (withProgram, protectedLinePrefix) = do
                 case admitted of
                   Nothing -> do
-                    prepared <- either fail pure (qualifyCompilerDefault defaults namespaces withProgram)
-                    pure (spliceTemplate prepared turnSrc bindersStr)
+                    (prepared, qualifiedLinePrefix) <- either fail pure
+                      (qualifyCompilerDefaultWithLineOffset defaults namespaces withProgram)
+                    pure (spliceTemplate prepared turnSrc bindersStr, protectedLinePrefix + qualifiedLinePrefix)
                   Just admission -> do
                     withPrefix <- if null (itemValueImports admission) then pure withProgram else
                       replaceRecipeMarker preambleImportMarker
                         (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n")
                           (itemValueImports admission) ++ preambleImportMarker) withProgram
-                    checkedRecipeSource defaults namespaces admission withPrefix turnSrc
+                    (source, qualifiedLinePrefix) <- checkedRecipeSourceWithLineOffset
+                      defaults namespaces admission withPrefix turnSrc
+                    pure (source, protectedLinePrefix + qualifiedLinePrefix)
               authorityFields = case admitted of
                 Just authority -> ["item", itemAdmissionDigest authority, itemCellReceiptDigest authority]
                 Nothing -> ["unadmitted"]
@@ -1016,23 +1024,31 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                 | (identity, generation) <- Map.toAscList (requestRetainedGenerations args) ]
               renderNamedRecipe = do
                 withProgram <- prepareTemplate originalTemplate
-                baseSource <- renderRecipe withProgram
+                (baseSource, baseLineOffset) <- renderRecipe withProgram
                 if sbKind sb == KDecl
-                  then pure (originalTemplate, baseSource)
+                  then do
+                    protectedOccurrences <- either fail pure
+                      (captureProtectedTemplateImports selectedFlags originalTemplate)
+                    renderedOccurrences <- either fail pure
+                      (renderProtectedTemplateImports baseLineOffset protectedOccurrences)
+                    pure (originalTemplate, baseSource, renderedOccurrences)
                   else do
                     let owner = generatedScaffoldModuleName
                           (["turn-scaffold-owner-v1", "scope"] ++ semanticScopeFields
                             ++ ["template", originalTemplate, "rendered", baseSource
                               ] ++ includeFields ++ authorityFields ++ retainedFields)
                     renamed <- either fail pure (renameScaffoldModuleHeader owner originalTemplate)
+                    protectedOccurrences <- either fail pure
+                      (captureProtectedTemplateImports selectedFlags renamed)
                     renamedTemplate <- prepareTemplate renamed
-                    finalSource <- renderRecipe renamedTemplate
-                    pure (renamed, finalSource)
-          (finalProtected, finalSource) <- renderNamedRecipe
+                    (finalSource, linePrefix) <- renderRecipe renamedTemplate
+                    renderedOccurrences <- either fail pure
+                      (renderProtectedTemplateImports linePrefix protectedOccurrences)
+                    pure (renamed, finalSource, renderedOccurrences)
+          (finalProtected, finalSource, finalOccurrences) <- renderNamedRecipe
           finalOutput <- writeSplicedModule outDir lastAttempt finalSource
-          let rendered = (finalProtected, finalSource, finalOutput)
-          let (protected, source, ( _,moduleName',modulePath)) = rendered
-          pure (protected,source,moduleName',modulePath)
+          let (_,moduleName',modulePath) = finalOutput
+          pure (finalProtected, finalSource, finalOccurrences, moduleName',modulePath)
     -- Four-shape selection (protocol note, "the verdict space has four
     -- shapes, not three"): a bind that binds no name selects its own
     -- template kind and skips the session-bind artifacts entirely —
@@ -1049,11 +1065,12 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           _ -> zip [0..] allMatching
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
-        compileTurn protected spliced modName modulePath = do
+        compileTurn protected spliced protectedOccurrences modName modulePath = do
           purpose <- case protectedTemplates of
             Nothing -> pure basePurpose
             Just _ -> do
-              recipe <- generatedScaffoldRecipe parserFlags templateImports protected spliced modulePath modName >>= either fail pure
+              recipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
+                protectedOccurrences protected spliced modulePath modName >>= either fail pure
               pure (GeneratedScaffoldCompile recipe basePurpose)
           compiler (PreparedProducts (requestModuleCandidates args))
             (Map.keysSet (requestRetainedGenerations args)) purpose
@@ -1061,8 +1078,8 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
             (requestBuildProductsDir args)
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         compileVariants _ ((index,tmplFile):rest) = do
-          (protected, spliced, modName, modulePath) <- spliceInto tmplFile
-          attempted <- try (compileTurn protected spliced modName modulePath)
+          (protected, spliced, protectedOccurrences, modName, modulePath) <- spliceInto tmplFile
+          attempted <- try (compileTurn protected spliced protectedOccurrences modName modulePath)
           case attempted of
             Right prepared ->
               return (index, spliced, prepared)
@@ -1185,6 +1202,8 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
       Nothing -> pure template
       Just _ -> either (throwIO . InvalidCheckingWrapper) pure
         (replaceTemplateModuleHeader "module CellCheck where" template)
+    protectedCheckImports <- either fail pure
+      (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags checkingTemplate)
     initialPlan <- analyzeCellWithFlags parserFlags template cellSource >>= either throwCellSplitError pure
     initialSource <- either fail pure (renderCellCheckSource checkingTemplate initialPlan)
     let outDir = fromMaybe
@@ -1208,7 +1227,8 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
         checkPlan plan = maybe plan (\(_,planned,_,_,_) -> plannedCheckPlan planned) preparedDeclaration
     (analyzed, provisional) <- checkCellInstances (\plan -> do
       let effective = checkPlan plan
-      rendered <- either fail pure (renderCellCheckSource checkingTemplate effective)
+      (rendered, linePrefix) <- either fail pure
+        (renderCellCheckSourceWithLineOffset checkingTemplate effective)
       writeFile modulePath rendered
       -- Preserve the latest plan for failure diagnostics without encoding and
       -- writing a provisional result before every successful check attempt.
@@ -1217,8 +1237,10 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
       compilePurpose <- case admittedScope >>= scopeCheckedCell of
         Nothing -> pure baseCheckPurpose
         Just admission -> do
-          recipe <- generatedCheckingTemplateRecipe parserFlags (checkedTemplateImports admission)
-            template rendered modulePath moduleName' >>= either fail pure
+          mappedImports <- either fail pure (renderProtectedTemplateImports linePrefix protectedCheckImports)
+          recipe <- generatedCheckingTemplateRecipeWithProtectedImports parserFlags
+            (checkedTemplateImports admission) mappedImports checkingTemplate rendered modulePath moduleName'
+            >>= either fail pure
           pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
       compiler checkedSelection Set.empty
         (withSourceImportIntents (cellPlanPrologue effective) compilePurpose)
@@ -1354,7 +1376,10 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
           let checkPath = directory </> "CellCheck.hs"
               checkingTemplate = either error id (replaceTemplateModuleHeader "module CellCheck where" template)
               check plan = do
-                rendered <- either fail pure (renderCellCheckSource checkingTemplate plan)
+                protectedImports <- either fail pure
+                  (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags checkingTemplate)
+                (rendered, linePrefix) <- either fail pure
+                  (renderCellCheckSourceWithLineOffset checkingTemplate plan)
                 let globalSource = globalProgramKeys offset (length (cellPlanItems plan)) rendered
                 writeFile checkPath globalSource
                 let baseCheckPurpose =
@@ -1363,9 +1388,11 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                 compilePurpose <- case scopeCheckedCell scope of
                   Nothing -> pure baseCheckPurpose
                   Just checked -> do
+                    mappedImports <- either fail pure (renderProtectedTemplateImports linePrefix protectedImports)
                     moduleName' <- maybe (fail "compiled cell check has no module owner") pure (extractModuleName globalSource)
-                    recipe <- generatedCheckingTemplateRecipe parserFlags (checkedTemplateImports checked)
-                      template globalSource checkPath moduleName' >>= either fail pure
+                    recipe <- generatedCheckingTemplateRecipeWithProtectedImports parserFlags
+                      (checkedTemplateImports checked) mappedImports checkingTemplate globalSource checkPath moduleName'
+                      >>= either fail pure
                     pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
                 scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs))
                   (Map.keysSet (requestRetainedGenerations localArgs))

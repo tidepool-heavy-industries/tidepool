@@ -22,7 +22,10 @@ module Tidepool.ExactHydration
   , checkedValueImportAuthorityFromVerified
   , CheckedTemplateInterface(..)
   , CheckedTemplateImports(..)
+  , ProtectedTemplateImports, RenderedProtectedTemplateImports
+  , captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, generatedCheckingTemplateRecipe
+  , generatedScaffoldRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
@@ -38,7 +41,7 @@ import Data.List (mapAccumL, stripPrefix)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
 import Data.Char (isHexDigit, isSpace, toLower)
-import Data.Maybe (isJust, isNothing, catMaybes)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
@@ -113,6 +116,7 @@ import System.Directory (getTemporaryDirectory, removeFile, canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
 import System.IO (fixIO)
 import System.IO (hClose, hIsClosed, openBinaryTempFile)
+import Tidepool.TurnSource (preambleImportMarker)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -235,6 +239,20 @@ data CheckedTemplateImports = CheckedTemplateImports
   , checkedTemplateGraph :: [CheckedTemplateInterface]
   } deriving (Eq, Show)
 
+data ProtectedTemplateImport = ProtectedTemplateImport
+  { protectedImportModule :: String
+  , protectedImportLine :: Int
+  , protectedImportSource :: String
+  , protectedImportShape :: TemplateImportShape
+  }
+
+data ProtectedTemplateImports = ProtectedTemplateImports String Bool [ProtectedTemplateImport]
+
+data RenderedProtectedTemplateImports = RenderedProtectedTemplateImports
+  { renderedProtectedSource :: String
+  , renderedProtectedOccurrences :: [(String,Int,String,TemplateImportShape)]
+  }
+
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
   [(CheckedTemplateInterface,Int,TemplateImportShape)] [CheckedTemplateInterface]
   GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose
@@ -267,6 +285,42 @@ parseTemplateImport flags source = case unP Parser.parseImport
         shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
     in Just (owner,shape)
 
+captureProtectedTemplateImports :: DynFlags -> String -> Either String ProtectedTemplateImports
+captureProtectedTemplateImports = captureProtectedTemplateImportsAt preambleImportMarker
+
+captureProtectedTemplateImportsAt :: String -> DynFlags -> String -> Either String ProtectedTemplateImports
+captureProtectedTemplateImportsAt marker flags source = do
+  markerLine <- case lines marker of
+    [line] -> Right line
+    _ -> Left "protected template insertion marker must occupy one physical line"
+  let sourceLines = zip [1..] (lines source)
+      insertionBoundaries = [line | (line,textLine) <- sourceLines, textLine == markerLine]
+      occurrences =
+        [ ProtectedTemplateImport owner line textLine shape
+        | (line,textLine) <- sourceLines
+        , let trimmed = dropWhile isSpace textLine
+        , Just rest <- [stripPrefix "import" trimmed]
+        , not (null rest) && isSpace (head rest)
+        , Just (owner,shape) <- [parseTemplateImport flags textLine]
+        ]
+  case insertionBoundaries of
+    [] -> pure (ProtectedTemplateImports source False occurrences)
+    [boundary]
+      | all ((< boundary) . protectedImportLine) occurrences ->
+          pure (ProtectedTemplateImports source True occurrences)
+      | otherwise -> Left "protected template import follows its mutable insertion marker"
+    _ -> Left "protected template repeats its mutable insertion marker"
+
+renderProtectedTemplateImports :: Int -> ProtectedTemplateImports -> Either String RenderedProtectedTemplateImports
+renderProtectedTemplateImports linePrefix (ProtectedTemplateImports source hasBoundary occurrences)
+  | linePrefix < 0 = Left "protected template line prefix is negative"
+  | linePrefix > 0 && not hasBoundary =
+      Left "protected template line mapping requires its mutable insertion marker"
+  | otherwise = Right (RenderedProtectedTemplateImports source
+      [(protectedImportModule occurrence, protectedImportLine occurrence + linePrefix,
+        protectedImportSource occurrence, protectedImportShape occurrence)
+      | occurrence <- occurrences])
+
 generatedScaffoldRecipe :: DynFlags -> CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedScaffoldRecipe = generatedScaffoldRecipeFor NativeTurnTemplate
@@ -275,37 +329,58 @@ generatedCheckingTemplateRecipe :: DynFlags -> CheckedTemplateImports -> String 
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedCheckingTemplateRecipe = generatedScaffoldRecipeFor CheckingCellTemplate
 
+generatedCheckingTemplateRecipeWithProtectedImports :: DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> String -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedCheckingTemplateRecipeWithProtectedImports = generatedScaffoldRecipeWithProtectedImportsFor CheckingCellTemplate
+
 generatedScaffoldRecipeFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedScaffoldRecipeFor purpose flags (CheckedTemplateImports roots interfaces) protectedTemplate rendered path name = do
+generatedScaffoldRecipeFor purpose flags imports protectedTemplate rendered path name =
+  case captureProtectedTemplateImports flags protectedTemplate >>= renderProtectedTemplateImports 0 of
+    Left message -> pure (Left message)
+    Right mapped -> generatedScaffoldRecipeWithProtectedImportsFor purpose flags imports mapped
+      protectedTemplate rendered path name
+
+generatedScaffoldRecipeWithProtectedImports :: DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> String -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedScaffoldRecipeWithProtectedImports = generatedScaffoldRecipeWithProtectedImportsFor NativeTurnTemplate
+
+generatedScaffoldRecipeWithProtectedImportsFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> String -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedScaffoldRecipeWithProtectedImportsFor purpose flags
+    (CheckedTemplateImports roots interfaces) mapped protectedTemplate rendered path name = do
   canonical <- canonicalizePath path
   let compilerImport = "import qualified Tidepool.Internal.Resume as TidepoolResume"
-      occurrences text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == compilerImport]
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
-      importOccurrences source = Map.fromListWith (flip (++))
-        [ (owner,[(line,shape)])
-        | (line,textLine) <- zip [1..] (lines source)
-        , textLine /= compilerImport
-        , let trimmed = dropWhile isSpace textLine
-        , Just rest <- [stripPrefix "import" trimmed]
-        , not (null rest) && isSpace (head rest)
-        , Just (owner,shape) <- [parseTemplateImport flags textLine]
-        ]
-      protectedImports = importOccurrences protectedTemplate
-      renderedImports = importOccurrences rendered
-      templateOccurrence interface =
-        let owner = templateInterfaceModule interface
-            matching = Map.findWithDefault [] owner
-        in case (matching protectedImports,matching renderedImports) of
-          ([],_) -> Right Nothing
-          ([(_,shape)],[(line,renderedShape)]) | shape == renderedShape -> Right (Just (interface,line,shape))
+      renderedLines = zip [1..] (lines rendered)
+      mappedSource = renderedProtectedSource mapped
+      mappedOccurrences = renderedProtectedOccurrences mapped
+      mappedFor interface =
+        [occurrence | occurrence@(owner,_,source,_) <- mappedOccurrences
+        , owner == templateInterfaceModule interface, source /= compilerImport]
+      compilerImportLines = [line | (_,line,source,_) <- mappedOccurrences, source == compilerImport]
+      mappedOccurrence (owner,line,source,shape) = do
+        renderedSource <- maybe (Left "checked template interface import is missing, duplicated, or changed") Right
+          (lookup line renderedLines)
+        unless (renderedSource == source) (Left "checked template interface import is missing, duplicated, or changed")
+        case parseTemplateImport flags renderedSource of
+          Just (renderedOwner,renderedShape) | renderedOwner == owner && renderedShape == shape -> Right ()
           _ -> Left "checked template interface import is missing, duplicated, or changed"
+      templateOccurrences interface = do
+        let selected = mappedFor interface
+        mapM_ mappedOccurrence selected
+        pure [(interface,line,shape) | (_,line,_,shape) <- selected]
   pure $ do
+    unless (mappedSource == protectedTemplate)
+      (Left "protected template occurrence map belongs to another source")
     let rootSet = Set.fromList roots
         graphOwners = [(templateInterfaceUnit interface,templateInterfaceModule interface) | interface <- interfaces]
     unless (length roots == Set.size rootSet && all (`elem` graphOwners) roots)
       (Left "checked template roots are duplicated or leave their sealed graph")
-    selected <- catMaybes <$> mapM templateOccurrence
+    selected <- concat <$> mapM templateOccurrences
       [interface | interface <- interfaces
       , (templateInterfaceUnit interface,templateInterfaceModule interface) `Set.member` rootSet]
     let key interface = (templateInterfaceUnit interface,templateInterfaceModule interface)
@@ -318,9 +393,9 @@ generatedScaffoldRecipeFor purpose flags (CheckedTemplateImports roots interface
               reachable (Map.insert owner interface seen) (templateInterfaceImports interface ++ rest)
     unless (Map.size graph == length interfaces) (Left "duplicate checked template interface")
     closure <- reachable Map.empty [key interface | (interface,_,_) <- selected]
-    case (purpose,occurrences protectedTemplate,occurrences rendered) of
-      (NativeTurnTemplate,[_],[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
-      (CheckingCellTemplate,[],[]) -> Right (GeneratedScaffoldRecipe canonical name bytes 0 selected closure ImportedTemplateInstances purpose)
+    case (purpose,compilerImportLines) of
+      (NativeTurnTemplate,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
+      (CheckingCellTemplate,[]) -> Right (GeneratedScaffoldRecipe canonical name bytes 0 selected closure ImportedTemplateInstances purpose)
       _ -> Left "generated scaffold support import differs from its template role"
 
 -- Only the activation admission supplies this complete original instance

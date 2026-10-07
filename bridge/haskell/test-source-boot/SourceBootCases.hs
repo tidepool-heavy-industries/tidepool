@@ -168,6 +168,8 @@ import Tidepool.ExactHydration
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
+  , captureProtectedTemplateImports, renderProtectedTemplateImports
+  , generatedScaffoldRecipeWithProtectedImports
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
@@ -206,7 +208,7 @@ import Tidepool.ExactScope
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
-import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
+import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..)
@@ -1336,16 +1338,33 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let templateInterface = CheckedTemplateInterface (exactUnit supportInterface)
           (exactModule supportInterface) (exactSha256 supportInterface) []
         withTemplate = unlines (take 5 (lines protected)
-          ++ ["import Tidepool.Internal.Resume hiding (resumeLifted)"] ++ drop 5 (lines protected))
+          ++ ["import Tidepool.Internal.Resume hiding (resumeLifted)", init preambleImportMarker] ++ drop 5 (lines protected))
     writeFile target withTemplate
     let templateRoot = [(templateInterfaceUnit templateInterface,templateInterfaceModule templateInterface)]
         templateImports = CheckedTemplateImports templateRoot [templateInterface]
     capturedTemplate <- generatedScaffoldRecipe parserFlags templateImports withTemplate withTemplate target "Expr"
       >>= either fail pure
     let capturedPurpose = GeneratedScaffoldCompile capturedTemplate (CheckedItemCompile [] Nothing [])
-    interfaceOnly <- compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
+        protectedImport = "import Tidepool.Internal.Resume hiding (resumeLifted)"
+    duplicateProtected <- either fail pure
+      (replaceTemplateMarker preambleImportMarker (protectedImport ++ "\n" ++ preambleImportMarker) withTemplate)
+    writeFile target duplicateProtected
+    protectedOccurrences <- either fail pure (captureProtectedTemplateImports parserFlags duplicateProtected)
+    renderedOccurrences <- either fail pure (renderProtectedTemplateImports 1 protectedOccurrences)
+    let renderedDuplicate = "{-# LANGUAGE PackageImports #-}\n" ++ duplicateProtected
+    writeFile target renderedDuplicate
+    duplicateRecipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
+      renderedOccurrences duplicateProtected renderedDuplicate target "Expr" >>= either fail pure
+    let duplicatePurpose = GeneratedScaffoldCompile duplicateRecipe (CheckedItemCompile [] Nothing [])
+    interfaceOnly <- compile (PreparedProducts Nothing) Set.empty duplicatePurpose (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult interfaceOnly))) $
-      fail "initial template interface changed the native result"
+      fail "duplicate protected template imports changed the native result"
+    missingProtectedDuplicate <- either fail pure
+      (replaceTemplateMarker (protectedImport ++ "\n" ++ preambleImportMarker) preambleImportMarker duplicateProtected)
+    missingDuplicateRecipe <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
+      renderedOccurrences duplicateProtected ("{-# LANGUAGE PackageImports #-}\n" ++ missingProtectedDuplicate) target "Expr"
+    unless (case missingDuplicateRecipe of Left _ -> True; Right _ -> False) $
+      fail "a missing protected duplicate retained its occurrence authority"
     let changedRestriction = T.unpack
           (T.replace "hiding (resumeLifted)" "hiding (settle)" (T.pack withTemplate))
     changedRestrictionRecipe <- generatedScaffoldRecipe parserFlags templateImports
@@ -1395,12 +1414,16 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       "checked template graph interface seal changed" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile wrongSeal GeneralCompile)
         (Just hidden) target [] Nothing
-    let secondImport = unlines (take 5 (lines withTemplate)
-          ++ ["import qualified Tidepool.Internal.Resume as AuthoredSecond"] ++ drop 5 (lines withTemplate))
-    writeFile target secondImport
-    secondRecipe <- generatedScaffoldRecipe parserFlags templateImports withTemplate secondImport target "Expr"
-    unless (case secondRecipe of Left _ -> True; Right _ -> False) $
-      fail "authored second import acquired protected template authority"
+    let secondImport = "import qualified Tidepool.Internal.Resume as AuthoredSecond"
+    authoredExtra <- either fail pure
+      (replaceTemplateMarker preambleImportMarker (secondImport ++ "\n" ++ preambleImportMarker) duplicateProtected)
+    writeFile target authoredExtra
+    secondRecipe <- generatedScaffoldRecipe parserFlags templateImports duplicateProtected authoredExtra target "Expr"
+      >>= either fail pure
+    requireHiddenSource "authored same-owner import has no protected occurrence slot" $
+      compile (PreparedProducts Nothing) Set.empty
+        (GeneratedScaffoldCompile secondRecipe (CheckedItemCompile [] Nothing []))
+        (Just hidden) target [] Nothing
     let qualifiedTemplate = unlines (take 5 (lines protected)
           ++ ["import qualified Tidepool.Internal.Resume as CapturedTemplate"] ++ drop 5 (lines protected))
     writeFile target qualifiedTemplate
@@ -1435,7 +1458,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let alteredOwner product' = product' {originalIfaceSha256=replicate 64 'f'}
         malformedScope = admittedScope {scopeProducts=map alteredOwner (scopeProducts admittedScope)}
     requireUserError "mismatched native product/interface seal"
-      "exact interface evidence is incomplete or lacks native module proof" $
+      "user error (exact interface evidence is incomplete or lacks native module proof)" $
       compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose malformedScope)
         (Just hidden) target [] Nothing
     supportText <- BSC.unpack <$> BS.readFile supportPath

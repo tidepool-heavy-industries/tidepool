@@ -1,5 +1,6 @@
 module Tidepool.CheckedRecipe
-  ( checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt
+  ( checkedItemCompilePurpose, checkedRecipeSource, checkedRecipeSourceWithLineOffset
+  , replaceRecipeMarker, writeCheckedItemReceipt
   ) where
 
 import Codec.CBOR.Encoding (encodeListLen, encodeString, encodeWord64)
@@ -18,7 +19,7 @@ import Tidepool.ExtractUtil (shaHex)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.TurnSource
   ( spliceTemplate, replaceTemplateMarker
-  , CompilerDefaultRecipe, qualifyCompilerDefault )
+  , CompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset )
 
 checkedRecipeAnnotations :: CheckedItemAdmission -> [(String,CheckedSignature)]
 checkedRecipeAnnotations admission =
@@ -35,7 +36,12 @@ checkedItemCompilePurpose admission = CheckedItemCompile annotations original va
 -- The admitted template is a versioned recipe input. Transform its markers
 -- before inserting authored bytes, so authored syntax is never rescanned.
 checkedRecipeSource :: CompilerDefaultRecipe -> [ModuleName] -> CheckedItemAdmission -> String -> String -> IO String
-checkedRecipeSource defaults namespaces admission template source = case itemKind admission of
+checkedRecipeSource defaults namespaces admission template source =
+  fst <$> checkedRecipeSourceWithLineOffset defaults namespaces admission template source
+
+checkedRecipeSourceWithLineOffset :: CompilerDefaultRecipe -> [ModuleName] -> CheckedItemAdmission
+  -> String -> String -> IO (String,Int)
+checkedRecipeSourceWithLineOffset defaults namespaces admission template source = case itemKind admission of
   "bind" -> do
     unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
       (fail "checked bind requires canonical recipe version one")
@@ -45,8 +51,8 @@ checkedRecipeSource defaults namespaces admission template source = case itemKin
         result = intercalate ", " (map fst aliases)
     amended <- if null aliases then pure template else replaceRecipeMarker "{{TURN_STMT}}"
       ("{{TURN_STMT}}\n; let { " ++ declarations ++ " }\n") template
-    prepared <- either fail pure (qualifyCompilerDefault defaults namespaces amended)
-    pure (spliceTemplate prepared source result)
+    (prepared,lineOffset) <- either fail pure (qualifyCompilerDefaultWithLineOffset defaults namespaces amended)
+    pure (spliceTemplate prepared source result,lineOffset)
   "expr" -> case checkedRecipeAnnotations admission of
     [(alias,_)] -> do
       observation <- maybe (fail "checked expression has no owning observation name") pure (itemObservationName admission)
@@ -60,8 +66,8 @@ checkedRecipeSource defaults namespaces admission template source = case itemKin
       when (null liftStatement) (fail "checked expression has no certified lift plan")
       let statement = "let { " ++ alias ++ " :: (); "
             ++ alias ++ " = (\n" ++ source ++ "\n) }\n; " ++ liftStatement
-      prepared <- either fail pure (qualifyCompilerDefault defaults namespaces template)
-      pure (spliceTemplate prepared statement observation)
+      (prepared,lineOffset) <- either fail pure (qualifyCompilerDefaultWithLineOffset defaults namespaces template)
+      pure (spliceTemplate prepared statement observation,lineOffset)
     _ -> fail "checked expression has no unique full signature"
   _ -> fail "checked declaration lacks an original identity certificate"
 
