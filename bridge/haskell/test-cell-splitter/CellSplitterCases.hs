@@ -14,11 +14,18 @@ import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
 import Data.Dynamic (fromDynamic)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as Text
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
 import GHC.Builtin.Types (intTy, intDataCon)
+import GHC.Builtin.Names (genClassKey)
+import GHC.Core.Class (className)
+import GHC.Core.InstEnv (is_cls, is_tys)
+import GHC.Core.TyCon (tyConName)
 import GHC.Core qualified as Core
 import GHC.Core.DataCon (dataConWorkId, dataConRepArgTys, dataConTheta)
 import GHC.Core.Coercion (mkPrimEqPred)
@@ -34,8 +41,8 @@ import GHC.Types.Var.Set (IdSet)
 import GHC.Types.Var (isId, isCoVar, varType, varName)
 import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
-import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString)
-import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env)
+import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString, nameUnique)
+import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env, tcg_insts)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
@@ -62,7 +69,8 @@ import Tidepool.TurnSource
   , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker )
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
-import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExtractUtil (getLibdir, shaHex)
+import Tidepool.Test.Runner (requiredInput)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope (readExactScope)
 import Tidepool.CompilerProducts (newPreparedOriginalInterfaceArtifacts)
@@ -70,7 +78,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , originalInterfaceBytes, originalInterfaceSha256 )
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
@@ -367,6 +375,64 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
   -- of all three mutable input files, without manufacturing a source row.
   let encoded = toStrictByteString (encodeFinalizedModuleArtifacts finalized)
   when (BS.null encoded) (fail "captured value finalization envelope is empty")
+  -- Decode the actual packet, rather than predicting its content-addressed
+  -- filenames. Both source and type-only rows must be owned by the new root.
+  let payload fields offset = case drop offset fields of
+        TString path : TString sha : _ -> pure (Text.unpack path,Text.unpack sha)
+        _ -> fail "captured payload descriptor is malformed"
+      modulePayload (TList fields) | length fields == 11 = do
+        ordinary <- mapM (payload fields) [3,6]
+        core <- case fields !! 9 of
+          TNull -> pure []
+          TList descriptor -> (:[]) <$> payload descriptor 0
+          _ -> fail "captured Core descriptor is malformed"
+        pure (ordinary ++ core)
+      modulePayload _ = fail "captured module row is malformed"
+      valuePayload (TList fields) | length fields == 9 = mapM (payload fields) [2,5]
+      valuePayload _ = fail "captured value row is malformed"
+  payloads <- case deserialiseFromBytes decodeTerm (BSL.fromStrict encoded) of
+    Right (remaining,TList [_,_,TList modules,TList values]) | BSL.null remaining, not (null values) ->
+      concat <$> sequence (map modulePayload modules ++ map valuePayload values)
+    _ -> fail "captured envelope lost its genuine type-only value row"
+  let projected = root </> "projected-packet"
+  moved <- materializeFinalizedModuleArtifacts projected finalized
+  unless (toStrictByteString (encodeFinalizedModuleArtifacts moved) == encoded)
+    (fail "packet custody changed captured descriptors or seals")
+  movedAgain <- materializeFinalizedModuleArtifacts projected finalized
+  unless (toStrictByteString (encodeFinalizedModuleArtifacts movedAgain) == encoded)
+    (fail "identical packet materialization changed its evidence")
+  forM_ payloads $ \(path,sha) -> do
+    original <- BS.readFile (root </> path)
+    owned <- BS.readFile (projected </> path)
+    unless (owned == original && shaHex owned == sha)
+      (fail "projected packet omitted or changed a captured payload")
+  let (changedPath,_) = head payloads
+  originalPayload <- BS.readFile (root </> changedPath)
+  when (BS.null originalPayload) (fail "captured payload is empty")
+  let changedOutput = BS.cons (BS.head originalPayload + 1) (BS.tail originalPayload)
+  BS.writeFile (projected </> changedPath) changedOutput
+  unchangedOrigin <- BS.readFile (root </> changedPath)
+  unless (unchangedOrigin == originalPayload)
+    (fail "packet output mutation also changed its independent original capture")
+  conflicting <- try (materializeFinalizedModuleArtifacts projected finalized)
+    `finally` BS.writeFile (projected </> changedPath) originalPayload
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  case conflicting of
+    Left _ -> pure ()
+    Right _ -> fail "conflicting existing packet bytes were replaced or accepted"
+  _ <- materializeFinalizedModuleArtifacts projected finalized
+  BS.appendFile (root </> changedPath) "changed"
+  changed <- try (materializeFinalizedModuleArtifacts (root </> "changed-packet") finalized)
+    `finally` BS.writeFile (root </> changedPath) originalPayload
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  case changed of
+    Left _ -> pure ()
+    Right _ -> fail "changed captured payload acquired new packet custody"
+  forM_ payloads $ \(path,_) -> removeFile (root </> path)
+  forM_ payloads $ \(path,sha) -> do
+    owned <- BS.readFile (projected </> path)
+    unless (shaHex owned == sha)
+      (fail "projected custody depended on the removed capture directory")
   -- Reinject an actually issued interface with altered nominal evidence. The
   -- source census and checking HPT still cannot authorize that sidecar.
   _ <- mkBoundBinders ["captured"] 1 root (pprPipelineResult producer)
@@ -1848,6 +1914,124 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       removeFile path
       createDirectory path
       pure path
+
+-- The first case is the retained public notebook input whose consumer
+-- derives demand Generic before GHC reports duplicate declarations. The
+-- variants distinguish actual class identities from their source spelling.
+explicitGenericDerivationRecovery :: IO ()
+explicitGenericDerivationRecovery = genericDerivationRecovery
+  "Notebook.cell.hs" ["ScopePing", "ScopeTools"] []
+
+qualifiedAndStandaloneGenericRecovery :: IO ()
+qualifiedAndStandaloneGenericRecovery = genericDerivationRecovery
+  "ResolvedVariants.cell.hs" ["Qualified", "Standalone", "Reexported"]
+  ["Automatic", "ForeignIdentity"]
+
+genericDerivationRecovery :: FilePath -> [String] -> [String] -> IO ()
+genericDerivationRecovery fixture explicit automatic =
+  withGenericCompiler fixture $ \compile plan -> do
+    -- The exact authored derives are valid without their generated duplicates.
+    -- Retain the automatic-only companions while checking this prerequisite.
+    (_, baseline) <- checkCellInstances compile (omitCellGenericDeclarations explicit plan)
+    assertGenericInstances (explicit ++ automatic) baseline
+    assertEqual "parser retains candidates until GHC resolves their class" True
+      (all (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations plan)) (explicit ++ automatic))
+    (accepted, result) <- checkCellInstances compile plan
+    assertEqual "authored Generic keeps its unique native instance" False
+      (any (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted)) explicit)
+    assertEqual "missing Generic and unrelated same-spelling classes retain companions" True
+      (all (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted)) automatic)
+    assertGenericInstances (explicit ++ automatic) result
+    -- The accepted source also succeeds without the retry loop, so its
+    -- validity cannot depend on swallowing a failed compiler operation.
+    ordinary <- compile accepted
+    assertGenericInstances (explicit ++ automatic) ordinary
+
+authoredGenericConflictsRemainErrors :: IO ()
+authoredGenericConflictsRemainErrors =
+  withGenericCompiler "AuthoredConflict.cell.hs" $ \compile plan -> do
+    let requireRefusal :: Either SomeException result -> IO ()
+        requireRefusal outcome = case outcome of
+          Right _ -> fail "conflicting authored Generic instances were accepted"
+          Left failure -> case fromException failure of
+            Just sourceError -> requireSourceDiagnostics (diagsFromSourceError sourceError)
+            Nothing -> case fromException failure of
+              Just (DependencySourceFailure diagnostics) -> requireSourceDiagnostics diagnostics
+              _ -> fail ("authored Generic conflict lost its source failure: " ++ show failure)
+        requireSourceDiagnostics diagnostics = unless
+          (any ((== DiagError) . dSeverity) diagnostics)
+          (fail "authored Generic refusal has no native error diagnostic")
+    -- The same target and class compile with one real authored instance
+    -- before either conflict refusal is allowed to satisfy this control.
+    source <- readFile "test-cell-splitter/fixtures/explicit-generic/AuthoredConflictBaseline.cell.hs"
+    baselinePlan <- genericDeclarationPlan source
+    (_, baseline) <- checkCellInstances compile (omitCellGenericDeclarations ["Conflicting"] baselinePlan)
+    assertGenericInstances ["Conflicting"] baseline
+    -- Removing the generated candidate leaves the real authored conflict.
+    -- Recovery must preserve that refusal rather than authorizing either one.
+    authored <- try (compile (omitCellGenericDeclarations ["Conflicting"] plan))
+      :: IO (Either SomeException CheckedEnvironmentResult)
+    requireRefusal authored
+    recovered <- try (checkCellInstances compile plan)
+      :: IO (Either SomeException (CellSourcePlan, CheckedEnvironmentResult))
+    requireRefusal recovered
+
+withGenericCompiler
+  :: FilePath
+  -> ((CellSourcePlan -> IO CheckedEnvironmentResult) -> CellSourcePlan -> IO result)
+  -> IO result
+withGenericCompiler fixture use = bracket structuralDisplayDirectory removeDirectoryRecursive $ \root -> do
+  effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
+  source <- readFile ("test-cell-splitter/fixtures/explicit-generic" </> fixture)
+  plan <- genericDeclarationPlan source
+  let includes = [root, "test-cell-splitter", effects, prelude]
+      path = root </> "GenericDerivation.hs"
+  withResidentPipelineSelectedRequests includes $ \runRequest ->
+    runRequest (pure ()) $ \compiler -> do
+      let compile current = do
+            rendered <- either fail pure (renderCellCheckSource genericDerivationTemplate current)
+            writeFile path rendered
+            compiler CheckedEnvironment mempty
+              (GeneratedInstanceCheck (cellGeneratedInstanceRecipe current) OriginalDeclarationCompile)
+              Nothing path includes Nothing
+      use compile plan
+
+-- Match Main's declaration preparation boundary. The import prologue and
+-- executable runs have their own segments; companion refinement consumes
+-- one authored declaration run rather than a reconstructed whole-cell plan.
+genericDeclarationPlan :: String -> IO CellSourcePlan
+genericDeclarationPlan source = do
+  whole <- analyzeOrderedCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
+  case [segment | segment <- cellInferenceSegments whole
+    , not (null (cellPlanGenericDeclarations segment))] of
+    [segment] -> pure segment
+    _ -> fail "Generic fixture did not select one original declaration segment"
+
+assertGenericInstances :: [String] -> CheckedEnvironmentResult -> IO ()
+assertGenericInstances targets result = do
+  let environment = crTargetTcGblEnv result
+      owned = [occNameString (nameOccName (tyConName constructor))
+        | instance' <- tcg_insts environment
+        , nameUnique (className (is_cls instance')) == genClassKey
+        , ty <- is_tys instance'
+        , Just (constructor, _) <- [splitTyConApp_maybe ty]
+        , nameModule_maybe (tyConName constructor) == Just (tcg_mod environment)]
+  unless (not (null targets)) (fail "Generic native control selected no targets")
+  forM_ targets $ \target -> assertEqual ("unique native Generic instance for " ++ target)
+    1 (length (filter (== target) owned))
+
+genericDerivationTemplate :: String
+genericDerivationTemplate = unlines
+  [ "{-# LANGUAGE DeriveGeneric, StandaloneDeriving, FlexibleInstances, FlexibleContexts, UndecidableInstances #-}"
+  , "{{CELL_PRAGMAS}}"
+  , "module GenericDerivation where"
+  , "{{CELL_IMPORTS}}"
+  , "{{CELL_DECLS}}"
+  , "__tidepoolCellExpression :: value -> Maybe ()"
+  , "__tidepoolCellExpression _ = pure ()"
+  , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
+  ]
 
 data DisplayTestScope = OrdinaryDisplayTest | LegacyDisplayScopeTest
 

@@ -19,7 +19,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (decodeListLen, decodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
-import Data.Bits (testBit)
+import Data.Bits (testBit, xor)
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.MVar (newMVar, modifyMVar_, readMVar)
@@ -108,7 +108,7 @@ import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
-  ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
+  ( CertifiedOriginalProducts, writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
   , requireOriginalExecutableGlobals, certifiedExecutionSource
   , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
@@ -3055,6 +3055,39 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (emittedInventory == encodeModuleProducts
       (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
     fail "retained original group encodings changed the emitted native inventory"
+  let packetDirectory = captureDirectory </> "projected-packet"
+  packetCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  let packetFinalized = certifiedFinalizedArtifacts packetCertificate
+  withFileObservations $ \observations ->
+    forM_ (Map.elems (finalizedLocalAdmissions packetFinalized)) $ \local -> do
+      let (interface,_,_) = localFinalizedInterface local
+      unless (takeDirectory (exactPath interface) == packetDirectory)
+        (fail "reused original packet retained another packet's payload custody")
+      revalidateLocalFinalizedAdmissionWith observations local >>= either fail pure
+  unless (map moduleProductInput (certifiedOriginalProducts packetCertificate)
+      == map moduleProductInput (certifiedOriginalProducts currentCertificate)) $
+    fail "packet payload custody changed the issued original group inventory"
+  let originAdmissions = Map.elems (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate))
+  originInterface <- case originAdmissions of
+    local : _ -> pure (let (interface,_,_) = localFinalizedInterface local in interface)
+    [] -> fail "reused packet control has no actual finalized source owner"
+  originBytes <- BS.readFile (exactPath originInterface)
+  when (BS.null originBytes) (fail "captured original interface is empty")
+  let refusedDirectory = captureDirectory </> "changed-origin-packet"
+  BS.writeFile (exactPath originInterface) (BS.cons (BS.head originBytes `xor` 1) (BS.tail originBytes))
+  changedOrigin <- try (writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+      refusedDirectory paired (Just issuedContext) [("usesGood",currentProgram)])
+    `finally` BS.writeFile (exactPath originInterface) originBytes
+    :: IO (Either SomeException CertifiedOriginalProducts)
+  case changedOrigin of
+    Left _ -> pure ()
+    Right _ -> fail "reused inventory published a packet from changed captured origin bytes"
+  restoredCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  unless (map moduleProductInput (certifiedOriginalProducts restoredCertificate)
+      == map moduleProductInput (certifiedOriginalProducts currentCertificate)) $
+    fail "restored capture did not independently reproduce the original packet"
   pendingBodyCache <- newPreparedBodyCache
   pendingRawCache <- newOriginalProjectionCollector
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do

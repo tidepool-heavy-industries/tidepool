@@ -332,50 +332,18 @@ impl CellCheck {
             TurnKind::Bind => tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
             TurnKind::Expr => tidepool_toolchain::checked_cell::CheckedItemKind::Expression,
         };
-        let pins = if observation.verdict.kind == TurnKind::Bind {
-            observation
-                .verdict
-                .binders
-                .iter()
-                .map(|binder| {
-                    let matches = self
-                        .pins
-                        .iter()
-                        .filter(|pin| {
-                            pin.key == format!("__tidepool_cell_pin_{item_index}_{binder}")
-                        })
-                        .collect::<Vec<_>>();
-                    match matches.as_slice() {
-                        [pin] => Ok(encode_checked_pin(pin)),
-                        _ => Err(CompileError::ExtractFailed(
-                            "checked pin observation missing or duplicated".into(),
-                        )),
-                    }
-                })
-                .collect::<Result<Vec<_>, CompileError>>()?
-        } else {
-            Vec::new()
-        };
+        let pins = self.pins.iter().map(encode_checked_pin).collect::<Vec<_>>();
         let expressions = self
             .expression_plans
             .iter()
-            .filter(|plan| plan.key == format!("__tidepool_cell_expr_{item_index}"))
+            .map(encode_checked_expression)
             .collect::<Vec<_>>();
-        let expression = match expressions.as_slice() {
-            [] => None,
-            [plan] => Some(encode_checked_expression(plan)),
-            _ => {
-                return Err(CompileError::ExtractFailed(
-                    "checked expression observation duplicated".into(),
-                ))
-            }
-        };
         item.validate_observations(
             &observation.source,
             kind,
             &observation.verdict.binders,
             &pins,
-            expression.as_ref(),
+            &expressions,
         )?;
         Ok(item)
     }
@@ -7695,7 +7663,7 @@ mod tests {
                 tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
                 item.binders(),
                 &[],
-                None
+                &[]
             )
             .is_err());
         assert!(item.signatures()[0]

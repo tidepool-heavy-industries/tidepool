@@ -4,7 +4,7 @@
 -- | Captured finalization files and their exact dependency seals. The receipt
 -- names these bounded files; it never duplicates their payloads inline.
 module Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts
   , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals, finalizedValueInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
@@ -15,7 +15,7 @@ module Tidepool.FinalizedModuleArtifacts
 import Codec.CBOR.Decoding qualified as D
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding
-import Control.Exception (Exception, IOException, evaluate, throwIO, try)
+import Control.Exception (Exception, IOException, bracket, evaluate, throwIO, try)
 import Control.Monad (forM, forM_, unless, when, replicateM)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -30,12 +30,15 @@ import GHC.Unit.Module (ModuleName, moduleName, moduleUnit, moduleNameString, mk
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitIdString, unitString, stringToUnit)
 import Numeric (showHex)
-import System.Directory (makeAbsolute)
+import System.Directory (makeAbsolute, createDirectoryIfMissing, removeFile)
 import System.FilePath ((</>), normalise, isAbsolute)
+import System.IO.Error (isAlreadyExistsError)
+import System.IO (openBinaryTempFile, hClose, hIsClosed)
+import System.Posix.Files (createLink, getSymbolicLinkStatus, isRegularFile)
 import System.Mem.StableName (StableName, makeStableName)
 
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
-import Tidepool.BoundedRead (FileObservations, FileObservation(..), withFileObservations, observeFile)
+import Tidepool.BoundedRead (FileObservations, FileObservation(..), withFileObservations, observeFile, readFileAtMost)
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces )
 import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
@@ -64,6 +67,7 @@ data FinalizedArtifactFailure
   | InvalidFinalizedPackage String String
   | FinalizedPayloadTooLarge String
   | FinalizedInventoryTooLarge
+  | CapturedFinalizedPayloadChanged FilePath
   deriving Show
 instance Exception FinalizedArtifactFailure
 
@@ -218,6 +222,56 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
       BS.writeFile (absoluteDirectory </> relative) bytes
       pure (CapturedPayload relative sha (BS.length bytes))
     size (CapturedPayload _ _ count) = count
+
+-- Each packet owns every relative payload it encodes, even when projection
+-- reuses a finalization captured for another packet in the same transaction.
+-- Destination-local exclusive publication preserves the captured bytes and
+-- compiler-object identity without requiring the capture filesystem to match.
+materializeFinalizedModuleArtifacts :: FilePath -> FinalizedModuleArtifacts -> IO FinalizedModuleArtifacts
+materializeFinalizedModuleArtifacts directory artifacts@(FinalizedModuleArtifacts units captured values) =
+  case captured of
+    Nothing -> pure artifacts
+    Just (CapturedModules source rows) -> do
+      destination <- normalise <$> makeAbsolute directory
+      if destination == source then pure artifacts else do
+        createDirectoryIfMissing True destination
+        let payloads = concat
+              [[(interfaceLimit,interface),(packageLimit,package)]
+                ++ maybe [] (\payload -> [(coreLimit,payload)]) core
+              | CapturedModule _ _ _ interface package core _ _ <- rows]
+              ++ concat [[(interfaceLimit,interface),(packageLimit,package)]
+                | CapturedValueInterface _ _ interface package _ <- values]
+        forM_ payloads $ \(limit,payload@(CapturedPayload _ sha count)) -> do
+          let original = payloadPath source payload
+              output = payloadPath destination payload
+          when (count <= 0 || count > limit) $
+            throwIO (CapturedFinalizedPayloadChanged original)
+          originalStatus <- getSymbolicLinkStatus original
+          unless (isRegularFile originalStatus) $
+            throwIO (CapturedFinalizedPayloadChanged original)
+          bytes <- readFileAtMost original (count + 1)
+          unless (BS.length bytes == count && digest bytes == sha) $
+            throwIO (CapturedFinalizedPayloadChanged original)
+          bracket (openBinaryTempFile destination "finalized-payload.tmp")
+            (\(temporary,handle) -> do
+              closed <- hIsClosed handle
+              unless closed (hClose handle)
+              removeFile temporary)
+            (\(temporary,handle) -> do
+              BS.hPut handle bytes
+              hClose handle
+              linked <- try (createLink temporary output) :: IO (Either IOException ())
+              case linked of
+                Left failure | isAlreadyExistsError failure -> pure ()
+                             | otherwise -> throwIO failure
+                Right () -> pure ())
+          outputStatus <- getSymbolicLinkStatus output
+          unless (isRegularFile outputStatus) $
+            throwIO (CapturedFinalizedPayloadChanged output)
+          owned <- readFileAtMost output (count + 1)
+          unless (owned == bytes) $
+            throwIO (CapturedFinalizedPayloadChanged output)
+        pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values)
 
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =
