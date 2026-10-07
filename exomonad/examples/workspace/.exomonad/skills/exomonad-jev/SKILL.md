@@ -35,6 +35,17 @@ one round trip. Both return a typed Jev call error or a response. Use
 you need its model, usage or diagnostics. Read the typed error and fall back
 to your own policy; never retry blindly.
 
+Call errors retain preparation, typed host cause, and response decoding as
+separate cases. A circuit-open result includes its retry delay; client setup
+failure remains distinct from an unconfigured endpoint. Usage counts are
+optional: unknown or malformed usage stays unknown, and measured zero is
+`Just 0`. `J.mapResponse` projects the answer while preserving model, usage,
+diagnostics and preview facts.
+
+For recording and replay, retain `J.prepare model state packet` once.
+`J.request prepared` reads its checked wire body; `J.decode prepared body`
+uses the original typed decoder and payloads.
+
 ## Compose the questions
 
 Choose the question's structure before its wording. A `choice` models competing
@@ -131,7 +142,10 @@ whatever it is.
 
 A policy sets three floors: mass, margin and confidence. `J.lenient`,
 `J.careful` and `J.strict` provide increasing thresholds; choose them against
-actual decisions and outcomes. `J.handle` follows the winner directly;
+actual decisions and outcomes. Policy constructors are abstract;
+`J.customPolicy mass margin confidence` validates a `Custom` policy. A nominal
+policy tag records which policy ran; it does not grant authority or establish
+semantic certainty. `J.handle` follows the winner directly;
 `J.settle` adds a doubt branch when the program benefits from another read,
 another question or a handback. `J.settle policy answer
 handlers` returns `Either J.Doubt (J.Settled p r)`: `Right settled` carries
