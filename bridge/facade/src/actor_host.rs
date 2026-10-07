@@ -1030,25 +1030,9 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
     }
 }
 
-fn worker_launch_resolver(config: &ActorHostConfig) -> exomonad_actor::WorkerLaunchResolver {
-    let config = config.clone();
-    let base = FrozenBasePrompt::selected_body(
-        config
-            .workspace_inputs
-            .as_ref()
-            .and_then(|inputs| inputs.prompts.get("base"))
-            .map(String::as_str),
-        config.jev_surface(),
-    );
-    let fingerprint = blake3::hash(base.as_bytes()).to_hex().to_string();
-    Arc::new(move |request| resolve_worker_launch(&config, request, &fingerprint))
-}
-
 /// Resolve a requested `Model` (an alias into the frozen workspace's model
 /// table, or an already-literal provider model name) against the host
-/// config. Shared by the real launch preview below and by recipe checks'
-/// `RecipeActivation`, so both report the same resolved model string instead
-/// of one of them echoing the alias back unresolved.
+/// config. Actual launches and recipe checks use the same frozen model table.
 pub(crate) fn resolve_model(
     config: &ActorHostConfig,
     model: &exomonad_actor::Model,
@@ -1062,42 +1046,6 @@ pub(crate) fn resolve_model(
             .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}")),
         exomonad_actor::Model::Literal(model) => Ok(model.clone()),
     }
-}
-
-fn resolve_worker_launch(
-    config: &ActorHostConfig,
-    request: &exomonad_actor::WorkerLaunchRequest,
-    base_fingerprint: &str,
-) -> Result<exomonad_actor::WorkerLaunchPreview, String> {
-    let mut instructions = developer_instructions_selected(
-        &request.capabilities,
-        config.workspace_inputs.as_ref(),
-        request.instructions.as_deref(),
-    );
-    append_inheritance_authority(&mut instructions);
-    let model = request
-        .model
-        .as_ref()
-        .map(|model| resolve_model(config, model))
-        .transpose()?;
-    Ok(exomonad_actor::WorkerLaunchPreview {
-        model: model.or_else(|| {
-            (request.context == exomonad_actor::ForkContext::SelectedContext)
-                .then(|| config.model.clone())
-        }),
-        effort: request.effort.unwrap_or(config.effort),
-        instructions,
-        base_fingerprint: base_fingerprint.into(),
-        workspace_identity: config
-            .workspace_inputs
-            .as_ref()
-            .map(|inputs| inputs.identity().into()),
-        modules: config
-            .workspace_inputs
-            .as_ref()
-            .map(|inputs| inputs.import_modules().map(str::to_owned).collect())
-            .unwrap_or_default(),
-    })
 }
 
 fn append_inheritance_authority(instructions: &mut String) {
@@ -2061,13 +2009,12 @@ async fn run_owned(
         bindings.clone(),
         runtime_namespace(&run_root),
     );
-    let (forest, deployments) = ResidentForest::new_with_launch_resolver(
+    let (forest, deployments) = ResidentForest::new(
         source,
         descriptor.placement().session,
         machine,
         Some(worktree_admission.clone()),
         host_incarnation.incarnation(),
-        Some(worker_launch_resolver(&config)),
     );
     let mut forest = forest
         .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(

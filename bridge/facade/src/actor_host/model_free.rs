@@ -134,7 +134,7 @@ impl ModelFreeSession {
                 machine.run_startup_entry(entry)?
             }
         };
-        let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
+        let (forest, mut deployments) = ResidentForest::new(
             source,
             descriptor.placement().session,
             machine,
@@ -145,7 +145,6 @@ impl ModelFreeSession {
                 runtime_namespace(session_root.path()),
             ))),
             exomonad_actor::Incarnation::FIRST,
-            Some(worker_launch_resolver(config)),
         );
         let returned_child_session_factory = Arc::clone(&child_session_factory);
         let mut forest = forest
