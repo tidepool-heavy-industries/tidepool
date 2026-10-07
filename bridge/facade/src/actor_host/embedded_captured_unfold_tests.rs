@@ -15,6 +15,7 @@ const PENDING_CALL: &str = "captured-unfold-and-await";
 const REUSE_CALL: &str = "reuse-failed-cell-capture";
 const RESUME_INPUT: &str = "resume interrupted captured fixture";
 const LOCAL_STARTUP_CALL: &str = "read-started-local-actors";
+const INTENTIONAL_PARENT_FAILURE: &str = "M2_INTENTIONAL_PARENT_EXECUTION_FAILURE";
 
 const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 
@@ -1482,6 +1483,9 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .expect("failed creator retains structured publication");
                     assert_eq!(metadata["publication"]["status"], "notPublished");
                     assert_eq!(metadata["publication"]["reason"], "failed");
+                    assert_eq!(metadata["diagnostic"]["class"], "runtime", "{metadata}");
+                    assert_eq!(metadata["diagnostic"]["phase"], "run", "{metadata}");
+                    assert!(failure.to_string().contains(INTENTIONAL_PARENT_FAILURE));
                     assert!(metadata["items"]
                         .as_array()
                         .is_some_and(|items| items.iter().any(|item| item["operations"]
@@ -1992,11 +1996,8 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 "{rejected}"
             );
             assert_eq!(rejected["publication"]["reason"], "rejected", "{rejected}");
-            let diagnostics = rejected.to_string();
-            assert!(
-                diagnostics.contains("Bool") && diagnostics.contains("Int"),
-                "{rejected}"
-            );
+            super::test_campaign::require_ghc_compile_rejection(&rejected, &["Bool", "Int"])
+                .unwrap_or_else(|error| panic!("{error}"));
             assert_eq!(
                 binding.inbox.watermark(),
                 1,

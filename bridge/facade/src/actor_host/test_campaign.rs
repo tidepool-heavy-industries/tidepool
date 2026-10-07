@@ -24,6 +24,41 @@ pub(super) fn original_tool_call(
     )
 }
 
+/// Require the structured receipt shape produced by an authored GHC source
+/// rejection. Workbench receipts do not expose the full failure envelope, but
+/// a compile-layer rejection with an authored error diagnostic comes from the
+/// compiler's structured diagnostics path.
+pub(super) fn require_ghc_compile_rejection(
+    response: &serde_json::Value,
+    required_fragments: &[&str],
+) -> Result<(), String> {
+    let items = response["items"]
+        .as_array()
+        .ok_or_else(|| "workbench rejection has no item receipts".to_owned())?;
+    let found = items.iter().any(|item| {
+        item["status"] == "rejected"
+            && item["failureLayer"] == "compile"
+            && item["diagnostics"].as_array().is_some_and(|diagnostics| {
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic["severity"] == "error"
+                        && diagnostic["location"]["kind"] == "authored"
+                        && diagnostic["message"].as_str().is_some_and(|message| {
+                            required_fragments
+                                .iter()
+                                .all(|fragment| message.contains(fragment))
+                        })
+                })
+            })
+    });
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "workbench response lacks an authored GHC compile error containing {required_fragments:?}: {response}"
+        ))
+    }
+}
+
 // Semantic acceptance includes cold whole-cell compilation, validation and
 // native attachment in a debug build. Performance gates keep their own budgets.
 pub(super) const COLD_DEBUG_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
@@ -977,6 +1012,35 @@ pub(super) fn hosted_test_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ghc_compile_rejection_requires_authored_error_diagnostic_data() {
+        let response = serde_json::json!({
+            "items": [{
+                "status": "rejected",
+                "failureLayer": "compile",
+                "diagnostics": [{
+                    "severity": "error",
+                    "location": {"kind": "authored", "label": "<cell>"},
+                    "message": "Couldn't match type Bool with Int"
+                }]
+            }]
+        });
+        assert!(require_ghc_compile_rejection(&response, &["Bool", "Int"]).is_ok());
+
+        let wrong_cause = serde_json::json!({
+            "items": [{
+                "status": "rejected",
+                "failureLayer": "install",
+                "diagnostics": [{
+                    "severity": "error",
+                    "location": {"kind": "foreign", "file": "Generated.hs"},
+                    "message": "Couldn't match type Bool with Int"
+                }]
+            }]
+        });
+        assert!(require_ghc_compile_rejection(&wrong_cause, &["Bool", "Int"]).is_err());
+    }
     use harness::transport::{ResponsesRequest, TransportError};
 
     fn request() -> ResponsesRequest {

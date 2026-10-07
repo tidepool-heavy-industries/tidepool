@@ -36,6 +36,6 @@ do
   result <- awaitWatch replies
   case (inheritedRefusal, deferredRefusal, result) of
     (Left (UnfoldUncapturedContext _), Left (UnfoldDeferredInvocationOwned _), Right (42, 42)) ->
-      error "intentional captured parent Haskell execution failure" >> pure True
-    _ -> error "captured same-cell reply contract failed" >> pure True
+      error "M2_INTENTIONAL_PARENT_EXECUTION_FAILURE" >> pure True
+    _ -> display False
 capturedSuffix <- pure (99 :: Int)

@@ -10,7 +10,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     use super::hosted_test_context::HostedTestRuntime;
     use super::test_campaign::{
         hosted_script_provider, hosted_test_settings, next_hosted_script_round,
-        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+        require_ghc_compile_rejection, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
     };
     use exomonad_tool::ActorEffectKey;
 
@@ -101,6 +101,8 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
             assert_eq!(denied["status"], "rejected", "{denied}");
             assert_eq!(denied["publication"]["status"], "notPublished", "{denied}");
             assert_eq!(denied["publication"]["reason"], "rejected", "{denied}");
+            require_ghc_compile_rejection(&denied, &["Journal"])
+                .unwrap_or_else(|error| panic!("{error}"));
             child_after.call(
                 "selected-typed-reply",
                 "import qualified Exomonad.Contrib.Types as Types\nrespond (Types.Produced (Types.Candidate (Types.taskSource sessionInput) [Types.obligation sessionInput] []))",
