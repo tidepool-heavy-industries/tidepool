@@ -8,7 +8,7 @@ do
             }
         }
   started <- send (Core.AgentLaunchSpawnWith
-    (Core.CapturedSpawn "CHECKPOINT_TOKEN") (\_ -> installSpec @'[] actualSpec)
+    (Core.CapturedSpawn "CHECKPOINT_TOKEN") (\_ -> installSpec @'[] actualSpec >> Agents.installRequestReceiver)
     (Core.ForkDirectory Core.CurrentCheckout) [] (Just "CHILD_LABEL")
     Nothing Nothing Nothing CHILD_LIFETIME Nothing)
   case started of

@@ -2728,6 +2728,8 @@ pub struct ResidentKernelBehavior<H, O> {
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
     explicit_installer: Option<Arc<RootCustody>>,
+    prepared_request_receiver: Option<crate::resident_workbench::PreparedRequestReceiver>,
+    request_receiver_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     fresh_context_seed: Option<String>,
     spawn_source: Option<crate::CheckpointSourceLayer>,
     spawn_helper_branch: Option<String>,
@@ -3569,6 +3571,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             environment,
             boot: Some(boot),
             explicit_installer: None,
+            prepared_request_receiver: None,
+            request_receiver_scope: None,
             fresh_context_seed: None,
             spawn_source: None,
             spawn_helper_branch: None,
@@ -4654,6 +4658,8 @@ where
     fn release_session_state(&mut self) {
         self.descriptor.source_imports().release_capture();
         self.explicit_installer.take();
+        self.prepared_request_receiver.take();
+        self.request_receiver_scope.take();
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();
@@ -7470,16 +7476,18 @@ where
         let compiler_owner =
             crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit());
         let compiled_tools = match self.explicit_installer.as_ref() {
-            Some(installer) => {
-                compiler_owner
-                    .scope(application_workbench.prepare_explicit_tools(
-                        compile_context.clone(),
-                        self.spec_installs,
-                        self.descriptor.capabilities().effect_keys().to_vec(),
-                        Arc::clone(installer),
-                    ))
-                    .await
-            }
+            Some(installer) => compiler_owner
+                .scope(application_workbench.prepare_explicit_application(
+                    compile_context.clone(),
+                    self.spec_installs,
+                    self.descriptor.capabilities().effect_keys().to_vec(),
+                    Arc::clone(installer),
+                ))
+                .await
+                .map(|(tools, receiver)| {
+                    self.prepared_request_receiver = Some(receiver);
+                    tools
+                }),
             None => {
                 compiler_owner
                     .scope(application_workbench.prepare_tools(
@@ -7626,8 +7634,34 @@ where
             let installation = self
                 .prepare_interactive_policy(kernel, context, None)
                 .await?;
+            let receiver = self.prepared_request_receiver.take().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "public spawn completed tools without its request receiver".into(),
+                )
+            })?;
+            // Receiver source custody survives replacement of the independently installed tools.
+            self.request_receiver_scope = Some(receiver.scope);
+            let outcome = self
+                .environment
+                .runner
+                .run_rooted_entry(
+                    context.clone(),
+                    receiver.entry,
+                    context.placement.resource_scope,
+                )
+                .await?;
+            let boundary = self
+                .environment
+                .runner
+                .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+                .await?;
+            let ResidentActorBoundary::Receive(receiver) = boundary else {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "public spawn request driver did not install its mailbox receiver".into(),
+                ));
+            };
+            self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
             self.commit_interactive_installation(kernel, context, installation)?;
-            self.set_standing(context.actor, ResidentStanding::Workbench);
             return Ok(KernelStep::Continue(()));
         }
         if matches!(boot, ResidentBoot::Workbench) {

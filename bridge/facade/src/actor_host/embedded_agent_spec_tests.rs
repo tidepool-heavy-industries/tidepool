@@ -294,6 +294,7 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_after.assert_value("supplied-first-request", "True");
             let child_round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            let first_session = child_round.request.session_id.clone();
             assert!(child_round
                 .request
                 .tools
@@ -315,7 +316,10 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
                 before_call,
                 "first typed handler uses its installed code"
             );
-            child_after.call("supplied-typed-response", "respond (111 :: Int)");
+            child_after.call(
+                "supplied-typed-response",
+                "respond (sessionInput + 101 :: Int)",
+            );
             let child_after = next_hosted_script_round(&mut requests, &mut pending, &child).await;
             assert_eq!(
                 child_after.settled_output("supplied-typed-response")["status"],
@@ -326,8 +330,132 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
                 "supplied-observe-result",
                 include_str!("fixtures/supplied_live_observe.hs"),
             );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("supplied-observe-result", "True");
+            root_after.call(
+                "supplied-second-request",
+                include_str!("fixtures/supplied_live_request_again.hs"),
+            );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("supplied-second-request", "True");
+            let second_child_round =
+                next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_eq!(second_child_round.request.session_id, first_session);
+            assert!(second_child_round
+                .request
+                .tools
+                .iter()
+                .any(|tool| tool["name"] == "distinctive"));
+            second_child_round.function(
+                "supplied-second-distinctive-call",
+                "distinctive",
+                serde_json::json!({"number":20,"hold":false}),
+            );
+            let second_child_after =
+                next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_supplied_answer(
+                &second_child_after.settled_output("supplied-second-distinctive-call"),
+                "121",
+            );
+            second_child_after.call(
+                "supplied-second-typed-response",
+                "respond (sessionInput + 101 :: Int)",
+            );
+            let second_child_after =
+                next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_eq!(
+                second_child_after.settled_output("supplied-second-typed-response")["status"],
+                "replied"
+            );
+            second_child_after.finish();
+            root_after.call(
+                "supplied-observe-second-result",
+                include_str!("fixtures/supplied_live_observe_again.hs"),
+            );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("supplied-observe-result", "True");
+            root_done.assert_value("supplied-observe-second-result", "True");
+            root_done.finish();
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn supplied_spec_request_queued_in_spawn_cell_reaches_installed_receiver() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 3);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_supplied_spec(config);
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Spawn a supplied spec and immediately send it typed work.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = std::collections::VecDeque::new();
+            let root_round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_round.call(
+                "supplied-immediate-spawn-and-request",
+                include_str!("fixtures/supplied_live_spawn_request_same_cell.hs"),
+            );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("supplied-immediate-spawn-and-request", "True");
+
+            let child_node = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.label == "supplied-live-immediate")
+                .expect("same-cell spawn commits its supplied child");
+            assert_eq!(child_node.creator, Some(host.context.actor.identity()));
+            assert_eq!(
+                child_node.context_parent, None,
+                "FreshCtx selects fresh context"
+            );
+            let child = child_path(&host.context, child_node.actor);
+            let child_round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert!(child_round
+                .request
+                .tools
+                .iter()
+                .any(|tool| tool["name"] == "distinctive"));
+            let before_call = tidepool_extract_cmd::extract_spawn_count();
+            child_round.function(
+                "supplied-immediate-distinctive-call",
+                "distinctive",
+                serde_json::json!({"number":30,"hold":false}),
+            );
+            let child_after = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_supplied_answer(
+                &child_after.settled_output("supplied-immediate-distinctive-call"),
+                "131",
+            );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                before_call,
+                "immediate typed handler uses its installed code"
+            );
+            child_after.call(
+                "supplied-immediate-typed-response",
+                "respond (sessionInput + 101 :: Int)",
+            );
+            let child_after = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_eq!(
+                child_after.settled_output("supplied-immediate-typed-response")["status"],
+                "replied"
+            );
+            child_after.finish();
+            root_after.call(
+                "supplied-observe-immediate-result",
+                include_str!("fixtures/supplied_live_observe_immediate.hs"),
+            );
+            let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_done.assert_value("supplied-observe-immediate-result", "True");
             root_done.finish();
         })
     })

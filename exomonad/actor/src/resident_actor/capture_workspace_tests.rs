@@ -145,6 +145,10 @@ impl CaptureFixture {
         );
         let preamble =
             insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
+        let preamble = insert_preamble_imports(
+            &preamble,
+            "qualified Tidepool.Actors.Internal.Agent as Agents",
+        );
         let root = tempfile::tempdir().expect("session root");
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())

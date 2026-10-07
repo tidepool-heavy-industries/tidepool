@@ -44,6 +44,7 @@ import Tidepool.Agent.Contract
 import Tidepool.Agent.Launch hiding (workspaceWire)
 import qualified Tidepool.Agent.Launch as Launch
 import Tidepool.Agent.Ref.Internal (AgentRef (..), agentIdentity)
+import Tidepool.Actors.Internal.Agent (installRequestReceiver)
 import Tidepool.Effects.Row (KnownEffects (knownEffects), effectKeys)
 import Tidepool.Effects.Core
   ( AgentLaunch (..), CheckpointRefusal, Model, ForkEffort
@@ -139,7 +140,9 @@ spawnSubagent
 spawnSubagent context workspace options = do
   admitted <- send (AgentLaunchSpawnWith
     (contextWire context)
-    (\_ -> installSpec @childEffects (spawnSpec options))
+    (\_ -> do
+      installSpec @childEffects (spawnSpec options)
+      installRequestReceiver)
     (Launch.workspaceWire workspace)
     (effectKeys (knownEffects @childEffects))
     (spawnLabel options)

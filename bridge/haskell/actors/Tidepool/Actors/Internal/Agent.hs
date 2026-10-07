@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -29,6 +30,7 @@ module Tidepool.Actors.Internal.Agent
   , StopOutcome (..), stopAgent
   , AgentRetentionError (..), retainAgent
   , sendMessage, parentAgent, pollNotification
+  , installRequestReceiver, installRequestReceiverSited
   , NotificationReceipt, NotificationError (..), NotificationState (..)
   ) where
 
@@ -52,7 +54,7 @@ import Tidepool.Inspection
   ( Display (..), DisplayRoot (..), DisplayTree (..), PageDisplay (..)
   , opaqueHandle, pageWithContinuation )
 import Tidepool.Effects.Core
-  ( AgentControl (..), AgentInspection (..), Notifications (..)
+  ( AgentControl (..), AgentInspection (..), AgentTools, Notifications (..)
   , NotificationError (..), NotificationState (..), AgentStopControlOutcome (..)
   , WorkerLifetime, AgentRetentionError (..)
   , AgentDisposition (..), AgentRosterEntry (..), AgentRosterState (..)
@@ -62,6 +64,26 @@ import Tidepool.Internal.ActorRef (actorAddress)
 import Tidepool.Internal.RequestSite (RequestSite)
 import Tidepool.Duration (Duration, milliseconds, minutes, seconds)
 import Tidepool.Worktree (observeSubmission, worktreeHead, worktreeId)
+
+-- | Register the fixed request receiver during child activation. The
+-- receiver's effect row is carried by its own live callback, independent of
+-- the selected effects used to install the child's tool policy.
+{-# OPAQUE installRequestReceiver #-}
+installRequestReceiver :: Member AgentTools effects => Eff effects ()
+installRequestReceiver = installRequestReceiverSited
+  (error "installRequestReceiver: extractor must assign a typed site")
+
+{-# OPAQUE installRequestReceiverSited #-}
+installRequestReceiverSited
+  :: Member AgentTools effects
+  => RequestSite '[] ()
+  -> Eff effects ()
+installRequestReceiverSited site = send
+  (Core.AgentToolsInstallReceiverWith site agentRequestDriver)
+
+agentRequestDriver :: Int -> Eff (Actor.ReadOnlyEffects AgentProtocol) ()
+agentRequestDriver _ = Actor.serve @() @AgentProtocol ()
+  (\() (RunRequest action) -> action >> pure ((), ()))
 
 -- | Repeatable lifecycle observation of one exact actor incarnation.
 data AgentState

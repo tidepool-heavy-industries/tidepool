@@ -147,6 +147,10 @@ sitedVerbs =
   , (verb "runScope" "Tidepool.Scope.Internal"
       "runScopeSited" "Tidepool.Scope.Internal" False [] DeliverHostAnswer SelectedAnswer)
       { vsAnswerSource = EffectResult }
+  , (verb "installRequestReceiver" "Tidepool.Actors.Internal.Agent"
+      "installRequestReceiverSited" "Tidepool.Actors.Internal.Agent" False []
+      DeliverHostAnswer SelectedAnswer)
+      { vsAnswerSource = EffectResult }
   ]
   where
     verb name source sibling siblingSource listAnswer inputs delivery wireSource =

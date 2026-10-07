@@ -882,6 +882,23 @@ pub(crate) struct ResidentWorkbenchTools {
     pub(crate) revision: Option<String>,
 }
 
+/// A public application's receiver retains its source domain independently of tool reloads.
+pub(crate) struct PreparedRequestReceiver {
+    pub(crate) entry: RootCustody,
+    pub(crate) scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+}
+
+#[derive(Clone, Copy)]
+enum ToolInstallationPurpose {
+    ToolsOnly,
+    SpawnApplication,
+}
+
+struct PreparedToolInstallation {
+    tools: ResidentWorkbenchTools,
+    receiver: Option<PreparedRequestReceiver>,
+}
+
 /// Code and values retained by the installation's real producer.
 enum InstalledToolCode {
     SourcePrepared(Arc<crate::agent_spec::preparation::PreparedToolset>),
@@ -2222,6 +2239,48 @@ where
     }
 }
 
+fn capture_request_receiver_entry<H, O>(
+    session: &mut ResidentSession<H, O>,
+    hole: &ResidentHole,
+    site: i64,
+    actor_realm: RealmId,
+) -> Result<RootCustody, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let site = u64::try_from(site).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(
+            "request receiver registration carried an invalid site id".into(),
+        )
+    })?;
+    if session.parked_realm(hole) != Some(actor_realm) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "request receiver registration escaped its actor realm".into(),
+        ));
+    }
+    if !session
+        .parked_program_provenance(hole)
+        .is_some_and(|provenance| {
+            provenance
+                .sites()
+                .iter()
+                .any(|evidence| evidence.site == site && evidence.inputs.is_empty())
+        })
+    {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "request receiver registration has no compiler-issued completion site".into(),
+        ));
+    }
+    session
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "request receiver registration has no live entry".into(),
+            )
+        })
+}
+
 fn require_tool_installation_completion<H, O>(
     session: &mut ResidentSession<H, O>,
     registration: &ParkedHoleAbortRegistration,
@@ -3172,6 +3231,9 @@ impl ResidentRequest {
             Self::AgentTools(
                 crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(..),
             ) => "agent tool installation",
+            Self::AgentTools(
+                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallReceiverWith(..),
+            ) => "agent request receiver installation",
             Self::AgentTools(crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith) => {
                 "agent tool input"
             }
@@ -4578,8 +4640,10 @@ where
                     granted_effects,
                     ready.effects,
                     InstalledToolCode::SourcePrepared(ready.prepared),
+                    ToolInstallationPurpose::ToolsOnly,
                 )
                 .await
+                .map(|installation| installation.tools)
             }
             .instrument(span),
         )
@@ -4596,6 +4660,55 @@ where
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        Box::pin(async move {
+            self.prepare_explicit_installation(
+                context,
+                install,
+                granted_effects,
+                installer,
+                ToolInstallationPurpose::ToolsOnly,
+            )
+            .await
+            .map(|installation| installation.tools)
+        })
+    }
+
+    pub(crate) async fn prepare_explicit_application(
+        &self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+    ) -> Result<(ResidentWorkbenchTools, PreparedRequestReceiver), ResidentActorWorkbenchError>
+    {
+        let prepared = self
+            .prepare_explicit_installation(
+                context,
+                install,
+                granted_effects,
+                installer,
+                ToolInstallationPurpose::SpawnApplication,
+            )
+            .await?;
+        let receiver = prepared.receiver.ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "public spawn installer did not register its request receiver".into(),
+            )
+        })?;
+        Ok((prepared.tools, receiver))
+    }
+
+    fn prepare_explicit_installation<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+        purpose: ToolInstallationPurpose,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<PreparedToolInstallation, ResidentActorWorkbenchError>,
     > {
         // Source and live installers use the same heap boundary: nested child
         // startup must not embed the installation's machine futures in its caller.
@@ -4632,6 +4745,7 @@ where
                     granted_effects,
                     admitted_base,
                     InstalledToolCode::ExplicitLive(installer),
+                    purpose,
                 )
                 .await
             }
@@ -4646,7 +4760,8 @@ where
         granted_effects: Vec<crate::ActorEffectKey>,
         admitted_base: Vec<crate::ActorEffectKey>,
         code: InstalledToolCode,
-    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
+        purpose: ToolInstallationPurpose,
+    ) -> Result<PreparedToolInstallation, ResidentActorWorkbenchError> {
         let installation = crate::agent_spec::installation_expression("", &admitted_base);
         let dispatcher_effects = installation.dispatcher_effect_row();
         let (revision, origin) = match &code {
@@ -4825,22 +4940,47 @@ where
                         .resume_classified(hole, ())
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
+                    let (settled, receiver) = match purpose {
+                        ToolInstallationPurpose::ToolsOnly => (settled, None),
+                        ToolInstallationPurpose::SpawnApplication => {
+                            let ResidentOutcome::Suspended { hole, request, .. } = settled else {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "public spawn installer must register its request receiver after tools".into(),
+                                ));
+                            };
+                            let ResidentRequest::AgentTools(
+                                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallReceiverWith(site, _),
+                            ) = ResidentRequest::decode(&request, session.data_con_table())? else {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "public spawn installer crossed an unexpected receiver registration boundary".into(),
+                                ));
+                            };
+                            let entry = capture_request_receiver_entry(session, &hole, site, context.placement.resource_scope)?;
+                            let receiver = PreparedRequestReceiver { entry, scope: Arc::clone(&installation_scope) };
+                            let settled = session.resume_classified(hole, ()).map_err(classify_resumption)?;
+                            resumption_registration.replace_in_checkout(session, &settled);
+                            (settled, Some(receiver))
+                        }
+                    };
                     require_tool_installation_completion(session, &resumption_registration, &settled)?;
                     if let Some(prepared) = code.prepared() {
                         tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
                     } else {
                         tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
                     }
-                    Ok(ResidentWorkbenchTools {
-                        declarations,
-                        dispatch: Arc::new(dispatch),
-                        _installation_scope: installation_scope,
-                        code,
-                        dispatcher_effects,
-                        slots,
-                        origin,
-                        install,
-                        revision,
+                    Ok(PreparedToolInstallation {
+                        tools: ResidentWorkbenchTools {
+                            declarations,
+                            dispatch: Arc::new(dispatch),
+                            _installation_scope: installation_scope,
+                            code,
+                            dispatcher_effects,
+                            slots,
+                            origin,
+                            install,
+                            revision,
+                        },
+                        receiver,
                     })
                 }))
                 .await;
