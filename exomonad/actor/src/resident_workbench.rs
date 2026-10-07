@@ -858,7 +858,7 @@ pub(crate) struct ResidentWorkbenchTools {
     /// Installer source roots belong to the installed implementation, not the
     /// actor's published declaration and value surface.
     _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    _prepared: Arc<crate::agent_spec::preparation::PreparedToolset>,
+    code: InstalledToolCode,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
@@ -866,7 +866,7 @@ pub(crate) struct ResidentWorkbenchTools {
     pub(crate) slots: Vec<String>,
     /// How the spec was found, and where. Reported in status and in every
     /// reload receipt.
-    pub(crate) resolved: crate::agent_spec::ResolvedSpec,
+    pub(crate) origin: crate::agent_spec::SpecOrigin,
     /// Which install this record is, counting from one within this actor
     /// incarnation. A completed call names it, so a receipt says which record
     /// served the call and not merely which record is active now.
@@ -879,6 +879,37 @@ pub(crate) struct ResidentWorkbenchTools {
     /// reachable through the call belongs to one revision, which would be a
     /// different and possibly false claim.
     pub(crate) revision: Option<String>,
+}
+
+/// Code and values retained by the installation's real producer.
+enum InstalledToolCode {
+    SourcePrepared(Arc<crate::agent_spec::preparation::PreparedToolset>),
+    ExplicitLive(Arc<RootCustody>),
+}
+
+impl InstalledToolCode {
+    fn prepared(&self) -> Option<&Arc<crate::agent_spec::preparation::PreparedToolset>> {
+        match self {
+            Self::SourcePrepared(prepared) => Some(prepared),
+            Self::ExplicitLive(_) => None,
+        }
+    }
+}
+
+/// Captured installer sent through the target actor's ordinary mailbox.
+pub struct SpecReplacementDefinition {
+    pub(crate) caller: crate::ActorRef,
+    pub(crate) installer: RootCustody,
+    pub(crate) session: tidepool_repr::SessionId,
+    pub(crate) effects: Vec<crate::ActorEffectKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecReplacementError {
+    Unavailable,
+    Unauthorized,
+    SurfaceChanged,
+    Failed(String),
 }
 
 /// Authority over one actor's installed handler and immutable source revision.
@@ -936,7 +967,7 @@ impl InstalledToolLease {
     pub fn toolset_acquisition(&self) -> Option<&crate::ToolsetAcquisition> {
         self.tools
             .as_ref()
-            .map(|tools| &tools._prepared.acquisition)
+            .and_then(|tools| tools.code.prepared().map(|prepared| &prepared.acquisition))
     }
 
     pub(crate) fn tools_arc(&self) -> Option<Arc<ResidentWorkbenchTools>> {
@@ -1026,6 +1057,38 @@ impl InstalledToolsState {
         staged.commit(publication, Box::new(|| *current = Some(replacement)))
     }
 
+    /// Publish against the exact admitted implementation. Accepted calls retain
+    /// their immutable lease, including when this actor replaces its own tools.
+    pub(crate) fn replace_explicit(
+        &self,
+        expected: &InstalledToolLease,
+        tools: Arc<ResidentWorkbenchTools>,
+    ) -> Result<(), SpecReplacementError> {
+        let mut current = self.0.lock();
+        let active = current.as_ref().ok_or(SpecReplacementError::Unavailable)?;
+        if active.actor() != expected.actor()
+            || active.source().semantic_digest() != expected.source().semantic_digest()
+            || !active
+                .tools_arc()
+                .zip(expected.tools_arc())
+                .is_some_and(|(active, expected)| Arc::ptr_eq(&active, &expected))
+        {
+            return Err(SpecReplacementError::Unavailable);
+        }
+        let old = active.tools().ok_or(SpecReplacementError::Unavailable)?;
+        if !exomonad_tool::surface::compare_surfaces(&old.declarations, &tools.declarations)
+            .is_empty()
+        {
+            return Err(SpecReplacementError::SurfaceChanged);
+        }
+        *current = Some(InstalledToolLease::new(
+            expected.actor(),
+            expected.source().clone(),
+            Some(tools),
+        ));
+        Ok(())
+    }
+
     pub(crate) fn clear(&self) {
         *self.0.lock() = None;
     }
@@ -1041,7 +1104,7 @@ impl ResidentWorkbenchTools {
             "install={} revision={} {}",
             self.install,
             self.revision.as_deref().unwrap_or("(run)"),
-            self.resolved.describe()
+            self.origin.describe()
         )
     }
 }
@@ -2576,6 +2639,11 @@ pub(crate) enum ResidentActorBoundary {
     },
     ForkGroup(ForkGroupBoundary),
     Start(crate::ResidentActorStart),
+    ReplaceSpec {
+        continuation: ResidentHole,
+        target: crate::ActorRef,
+        definition: SpecReplacementDefinition,
+    },
     Outbound(ResidentOutbound),
     Wait(ResidentWaitRequest),
     Poll(crate::wait::ResidentPollRequest),
@@ -2852,6 +2920,7 @@ impl ResidentActorBoundary {
             Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
             Self::Replace { .. } => "replaceActor",
+            Self::ReplaceSpec { .. } => "replaceSpec",
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
@@ -3142,6 +3211,9 @@ impl ResidentRequest {
             Self::Introspection(
                 crate::generated::introspection::IntrospectionReq::IntrospectionTypeOfWith(..),
             ) => "structured type",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(..),
+            ) => "replaceSpec",
             Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
                 ..,
             )) => "spawnSubagent",
@@ -4643,71 +4715,167 @@ where
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
         let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
-        Box::pin(async move {
-            let ready = self.prepare_toolset_only(
-                context.clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                granted_effects.clone(),
-            ).await?;
-            let admitted_base = ready.effects;
-            let prepared = ready.prepared;
-            let installation = crate::agent_spec::installation_expression(&prepared.entry_name, &admitted_base);
-            let dispatcher_effects = installation.dispatcher_effect_row();
-            let revision = Some(prepared.source_revision.clone());
-            let publication_resolved = prepared.resolved.clone();
-            let mut compile_context = context.clone();
-            compile_context.haskell_effects_alias = dispatcher_effects.clone();
-            let installation_scope = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    // Each installation has an independent CAF/source domain even
-                    // when actors share the surrounding machine and native images.
-                    let isolated = session.mint_isolated_scope();
-                    let retained = session.retain_lexical_scope(isolated)?;
-                    session.retire_scope(isolated);
-                    Ok(retained)
-                })
-                .await?;
-            compile_context.placement.lexical_scope = installation_scope.scope();
-            let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
-                &self.access,
-                compile_context.clone(),
-                None,
-                "tool installation was abandoned before settlement".into(),
-                Some(installation_scope.clone()),
-            );
-            let registration = abort_guard.registration();
-            let installed_effect_support = self.access.source.installed_effect_support().to_vec();
-            let handler_effect_support = self.access.handler_effect_support.clone();
-            let prepared_entry = Arc::clone(&prepared);
-            let installer_source = installation.expression;
-            let step = registration.scope(self.access.with_machine(
-                compile_context.clone(), move |session, context, _| {
-                    session.set_image_registry(Arc::clone(prepared_entry.entry.image_registry()));
-                    let entry = session.prepare_startup_entry(prepared_entry.entry.compiled().code())?;
-                    let outcome = session.run_startup_entry(entry);
-                    start_fragment_settlement(
-                        session, context, 1, installer_source, WorkbenchDisplay::Discard,
-                        prepared_entry.entry.compiled().warnings.warnings.clone(), outcome,
+        Box::pin(
+            async move {
+                let ready = self
+                    .prepare_toolset_only(
+                        context.clone(),
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        granted_effects.clone(),
                     )
-                },
-            )).await?;
-            let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-                let detail = match step {
-                    ResidentWorkbenchStep::Rejected(detail) => detail.output,
-                    _ => "installer completed without publishing its handler".into(),
+                    .await?;
+                self.install_tools_action(
+                    context,
+                    install,
+                    granted_effects,
+                    ready.effects,
+                    InstalledToolCode::SourcePrepared(ready.prepared),
+                )
+                .await
+            }
+            .instrument(span),
+        )
+    }
+
+    /// Run an already compiled installer and preserve its exact closure dependencies.
+    /// The caller imports the rooted action into this machine before admission.
+    pub(crate) async fn prepare_explicit_tools(
+        &self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
+        let support = self.access.source.installed_effect_support().to_vec();
+        let observer = self.access.handler_effect_support.clone();
+        let requested = granted_effects.clone();
+        let admitted_base = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                let mut support = support;
+                support.extend(observer(session.handlers()));
+                if requested
+                    .iter()
+                    .any(|key| !support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "compiled spec requires unavailable interpreter support".into(),
+                    ));
+                }
+                Ok(requested)
+            })
+            .await?;
+        self.install_tools_action(
+            context,
+            install,
+            granted_effects,
+            admitted_base,
+            InstalledToolCode::ExplicitLive(installer),
+        )
+        .await
+    }
+
+    async fn install_tools_action(
+        &self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        admitted_base: Vec<crate::ActorEffectKey>,
+        code: InstalledToolCode,
+    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
+        let installation = crate::agent_spec::installation_expression("", &admitted_base);
+        let dispatcher_effects = installation.dispatcher_effect_row();
+        let (revision, origin) = match &code {
+            InstalledToolCode::SourcePrepared(prepared) => (
+                Some(prepared.source_revision.clone()),
+                crate::agent_spec::SpecOrigin::SourcePrepared(prepared.resolved.clone()),
+            ),
+            InstalledToolCode::ExplicitLive(_) => {
+                (None, crate::agent_spec::SpecOrigin::ExplicitLive)
+            }
+        };
+        let mut compile_context = context.clone();
+        compile_context.haskell_effects_alias = dispatcher_effects.clone();
+        let installation_scope = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                // Each installation has an independent CAF/source domain even
+                // when actors share the surrounding machine and native images.
+                let isolated = session.mint_isolated_scope();
+                let retained = session.retain_lexical_scope(isolated)?;
+                session.retire_scope(isolated);
+                Ok(retained)
+            })
+            .await?;
+        compile_context.placement.lexical_scope = installation_scope.scope();
+        let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            compile_context.clone(),
+            None,
+            "tool installation was abandoned before settlement".into(),
+            Some(installation_scope.clone()),
+        );
+        let registration = abort_guard.registration();
+        let installed_effect_support = self.access.source.installed_effect_support().to_vec();
+        let handler_effect_support = self.access.handler_effect_support.clone();
+        let step = registration
+            .scope(self.access.with_machine(compile_context.clone(), {
+                let prepared = code.prepared().cloned();
+                let installer = match &code {
+                    InstalledToolCode::ExplicitLive(installer) => Some(Arc::clone(installer)),
+                    InstalledToolCode::SourcePrepared(_) => None,
                 };
-                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "tool installation: {detail}"
-                )));
+                move |session, context, _| {
+                    let (outcome, warnings) = match (prepared, installer) {
+                        (Some(prepared), None) => {
+                            session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
+                            let entry =
+                                session.prepare_startup_entry(prepared.entry.compiled().code())?;
+                            (
+                                session.run_startup_entry(entry),
+                                prepared.entry.compiled().warnings.warnings.clone(),
+                            )
+                        }
+                        (None, Some(installer)) => (
+                            session.run_rooted_entry_borrowed(
+                                "agent_spec_installer",
+                                &installer,
+                                0,
+                                context.placement.resource_scope,
+                                None,
+                            ),
+                            Vec::new(),
+                        ),
+                        _ => unreachable!("one installation producer"),
+                    };
+                    start_fragment_settlement(
+                        session,
+                        context,
+                        1,
+                        "agent spec installation".into(),
+                        WorkbenchDisplay::Discard,
+                        warnings,
+                        outcome,
+                    )
+                }
+            }))
+            .await?;
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            let detail = match step {
+                ResidentWorkbenchStep::Rejected(detail) => detail.output,
+                _ => "installer completed without publishing its handler".into(),
             };
-            // The registration observes either parked state before this
-            // checkout is awaited. Its armed guard retains the installation
-            // scope and aborts the exact hole if this future is dropped.
-            // Deferred work remains unstarted until the checkout rejects and
-            // aborts it; successful publication alone disarms the guard.
-            let resumption_registration = registration.clone();
-            let publication = registration.scope(self
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "tool installation: {detail}"
+            )));
+        };
+        // The registration observes either parked state before this
+        // checkout is awaited. Its armed guard retains the installation
+        // scope and aborts the exact hole if this future is dropped.
+        // Deferred work remains unstarted until the checkout rejects and
+        // aborts it; successful publication alone disarms the guard.
+        let resumption_registration = registration.clone();
+        let publication = registration.scope(self
                 .access
                 .with_machine(compile_context, move |session, context, _| {
                     let (hole, request) = tool_installation_request(
@@ -4794,27 +4962,28 @@ where
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     require_tool_installation_completion(session, &resumption_registration, &settled)?;
-                    let acquisition = serde_json::to_string(&prepared.acquisition)
-                        .expect("toolset acquisition fields serialize to JSON");
-                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", source_revision = %prepared.source_revision, acquisition = %acquisition, prepared_owner = Arc::as_ptr(&prepared) as usize, image_registry = Arc::as_ptr(prepared.entry.image_registry()) as usize, installation_scope = ?installation_scope.scope(), resource_scope = ?context.placement.resource_scope, requested_effects = ?granted_effects, effective_effects = ?admitted_base, "actor phase");
+                    if let Some(prepared) = code.prepared() {
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
+                    } else {
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", install, "actor phase");
+                    }
                     Ok(ResidentWorkbenchTools {
                         declarations,
                         dispatch: Arc::new(dispatch),
                         _installation_scope: installation_scope,
-                        _prepared: prepared,
+                        code,
                         dispatcher_effects,
                         slots,
-                        resolved: publication_resolved,
+                        origin,
                         install,
                         revision,
                     })
                 }))
                 .await;
-            if publication.is_ok() {
-                abort_guard.disarm();
-            }
-            publication
-        }.instrument(span))
+        if publication.is_ok() {
+            abort_guard.disarm();
+        }
+        publication
     }
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
@@ -8257,6 +8426,29 @@ where
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
                     ResidentRequest::AgentLaunch(
+                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(
+                            (id, incarnation), _, effects,
+                        ),
+                    ) => {
+                        let target = crate::ActorRef {
+                            id: crate::ActorId(u64::try_from(id).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid replacement actor id".into()))?),
+                            incarnation: crate::Incarnation(u64::try_from(incarnation).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid replacement incarnation".into()))?),
+                        };
+                        let installer = session.live_payload_handle_owned_by(
+                            hole.cont_id(), context.placement.resource_scope,
+                        )?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol(
+                            "spec replacement did not retain its compiled installer".into(),
+                        ))?;
+                        Ok(ResidentActorBoundary::ReplaceSpec {
+                            continuation: hole, target,
+                            definition: SpecReplacementDefinition {
+                                caller: context.actor, installer,
+                                session: context.placement.session,
+                                effects: effects.into_iter().map(Into::into).collect(),
+                            },
+                        })
+                    }
+                    ResidentRequest::AgentLaunch(
                         crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
                             _, spawn_context, workspace, effects, label, model, effort,
                             instructions, lifetime, limits,
@@ -9893,6 +10085,21 @@ where
                         hole,
                         crate::request_effect::ReplyResult(outcome.map(|_| ())),
                     )
+                    .map_err(classify_resumption)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_spec_replacement(
+        &self,
+        context: crate::ActorSessionContext,
+        continuation: ResidentHole,
+        result: Result<(), SpecReplacementError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .resume_classified(continuation, result)
                     .map_err(classify_resumption)
             })
             .await
@@ -16450,7 +16657,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .prepare_tools(context.clone(), 1, vec![])
             .await
             .unwrap();
-        assert!(Arc::ptr_eq(&warmed.prepared, &first._prepared));
+        assert!(Arc::ptr_eq(
+            &warmed.prepared,
+            &first.code.prepared().expect("source-prepared installation")
+        ));
         let completed_executions =
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
         assert!(
@@ -16462,7 +16672,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             "the actual installation reuses immutable readiness without another compiler turn"
         );
         let proof = first
-            ._prepared
+            .code
+            .prepared()
+            .expect("source-prepared installation")
             .entry
             .compiled()
             .original_compile_input()
@@ -16479,7 +16691,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .prepare_tools(context.clone(), 2, vec![])
             .await
             .unwrap();
-        assert!(Arc::ptr_eq(&first._prepared, &second._prepared));
+        assert!(Arc::ptr_eq(
+            &first.code.prepared().expect("source-prepared installation"),
+            &second
+                .code
+                .prepared()
+                .expect("source-prepared installation")
+        ));
         assert_ne!(
             first._installation_scope.scope(),
             second._installation_scope.scope()
@@ -16490,7 +16708,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         assert_eq!(first.declarations, second.declarations);
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
-            &first._prepared,
+            &first.code.prepared().expect("source-prepared installation"),
         ))
         .await;
         let original_identity = proof.original_input_identity().to_owned();
@@ -16558,7 +16776,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_ne!(original_source, successor.original_source());
         assert_ne!(original_identity, successor.original_input_identity());
         let retained = second
-            ._prepared
+            .code
+            .prepared()
+            .expect("source-prepared installation")
             .entry
             .compiled()
             .original_compile_input()
@@ -16594,7 +16814,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             original_session,
             original_context,
             source.clone(),
-            &first._prepared.entry,
+            &first
+                .code
+                .prepared()
+                .expect("source-prepared installation")
+                .entry,
             "41",
         )
         .await;
@@ -16615,6 +16839,62 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .count()
                 > completed_executions.lines().count()
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_installer_keeps_capture_and_replacement_leases_without_recompiling() {
+        with_test_compiler_owner(async {
+            let (mut session, context, mut source, root) = host_mount_fixture();
+            let authored = tempfile::tempdir().unwrap();
+            std::fs::write(authored.path().join("CapturedSpecInstaller.hs"),
+                include_str!("fixtures/captured-spec-installer.hs")).unwrap();
+            let mut include_roots = source.base_include.to_vec();
+            include_roots.push(authored.path().to_path_buf());
+            source.base_include = include_roots.into();
+            let preamble = insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
+            let templates = resident_workbench_templates(&preamble, &context.haskell_effects_alias, "");
+            let include = source.base_include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let turn = run_turn(TurnRequest {
+                exact_context: None, session_id: Some(context.placement.session),
+                turn_text: "installer <- pure (CapturedSpecInstaller.installer \"retained notebook value\")",
+                templates: &templates, include: &include, session_root: root.path(),
+                inject_modules: &[], gen: 1, verdict: None, target: None, retained_imports: &[],
+            }).unwrap();
+            let TurnResult::Bind { bound, compiled, .. } = turn else { panic!("installer bind") };
+            assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
+            let installer = Arc::new(session.retain_binding_custody("installer").unwrap().unwrap());
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let before = tidepool_extract_cmd::extract_spawn_count();
+            let first = Arc::new(workbench.prepare_explicit_tools(context.clone(), 1, vec![], installer.clone()).await.unwrap());
+            let second = Arc::new(workbench.prepare_explicit_tools(context.clone(), 2, vec![], installer.clone()).await.unwrap());
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+            assert!(first.origin.is_explicit());
+            let expected = InstalledToolLease::new(context.actor, crate::CheckpointSourceLayer::default(), Some(first));
+            assert!(expected.toolset_acquisition().is_none(), "live values do not claim source-cache acquisition");
+            let state = InstalledToolsState::default();
+            state.publish(expected.clone());
+            state.replace_explicit(&expected, second.clone()).unwrap();
+            assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+            assert_eq!(expected.tools().unwrap().install, 1);
+            assert_eq!(state.replace_explicit(&expected, second), Err(SpecReplacementError::Unavailable));
+            let active = state.current().unwrap();
+            let mut changed = workbench.prepare_explicit_tools(context.clone(), 3, vec![], installer).await.unwrap();
+            changed.declarations.clear();
+            assert_eq!(state.replace_explicit(&active, Arc::new(changed)), Err(SpecReplacementError::SurfaceChanged));
+            assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+            for lease in [expected, state.current().unwrap()] {
+                let step = workbench.begin_tool(context.clone(), lease.tools().unwrap().dispatch.clone(), "probe".into(), serde_json::json!("input")).await.unwrap();
+                let step = match step {
+                    ResidentWorkbenchStep::Running { fragment, outcome } => workbench.settle_item(context.clone(), *fragment, (*outcome).into()).await.unwrap(),
+                    other => other,
+                };
+                let ResidentWorkbenchStep::Committed { output, .. } = step else { panic!("captured tool did not complete") };
+                assert!(output.contains("retained notebook value"), "{output}");
+            }
+            state.clear();
+        }).await;
     }
 
     #[tokio::test]

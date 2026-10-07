@@ -640,6 +640,14 @@ pub trait KernelBehavior: Send + 'static {
             })
         })
     }
+    fn replace_spec<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _definition: crate::SpecReplacementDefinition,
+    ) -> BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
+        Box::pin(async { Err(crate::SpecReplacementError::Unavailable) })
+    }
+
     fn replace<'a>(
         &'a mut self,
         _context: &'a KernelContext,
@@ -1638,6 +1646,17 @@ where
                 };
                 reply.send(result).ok();
             }
+            KernelMessage::ReplaceSpec { definition, reply } => {
+                let outcome = if state.replacement.is_some() {
+                    Err(crate::SpecReplacementError::Unavailable)
+                } else {
+                    state
+                        .behavior
+                        .replace_spec(&state.context, *definition)
+                        .await
+                };
+                reply.send(outcome).ok();
+            }
             KernelMessage::Replace { definition, reply } => {
                 if state.replacement.is_some() {
                     let failure = match state.behavior.discard_replacement(*definition).await {
@@ -2247,6 +2266,11 @@ fn can_apply_independent_settlement<B: KernelBehavior>(
         return false;
     }
     match message {
+        KernelMessage::ReplaceSpec { .. } => state.replacement.is_none()
+            && matches!(state.hosted_admission, HostedAdmission::Open)
+            && !state.pending_tasks.values().any(|pending| {
+                matches!(pending, PendingActorTask::Workbench(workbench) if workbench.publication)
+            }),
         KernelMessage::ToolCompleted { boundary, .. }
         | KernelMessage::ToolAborted { boundary, .. }
         | KernelMessage::ReconcileWorkbenchBoundary { boundary, .. } => {
@@ -2275,6 +2299,13 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
     message: KernelMessage,
 ) {
     match message {
+        KernelMessage::ReplaceSpec { definition, reply } => {
+            let result = state
+                .behavior
+                .replace_spec(&state.context, *definition)
+                .await;
+            reply.send(result).ok();
+        }
         KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
             let outcome = state
                 .behavior
@@ -2888,7 +2919,9 @@ enum DeferredControl {
 
 fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
     match message {
-        KernelMessage::Workbench { .. } => Some(DeferredControl::Workbench),
+        KernelMessage::Workbench { .. } | KernelMessage::ReplaceSpec { .. } => {
+            Some(DeferredControl::Workbench)
+        }
         KernelMessage::Tool { .. } | KernelMessage::ToolWithHostedCheckpoint { .. } => {
             Some(DeferredControl::HostedInvocation)
         }

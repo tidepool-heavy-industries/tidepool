@@ -366,6 +366,10 @@ pub enum KernelResume {
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    ReplaceSpec {
+        definition: Box<crate::SpecReplacementDefinition>,
+        reply: RpcReplyPort<Result<(), crate::SpecReplacementError>>,
+    },
     Replace {
         definition: Box<crate::ActorReplacementDefinition>,
         reply: RpcReplyPort<Result<LocalActorRef, KernelInvocationFailure>>,
@@ -462,6 +466,7 @@ impl KernelMessage {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Replace { .. } => "Replace",
+            Self::ReplaceSpec { .. } => "ReplaceSpec",
             Self::Drain { .. } => "Drain",
             Self::DrainFence => "DrainFence",
             Self::ReplacementFence => "ReplacementFence",
@@ -493,6 +498,7 @@ impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Replace { .. } => formatter.write_str("Replace"),
+            Self::ReplaceSpec { .. } => formatter.write_str("ReplaceSpec"),
             Self::Drain { .. } => formatter.write_str("Drain"),
             Self::DrainFence => formatter.write_str("DrainFence"),
             Self::ReplacementFence => formatter.write_str("ReplacementFence"),
@@ -1059,6 +1065,27 @@ impl LocalActorRef {
             return Ok(());
         }
         result
+    }
+
+    pub(crate) async fn replace_spec(
+        &self,
+        definition: crate::SpecReplacementDefinition,
+    ) -> Result<(), crate::SpecReplacementError> {
+        if self.terminal.get().is_some() {
+            return Err(crate::SpecReplacementError::Unavailable);
+        }
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::ReplaceSpec {
+                definition: Box::new(definition),
+                reply: reply.into(),
+            })
+            .map_err(|_| crate::SpecReplacementError::Unavailable)?;
+        receive.await.map_err(|_| {
+            crate::SpecReplacementError::Failed(
+                "spec replacement outcome unavailable; inspect target before retrying".into(),
+            )
+        })?
     }
 
     pub(crate) async fn replace(

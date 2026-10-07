@@ -862,3 +862,23 @@ impl ToHaskell for ActorContextProjection {
         })
     }
 }
+
+impl tidepool_bridge::sealed::ToHaskellSealed for SpecReplacementError {}
+impl ToHaskell for SpecReplacementError {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let name = match self {
+            Self::Unavailable => "SpecReplacementUnavailable",
+            Self::Unauthorized => "SpecReplacementUnauthorized",
+            Self::SurfaceChanged => "SpecReplacementSurfaceChanged",
+            Self::Failed(_) => "SpecReplacementFailed",
+        };
+        visit_core(table, visitor, name, |visitor| match self {
+            Self::Failed(detail) => detail.visit(table, visitor),
+            _ => Ok(()),
+        })
+    }
+}

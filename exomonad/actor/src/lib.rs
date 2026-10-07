@@ -160,7 +160,8 @@ pub use resident_workbench::{
     ActivationCompileStage, ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory,
     InstalledToolLease, PreparedSourceToolset, RequestWorkbenchScope, ResidentActorRunner,
     ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
-    SourceToolsetRecipe, ToolDispatchError, ToolDispatchReply,
+    SourceToolsetRecipe, SpecReplacementDefinition, SpecReplacementError, ToolDispatchError,
+    ToolDispatchReply,
 };
 pub use role::{render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget};
 pub use runtime_observation::{

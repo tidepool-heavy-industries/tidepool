@@ -1917,6 +1917,59 @@ fn render_watches_view(
     lines.join("\n")
 }
 
+async fn install_explicit_replacement<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    context: ActorSessionContext,
+    state: Arc<crate::resident_workbench::InstalledToolsState>,
+    allowed: Vec<crate::ActorEffectKey>,
+    definition: crate::SpecReplacementDefinition,
+) -> Result<(), crate::SpecReplacementError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let expected = state
+        .current()
+        .filter(|lease| lease.tools().is_some())
+        .ok_or(crate::SpecReplacementError::Unavailable)?;
+    if definition
+        .effects
+        .iter()
+        .any(|effect| !allowed.contains(effect))
+    {
+        return Err(crate::SpecReplacementError::Unauthorized);
+    }
+    let workbench = environment
+        .runner
+        .application_workbench()
+        .with_intrinsic_effect_support(environment.intrinsic_effect_support());
+    let installer = Arc::new(
+        environment
+            .runner
+            .transfer_custody(
+                definition.installer,
+                definition.session,
+                context.placement.session,
+                context.placement.resource_scope,
+            )
+            .await
+            .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?,
+    );
+    let install = expected
+        .tools()
+        .expect("admitted installation")
+        .install
+        .checked_add(1)
+        .ok_or_else(|| {
+            crate::SpecReplacementError::Failed("installation identity exhausted".into())
+        })?;
+    let tools = workbench
+        .prepare_explicit_tools(context, install, definition.effects, installer)
+        .await
+        .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?;
+    state.replace_explicit(&expected, Arc::new(tools))
+}
+
 fn actor_can_control(
     owner: ActorRef,
     candidate: ActorRef,
@@ -5539,6 +5592,42 @@ where
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::ReplaceSpec {
+                continuation,
+                target,
+                definition,
+            } => {
+                let authorized =
+                    actor_can_control(context.actor, target, &environment.actors.lock());
+                let installed = self.installed_tools.clone();
+                let installation_context = self.context(context.actor);
+                let allowed = descriptor.effective_role().effect_keys().to_vec();
+                Box::pin(async move {
+                    let result = if !authorized {
+                        Err(crate::SpecReplacementError::Unauthorized)
+                    } else if target == context.actor {
+                        install_explicit_replacement(
+                            environment.clone(),
+                            installation_context,
+                            installed,
+                            allowed,
+                            definition,
+                        )
+                        .await
+                    } else if let Some(actor) = kernel
+                        .resolve(target)
+                        .filter(|actor| actor.terminal().get().is_none())
+                    {
+                        actor.replace_spec(definition).await
+                    } else {
+                        Err(crate::SpecReplacementError::Unavailable)
+                    };
+                    environment
+                        .runner
+                        .resume_spec_replacement(context, continuation, result)
+                        .await
+                })
+            }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
                 continuation,
                 relative,
@@ -7030,6 +7119,9 @@ where
                     .resume_fork_cleanup(context.clone(), continuation, outcome)
                     .await
             }),
+            ResidentActorBoundary::ReplaceSpec { .. } => {
+                unreachable!("spec replacement was prepared as an independent effect")
+            }
             ResidentActorBoundary::Start(start) => {
                 Box::pin(self.start_child(kernel, context, effect_owner, start))
             }
@@ -8212,13 +8304,27 @@ where
         );
         let compiler_owner =
             crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit());
-        let compiled_tools = compiler_owner
-            .scope(application_workbench.prepare_tools(
-                compile_context.clone(),
-                self.spec_installs,
-                self.descriptor.capabilities().effect_keys().to_vec(),
-            ))
-            .await;
+        let compiled_tools = match self.explicit_installer.as_ref() {
+            Some(installer) => {
+                compiler_owner
+                    .scope(application_workbench.prepare_explicit_tools(
+                        compile_context.clone(),
+                        self.spec_installs,
+                        self.descriptor.capabilities().effect_keys().to_vec(),
+                        Arc::clone(installer),
+                    ))
+                    .await
+            }
+            None => {
+                compiler_owner
+                    .scope(application_workbench.prepare_tools(
+                        compile_context.clone(),
+                        self.spec_installs,
+                        self.descriptor.capabilities().effect_keys().to_vec(),
+                    ))
+                    .await
+            }
+        };
         tracing::info!(
             actor = %context.actor,
             phase = "startup",
@@ -8228,6 +8334,7 @@ where
             "agent spec preparation"
         );
         let compiled_tools = Arc::new(compiled_tools?);
+        self.explicit_installer.take();
         #[cfg(test)]
         if let Some(observer) = &self.activation_preview_observer {
             observer(
@@ -12928,6 +13035,37 @@ where
                     }
                 }
             }
+        })
+    }
+
+    fn replace_spec<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        definition: crate::SpecReplacementDefinition,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
+        Box::pin(async move {
+            let target = kernel.identity();
+            let authorized =
+                actor_can_control(definition.caller, target, &self.environment.actors.lock());
+            if !authorized {
+                return Err(crate::SpecReplacementError::Unauthorized);
+            }
+            let outcome = install_explicit_replacement(
+                self.environment.clone(),
+                self.context(target),
+                self.installed_tools.clone(),
+                self.descriptor.effective_role().effect_keys().to_vec(),
+                definition,
+            )
+            .await;
+            if outcome.is_ok() {
+                self.spec_installs = self
+                    .installed_tools
+                    .current_tools()
+                    .map_or(self.spec_installs, |tools| tools.install);
+                self.after_tool.forget_failures();
+            }
+            outcome
         })
     }
 
