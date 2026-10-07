@@ -281,15 +281,15 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
         let identity = source_roots_identity(b"history", &[root.clone()]).unwrap();
         if prior_expected != expected_dependencies {
             prop_assert_ne!(
-                identity,
-                prior_identity,
+                identity.clone(),
+                prior_identity.clone(),
                 "a changed manifest changes its identity"
             );
             covered.identity_changes += 1;
         } else {
             prop_assert_eq!(
-                identity,
-                prior_identity,
+                identity.clone(),
+                prior_identity.clone(),
                 "an unchanged manifest keeps its identity"
             );
             covered.identity_stable_steps += 1;
@@ -304,7 +304,7 @@ fn replay(ops: &[Op]) -> Result<Coverage, TestCaseError> {
         fs::create_dir(&relocated_root).unwrap();
         materialize(&relocated_root, &files, aliases);
         prop_assert_eq!(
-            identity,
+            identity.clone(),
             source_roots_identity(b"history", &[relocated_root]).unwrap()
         );
 
