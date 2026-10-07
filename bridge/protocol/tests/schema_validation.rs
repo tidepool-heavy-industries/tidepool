@@ -1,5 +1,32 @@
 //! Schema validation and narrow rendering pins; generated consumers are build outputs.
 
+#[test]
+fn lexical_scope_delimiter_keeps_body_and_cleanup_outcomes_separate() {
+    use tidepool_protocol::schema::{HandlingClass, RustBinding};
+
+    let scopes = tidepool_protocol::effects::resource_scope::resource_scopes();
+    assert_eq!(
+        scopes.constructor_signatures(),
+        [
+            "ScopeRunWith :: (Int -> Eff bodyEffs ()) -> ResourceScopes (Either ScopeFailure (), Either CleanupError ())",
+            "ScopeDoneWith :: Int -> ResourceScopes ()",
+        ]
+    );
+    assert_eq!(scopes.verbs[0].args[0].rust, RustBinding::HaskellValue);
+    assert!(scopes
+        .verbs
+        .iter()
+        .all(|verb| verb.handling == HandlingClass::Actor));
+    assert!(!scopes.authored_surface.includes_type_def("Scope"));
+    assert!(!scopes.authored_surface.includes_verb("ScopeRunWith"));
+    assert!(!scopes.authored_surface.includes_verb("ScopeDoneWith"));
+
+    let generated = tidepool_protocol::actor_generated_files();
+    assert!(generated
+        .iter()
+        .any(|file| file.path == "exomonad/actor/src/generated/resource_scopes.rs"));
+}
+
 /// The suspension-decode roster must be internally consistent too — same
 /// discipline as [`every_migrated_effect_validates`], over the disjoint
 /// roster.

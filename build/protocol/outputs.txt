@@ -13,6 +13,8 @@ bridge/mcp/src/generated/ask_user.rs
 bridge/mcp/src/generated/read_state.rs
 bridge/mcp/src/generated/recipe_check.rs
 bridge/mcp/src/generated/green.rs
+bridge/mcp/src/generated/resource_scopes.rs
+tidepool/bridge-effects/src/generated/resource_scopes.rs
 bridge/mcp/src/generated/actor.rs
 bridge/mcp/src/generated/actor_context.rs
 bridge/mcp/src/generated/introspection.rs
@@ -57,6 +59,7 @@ bridge/haskell/lib/Tidepool/Internal/ActorProfiles.hs
 tidepool/runtime/src/generated/ask.rs
 tidepool/runtime/src/generated/mod.rs
 exomonad/actor/src/generated/actor.rs
+exomonad/actor/src/generated/resource_scopes.rs
 exomonad/actor/src/generated/actor_context.rs
 exomonad/actor/src/generated/introspection.rs
 exomonad/actor/src/generated/lookup.rs

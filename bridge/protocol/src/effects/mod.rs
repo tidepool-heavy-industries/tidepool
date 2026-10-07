@@ -43,6 +43,7 @@ pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
 pub mod reflect;
+pub mod resource_scope;
 pub mod sleep;
 pub mod source;
 pub mod worktree;
@@ -74,6 +75,7 @@ pub fn all() -> Vec<Effect> {
         read_state::read_state(),
         recipe_check::recipe_check(),
         green::green(),
+        resource_scope::resource_scopes(),
         actor::actor(),
         actor_context::actor_context(),
         introspection::introspection(),

@@ -11,6 +11,7 @@ import qualified Tidepool.Event as Event
 import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Contract (AgentSpec, NoTools, defaultSpec)
 import qualified Tidepool.Model as Model
+import qualified Tidepool.Scope as Scope
 
 coreReceive :: RequestSite '[] next -> (forall result. api result -> Eff handlerEffects ()) -> Core.ActorLocal api next
 coreReceive = Core.ActorReceiveWith
@@ -32,3 +33,9 @@ modelSpec = defaultSpec
 
 modelTurn :: Model.ModelTurn NoTools effects Text
 modelTurn = Model.textTurn modelSpec "compiled model contract"
+
+scopeBody :: Member Core.ResourceScopes effects => Eff effects (Scope.ScopeOutcome (Int -> Int))
+scopeBody = Scope.withScope $ \_ -> pure (+ 1)
+
+scopeLifetime :: Scope.Scope -> Core.WorkerLifetime
+scopeLifetime = Core.InScope

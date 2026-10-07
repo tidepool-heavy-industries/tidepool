@@ -111,20 +111,25 @@ pub fn forks() -> Effect {
                 wire_rust: None,
                 haskell_module: None,
                 shape: TypeShape::Sum {
-                    variants: ["InvocationOwned", "ActorOwned", "SwarmOwned"]
+                    variants: ["InvocationOwned", "ActorOwned", "RunOwned"]
                         .into_iter()
                         .map(|ctor| SumVariant {
                             ctor,
                             fields: VariantFields::Positional(Vec::new()),
                             doc: &[],
                         })
+                        .chain(std::iter::once(SumVariant {
+                            ctor: "InScope",
+                            fields: VariantFields::Positional(vec![HsType::Named("Scope")]),
+                            doc: &[],
+                        }))
                         .collect(),
                 },
                 json: JsonInstance::None,
                 derives: WireDerives(&[]),
                 domain: None,
                 doc: &[
-                    "InvocationOwned is the hosted invocation default; ActorOwned and SwarmOwned retain work beyond it. Structured actor turns without a hosted invocation use actor ownership.",
+                    "Lifetime selects cleanup ownership independently of authority and construction provenance. InScope explicitly selects a runtime-issued lexical scope; returning a handle does not transfer lifetime.",
                 ],
             },
             TypeDef {
@@ -266,6 +271,7 @@ pub fn forks() -> Effect {
             },
         ],
         external_types: &[
+            crate::schema::ExternalType { haskell_name: "Scope", rust_wire: "tidepool_bridge_effects::ResourceScopeId", core_module: None },
             crate::schema::ExternalType { haskell_name: "ActorLaunchRole", rust_wire: "crate::ActorLaunchRoleWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "ActorEffectProfile", rust_wire: "crate::ActorEffectProfileWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "WorktreeSpec", rust_wire: "tidepool_bridge_effects::WtWorktreeSpec", core_module: None },
