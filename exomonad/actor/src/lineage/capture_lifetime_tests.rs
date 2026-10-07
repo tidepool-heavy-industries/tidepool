@@ -55,7 +55,7 @@ fn claim_capture(registry: &ActorAdmissionRegistry, token: &str) -> CheckpointLe
 
 #[test]
 fn released_capture_preserves_two_admissions_until_last_lexical_share() {
-    let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+    let registry = ActorAdmissionRegistry::new();
     let mut session = PersistentSession::new(None, 1024);
     let (token, original, retained_scope, boundary) = capture(&registry, &mut session);
     registry
@@ -115,7 +115,7 @@ fn released_capture_preserves_two_admissions_until_last_lexical_share() {
 
 #[test]
 fn undelivered_capture_releases_its_runtime_capsule() {
-    let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+    let registry = ActorAdmissionRegistry::new();
     let mut session = PersistentSession::new(None, 1024);
     let (token, original, retained_scope, boundary) = capture(&registry, &mut session);
     assert_eq!(
@@ -134,7 +134,7 @@ fn undelivered_capture_releases_its_runtime_capsule() {
 
 #[test]
 fn retained_checkpoint_scope_refuses_another_runtime_owner() {
-    let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+    let registry = ActorAdmissionRegistry::new();
     let mut source = PersistentSession::new(None, 1024);
     let (token, _, _, _) = capture(&registry, &mut source);
     registry

@@ -1,6 +1,7 @@
 //! Per-child admission retained under the checkpoint owner's transaction lock.
 
 use super::*;
+use tidepool_repr::ActorPath;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnAdmissionOutcome {
@@ -146,7 +147,6 @@ impl ActorAdmissionRegistry {
         let id = uuid::Uuid::new_v4();
         let path = ActorPath::parse(&format!("spawn-{id}"))
             .expect("runtime generated actor path is valid");
-        self.lineage.retain_external(path.clone());
         state.spawns.insert(
             id,
             SpawnAdmissionRecord {
@@ -329,7 +329,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn independent_admissions_keep_exact_terminal_replay_and_ignore_labels() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let owner = ActorRef::first(crate::ActorId(1));
         let first = registry
             .claim_spawn(owner, SessionId(1), None, None)
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn checkpoint_spawn_claim_linearizes_release_and_preserves_admitted_share() {
         for _ in 0..64 {
-            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+            let registry = ActorAdmissionRegistry::new();
             let owner = ActorRef::first(crate::ActorId(1));
             let token = checkpoint(&registry, owner);
             let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn checkpoint_issuer_and_creator_ceilings_charge_pending_and_live_children() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(crate::ActorId(1));
         let creator = ActorRef::first(crate::ActorId(2));
         let token = checkpoint(&registry, issuer);
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn failed_unbound_child_releases_only_its_own_reserved_capacity() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let owner = ActorRef::first(crate::ActorId(1));
         let first = registry
             .claim_spawn(owner, SessionId(1), None, Some(2))
@@ -485,7 +485,7 @@ mod tests {
     }
     #[test]
     fn pre_start_identity_failure_retains_identity_and_releases_reserved_capacity() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let owner = ActorRef::first(crate::ActorId(1));
         let failed = registry
             .claim_spawn(owner, SessionId(1), None, Some(1))
@@ -527,7 +527,7 @@ mod tests {
             "custody transfer",
             "kernel admission",
         ] {
-            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+            let registry = ActorAdmissionRegistry::new();
             let owner = ActorRef::first(crate::ActorId(1));
             let claim = registry
                 .claim_spawn(owner, SessionId(1), None, None)
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn delegated_children_keep_issuer_budget_for_fresh_descendants_and_new_captures() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(crate::ActorId(1));
         let creator = ActorRef::first(crate::ActorId(2));
         let child = ActorRef::first(crate::ActorId(3));
@@ -678,7 +678,7 @@ mod tests {
             maximum in 1u16..7,
             operations in proptest::collection::vec(accounting_operation(), 1..96),
         ) {
-            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+            let registry = ActorAdmissionRegistry::new();
             let issuer = ActorRef::first(crate::ActorId(1));
             let root_creator = ActorRef::first(crate::ActorId(2));
             let token = checkpoint_with_limit(&registry, issuer, Some(maximum));
@@ -768,7 +768,7 @@ mod tests {
             maximum in 1u16..5,
             contenders in 2usize..9,
         ) {
-            let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+            let registry = ActorAdmissionRegistry::new();
             let issuer = ActorRef::first(crate::ActorId(1));
             let token = checkpoint_with_limit(&registry, issuer, Some(maximum));
             let barrier = Arc::new(std::sync::Barrier::new(contenders + 1));

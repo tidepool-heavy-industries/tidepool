@@ -9,16 +9,12 @@
 //! round. Ordinary provider output termination makes it idle; reply settlement
 //! completes one typed request; only supervision terminates the actor.
 //!
-//! Cache-preserving context unfold is admitted here as one atomic sibling
-//! group. The caller's active provider thread and immutable Haskell snapshot
-//! are shared as information, while [`ActorCapabilities`], exact
-//! [`ActorEffectKey`] membership, opaque grants, workspace placement, and
-//! descendant limits independently define each child's authority. Children
-//! are admitted dormant and released after the enclosing hosted tool block's
-//! real result is durable. They inherit its final committed Haskell scope.
-//! Admission failure aborts its own group; subsequent statement failure preserves
-//! earlier admissions. Unacknowledged groups are cancelled on host reattachment
-//! or owner shutdown. Published children remain independently addressable.
+//! Each child is admitted independently with an explicit context, workspace,
+//! installer, and lifetime. [`ActorCapabilities`], exact [`ActorEffectKey`]
+//! membership, opaque resource grants, and retained sponsor budgets authorize
+//! its work. A captured checkpoint keeps information available without
+//! changing the child's caller-selected tool surface. Readiness acknowledges
+//! the installed actor before the caller receives its live typed handle.
 
 pub(crate) mod after_tool;
 pub mod agent_spec;
@@ -106,8 +102,8 @@ pub use kernel::{
     NativeProviderStartError, NativeProviderTurnLease, WorkbenchStepKey,
 };
 pub use lineage::{
-    ActorAdmissionRegistry, ActorLineageRegistry, ActorPathReservation, CheckpointLease,
-    CheckpointRefusal, SpawnAdmission, SpawnAdmissionOutcome, SpawnCleanupOutcome,
+    ActorAdmissionRegistry, CheckpointLease, CheckpointRefusal, SpawnAdmission,
+    SpawnAdmissionOutcome, SpawnCleanupOutcome,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,

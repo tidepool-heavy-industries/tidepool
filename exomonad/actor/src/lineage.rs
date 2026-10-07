@@ -1,12 +1,12 @@
 //! Checkpoint custody and independent child admission under one atomic owner.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
-use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
+
 use tidepool_runtime::session::ContextCheckpointBoundary;
 
 use crate::ActorRef;
@@ -14,45 +14,6 @@ use crate::HostedCheckpointAttachment;
 
 mod spawn_admission;
 pub use spawn_admission::{SpawnAdmission, SpawnAdmissionOutcome, SpawnCleanupOutcome};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActorPathReservation {
-    pub requested: ActorPath,
-    pub allocated: ActorPath,
-}
-
-#[derive(Default)]
-struct LineageState {
-    occupied: BTreeSet<ActorPath>,
-}
-
-/// Collision-free allocation of retained runtime actor paths.
-#[derive(Clone, Default)]
-pub struct ActorLineageRegistry {
-    state: Arc<Mutex<LineageState>>,
-}
-
-impl ActorLineageRegistry {
-    pub fn reserve_path(
-        &self,
-        requested: ActorPath,
-    ) -> Result<ActorPathReservation, ActorPathError> {
-        let mut state = self.state.lock();
-        let Some((leaf, prefix)) = requested.segments().split_last() else {
-            return Err(ActorPathError::EmptyPath);
-        };
-        let allocated = lowest_available(|path| state.occupied.contains(path), prefix, leaf)?;
-        state.occupied.insert(allocated.clone());
-        Ok(ActorPathReservation {
-            requested,
-            allocated,
-        })
-    }
-
-    pub fn retain_external(&self, path: ActorPath) -> bool {
-        self.state.lock().occupied.insert(path)
-    }
-}
 
 #[derive(Default)]
 struct ActorAdmissionsState {
@@ -75,7 +36,6 @@ struct ReleasedCheckpoint {
 /// One atomic owner for checkpoint leases and independent spawn reservations.
 #[derive(Clone)]
 pub struct ActorAdmissionRegistry {
-    lineage: ActorLineageRegistry,
     state: Arc<Mutex<ActorAdmissionsState>>,
     checkpoint_namespace: uuid::Uuid,
 }
@@ -172,11 +132,16 @@ impl CheckpointLease {
     }
 }
 
+impl Default for ActorAdmissionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActorAdmissionRegistry {
     #[must_use]
-    pub fn new(lineage: ActorLineageRegistry) -> Self {
+    pub fn new() -> Self {
         Self {
-            lineage,
             state: Arc::new(Mutex::new(ActorAdmissionsState::default())),
             checkpoint_namespace: uuid::Uuid::new_v4(),
         }
@@ -629,37 +594,6 @@ impl ActorAdmissionRegistry {
     }
 }
 
-fn lowest_available(
-    occupied: impl Fn(&ActorPath) -> bool,
-    prefix: &[ActorPathSegment],
-    leaf: &ActorPathSegment,
-) -> Result<ActorPath, ActorPathError> {
-    let candidate = ActorPath::new(
-        prefix
-            .iter()
-            .cloned()
-            .chain(std::iter::once(leaf.clone()))
-            .collect(),
-    )?;
-    if !occupied(&candidate) {
-        return Ok(candidate);
-    }
-    for ordinal in 1.. {
-        let numbered = leaf.numbered(ordinal)?;
-        let candidate = ActorPath::new(
-            prefix
-                .iter()
-                .cloned()
-                .chain(std::iter::once(numbered))
-                .collect(),
-        )?;
-        if !occupied(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    unreachable!("unbounded numeric suffix space")
-}
-
 #[cfg(test)]
 #[path = "lineage/capture_lifetime_tests.rs"]
 mod capture_lifetime_tests;
@@ -707,7 +641,7 @@ mod tests {
 
     #[test]
     fn undelivered_checkpoint_drops_opaque_host_attachment() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let (token, drops) = checkpoint_with_attachment(
             &registry,
@@ -737,7 +671,7 @@ mod tests {
 
     #[test]
     fn failed_workbench_boundary_drops_only_its_pending_host_attachments() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let failed_boundary =
             ContextCheckpointBoundary::external("thread".into(), "failed".into(), "failed".into());
@@ -764,7 +698,7 @@ mod tests {
 
     #[test]
     fn issuer_failure_drops_only_pending_host_attachments() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let other = ActorRef::first(ActorId(2));
         let boundary =
@@ -802,7 +736,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_waits_for_exact_boundary_and_survives_issuer_retirement() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let boundary =
             ContextCheckpointBoundary::external("thread".into(), "call".into(), "call".into());
@@ -848,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_checkpoint_refuses_delegation_and_restart_namespace() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let boundary =
             ContextCheckpointBoundary::external("thread".into(), "call".into(), "call".into());
@@ -876,7 +810,7 @@ mod tests {
             registry.checkpoint(&token, SessionId(7)),
             Err(CheckpointRefusal::CaptureFailed)
         ));
-        let restarted = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let restarted = ActorAdmissionRegistry::new();
         assert!(matches!(
             restarted.checkpoint(&token, SessionId(7)),
             Err(CheckpointRefusal::ProcessRestartUnsupported)
@@ -885,7 +819,7 @@ mod tests {
 
     #[tokio::test]
     async fn delivered_checkpoint_survives_later_failure_of_its_workbench_boundary() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let boundary =
             ContextCheckpointBoundary::external("thread".into(), "call".into(), "call".into());
@@ -933,7 +867,7 @@ mod tests {
 
     #[tokio::test]
     async fn release_is_idempotent_and_revokes_pending_or_published_lease() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let boundary =
             ContextCheckpointBoundary::external("thread".into(), "call".into(), "call".into());
@@ -1010,7 +944,7 @@ mod tests {
             registry.release_checkpoint(&published, SessionId(7)),
             Ok(None)
         );
-        let restarted = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let restarted = ActorAdmissionRegistry::new();
         assert_eq!(
             restarted.release_checkpoint(&published, SessionId(7)),
             Err(CheckpointRefusal::ProcessRestartUnsupported)
@@ -1019,7 +953,7 @@ mod tests {
 
     #[test]
     fn failed_checkpoint_release_retains_scope_until_retry_is_confirmed() {
-        let registry = ActorAdmissionRegistry::new(ActorLineageRegistry::default());
+        let registry = ActorAdmissionRegistry::new();
         let issuer = ActorRef::first(ActorId(1));
         let boundary =
             ContextCheckpointBoundary::external("thread".into(), "call".into(), "call".into());
