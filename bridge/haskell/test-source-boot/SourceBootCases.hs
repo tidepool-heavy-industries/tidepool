@@ -19,7 +19,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (decodeListLen, decodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
-import Data.Bits (testBit)
+import Data.Bits (testBit, xor)
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.MVar (newMVar, modifyMVar_, readMVar)
@@ -3073,8 +3073,9 @@ originalProjectionProducts = withScratch $ \work -> do
     local : _ -> pure (let (interface,_,_) = localFinalizedInterface local in interface)
     [] -> fail "reused packet control has no actual finalized source owner"
   originBytes <- BS.readFile (exactPath originInterface)
+  when (BS.null originBytes) (fail "captured original interface is empty")
   let refusedDirectory = captureDirectory </> "changed-origin-packet"
-  BS.appendFile (exactPath originInterface) "changed"
+  BS.writeFile (exactPath originInterface) (BS.cons (BS.head originBytes `xor` 1) (BS.tail originBytes))
   changedOrigin <- try (writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
       refusedDirectory paired (Just issuedContext) [("usesGood",currentProgram)])
     `finally` BS.writeFile (exactPath originInterface) originBytes
@@ -3082,6 +3083,11 @@ originalProjectionProducts = withScratch $ \work -> do
   case changedOrigin of
     Left _ -> pure ()
     Right _ -> fail "reused inventory published a packet from changed captured origin bytes"
+  restoredCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  unless (map moduleProductInput (certifiedOriginalProducts restoredCertificate)
+      == map moduleProductInput (certifiedOriginalProducts currentCertificate)) $
+    fail "restored capture did not independently reproduce the original packet"
   pendingBodyCache <- newPreparedBodyCache
   pendingRawCache <- newOriginalProjectionCollector
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
