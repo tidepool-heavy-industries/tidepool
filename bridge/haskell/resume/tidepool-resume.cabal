@@ -1,0 +1,13 @@
+cabal-version: 2.4
+name:          tidepool-resume
+version:       0.1.0.0
+build-type:    Simple
+
+library
+  hs-source-dirs:   src
+  exposed-modules:  Tidepool.Internal.Resume
+  build-depends:
+    base >= 4.20 && < 5,
+    freer-simple
+  default-language: GHC2024
+  ghc-options:      -Wall

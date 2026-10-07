@@ -50,7 +50,6 @@ nix_haskell_toolchain(
         "root//bridge/haskell:haskell_prepared_json_scientific_source",
         "root//bridge/haskell:haskell_prepared_formatting_double_source",
         "root//bridge/haskell:haskell_prepared_time_source",
-        "root//bridge/haskell:haskell_typed_segment_resume_source",
         "root//bridge/haskell:haskell_host_command_types_source",
     ],
     visibility = ["PUBLIC"],

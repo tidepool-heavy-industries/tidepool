@@ -233,6 +233,7 @@
                   ];
                 }
               );
+            tidepool-resume = self'.callCabal2nix "tidepool-resume" ./bridge/haskell/resume { };
             freer-simple =
               (pkgs.haskell.lib.unmarkBroken (pkgs.haskell.lib.doJailbreak super'.freer-simple)).overrideAttrs
                 (old: {
@@ -244,6 +245,7 @@
         };
         ghcPackages =
           ps: with ps; [
+            tidepool-resume
             freer-simple
             lens
             errors
