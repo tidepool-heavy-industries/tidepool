@@ -1490,6 +1490,31 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    /// Item projections can publish separate receipts for one source owner.
+    /// Only the scaffold identity is combined; support policy retains every
+    /// validated admission and its import and original-selection evidence.
+    pub(crate) fn matching_generated_source_owner(
+        admissions: &[Self],
+        source: &str,
+    ) -> Result<ExactModuleIdentity, CompileError> {
+        let owners = admissions
+            .iter()
+            .filter(|admission| {
+                admission
+                    .witness
+                    .matches_source(admission.witness.source_path(), source)
+            })
+            .map(Self::generated_source_owner)
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut owners = owners.into_iter();
+        match (owners.next(), owners.next()) {
+            (Some(owner), None) => Ok(owner),
+            _ => Err(CompileError::ExtractFailed(
+                "program support lacks one authenticated generated source owner".into(),
+            )),
+        }
+    }
+
     /// Completed-source validation binds GENERATED_SOURCE to this receipt's
     /// hash-verified witness. Resolve its owner without parsing source text.
     pub(crate) fn generated_source_owner(&self) -> Result<ExactModuleIdentity, CompileError> {
@@ -8686,6 +8711,87 @@ mod tests {
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
         Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
+    }
+
+    #[test]
+    fn generated_source_owner_accepts_separate_projection_receipts_and_checks_every_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(directory.path(), context);
+        let source = "module Consumer where\n";
+        let fixture = import_receipt(directory.path(), &request, "Unadmitted");
+        let mut receipt = read_receipt(&fixture);
+        receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        let output = directory.path().join("outputs");
+        let receipts = ["first", "second"].map(|name| {
+            let root = output.join(".exact-compilations").join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let snapshot = root.join("source.hs");
+            std::fs::write(&snapshot, source).unwrap();
+            let mut projected = receipt.clone();
+            projected.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
+            let path = root.join("receipt.cbor");
+            write_receipt(&path, &projected);
+            path
+        });
+        let expected = identity("fixture", "Consumer");
+        let admissions = request.validate_outputs(&output).unwrap();
+        assert_eq!(admissions.len(), 2);
+        assert_eq!(
+            ExactSourceAdmission::matching_generated_source_owner(&admissions, source).unwrap(),
+            expected
+        );
+        assert!(ExactSourceAdmission::matching_generated_source_owner(&[], source).is_err());
+        assert!(ExactSourceAdmission::matching_generated_source_owner(
+            &admissions,
+            "module Changed where\n"
+        )
+        .is_err());
+
+        let snapshot = receipts[1].parent().unwrap().join("source.hs");
+        std::fs::write(&snapshot, b"changed after projection").unwrap();
+        assert!(request.validate_outputs(&output).is_err());
+        std::fs::write(&snapshot, source).unwrap();
+        let valid = read_receipt(&receipts[1]);
+        let mut changed_hash = valid.clone();
+        changed_hash.as_array_mut().unwrap()[5] = text(sha256(b"different source"));
+        write_receipt(&receipts[1], &changed_hash);
+        assert!(request.validate_outputs(&output).is_err());
+
+        let mut malformed = valid.clone();
+        let fields = malformed.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        evidence.modules[0].unit.clear();
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipts[1], &malformed);
+        assert!(request.validate_outputs(&output).is_err());
+
+        let mut distinct = valid.clone();
+        let fields = distinct.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        evidence.modules[0].unit = "other".into();
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap()[0] = text("other");
+        write_receipt(&receipts[1], &distinct);
+        let distinct_admissions = request.validate_outputs(&output).unwrap();
+        assert_eq!(distinct_admissions.len(), 2);
+        assert!(ExactSourceAdmission::matching_generated_source_owner(
+            &distinct_admissions,
+            source
+        )
+        .is_err());
+
+        write_receipt(&receipts[1], &valid);
+        let restored = request.validate_outputs(&output).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(
+            ExactSourceAdmission::matching_generated_source_owner(&restored, source).unwrap(),
+            expected
+        );
     }
 
     #[test]
