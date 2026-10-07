@@ -802,12 +802,35 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
             owner_history
         );
         assert_eq!(next.recovery_products.len(), owner_history.len());
+        // This is a new interface-only compiler request, not growth of the
+        // previous native offer. Retain every old carrier while choosing the
+        // newly certified native version for each owner.
+        let projection = history_context.compiler_input_projection().interface_only();
         history_context = history_context
+            .with_compiler_input_projection(projection)
+            .unwrap()
             .extend_checked_original_products(
                 canonical_producer,
                 &[current_a.clone(), current_b.clone()],
             )
             .unwrap();
+        assert_eq!(
+            history_context
+                .compiler_original_products()
+                .unwrap()
+                .iter()
+                .map(|product| product.owner().clone())
+                .collect::<BTreeSet<_>>(),
+            selected,
+        );
+        assert_eq!(
+            history_context
+                .recovery_products()
+                .iter()
+                .map(|product| product.owner().clone())
+                .collect::<BTreeSet<_>>(),
+            owner_history,
+        );
         latest_recovery = next.recovery_products.clone();
     }
     assert_eq!(owner_history.len(), 6);
