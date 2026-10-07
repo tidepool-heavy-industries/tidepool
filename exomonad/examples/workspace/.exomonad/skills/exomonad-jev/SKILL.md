@@ -198,9 +198,11 @@ let gate = J.choice "Which of these describes the candidate?"
 answer <- J.ask1 (J.state (#owned_paths := (["src/Retry.hs", "tests/RetrySpec.hs"] :: [Text]) :& #diff_stat := diffStat :& #test_output := testOutput :& #review_scope := ("retry bounds only" :: Text))) gate
 display (case answer of
   Left err -> "jev unavailable: " <> T.pack (show err)
-    Right response -> let a = J.answers response in case J.takenUnder J.careful a of
-    Left doubt -> "hold: " <> doubt.why
-    Right settled -> a.key <> " -> " <> J.settledValue settled <> "; " <> J.explain J.careful a)
+  Right response ->
+    let a = J.answers response
+    in case J.takenUnder J.careful a of
+      Left doubt -> "hold: " <> doubt.why
+      Right settled -> a.key <> " -> " <> J.settledValue settled <> "; " <> J.explain J.careful a)
 ```
 
 The example uses `J.careful` to demonstrate settlement. Choose thresholds from

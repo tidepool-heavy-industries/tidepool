@@ -54,7 +54,8 @@ output yielded policy doubt (confidence 0.36), not an actionable remedy. All six
 responses decoded and passed through the Haskell policy. These are synthetic
 cases, not a reliability estimate or evidence of frontier turns saved.
 
-The recipe host does not install Jev. Requests were prepared in Haskell, sent to
-the live endpoint by the operator, and replayed through `J.decode` and the typed
-planner. This verifies request construction and interpretation, not the native
-Jev effect transport. No command was retried by this trial.
+The recipe host does not install Jev. Each request was prepared once in Haskell
+from its model, state and packet, sent to the live endpoint by the operator, and
+the retained prepared value was reused to decode the response through `J.decode`
+and the typed planner. This verifies request construction and interpretation,
+not the native Jev effect transport. No command was retried by this trial.
