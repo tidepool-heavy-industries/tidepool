@@ -14,7 +14,7 @@ import GHC.Hs.Utils
 import GHC.Parser.Annotation (noLocA, noAnn)
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
-import GHC.Types.Name.Reader (RdrName, mkRdrQual, mkRdrUnqual, rdrNameOcc)
+import GHC.Types.Name.Reader (RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc)
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan)
 import GHC.Unit.Module (mkModuleName)
 import GHC.Utils.Outputable (defaultSDocContext, ppr, showSDocOneLine)
@@ -103,6 +103,8 @@ rewriteStatements plan statements = case reverse statements of
     terminalExpression (L _ statement) = case statement of
       LastStmt _ expression _ _
         | isPlainPureUnit expression -> Right segmentPureUnit
+      BodyStmt _ expression _ _
+        | isPlainPureUnit expression -> Right segmentPureUnit
       _ -> Left UnprovedRootAbstraction
 
     lowerItems [] final = Right final
@@ -189,11 +191,13 @@ isPlainPureUnit expression = case unLoc expression of
   _ -> False
   where
     isPureName function = case unLoc function of
-      HsVar _ name -> occNameString (rdrNameOcc (unLoc name)) == "pure"
+      HsVar _ name -> isUnqual (unLoc name)
+        && occNameString (rdrNameOcc (unLoc name)) == "pure"
       _ -> False
     isUnitExpression value = case unLoc value of
       HsPar _ inner -> isUnitExpression inner
       ExplicitTuple _ [] Boxed -> True
+      HsVar _ name -> occNameString (rdrNameOcc (unLoc name)) == "()"
       _ -> False
 
 unqualifiedName :: String -> RdrName
