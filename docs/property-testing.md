@@ -138,11 +138,13 @@ path resolves into the source tree.
 
 For custom runners, keep generated production replay inside the configured
 runner so failures receive shrinking and persistence. Separate deterministic
-regressions from generator-support checks; a failing prelude must not prevent
-the campaign from running unnoticed. Report observed coverage on failure too.
+regressions from generator-support checks. If a failed setup prevents generated
+execution, report zero generated cases rather than a campaign result. Report
+observed coverage on failure too.
 Distinguish selected test functions, configured fresh cases and actual callbacks:
 replay and shrinking can add callbacks, while zero-case replay may execute none.
-A passing empty replay establishes no search coverage.
+Saved-seed replay can exercise known regressions without fresh exploration;
+an empty replay establishes neither.
 
 Retain the minimized operation trace as well as the seed, tested revision,
 command, counts and logs. Strategies evolve, so a seed alone is not a stable
