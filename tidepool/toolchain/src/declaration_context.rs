@@ -193,6 +193,7 @@ impl OriginalCompilerInputs {
 pub(crate) struct RequestCompilerInputs {
     pub(crate) projection: CompilerInputProjection,
     pub(crate) metadata: ArtifactMetadataSnapshot,
+    pub(crate) artifacts: ArtifactView,
     declaration_semantic_sha256: [u8; 32],
 }
 
@@ -205,20 +206,20 @@ impl ProtectedScaffoldRequirements {
         let baseline = context.compiler_metadata_snapshot()?;
         let declaration_semantic_sha256 = context.semantic_sha256_from_metadata(&baseline);
         let mut projection = context.compiler_projection.merge(&self.projection)?;
-        let metadata = match private {
+        let (artifacts, metadata) = match private {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
-                context
-                    .artifact_view()
-                    .merge(&private.artifacts)?
-                    .metadata_snapshot()
+                let artifacts = context.artifact_view().merge(&private.artifacts)?;
+                let metadata = artifacts.metadata_snapshot();
+                (artifacts, metadata)
             }
-            None => baseline,
+            None => (context.artifact_view().clone(), baseline),
         };
         let metadata = projection.project_metadata(metadata)?;
         Ok(RequestCompilerInputs {
             projection,
             metadata,
+            artifacts,
             declaration_semantic_sha256,
         })
     }
@@ -5530,14 +5531,11 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     products: &[CertifiedRecoveryProduct],
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
     values: &[CertifiedValueInterface],
-    baseline: Option<&ExactDeclarationContext>,
+    baseline: Option<&ArtifactView>,
     demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
-    let view = baseline.map_or_else(
-        || ArtifactInventory::default().empty_view(),
-        |context| context.artifact_view().clone(),
-    );
+    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
     let mut entries = interfaces
         .iter()
         .cloned()

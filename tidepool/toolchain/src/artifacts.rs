@@ -2724,6 +2724,11 @@ fn seal_turn_outputs_with_validation(
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(imports)
         }
     };
+    let compiler_inputs = offer
+        .exact
+        .as_ref()
+        .map(|request| request.compiler_inputs())
+        .transpose()?;
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -2733,7 +2738,7 @@ fn seal_turn_outputs_with_validation(
             &certified.recovery_products,
             &certified.module_interfaces,
             &certified.value_interfaces,
-            offer.exact.as_ref().map(|request| request.context.as_ref()),
+            compiler_inputs.as_ref().map(|input| &input.artifacts),
             demand,
             validation,
         )?;
@@ -4077,6 +4082,10 @@ fn compile_invocation_inner(
                 );
             }
         }
+        let compiler_inputs = exact_request
+            .as_ref()
+            .map(|request| request.compiler_inputs())
+            .transpose()?;
         artifacts.artifact_view =
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -4086,9 +4095,7 @@ fn compile_invocation_inner(
                 &certified.recovery_products,
                 &certified.module_interfaces,
                 &certified.value_interfaces,
-                exact_request
-                    .as_ref()
-                    .map(|request| request.context.as_ref()),
+                compiler_inputs.as_ref().map(|input| &input.artifacts),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                     &target_imports,
                 ),
