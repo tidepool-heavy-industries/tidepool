@@ -22,6 +22,8 @@ mod display_settlement;
 mod drain_wait;
 pub(crate) mod forms;
 pub(crate) mod green;
+#[cfg(test)]
+mod green_runtime_tests;
 mod inspection_wait;
 pub(crate) mod invocation_work;
 mod owned_workbench;
