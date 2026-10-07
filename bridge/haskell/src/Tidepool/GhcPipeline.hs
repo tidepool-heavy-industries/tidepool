@@ -2158,8 +2158,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         prepareTypedTarget summary env tcg = case typedPlanFor selection of
           Just typedPlan | ms_mod_name summary == targetName -> do
             prepare <- maybe (throwIO MissingSegmentPreparation) pure (typedPreparationFor selection)
-            segment <- captureTypedSegment typedPlan env
-              (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) tcg
+            segment <- captureTypedSegment typedPlan env tcg
             -- GHC Make can turn a hook exception into a failed load and a
             -- diagnostic. This request owns the preparation callback's exact
             -- refusal or cancellation, independently of source diagnostics.

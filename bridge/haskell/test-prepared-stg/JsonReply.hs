@@ -1,3 +1,4 @@
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE DataKinds, TypeApplications, OverloadedStrings #-}
 module JsonReply where
 
@@ -5,7 +6,7 @@ import Control.Monad.Freer (Eff)
 import Tidepool.Aeson.Value (Value(..), object, (.=), scientific)
 import Tidepool.Actor (receive)
 import Tidepool.Effects.Core (ActorLocal)
-import Tidepool.Internal.Resume (settle, resumeLifted)
+import "tidepool-resume" Tidepool.Internal.Resume (settle, resumeLifted)
 
 -- The request carries a mailbox handler. This machine-level control resumes
 -- the receiver's typed next value directly without invoking that handler.
