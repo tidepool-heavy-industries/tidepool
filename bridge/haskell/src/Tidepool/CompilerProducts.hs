@@ -16,6 +16,7 @@ module Tidepool.CompilerProducts
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
+  , currentReconciledOriginalProducts
   , selectPreparedOriginalSessionOutputs
   ) where
 
@@ -47,13 +48,15 @@ import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
 import System.Mem.StableName (makeStableName)
 import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
+import Tidepool.OriginalProductRoots
+  ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionOutputs )
 import Tidepool.ExactScope
   ( ExactScope(..), scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
   , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
-  , CanonicalInterfaceProof, captureFinalizedSourceOriginals )
+  , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncoding, prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
@@ -113,7 +116,7 @@ prepareCompilerProjectionContext prepared retainedGenerations owner target auxil
     (prHscEnv (pprPipelineResult prepared))
     (compilationScope <$> preparedExactCompilation prepared)
     retainedGenerations owner target auxiliaryRoots hostJsonAuthority
-  pure context {projectionCurrentOriginals = pprAcceptedCandidateBindings prepared}
+  pure context {projectionCurrentOriginals = pprOriginalBindings prepared}
 
 prepareCompilerProjectionContextForEnvironment
   :: HscEnv -> Maybe ExactScope -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
@@ -198,6 +201,9 @@ data CurrentOriginalInventory = CurrentOriginalInventory
   , currentOriginalProducts :: [ModuleProductEncoding]
   , currentOriginalPackages :: Map.Map (String,String) BS.ByteString
   , currentOriginalFinalized :: FinalizedModuleArtifacts
+    -- Kept with these immutable products through item output selection; both
+    -- package demand and certification consume this same reconciliation.
+  , currentReconciledOriginalProducts :: ReconciledOriginalProducts
   , currentOriginalNames :: Map.Map Name SymbolIdentity
     -- Already admitted native originals are imports, never fresh emitted groups.
   , currentOriginalExternalNames :: Map.Map Name SymbolIdentity
@@ -261,13 +267,18 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       (availability,products,packages) <- admitModuleProducts originalInterfaces admittedContext
         (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared)
         (pprPackageImports prepared)
+      reconciled <- either (ioError . userError) pure (reconcileOriginalProducts
+        (compilationScope <$> preparedExactCompilation prepared)
+        [(T.unpack unit, T.unpack name, map originalGroupFromProjected groups)
+          | product <- products, let (unit,name,_,groups) = moduleProductInput product])
       let inventory = CurrentOriginalInventory
             { currentOriginalAvailability = availability
             , currentOriginalProducts = products
             , currentOriginalPackages = packages
             , currentOriginalFinalized = finalized
+            , currentReconciledOriginalProducts = reconciled
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
-            , currentOriginalExternalNames = pprAcceptedCandidateBindings prepared
+            , currentOriginalExternalNames = pprOriginalBindings prepared
             }
       pure admittedContext {preparedCurrentOriginalInventory = Just inventory}
 
@@ -410,6 +421,10 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
       acquireOriginal siblings owner = case exact of
         Nothing -> pure Nothing
         Just scope -> do
+          when (any (\original -> (originalUnit original,originalModule original) ==
+              (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (scopeProducts scope))
+            (fail ("required binder is absent from the admitted original native census: "
+              ++ show (unitString (moduleUnit owner),moduleNameString (moduleName owner))))
           existing <- readIORef originalPreparerRef
           prepare <- case existing of
             Just ready -> pure ready
@@ -652,7 +667,11 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
                       exactProgramProductVersionFromDigest scope (T.unpack unit) (T.unpack name)
                         (T.unpack source) iface native packages)) (sourceProductSha256 finalDependencies (T.unpack unit) (T.unpack name))
                     _ -> ""]
-      certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      reconciled <- case inventory of
+        Just current -> pure (currentReconciledOriginalProducts current)
+        Nothing -> either (ioError . userError) pure (reconcileOriginalProducts
+          (compilationScope <$> preparedExactCompilation prepared) [])
+      certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes

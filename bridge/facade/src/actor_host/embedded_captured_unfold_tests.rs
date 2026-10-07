@@ -1,6 +1,7 @@
 use super::test_campaign::{explicit_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
 use super::*;
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use harness::{
     engine::ResponsesTransport,
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
@@ -15,6 +16,7 @@ const PENDING_CALL: &str = "captured-unfold-and-await";
 const REUSE_CALL: &str = "reuse-failed-cell-capture";
 const RESUME_INPUT: &str = "resume interrupted captured fixture";
 const LOCAL_STARTUP_CALL: &str = "read-started-local-actors";
+const INTENTIONAL_COORDINATOR_FAILURE: &str = "HOSTED_INTENTIONAL_COORDINATOR_FAILURE";
 const INTENTIONAL_PARENT_FAILURE: &str = "M2_INTENTIONAL_PARENT_EXECUTION_FAILURE";
 
 const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
@@ -23,6 +25,8 @@ const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 enum CapturedScenario {
     Success,
     CancelWhileParked,
+    ShutdownAfterChildFailure,
+    CoordinatorFailureAfterChildFailure,
     FailureAfterReplies,
     ConcurrentNominalJoin,
 }
@@ -240,7 +244,7 @@ impl CapturedHostTransport {
                 1 => vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"captured-scope-setup", "name":"haskell",
                     "input":match self.scenario {
-                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
+                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
                         HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => format!("{}\n{}\n{}", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_nominal_join_setup.hs")),
                     }
                 }))],
@@ -258,7 +262,7 @@ impl CapturedHostTransport {
                             HostedScenario::LocalActorStartup => {
                                 "seed <- R.call (readSeed (R.client seedStore)) ()\nagents <- R.call (readAgents (R.client groupStore)) ()\ndisplay (case seed of Nothing -> null agents; _ -> False)"
                             }
-                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
+                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
                                 include_str!("embedded_captured_unfold_and_await.hs")
                             }
                             HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
@@ -378,6 +382,8 @@ impl CapturedHostTransport {
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":match self.scenario {
+                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) if ordinal == 0 => "display (error \"HOSTED_INTENTIONAL_CHILD_FAILURE\" :: Int)",
+                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => "_ <- Cmd.run (Cmd.argv [\"sleep\", \"300\"])\nrespond capturedGetter",
                             HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => "respond (m2MakeReply sessionInput)",
                             HostedScenario::Captured(CapturedScenario::FailureAfterReplies) if ordinal >= 2 => include_str!("embedded_captured_child_reuse_nominal.hs"),
                             _ => "respond capturedGetter",
@@ -710,6 +716,22 @@ async fn embedded_captured_unfold_awaits_two_child_replies_before_parent_call_re
 }
 
 #[tokio::test]
+async fn embedded_host_shutdown_after_child_failure_settles_active_calls() {
+    captured_host_scenario(HostedScenario::Captured(
+        CapturedScenario::ShutdownAfterChildFailure,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn embedded_coordinator_failure_after_child_failure_preserves_cleanup_proof() {
+    captured_host_scenario(HostedScenario::Captured(
+        CapturedScenario::CoordinatorFailureAfterChildFailure,
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell() {
     captured_host_scenario(HostedScenario::Captured(
         CapturedScenario::FailureAfterReplies,
@@ -879,7 +901,12 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     let check_shutdown_parked =
         scenario == HostedScenario::Captured(CapturedScenario::CancelWhileParked);
     let forest_after_shutdown = Arc::clone(&host.context.forest);
-    host.run_scenario(|host| {
+    let runtime_after_shutdown = Arc::clone(&host.runtime);
+    let observer_after_shutdown = host.context.observer.clone();
+    let actor_after_shutdown = host.context.actor.clone();
+    let owners_after_shutdown = Arc::clone(&host.context.owners);
+    let transport_after_shutdown = prepared_transport.lock().clone().unwrap();
+    let scenario_result = std::panic::AssertUnwindSafe(host.run_scenario(|host| {
         Box::pin(async move {
             host.input("Exercise the captured checkpoint scenario.")
                 .await
@@ -1105,6 +1132,74 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             eprintln!(
                 "[captured-engine] two child provider branches ready while exact parent claim is pending"
             );
+            if matches!(scenario, CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) {
+                transport.reply_children.send_replace(true);
+                let mut failed = None;
+                tokio::time::timeout(TYPED_CHILD_REPLY_SETTLEMENT_BUDGET, async {
+                    loop {
+                        let operation = parent_settlements.recv().await.unwrap();
+                        if sessions.contains(&operation.origin) {
+                            let output = scheduler.wait(&operation).await.unwrap();
+                            let JobOutput::Completed(Err(failure)) = output else {
+                                panic!("first child must retain its intentional failure: {output:?}");
+                            };
+                            assert!(failure.to_string().contains("HOSTED_INTENTIONAL_CHILD_FAILURE"), "{failure}");
+                            failed = Some(operation);
+                            break;
+                        }
+                    }
+                }).await.expect("intentional child failure settles");
+                let failed = failed.unwrap();
+                let active_origin = sessions.iter().find(|origin| **origin != failed.origin).unwrap();
+                let active_key = (active_origin.clone(), format!("captured-child-{}", active_origin.actor().0));
+                let active = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut observations = tokio::time::interval(Duration::from_millis(20));
+                    loop {
+                        if let Some(operation) = transport.operations.lock().get(&active_key).cloned() {
+                            break operation;
+                        }
+                        observations.tick().await;
+                    }
+                }).await.expect("other exact provider operation is issued");
+                let active_actor = campaign.observer.installations().into_iter()
+                    .find(|installation| campaign.binding(installation.actor.identity())
+                        .is_some_and(|binding| embedded_harness::original_operation(binding.identity(), &active).is_ok())).unwrap().actor;
+                let target = harness::embedding::HostIdentity {
+                    run: runtime_namespace(&campaign.config.run_directory.path()),
+                    actor: active_origin.actor().clone(),
+                    incarnation: active_actor.identity().incarnation.0.to_string(),
+                };
+                let native = exomonad_tool::ToolInvocationContext {
+                    origin: exomonad_tool::ToolInvocationOrigin::Model(
+                        embedded_harness::original_operation(&target, &active).unwrap(),
+                    ),
+                    call_id: active.call.0.clone(),
+                    namespace: None,
+                };
+                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                    let mut observations = tokio::time::interval(Duration::from_millis(20));
+                    while active_actor.hosted_workbench_waiting(&native).is_none() {
+                        assert!(runtime.store().claims_for_operation(&active).unwrap().iter()
+                            .any(|claim| claim.state == harness::store::ClaimState::Pending));
+                        observations.tick().await;
+                    }
+                }).await.expect("the other exact native call parks before host teardown");
+                assert!(runtime.store().claims_for_operation(&transport.operation(&root_origin, PENDING_CALL))
+                    .unwrap().iter().any(|claim| claim.state == harness::store::ClaimState::Pending));
+                assert!(matches!(scheduler.wait(&failed).await.unwrap(), JobOutput::Completed(Err(_))));
+                if scenario == CapturedScenario::CoordinatorFailureAfterChildFailure {
+                    campaign.observer.fail_coordination(INTENTIONAL_COORDINATOR_FAILURE);
+                    let failure = host.while_host_running(std::future::pending::<()>()).await.unwrap_err();
+                    let super::hosted_test_context::HostBarrierFailure::CoordinationFailed { error, .. } = failure else {
+                        panic!("expected exact coordinator failure before host result: {failure}");
+                    };
+                    assert_eq!(error, INTENTIONAL_COORDINATOR_FAILURE);
+                    panic!("{INTENTIONAL_COORDINATOR_FAILURE}");
+                }
+                // Returning invokes production teardown with one failed child,
+                // an active child command, and the parent's outstanding join.
+                return;
+            }
             if scenario == CapturedScenario::CancelWhileParked {
                 let pending = transport.operation(&root_origin, PENDING_CALL);
                 let target = harness::embedding::HostIdentity {
@@ -1436,6 +1531,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             )
             .await;
             match scenario {
+                CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure => unreachable!("shutdown scenario returns before child replies"),
                 CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
                     assert_committed_haskell_value(&result.unwrap(), "True");
                     received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
@@ -1676,8 +1772,95 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             }
             finish_root(&transport, &campaign).await;
         })
-    })
+    }))
+    .catch_unwind()
     .await;
+    if scenario == HostedScenario::Captured(CapturedScenario::CoordinatorFailureAfterChildFailure) {
+        let payload =
+            scenario_result.expect_err("coordinator scenario must retain its original marker");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied());
+        if message != Some(INTENTIONAL_COORDINATOR_FAILURE) {
+            std::panic::resume_unwind(payload);
+        }
+        assert!(owners_after_shutdown
+            .lock()
+            .values()
+            .all(|owner| owner.native_retirement == NativeRetirement::Preserve));
+    } else if let Err(payload) = scenario_result {
+        std::panic::resume_unwind(payload);
+    }
+    if matches!(
+        scenario,
+        HostedScenario::Captured(
+            CapturedScenario::ShutdownAfterChildFailure
+                | CapturedScenario::CoordinatorFailureAfterChildFailure
+        )
+    ) {
+        let scheduler = runtime_after_shutdown.scheduler();
+        let operations = transport_after_shutdown
+            .operations
+            .lock()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failed = 0;
+        let mut cancelled = 0;
+        for operation in operations {
+            if operation.call.0 != PENDING_CALL && !operation.call.0.starts_with("captured-child-")
+            {
+                continue;
+            }
+            match scheduler.wait(&operation).await.unwrap() {
+                JobOutput::Completed(Err(failure))
+                    if failure
+                        .to_string()
+                        .contains("HOSTED_INTENTIONAL_CHILD_FAILURE") =>
+                {
+                    failed += 1
+                }
+                JobOutput::Cancelled | JobOutput::CancelledWithReceipt(_) => cancelled += 1,
+                outcome => panic!(
+                    "shutdown must retain exact terminal proof for {operation:?}: {outcome:?}"
+                ),
+            }
+        }
+        assert_eq!(
+            failed, 1,
+            "original child failure remains retained after teardown"
+        );
+        assert_eq!(
+            cancelled, 2,
+            "parent and active child obtain exact cancellation receipts"
+        );
+        assert!(actor_after_shutdown
+            .terminal()
+            .cleanup()
+            .unwrap()
+            .is_confirmed());
+        for installation in observer_after_shutdown.installations() {
+            assert!(installation
+                .actor
+                .terminal()
+                .cleanup()
+                .unwrap()
+                .is_confirmed());
+            assert_eq!(
+                observed_resource_release(installation.actor.identity(), &owners_after_shutdown),
+                Some(exomonad_actor::ResourceRelease::Released),
+            );
+        }
+        assert!(forest_after_shutdown
+            .inspect_host_graph()
+            .iter()
+            .all(|node| {
+                node.terminal.is_some()
+                    && node.active_requests.is_empty()
+                    && node.queued_requests.is_empty()
+            }));
+    }
     if check_shutdown_parked {
         assert_eq!(
             forest_after_shutdown

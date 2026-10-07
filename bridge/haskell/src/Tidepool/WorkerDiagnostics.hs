@@ -32,6 +32,9 @@ throwCellSplitError errorValue = case errorValue of
   CellLexFailure ->
     throwIO (LocatedCellRejection (CellSourceSpan 1 1 1 1)
       "GHC could not lex the notebook cell")
+  CellStatementParseFailure sourceSpan ->
+    throwIO (LocatedCellRejection sourceSpan
+      "GHC could not parse the notebook statement list")
   CellDanglingOperatorFailure sourceSpan operatorText ->
     throwIO (LocatedCellRejection sourceSpan
       ("cell ends with a dangling operator `" ++ operatorText

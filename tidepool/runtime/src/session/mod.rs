@@ -712,9 +712,19 @@ fn certified_native_dependencies(
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
     roots: &[tidepool_toolchain::artifact_inventory::NativeRequirementRoot],
 ) -> Result<Vec<recovery::RecoveryLiveDependency>, SessionError> {
-    Ok(context
-        .artifact_view()
-        .native_binding_requirements_from_roots(roots)?
+    Ok(native_binding_dependencies(
+        context
+            .artifact_view()
+            .native_binding_requirements_from_roots(roots)?,
+    ))
+}
+
+fn native_binding_dependencies(
+    requirements: impl IntoIterator<
+        Item = tidepool_toolchain::artifact_inventory::NativeBindingRequirement,
+    >,
+) -> Vec<recovery::RecoveryLiveDependency> {
+    requirements
         .into_iter()
         .map(
             |requirement| recovery::RecoveryLiveDependency::NativeBinding {
@@ -729,7 +739,7 @@ fn certified_native_dependencies(
                 generation: requirement.generation,
             },
         )
-        .collect())
+        .collect()
 }
 
 fn authored_identity(

@@ -31,7 +31,8 @@ pub(super) async fn run_interactive_applications(
     mut lifecycle: mpsc::Receiver<LocalResidentDeployment>,
     application_owners: InteractiveOwners,
     fleet: InteractiveFleet,
-    shutdown: watch::Receiver<Option<NativeRetirement>>,
+    shutdown: watch::Receiver<ApplicationShutdown>,
+    coordination_failed: oneshot::Sender<String>,
     mut root_config: watch::Receiver<ActorHostConfig>,
     mut embedded_service: embedded_service::EmbeddedService,
 ) -> Result<(), String> {
@@ -156,11 +157,20 @@ pub(super) async fn run_interactive_applications(
             )
             .map_err(|error| format!("embedded actor history projection failed: {error}"))?;
     }
+    let test_failure = async {
+        #[cfg(test)]
+        if let Some(observer) = &test_observer {
+            return observer.wait_coordination_failure().await;
+        }
+        std::future::pending::<String>().await
+    };
+    tokio::pin!(test_failure);
     let failure = AssertUnwindSafe(async {
         let failure = loop {
         tokio::select! {
             biased;
             _ = wait_for_shutdown(shutdown.clone()) => break None,
+            failure = &mut test_failure => break Some(failure),
             changed = root_config.changed() => {
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
             }
@@ -900,39 +910,15 @@ pub(super) async fn run_interactive_applications(
                     }
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
-                        worktree_authority.remove_grant(actor.into());
-                        let binding = with_embedded_state(&application_owners, actor, |state| {
-                            if let Some(cancel) = state.cancellation.take() {
-                                cancel.send_replace(true);
-                            }
-                            state.pending_activations = None;
-                            if let Some(binding) = state.conversation.as_ref() {
-                                binding.mark_retired();
-                            }
-                            state.conversation.clone()
-                        }).flatten();
-                        if let Some(binding) = binding {
-                            schedule_embedded_notification_drain(
-                                actor,
-                                binding,
-                                &mut notifications,
-                            );
-                        }
-                        let lifecycle = if terminal.kind == ActorExitKind::Failed {
-                            harness::server::HostActorLifecycle::Lost
-                        } else {
-                            harness::server::HostActorLifecycle::Retired
-                        };
-                        embedded_lifecycle_tx.publish(actor, lifecycle);
-                        if let Some(resources) = &launch_context.config.command_resources {
-                            let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
-                            if let Err(error) = resources.seal_producer(&producer).await {
-                                tracing::warn!(?actor, %error, "command resource producer retirement remains unconfirmed");
-                            }
-                        }
-                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
-                            owner.retired(terminal);
-                        }
+                        retire_interactive_application(
+                            actor,
+                            terminal,
+                            &worktree_authority,
+                            &application_owners,
+                            &mut notifications,
+                            &embedded_lifecycle_tx,
+                            launch_context.config.command_resources.as_ref(),
+                        ).await;
 
 
                     }
@@ -1046,6 +1032,24 @@ pub(super) async fn run_interactive_applications(
             .ok();
     }
 
+    if let Some(error) = &failure {
+        let _ = coordination_failed.send(error.clone());
+    }
+    // Forest retirement needs this consumer to observe exact resource release.
+    // Its settled outcomes, rather than the stop request, fence channel closure.
+    let resident_cleanup = drain_resident_shutdown(
+        &mut lifecycle,
+        &mut embedded_tasks,
+        &application_owners,
+        &worktree_authority,
+        &mut notifications,
+        &embedded_lifecycle_tx,
+        launch_context.config.command_resources.as_ref(),
+        &mut release_waiters,
+        shutdown.clone(),
+    )
+    .await;
+
     close_release_observations(&mut lifecycle, &mut release_waiters, |actor| {
         observed_resource_release(actor, &application_owners)
     });
@@ -1053,7 +1057,11 @@ pub(super) async fn run_interactive_applications(
     let native_retirement = if failure.is_some() {
         NativeRetirement::Preserve
     } else {
-        shutdown.borrow().unwrap_or_default()
+        match *shutdown.borrow() {
+            ApplicationShutdown::Draining(retirement)
+            | ApplicationShutdown::ForestSettled(retirement) => retirement,
+            ApplicationShutdown::Running => NativeRetirement::Preserve,
+        }
     };
     for owner in application_owners.lock().values_mut() {
         owner.native_retirement = native_retirement;
@@ -1109,6 +1117,7 @@ pub(super) async fn run_interactive_applications(
     };
     let cleanup_failures = [
         earlier_embedded_cleanup,
+        resident_cleanup,
         embedded_cleanup,
         embedded_service_cleanup,
         notification_cleanup,
@@ -1121,9 +1130,221 @@ pub(super) async fn run_interactive_applications(
     } else {
         Some(cleanup_failures.join("; "))
     };
+    #[cfg(test)]
+    if let Some(observer) = &test_observer {
+        observer.application_shutdown(match &cleanup_failure {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        });
+    }
     match (failure, cleanup_failure) {
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
         (Some(error), None) | (None, Some(error)) => Err(error),
         (None, None) => Ok(()),
     }
+}
+
+async fn retire_interactive_application(
+    actor: ActorRef,
+    terminal: ActorTerminal,
+    worktree_authority: &ActorWorktreeAuthority,
+    application_owners: &InteractiveOwners,
+    notifications: &mut JoinSet<(ActorRef, Result<(), String>)>,
+    embedded_lifecycle_tx: &embedded_projection::LifecycleSender,
+    command_resources: Option<&Arc<exomonad_node::command_resources::CommandResourceClient>>,
+) {
+    worktree_authority.remove_grant(actor.into());
+    let binding = with_embedded_state(application_owners, actor, |state| {
+        if let Some(cancel) = state.cancellation.take() {
+            cancel.send_replace(true);
+        }
+        state.pending_activations = None;
+        if let Some(binding) = state.conversation.as_ref() {
+            binding.mark_retired();
+        }
+        state.conversation.clone()
+    })
+    .flatten();
+    if let Some(binding) = binding {
+        schedule_embedded_notification_drain(actor, binding, notifications);
+    }
+    let lifecycle = if terminal.kind == ActorExitKind::Failed {
+        harness::server::HostActorLifecycle::Lost
+    } else {
+        harness::server::HostActorLifecycle::Retired
+    };
+    embedded_lifecycle_tx.publish(actor, lifecycle);
+    if let Some(resources) = command_resources {
+        let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
+        if let Err(error) = resources.seal_producer(&producer).await {
+            tracing::warn!(?actor, %error, "command resource producer retirement remains unconfirmed");
+        }
+    }
+    if let Some(owner) = application_owners.lock().get_mut(&actor) {
+        owner.retired(terminal);
+    }
+}
+
+/// Keep the original lifecycle consumer alive while actor-owned retirement
+/// obtains its exact host release receipts. Ordinary work is refused here.
+async fn drain_resident_shutdown(
+    lifecycle: &mut mpsc::Receiver<LocalResidentDeployment>,
+    embedded_tasks: &mut JoinSet<(
+        ActorRef,
+        LocalActorRef,
+        Result<(), embedded_service::EmbeddedDriverError>,
+    )>,
+    application_owners: &InteractiveOwners,
+    worktree_authority: &ActorWorktreeAuthority,
+    notifications: &mut JoinSet<(ActorRef, Result<(), String>)>,
+    embedded_lifecycle_tx: &embedded_projection::LifecycleSender,
+    command_resources: Option<&Arc<exomonad_node::command_resources::CommandResourceClient>>,
+    release_waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
+    mut shutdown: watch::Receiver<ApplicationShutdown>,
+) -> Option<String> {
+    let mut failures = Vec::new();
+    loop {
+        let forest_settled = matches!(*shutdown.borrow(), ApplicationShutdown::ForestSettled(_));
+        let event = if forest_settled {
+            // No forest cleanup remains entitled to publish another release
+            // request. Consume the already-admitted cleanup events before exit.
+            match lifecycle.try_recv() {
+                Ok(event) => Some(event),
+                Err(_) => break,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                event = lifecycle.recv() => {
+                    if event.is_none() {
+                        failures.push("resident cleanup consumer closed before forest settlement".into());
+                        break;
+                    }
+                    event
+                }
+                result = embedded_tasks.join_next_with_id(), if !embedded_tasks.is_empty() => {
+                    match result {
+                        Some(Ok((task_id, (actor, _, outcome)))) => {
+                            if let Some(failure) = settle_embedded_shutdown(
+                                actor, task_id, outcome, application_owners, release_waiters,
+                            ) {
+                                failures.push(failure);
+                            }
+                        }
+                        Some(Err(error)) => {
+                            // A lost driver never certifies resource release.
+                            let actor = embedded_actor_for_task(application_owners, error.id());
+                            failures.push(format!("embedded Engine task for {actor:?}: {error}"));
+                        }
+                        None => {}
+                    }
+                    continue;
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() {
+                        failures.push("forest shutdown owner disappeared before settlement".into());
+                        break;
+                    }
+                    continue;
+                }
+            }
+        };
+        match event.expect("draining lifecycle event exists") {
+            LocalResidentDeployment::Retired { actor, terminal } => {
+                retire_interactive_application(
+                    actor,
+                    terminal,
+                    worktree_authority,
+                    application_owners,
+                    notifications,
+                    embedded_lifecycle_tx,
+                    command_resources,
+                )
+                .await;
+            }
+            LocalResidentDeployment::ReleaseAwait(request) => {
+                match observed_resource_release(request.actor, application_owners) {
+                    Some(release) => {
+                        request.answer(release);
+                    }
+                    None => release_waiters
+                        .entry(request.actor)
+                        .or_default()
+                        .push(request),
+                }
+            }
+            LocalResidentDeployment::CommandBackend(request) => {
+                request.supply(Err(
+                    tidepool_bridge_effects::CommandError::CommandUnavailable(
+                        "host admission is closed for forest shutdown".into(),
+                    ),
+                ));
+            }
+            LocalResidentDeployment::NotificationSend(command) => {
+                command.rejected(exomonad_actor::NotificationError::Unavailable);
+            }
+            LocalResidentDeployment::NotificationPoll(command) => {
+                command.observed(Err(exomonad_actor::NotificationError::Unavailable));
+            }
+            LocalResidentDeployment::RequestUpdate { delivery } => {
+                if let Some(presentation) = delivery.begin() {
+                    presentation
+                        .not_presented("host admission is closed for forest shutdown".into());
+                }
+            }
+            LocalResidentDeployment::PolicyInstalled(installation) => {
+                if let Some(admission) = installation.spawn_admission.as_ref() {
+                    admission.fail("host admission is closed for forest shutdown".into());
+                }
+            }
+            LocalResidentDeployment::RequestCancellation { .. } => {
+                // As in the running embedded consumer, this notice does not
+                // acknowledge a typed request. Invocation cleanup retires its
+                // owned workers and then checks RequestCleanupState::TargetClosed;
+                // an unclosed target keeps that cleanup unconfirmed.
+            }
+            // These notices only wake ordinary input in the embedded host.
+            // Target closure is established by the request/actor owners, never
+            // by receipt of a notice or the fact that its channel closed.
+            LocalResidentDeployment::DisplayPublished(_)
+            | LocalResidentDeployment::SessionReady { .. }
+            | LocalResidentDeployment::ChildExited { .. }
+            | LocalResidentDeployment::WatchChanged { .. }
+            | LocalResidentDeployment::SettlementChanged { .. } => {}
+        }
+    }
+    (!failures.is_empty()).then(|| failures.join("; "))
+}
+
+pub(super) fn settle_embedded_shutdown(
+    actor: ActorRef,
+    task_id: tokio::task::Id,
+    outcome: Result<(), embedded_service::EmbeddedDriverError>,
+    application_owners: &InteractiveOwners,
+    release_waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
+) -> Option<String> {
+    if with_embedded_state(application_owners, actor, |state| state.task_id) != Some(Some(task_id))
+    {
+        return Some(format!(
+            "embedded Engine {actor:?} joined without its exact registered task; release remains unconfirmed"
+        ));
+    }
+    let release = embedded_resource_release(outcome.as_ref().err());
+    update_embedded_state(application_owners, actor, |state| {
+        if state.task_id == Some(task_id) {
+            state.task_id = None;
+        }
+        state.live = false;
+        state.pending_activations = None;
+        state.cancellation = None;
+    });
+    answer_release_waiters(release_waiters, actor, release);
+    let error = outcome.err()?;
+    let failure = format!("embedded Engine {actor:?}: {error}");
+    if error.cleanup_failed() {
+        update_embedded_state(application_owners, actor, |state| {
+            state.cleanup_failure = Some(error);
+        });
+    }
+    Some(failure)
 }

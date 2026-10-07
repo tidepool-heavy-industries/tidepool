@@ -166,7 +166,8 @@ def declare_haskell_components():
         "Tidepool/TypedSegment/Source.hs": "src/Tidepool/TypedSegment/Source.hs",
         "Tidepool/TurnSource.hs": "src/Tidepool/TurnSource.hs",
         "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
-        "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs"
+        "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs",
+        "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
         deps = [],
         _haskell_toolchain = "toolchains//:haskell_with_extractor_source_inputs",
@@ -299,7 +300,8 @@ def declare_haskell_components():
         "Tidepool/TypedSegment/Source.hs": "src/Tidepool/TypedSegment/Source.hs",
         "Tidepool/TurnSource.hs": "src/Tidepool/TurnSource.hs",
         "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
-        "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs"
+        "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs",
+        "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
         deps = [],
         _haskell_toolchain = "toolchains//:haskell_with_extractor_source_inputs",
@@ -996,6 +998,8 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/typed-segment-native/strict-closure-let.hs": "test-cell-splitter/fixtures/typed-segment-native/strict-closure-let.hs",
         "test-cell-splitter/fixtures/typed-segment-native/strict-patterns.hs": "test-cell-splitter/fixtures/typed-segment-native/strict-patterns.hs",
         "test-cell-splitter/fixtures/typed-segment-native/substitution-shadow.hs": "test-cell-splitter/fixtures/typed-segment-native/substitution-shadow.hs",
+        "test-cell-splitter/fixtures/typed-segment-native/template-helper-definitions.hs": "test-cell-splitter/fixtures/typed-segment-native/template-helper-definitions.hs",
+        "test-cell-splitter/fixtures/typed-segment-native/template-helper-use.hs": "test-cell-splitter/fixtures/typed-segment-native/template-helper-use.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-action.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-action.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-dependent.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-dependent.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-phantom-action.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-phantom-action.hs",
@@ -1326,6 +1330,8 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/typed-segment-native/strict-closure-let.hs": "test-cell-splitter/fixtures/typed-segment-native/strict-closure-let.hs",
         "test-cell-splitter/fixtures/typed-segment-native/strict-patterns.hs": "test-cell-splitter/fixtures/typed-segment-native/strict-patterns.hs",
         "test-cell-splitter/fixtures/typed-segment-native/substitution-shadow.hs": "test-cell-splitter/fixtures/typed-segment-native/substitution-shadow.hs",
+        "test-cell-splitter/fixtures/typed-segment-native/template-helper-definitions.hs": "test-cell-splitter/fixtures/typed-segment-native/template-helper-definitions.hs",
+        "test-cell-splitter/fixtures/typed-segment-native/template-helper-use.hs": "test-cell-splitter/fixtures/typed-segment-native/template-helper-use.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-action.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-action.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-dependent.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-dependent.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-phantom-action.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-phantom-action.hs",
@@ -1652,6 +1658,8 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/typed-segment-native/strict-closure-let.hs": "test-cell-splitter/fixtures/typed-segment-native/strict-closure-let.hs",
         "test-cell-splitter/fixtures/typed-segment-native/strict-patterns.hs": "test-cell-splitter/fixtures/typed-segment-native/strict-patterns.hs",
         "test-cell-splitter/fixtures/typed-segment-native/substitution-shadow.hs": "test-cell-splitter/fixtures/typed-segment-native/substitution-shadow.hs",
+        "test-cell-splitter/fixtures/typed-segment-native/template-helper-definitions.hs": "test-cell-splitter/fixtures/typed-segment-native/template-helper-definitions.hs",
+        "test-cell-splitter/fixtures/typed-segment-native/template-helper-use.hs": "test-cell-splitter/fixtures/typed-segment-native/template-helper-use.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-action.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-action.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-dependent.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-dependent.hs",
         "test-cell-splitter/fixtures/typed-segment-native/unresolved-phantom-action.hs": "test-cell-splitter/fixtures/typed-segment-native/unresolved-phantom-action.hs",

@@ -2619,10 +2619,123 @@ fn compile_cell_program_admitted_receipt_controls(
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-enum CellProgramAudit {
+enum CellProgramAudit<'a> {
     None,
     Receipts,
     WorkCounts(Option<usize>),
+    NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
+}
+
+#[cfg(test)]
+fn compile_cell_program_admitted_native_emission_controls(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+    old_owners: &std::collections::BTreeSet<(String, String)>,
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    compile_cell_program_admitted_inner(
+        req,
+        admission,
+        templates,
+        CellProgramAudit::NativeEmissionOwnersAbsent(old_owners),
+    )
+}
+
+#[cfg(test)]
+enum ObservedReceiptOwnerRow {
+    NativeModule,
+    CapturedValue,
+}
+
+#[cfg(test)]
+fn observed_receipt_owner(row: &CborValue, kind: ObservedReceiptOwnerRow) -> (&str, &str) {
+    let fields = row.as_array().unwrap();
+    let (unit, module) = match kind {
+        ObservedReceiptOwnerRow::NativeModule => (1, 2),
+        ObservedReceiptOwnerRow::CapturedValue => (0, 1),
+    };
+    (
+        fields[unit].as_text().unwrap(),
+        fields[module].as_text().unwrap(),
+    )
+}
+
+#[cfg(test)]
+fn audit_current_native_emission(
+    program: &tidepool_toolchain::checked_cell::CellProgram,
+    directory: &Path,
+    old_owners: &std::collections::BTreeSet<(String, String)>,
+) {
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements().unwrap();
+    let mut observed = 0;
+    for item in program
+        .items()
+        .iter()
+        .filter(|item| item.native().is_some())
+    {
+        observed += 1;
+        let directory = directory.join(format!("item-{}", item.checked_item().index()));
+        let receipt_path = directory.join("certified-products.cbor");
+        let native_path = directory.join("module-products.cbor");
+        assert!(std::fs::metadata(&receipt_path).unwrap().len() <= 32 << 20);
+        assert!(std::fs::metadata(&native_path).unwrap().len() <= 64 << 20);
+        // The complete receipt has already passed same-directory admission,
+        // including its execution-source sidecar. These raw rows observe only
+        // this request's emission, before inherited custody is appended.
+        let receipt: CborValue =
+            ciborium::de::from_reader(std::fs::File::open(receipt_path).unwrap()).unwrap();
+        let receipt_modules = receipt.as_array().unwrap()[2].as_array().unwrap();
+        let emitted = tidepool_repr::execution_schema::parse_module_products(
+            &std::fs::read(native_path).unwrap(),
+            &requirements,
+            tidepool_repr::execution_schema::InventoryDecodeLimits::default(),
+        )
+        .unwrap();
+        assert!(!emitted.is_empty());
+        let receipt_owners = receipt_modules
+            .iter()
+            .map(|module| {
+                let (unit, module) =
+                    observed_receipt_owner(module, ObservedReceiptOwnerRow::NativeModule);
+                (unit.to_owned(), module.to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let native_owners = emitted
+            .iter()
+            .map(|module| (module.unit.clone(), module.module.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(receipt_owners.len(), receipt_modules.len());
+        assert_eq!(native_owners.len(), emitted.len());
+        assert_eq!(receipt_owners, native_owners);
+        for row in receipt_modules {
+            let (unit, module) = observed_receipt_owner(row, ObservedReceiptOwnerRow::NativeModule);
+            assert!(
+                !old_owners.contains(&(unit.to_owned(), module.to_owned())),
+                "current compiler receipt re-emitted old owner {}:{} with origin {:?}",
+                unit,
+                module,
+                row.as_array().unwrap()[0],
+            );
+        }
+        for module in &emitted {
+            assert!(
+                !old_owners.contains(&(module.unit.clone(), module.module.clone())),
+                "current native packet re-emitted old owner {}:{}",
+                module.unit,
+                module.module,
+            );
+        }
+    }
+    assert!(
+        observed > 0,
+        "a native emission audit must observe real native items"
+    );
 }
 
 #[cfg(test)]
@@ -2650,7 +2763,7 @@ fn compile_cell_program_admitted_inner(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
     templates: &[TurnTemplate],
-    #[cfg(test)] audit: CellProgramAudit,
+    #[cfg(test)] audit: CellProgramAudit<'_>,
 ) -> Result<
     (
         CellCheck,
@@ -2759,6 +2872,10 @@ fn compile_cell_program_admitted_inner(
     let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
         offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
     })?;
+    #[cfg(test)]
+    if let CellProgramAudit::NativeEmissionOwnersAbsent(old_owners) = audit {
+        audit_current_native_emission(&program, scratch.path(), old_owners);
+    }
     #[cfg(test)]
     if let CellProgramAudit::WorkCounts(expected_items) = audit {
         scaling_tests::assert_compiler_work(&program, &run.output.stderr, expected_items);
@@ -3165,6 +3282,9 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
     let products_path = root.join(format!("item-{index}/certified-products.cbor"));
     let products_original = std::fs::read(&products_path).unwrap();
     let products: CborValue = ciborium::de::from_reader(products_original.as_slice()).unwrap();
+    fn captured_owner(row: &CborValue) -> (&str, &str) {
+        observed_receipt_owner(row, ObservedReceiptOwnerRow::CapturedValue)
+    }
     let value_rows = products.as_array().unwrap()[6].as_array().unwrap()[3]
         .as_array()
         .unwrap();
@@ -3306,6 +3426,12 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             }
             _ => unreachable!(),
         }
+        // Keep the producer's strict owner order so each mutation reaches its
+        // type-evidence guard rather than the envelope ordering check.
+        rows.sort_by(|left, right| captured_owner(left).cmp(&captured_owner(right)));
+        assert!(rows
+            .windows(2)
+            .all(|pair| captured_owner(&pair[0]) < captured_owner(&pair[1])));
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
         std::fs::write(&products_path, bytes).unwrap();
@@ -3319,7 +3445,8 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         );
         if let Some(expected) = match mutation {
             0 => Some("produced value type output is missing"),
-            4 => Some("captured value was not selected by the request"),
+            1 | 3 | 4 => Some("captured value was not selected by the request"),
+            2 => Some("produced value type output differs from its reserved capture"),
             _ => None,
         } {
             assert!(

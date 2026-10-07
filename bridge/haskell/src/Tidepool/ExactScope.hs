@@ -15,11 +15,13 @@ module Tidepool.ExactScope
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal, normalizeInterfaceEvidence
+  , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, writeCheckedExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
+  , scopeAvailableOriginalProducts
   , originalGroupFromProjected, originalGroupFromCandidate
   ) where
 
@@ -74,6 +76,9 @@ import Tidepool.LocalNativeDeclaration
 import Tidepool.PackageWitness
   ( AdmittedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImports
   , revalidateAdmittedPackageImports )
+import Tidepool.NativeOriginalCensus
+  ( OriginalNativeCensus, readOriginalNativeCensus, nativeCensusOwner
+  , nativeCensusGroups, nativeCensusRequirements, nativeCensusCanonicalCertificate )
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore
@@ -219,6 +224,11 @@ canonicalHomeUnits = certificateHomeUnits . canonicalFacts
 canonicalSourceSha256 :: CanonicalInterfaceProof -> String
 canonicalSourceSha256 = certificateSource . canonicalFacts
 
+canonicalProofMatchesOwner :: String -> (String, String) -> CanonicalInterfaceProof -> Bool
+canonicalProofMatchesOwner producer owner proof =
+  certificateProducer (canonicalFacts proof) == producer
+    && certificateOwner (canonicalFacts proof) == owner
+
 canonicalRequirements :: CanonicalInterfaceProof -> Map.Map (String,String) String
 canonicalRequirements = certificateRequirements . canonicalFacts
 
@@ -252,30 +262,82 @@ type InterfaceOwner = (String,String)
 -- transport order; package facts are issued once from their sealed sidecars.
 data ScopeInterfaceInput = ScopeInterfaceInput InterfaceRow ExactInterfaceEvidence
   deriving (Eq, Show)
+-- Native availability is an immutable projection of the original receipt. It
+-- adds no selected executable groups to the scope.
+data AdmittedOriginalCensus = AdmittedOriginalCensus FilePath String ExactProduct OriginalNativeCensus
+  deriving (Eq, Show)
 data AdmittedScopeInputs = AdmittedScopeInputs [InterfaceOwner]
-  (Map.Map InterfaceOwner ScopeInterfaceInput) AdmittedPackageImports deriving (Eq, Show)
+  (Map.Map InterfaceOwner ScopeInterfaceInput) AdmittedPackageImports
+  (Map.Map InterfaceOwner AdmittedOriginalCensus) deriving (Eq, Show)
 
 -- A vacuous inventory grants no interface, Core or package authority.
 emptyScopeInputs :: AdmittedScopeInputs
-emptyScopeInputs = AdmittedScopeInputs [] Map.empty emptyAdmittedPackageImports
+emptyScopeInputs = AdmittedScopeInputs [] Map.empty emptyAdmittedPackageImports Map.empty
 
 scopeInterfaces :: ExactScope -> [InterfaceRow]
 scopeInterfaces scope = inputRows (scopeInputs scope)
 
 inputRows :: AdmittedScopeInputs -> [InterfaceRow]
-inputRows (AdmittedScopeInputs order inputs _) =
+inputRows (AdmittedScopeInputs order inputs _ _) =
   [row | owner <- order, let ScopeInterfaceInput row _ = inputs Map.! owner]
 
 scopeInterfaceEvidence :: ExactScope -> Map.Map InterfaceOwner ExactInterfaceEvidence
 scopeInterfaceEvidence = inputEvidence . scopeInputs
 
 inputEvidence :: AdmittedScopeInputs -> Map.Map InterfaceOwner ExactInterfaceEvidence
-inputEvidence (AdmittedScopeInputs _ inputs _) = Map.map (\(ScopeInterfaceInput _ evidence) -> evidence) inputs
+inputEvidence (AdmittedScopeInputs _ inputs _ _) = Map.map (\(ScopeInterfaceInput _ evidence) -> evidence) inputs
 
 makeScopeInputs :: [InterfaceRow] -> Map.Map InterfaceOwner ExactInterfaceEvidence
   -> AdmittedPackageImports -> AdmittedScopeInputs
 makeScopeInputs rows evidence roots = AdmittedScopeInputs (map rowOwner rows)
-  (Map.fromList [(rowOwner row,ScopeInterfaceInput row (evidence Map.! rowOwner row)) | row <- rows]) roots
+  (Map.fromList [(rowOwner row,ScopeInterfaceInput row (evidence Map.! rowOwner row)) | row <- rows]) roots Map.empty
+
+scopeAvailableOriginalProducts :: ExactScope -> [ExactProduct]
+scopeAvailableOriginalProducts scope =
+  [case Map.lookup (originalUnit selected,originalModule selected) census of
+     Just (AdmittedOriginalCensus _ _ full _) -> full
+     -- Request-private additions already carry the full groups issued by the
+     -- current original inventory. They need no fabricated external receipt.
+     Nothing -> selected
+  | selected <- scopeProducts scope]
+  where AdmittedScopeInputs _ _ _ census = scopeInputs scope
+
+validateNativeSelection :: ExactProduct -> ExactProduct -> IO ()
+validateNativeSelection selected full = do
+  let owner = (originalUnit full,originalModule full)
+      indexed = Map.fromList [(originalOrdinal group,group) | group <- originalGroups full]
+      ordinals = map originalOrdinal (originalGroups selected)
+  unless (selected {originalGroups=[]} == full {originalGroups=[]})
+    (fail ("selected native product differs from its admitted full carrier: " ++ show owner))
+  unless (Set.size (Set.fromList ordinals) == length ordinals)
+    (fail ("duplicate selected native ordinal: " ++ show owner))
+  forM_ (originalGroups selected) $ \group -> case Map.lookup (originalOrdinal group) indexed of
+    Just admitted | originalBinders group == originalBinders admitted
+      && Set.fromList (originalGlobals group) == Set.fromList (originalGlobals admitted) -> pure ()
+    _ -> fail ("selected native group differs from its admitted original census: "
+      ++ show (owner,originalOrdinal group))
+
+admitOriginalCensus :: String -> Map.Map InterfaceOwner ExactInterfaceEvidence
+  -> [(ExactProduct,(FilePath,String))] -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
+admitOriginalCensus producer evidence offered = Map.fromList <$> forM offered
+  (\(selected,(path,sha)) -> do
+    native <- readOriginalNativeCensus path sha
+    let key = (originalUnit selected,originalModule selected)
+        expectedOwner = (originalUnit selected,originalModule selected,originalVersion selected,
+          originalIfaceSha256 selected,originalProductSha256 selected)
+    unless (nativeCensusOwner native == expectedOwner)
+      (fail ("original native certification differs from its exact carrier: " ++ show key))
+    case Map.lookup key evidence of
+      Just (ModuleInterfaceEvidence proof)
+        | canonicalProofMatchesOwner producer key proof
+        , nativeCensusCanonicalCertificate native == Just (canonicalCertificateSha256 proof)
+        , nativeCensusRequirements native == canonicalRequirements proof -> pure ()
+      _ -> fail ("original native certification differs from its canonical owner: " ++ show key)
+    let full = selected {originalGroups =
+          [ExactOriginalGroup ordinal binders references
+          | (ordinal,binders,references) <- nativeCensusGroups native]}
+    validateNativeSelection selected full
+    pure (key,AdmittedOriginalCensus path sha full native))
 
 rowOwner :: InterfaceRow -> InterfaceOwner
 rowOwner (iface,_,_) = (exactUnit iface,exactModule iface)
@@ -286,15 +348,15 @@ extendExactScopeInputs :: ExactScope -> [(InterfaceRow,ExactInterfaceEvidence)]
   -> IO (Either String ExactScope)
 extendExactScopeInputs scope offered = do
   checked <- try (do
-    let AdmittedScopeInputs order previous roots = scopeInputs scope
+    let AdmittedScopeInputs order previous roots census = scopeInputs scope
     (inputs,added) <- foldM insert (previous,[]) offered
-    let prospective = AdmittedScopeInputs (order ++ map (rowOwner . fst) added) inputs roots
+    let prospective = AdmittedScopeInputs (order ++ map (rowOwner . fst) added) inputs roots census
     validateInputClosure (scopeProducerSha256 scope) prospective (scopeProducts scope)
     let fresh = makeScopeInputs (map fst added)
           (Map.fromList [(rowOwner row,evidence) | (row,evidence) <- added]) emptyAdmittedPackageImports
     withFileObservations (\observations -> revalidateScopeInputs observations fresh)
     union <- extendAdmittedPackageImports roots (map fst added) >>= either fail pure
-    pure scope {scopeInputs=AdmittedScopeInputs (order ++ map (rowOwner . fst) added) inputs union})
+    pure scope {scopeInputs=AdmittedScopeInputs (order ++ map (rowOwner . fst) added) inputs union census})
     :: IO (Either IOException ExactScope)
   pure (either (Left . show) Right checked)
   where
@@ -339,10 +401,15 @@ validateInputClosure producer inputs products = do
           _ -> False
     unless (Map.lookup key seals == Just (originalIfaceSha256 product') && hasCore)
       (fail "exact interface evidence is incomplete or lacks native module proof")
+  let AdmittedScopeInputs _ _ _ census = inputs
+  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full _) ->
+    case [product' | product' <- products, (originalUnit product',originalModule product') == key] of
+      [selected] -> validateNativeSelection selected full
+      _ -> fail "admitted native census lacks its unique scope product"
   where firstOfThree (value,_,_) = value
 
 revalidateScopeInputs :: FileObservations -> AdmittedScopeInputs -> IO ()
-revalidateScopeInputs observations (AdmittedScopeInputs _ inputs _) =
+revalidateScopeInputs observations (AdmittedScopeInputs _ inputs _ census) = do
   forM_ (Map.elems inputs) $ \(ScopeInterfaceInput (iface,packages,packagesSha) evidence) -> do
     let interfaceBound = case evidence of
           ModuleInterfaceEvidence{} -> Just (32 * 1024 * 1024)
@@ -358,6 +425,8 @@ revalidateScopeInputs observations (AdmittedScopeInputs _ inputs _) =
       LocalNativeDeclarationEvidence native ->
         revalidateLocalFinalizedAdmissionWith observations (localNativeProof native) >>= either fail pure
       _ -> pure ()
+  forM_ (Map.elems census) $ \(AdmittedOriginalCensus path sha _ _) ->
+    observeSeal observations path (Just (32 * 1024 * 1024)) sha "original native certification changed"
 
 observeSeal :: FileObservations -> FilePath -> Maybe Int -> String -> String -> IO ()
 observeSeal observations path bound expected reason = do
@@ -696,7 +765,7 @@ readExactScope path = do
     captured <- try (do
       unless (isAbsolute path) (fail "exact scope path must be absolute")
       bytes <- readBoundedFile path (4 * 1024 * 1024)
-      (offered, descriptors, interfaceEvidence) <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
+      (offered, descriptors, interfaceEvidence, nativeDescriptors) <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
         Left failure -> fail (show failure)
         Right (remaining, result)
           | BL.null remaining -> pure result
@@ -704,8 +773,10 @@ readExactScope path = do
       graphs <- readExecutionSourceGraphs (RetainedScopeGraphFiles path) [] descriptors
       let OfferedScope producer semantic rows lexical products references purpose types = offered
       evidence <- validateInterfaceEvidence producer rows interfaceEvidence
+      census <- admitOriginalCensus producer evidence nativeDescriptors
       roots <- extendAdmittedPackageImports emptyAdmittedPackageImports rows >>= either fail pure
-      let inputs = makeScopeInputs rows evidence roots
+      let AdmittedScopeInputs order admitted _ _ = makeScopeInputs rows evidence roots
+          inputs = AdmittedScopeInputs order admitted roots census
           sha = digest bytes
           scope = ExactScope path sha producer semantic inputs lexical products graphs references
             purpose types Set.empty
@@ -1090,7 +1161,7 @@ revalidateExactScope env scope = do
       validateInputClosure (scopeProducerSha256 scope) (scopeInputs scope) (scopeProducts scope)
       revalidateScopeInputs observations (scopeInputs scope)
       validatePreviewOriginalTarget scope (scopeInterfaceEvidence scope)
-      let AdmittedScopeInputs _ _ roots = scopeInputs scope
+      let AdmittedScopeInputs _ _ roots _ = scopeInputs scope
       revalidateAdmittedPackageImports observations env roots >>= either fail pure
       manifest <- observeFile observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
       -- Preserve the proof marker; observed_file alone counts actual reads.
@@ -1205,12 +1276,13 @@ data OfferedScope = OfferedScope String String [(ExactIfaceArtifact,FilePath,Str
   [((String,String),[(String,String)])] [ExactProduct] [ExecutionSourceRef]
   ExactScopePurpose (Maybe (RequestHelperRecipe,RequestTypeSignatures))
 
-decodeScope :: Decoder s (OfferedScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)])
+decodeScope :: Decoder s (OfferedScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)],
+  [(ExactProduct,(FilePath,String))])
 decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "9" && count == 9)
+  unless (magic == "TPEXACTSCOPE" && version == "10" && count == 9)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -1252,8 +1324,8 @@ decodeScope = do
     imports <- bounded 4096 owner
     unique "exact lexical imports" imports
     pure (node, imports)
-  products <- bounded 4096 $ do
-    array 7
+  nativeProducts <- bounded 4096 $ do
+    array 8
     originalProduct <- ExactProduct <$> nonempty <*> nonempty <*> digestField
       <*> digestField <*> digestField <*> absolute
       <*> bounded 65536 (do
@@ -1266,8 +1338,10 @@ decodeScope = do
     unless (all (\binder -> T.unpack (symbolUnit binder) == originalUnit originalProduct
         && T.unpack (symbolModule binder) == originalModule originalProduct) binders)
       (fail "exact binder has another original owner")
-    pure originalProduct
-  let keys = [(exactUnit iface, exactModule iface) | (iface, _, _) <- interfaces]
+    descriptor <- array 2 >> (,) <$> absolute <*> canonicalDigest
+    pure (originalProduct,descriptor)
+  let products = map fst nativeProducts
+      keys = [(exactUnit iface, exactModule iface) | (iface, _, _) <- interfaces]
       selected = map fst lexical
       productKeys = [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- products]
   unique "exact interface owners" keys
@@ -1314,7 +1388,7 @@ decodeScope = do
       (uncurry decodePurpose) purpose
     pure (requestTypes, admission)
   pure (OfferedScope producer semantic interfaces lexical products executionOwners
-    checkedPurpose requestTypes, descriptors, interfaceEvidence)
+    checkedPurpose requestTypes, descriptors, interfaceEvidence, nativeProducts)
   where
     decodePurpose authCount purpose = case purpose of
       "host-activation-preview3" -> do

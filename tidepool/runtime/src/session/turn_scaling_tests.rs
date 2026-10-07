@@ -945,17 +945,18 @@ where
 }
 
 #[derive(Clone, Copy)]
-enum AuthorityChecks {
+enum AuthorityChecks<'a> {
     Configured,
     RefusalBranches,
     TypedEntryRefusalBranches,
     FreshTargetWork,
     SegmentWorkCounts(usize),
+    NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
 
 enum CellDeclarationExpectation {
     Total(usize),
-    CapturedAt(usize),
+    CapturedAt { name: &'static str, line: usize },
 }
 
 // The caller supplies the response of the same physical request whose products
@@ -991,11 +992,28 @@ pub(super) fn assert_compiler_work(
         for (index, item) in program.items().iter().enumerate() {
             let native = item.native().unwrap();
             let target = native.target_owned();
-            let dependencies = target
-                .globals()
-                .iter()
-                .filter(|global| global.required_generation.is_some())
-                .collect::<Vec<_>>();
+            let (table, _) =
+                tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
+                    .unwrap();
+            let turn: ciborium::value::Value =
+                ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+            let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+            let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+            let context = native
+                .original_execution_context(&target, &table, &sites)
+                .unwrap();
+            // The entry stub can call a selected original helper that demands
+            // a live capture. Inspect that sealed group closure, not the
+            // stub's direct globals or every group in the source capsule.
+            let root = native.typed_entry().unwrap().native_requirement_root();
+            assert!(matches!(
+                root,
+                tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group { .. }
+            ));
+            let dependencies = context
+                .artifact_view()
+                .native_binding_requirements_from_roots(&[root])
+                .unwrap();
             let prior_captures = program.items()[..index]
                 .iter()
                 .flat_map(|prior| {
@@ -1023,8 +1041,10 @@ pub(super) fn assert_compiler_work(
                         .any(|(unit, module, name, generation)| {
                             global.identity.unit == *unit
                                 && global.identity.module == *module
+                                && global.identity.namespace == "value"
                                 && global.identity.occurrence == *name
-                                && global.required_generation == Some(*generation)
+                                && global.identity.record_parent.is_none()
+                                && global.generation == *generation
                         })
                 }),
                 "the actual item target must demand only exact captures from its prior plan prefix"
@@ -1048,9 +1068,10 @@ pub(super) fn assert_compiler_work(
                         global.identity.unit
                             == prior.native().unwrap().typed_entry().unwrap().entry().unit
                             && global.identity.module == bound[0].module
+                            && global.identity.namespace == "value"
                             && global.identity.occurrence == bound[0].name
-                            && global.required_generation
-                                == Some(prior.native().unwrap().generation())
+                            && global.identity.record_parent.is_none()
+                            && global.generation == prior.native().unwrap().generation()
                     })
                     .count();
                 assert_eq!(matching, 1,
@@ -1180,7 +1201,7 @@ fn execute_cell_with_authority_checks<H>(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
 ) -> Duration
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
@@ -1210,7 +1231,7 @@ fn try_execute_cell_with_authority_checks<H>(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
 ) -> Result<Duration, ResidentError>
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
@@ -1241,7 +1262,7 @@ fn try_execute_cell_with_template_imports<H>(
     source: &str,
     declarations: usize,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
     template_imports: &SourceImports,
 ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
 where
@@ -1273,9 +1294,81 @@ fn try_execute_cell_with_template_imports_expectation<H>(
     source: &str,
     declarations: CellDeclarationExpectation,
     publication_target: &ScalePublication,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
     template_imports: &SourceImports,
     expected_observation: Option<i64>,
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
+    try_execute_cell_with_template_imports_expectation_observed(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        publication_target,
+        authority_checks,
+        template_imports,
+        expected_observation,
+        |_| {},
+    )
+}
+
+fn try_execute_cell_with_template_imports_expectation_observed<H>(
+    resident: &mut ScaleSession<H>,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: CellDeclarationExpectation,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks<'_>,
+    template_imports: &SourceImports,
+    expected_observation: Option<i64>,
+    observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
+where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
+    try_execute_cell_with_template_preamble_observed(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        publication_target,
+        authority_checks,
+        template_imports,
+        expected_observation,
+        effects.preamble(),
+        observe,
+    )
+}
+
+fn try_execute_cell_with_template_preamble_observed<H>(
+    resident: &mut ScaleSession<H>,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: CellDeclarationExpectation,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks<'_>,
+    template_imports: &SourceImports,
+    expected_observation: Option<i64>,
+    preamble: &str,
+    observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
 ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError>
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
@@ -1290,8 +1383,8 @@ where
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
     let imports = view.turn_imports(template_imports);
-    let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
-    let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+    let template = resident_cell_check_template(preamble, effects.row(), &imports);
+    let templates = resident_workbench_templates(preamble, effects.row(), &imports);
     let specification = CheckedCellSpecification {
         admission_digest: [0; 32],
         cell_source: source.into(),
@@ -1315,9 +1408,9 @@ where
                 Arc::new(specification.clone()),
                 &admitted_include,
             )
-            .unwrap()
         },
-    );
+    )
+    .map_err(crate::session::SessionError::Compile)?;
     use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
     match declarations {
         CellDeclarationExpectation::Total(expected) => assert_eq!(
@@ -1332,16 +1425,16 @@ where
                 .count(),
             expected
         ),
-        CellDeclarationExpectation::CapturedAt(line) => {
+        CellDeclarationExpectation::CapturedAt { name, line } => {
             let declarations = plan
                 .items()
                 .iter()
                 .filter(|item| item.kind() == ParsedCellPlanKind::Declaration)
                 .collect::<Vec<_>>();
             let [declaration] = declarations.as_slice() else {
-                panic!("history requires one authored declaration group: {declarations:?}");
+                panic!("capture requires one authored declaration group: {declarations:?}");
             };
-            assert_eq!(declaration.binders(), ["historyCaptured"]);
+            assert_eq!(declaration.binders(), [name]);
             assert_eq!(declaration.span().start_line(), line);
             assert_eq!(declaration.span().end_line(), line + 1);
             assert_eq!(
@@ -1390,6 +1483,14 @@ where
             compile_view_evidence: "",
         };
         match authority_checks {
+            AuthorityChecks::NativeEmissionOwnersAbsent(old_owners) => {
+                compile_cell_program_admitted_native_emission_controls(
+                    request,
+                    admission.clone(),
+                    &templates,
+                    old_owners,
+                )
+            }
             AuthorityChecks::TypedEntryRefusalBranches => {
                 compile_cell_program_admitted_receipt_controls(
                     request,
@@ -1404,12 +1505,22 @@ where
                 None,
             ),
             AuthorityChecks::SegmentWorkCounts(count) => {
-                compile_cell_program_admitted_work_controls(
-                    request,
-                    admission.clone(),
-                    &templates,
-                    Some(count),
-                )
+                // Item certification and its ledger events run on this thread.
+                let subscriber = tracing_subscriber::registry().with(
+                    tracing_subscriber::fmt::layer()
+                        .with_test_writer()
+                        .with_filter(tracing_subscriber::EnvFilter::new(
+                            "off,exomonad_harness::timing=debug",
+                        )),
+                );
+                tracing::subscriber::with_default(subscriber, || {
+                    compile_cell_program_admitted_work_controls(
+                        request,
+                        admission.clone(),
+                        &templates,
+                        Some(count),
+                    )
+                })
             }
             _ => compile_cell_program_admitted(request, admission.clone(), &templates),
         }
@@ -1454,6 +1565,7 @@ where
         |_| compile_cell(),
     )
     .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
+    observe(&program);
     assert!(!checked.items.is_empty());
     if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
         assert!(
@@ -2550,7 +2662,7 @@ fn simple_cell_vertical(
     label: &str,
     source: &str,
     declarations: usize,
-    authority_checks: AuthorityChecks,
+    authority_checks: AuthorityChecks<'_>,
 ) -> Vec<String> {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();

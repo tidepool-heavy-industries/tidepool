@@ -148,7 +148,7 @@ fn publish_fixture_candidates(
     producer: &[u8],
     include: &[PathBuf],
     evidence: &DependencyEvidence,
-    parsed: ParsedModuleProducts<'_>,
+    parsed: ParsedModuleProducts,
     source: &str,
     certified: &CertifiedProducts,
     requested: &BTreeSet<String>,

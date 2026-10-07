@@ -78,7 +78,7 @@ import Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCache
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
-  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, selectPreparedOriginalSessionOutputs
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts, selectPreparedOriginalSessionOutputs
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
@@ -101,7 +101,7 @@ import Tidepool.CertifiedProducts (resolvePackageGlobal, homeInterfaceUsageOwner
 import Tidepool.FinalizedModuleArtifacts
   ( finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained, unrecoveredExactProducts)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
   , generatedActivationPreviewRecipe
   , RenderedProtectedTemplateImports
@@ -139,6 +139,7 @@ import Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256
   , readExactScope, revalidateExactScope, scopeInterfaces, scopeInterfaceEvidence, extendExactScopeInputs
+  , scopeAvailableOriginalProducts
   , extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -652,16 +653,12 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
       [] -> Nothing)
   let contextFor target = firstContext
         { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
-  let exactProducts = maybe [] scopeProducts exactScope
+  let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
       externalOriginalBinders = Set.fromList
         ([binder | product <- exactProducts, group <- originalGroups product
           , binder <- originalBinders group]
          ++ [binder | candidate <- candidates, group <- candidateGroups candidate
           , binder <- candidateGroupBinders group])
-      exactOriginals =
-        [(originalUnit originalProduct, originalModule originalProduct,
-          [(originalOrdinal group, originalBinders group, originalGlobals group)
-           | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
   let prepareOriginal executor = do
         acquired <- recoveryOriginalWorklist caches
         case acquired of
@@ -691,6 +688,11 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
+      exactOriginals =
+        [(originalUnit originalProduct, originalModule originalProduct,
+          [(originalOrdinal group, originalBinders group, originalGlobals group)
+           | group <- originalGroups originalProduct])
+        | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
   let newRecovery = case recoveryExecutor caches of
         Nothing -> newPreparedRecoveryWithPackageRoots
         Just executor -> newPreparedRecoveryWithExecutor executor
@@ -1885,8 +1887,11 @@ retainProgramProducts directory prepared certified target initial = do
           unit = T.unpack unitText
           owner = T.unpack ownerText
           key = (unit,owner)
-      when (any (\original -> (originalUnit original,originalModule original) == key)
-          (scopeProducts scope)) (fail "new native product replaces an admitted original owner")
+      forM_ [original | original <- scopeProducts scope
+          , (originalUnit original,originalModule original) == key] $ \original ->
+        fail ("new native product replaces an admitted original owner: " ++ show key
+          ++ "; admitted ordinals=" ++ show (map originalOrdinal (originalGroups original))
+          ++ "; offered ordinals=" ++ show (map Execution.projectedOriginalOrdinal groups))
       (sourceDigest,(interface,packagesPath,packagesSha)) <- case Map.lookup key (certifiedRetainedOriginals certified) of
         Just original -> do
           unless (case Map.lookup key (scopeInterfaceEvidence scope) of

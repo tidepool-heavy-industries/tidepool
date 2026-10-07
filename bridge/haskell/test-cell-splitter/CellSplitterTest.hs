@@ -72,6 +72,7 @@ tests = testGroup "cell-splitter"
   , testCase "legacy display scope refusal" $
       requiredInput "TIDEPOOL_TEST_EFFECTS_DIR" >>= structuralDisplayCompilation LegacyDisplayScopeTest
   , testGroup "parser" [testCase "lexical islands" $ withParserFlags $ \_flags lexicalFlags -> lexicalIslands lexicalFlags
+      , testCase "semicolon statement refinement" $ withParserFlags $ \flags _lexicalFlags -> semicolonStatementRefinement flags
       , testCase "comments pragmas and layout" $ withParserFlags $ \_flags lexicalFlags -> commentsPragmasAndLayout lexicalFlags
       , testCase "declarations form one cell item" $ withParserFlags $ \flags _lexicalFlags -> declarationsBecomeOneCellItem flags
       , testCase "prologue plans" $ withParserFlags $ \flags _lexicalFlags -> prologuePlans flags

@@ -3,9 +3,10 @@
 module Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
   , requiredOriginalPackageGlobalsWithRetained
+  , ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand ) where
 
-import Control.Monad (foldM)
+import Control.Monad (foldM, forM_, unless)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isNothing)
 import qualified Data.Set as Set
@@ -15,6 +16,38 @@ import Tidepool.ExecutionSchema
   , GlobalDecl(..) )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
+import Tidepool.ExactScope
+  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeAvailableOriginalProducts )
+
+-- Package demand and certification share one validated original index. Native
+-- availability uses the old complete census without selecting more roots.
+-- A new production never replaces an existing native carrier, including when
+-- both lowerings came from the same canonical Core and interface.
+newtype ReconciledOriginalProducts = ReconciledOriginalProducts [ExactProduct]
+
+unrecoveredExactProducts :: ReconciledOriginalProducts -> [ExactProduct]
+unrecoveredExactProducts (ReconciledOriginalProducts products) = products
+
+reconcileOriginalProducts
+  :: Maybe ExactScope -> [(String, String, [ExactOriginalGroup])]
+  -> Either String ReconciledOriginalProducts
+reconcileOriginalProducts scope recovered = do
+  let owners = Map.fromList [((unit, name), groups) | (unit, name, groups) <- recovered]
+  unless (Map.size owners == length recovered)
+    (Left "duplicate recovered original owner in package root inventory")
+  forM_ recovered $ \(_,_,groups) -> unless
+    (Set.size (Set.fromList (map originalOrdinal groups)) == length groups)
+    (Left "duplicate recovered original ordinal in package root inventory")
+  let available = maybe [] scopeAvailableOriginalProducts scope
+  forM_ available $ \original ->
+    let owner = (originalUnit original,originalModule original)
+    in forM_ (Map.lookup owner owners) $ \groups ->
+      Left ("new original production replaces an admitted native carrier: " ++ show owner
+        ++ "; native version=" ++ originalVersion original
+        ++ "; admitted ordinals=" ++ show (map originalOrdinal (originalGroups original))
+        ++ "; offered ordinals=" ++ show (map originalOrdinal groups))
+  Right (ReconciledOriginalProducts available)
 
 -- The outline bit records whether recovery must supply a definition. GHC's
 -- evaluatedness flag is independent: an unevaluated dictionary still needs

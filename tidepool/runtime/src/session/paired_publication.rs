@@ -120,6 +120,8 @@ pub(super) struct PreparedDeclarationPublication {
     pub(super) joined: JoinedDeclaration,
     pub(super) declared_names: Vec<String>,
     pub(super) source_domain_owners: Vec<tidepool_repr::execution_schema::CachedHomeOwner>,
+    pub(super) binding_custody:
+        Vec<tidepool_toolchain::artifact_inventory::NativeBindingRequirement>,
 }
 
 fn invalid_at(path: &Path, detail: impl Into<String>) -> SessionError {
@@ -970,6 +972,7 @@ impl AcceptedDeclarationPublication {
             .chain(base.surface.lexical.iter().cloned())
             .collect(),
         )?);
+        let binding_custody = receipt.native_binding_custody_requirements()?;
         let baseline = match &base.public.target {
             super::PublicPublicationBaseline::Durable { graph, .. } => {
                 Some((graph.checksum().to_owned(), graph.high_water()))
@@ -1033,29 +1036,8 @@ impl AcceptedDeclarationPublication {
                 .iter()
                 .map(recovery::RecoveryArtifactClosure::artifact_id)
                 .collect();
-            let native_owners = receipt
-                .exports()
-                .iter()
-                .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
-                .map(|identity| ExactModuleIdentity {
-                    unit: identity.unit.clone(),
-                    module: identity.module.clone(),
-                })
-                .collect::<std::collections::BTreeSet<_>>();
-            let native_artifacts = context
-                .artifact_view()
-                .descriptors()
-                .into_iter()
-                .filter(|descriptor| {
-                    descriptor.kind
-                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
-                        && native_owners.contains(&descriptor.owner)
-                })
-                .map(|descriptor| descriptor.id)
-                .collect::<std::collections::BTreeSet<_>>();
-            let native_roots =
-                super::selected_native_roots(context.artifact_view(), &native_artifacts);
-            let live_dependencies = super::certified_native_dependencies(&context, &native_roots)?;
+            let live_dependencies =
+                super::native_binding_dependencies(binding_custody.iter().cloned());
             let mut workbench_imports = base
                 .current_public
                 .as_ref()
@@ -1245,6 +1227,7 @@ impl AcceptedDeclarationPublication {
             .collect();
         let declaration = PreparedDeclarationPublication {
             source_domain_owners,
+            binding_custody,
             generation: base.reserved,
             declared_names,
             joined: JoinedDeclaration {

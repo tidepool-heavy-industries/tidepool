@@ -13,6 +13,7 @@ enum ProbeRequest {
 
 struct ProbeHandler {
     trace: Arc<CaptureMutex<Vec<i64>>>,
+    raw_result: Option<Arc<CaptureMutex<Vec<String>>>>,
     compiler_counts: Arc<CaptureMutex<Vec<u64>>>,
     cancel_after_record: Arc<CaptureMutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
 }
@@ -26,9 +27,13 @@ impl EffectHandler<QuietOutput> for ProbeHandler {
         cx: &EffectContext<'_, QuietOutput>,
     ) -> Result<Response, EffectError> {
         let ProbeRequest::Print(value) = request;
-        self.trace
-            .lock()
-            .push(value.parse().expect("recorded decimal Int"));
+        if let Some(result) = &self.raw_result {
+            result.lock().push(value);
+        } else {
+            self.trace
+                .lock()
+                .push(value.parse().expect("recorded decimal Int"));
+        }
         self.compiler_counts
             .lock()
             .push(tidepool_extract_cmd::extract_spawn_count());
@@ -55,6 +60,10 @@ struct SemanticSession {
 
 impl SemanticSession {
     fn new() -> Self {
+        Self::with_raw_result(None)
+    }
+
+    fn with_raw_result(raw_result: Option<Arc<CaptureMutex<Vec<String>>>>) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -87,6 +96,7 @@ impl SemanticSession {
         let resident = ResidentSession::from_persistent_for_test(
             frunk::hlist![ProbeHandler {
                 trace: trace.clone(),
+                raw_result,
                 compiler_counts: compiler_counts.clone(),
                 cancel_after_record: cancel_after_record.clone()
             }],
@@ -145,7 +155,10 @@ impl SemanticSession {
                 (0, 0),
                 label,
                 &history.cell,
-                CellDeclarationExpectation::CapturedAt(history.declaration_line),
+                CellDeclarationExpectation::CapturedAt {
+                    name: "historyCaptured",
+                    line: history.declaration_line,
+                },
                 &ScalePublication::Ephemeral,
                 AuthorityChecks::Configured,
                 &SourceImports::new(),
@@ -275,20 +288,126 @@ fn is_raised_exception(error: &ResidentError) -> bool {
 }
 
 #[test]
+fn signed_template_helpers_execute_recursion_and_polymorphism_once() {
+    let results = Arc::new(CaptureMutex::new(Vec::new()));
+    let mut session = SemanticSession::with_raw_result(Some(results.clone()));
+    let definitions = include_str!("fixtures/typed-segment-template-helpers.hs")
+        .replace("__EFFECT_ROW__", session.effects.row());
+    let preamble = crate::session::insert_preamble_imports(
+        &crate::session::insert_preamble_imports(
+            &format!("{}\n{definitions}", session.effects.preamble()),
+            "qualified Control.Monad.Freer as SegmentHelperEff",
+        ),
+        "qualified Data.Text as SegmentHelperText",
+    );
+    try_execute_cell_with_template_preamble_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "signed_template_helpers",
+        include_str!("fixtures/typed-segment-template-helper-use.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::SegmentWorkCounts(7),
+        &SourceImports::new(),
+        None,
+        &preamble,
+        |program| assert_eq!(program.items().len(), 7),
+    )
+    .unwrap();
+    let observed = results.lock().clone();
+    let [result] = observed.as_slice() else {
+        panic!("the single authored report must execute exactly once: {observed:?}");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(result).unwrap(),
+        serde_json::json!([7, 7, 3, 3.0]),
+    );
+    assert_eq!(session.compiler_counts.lock().len(), 1);
+    session.assert_no_compiler_since_last_effect();
+    for name in ["replyValue", "recursiveValue", "integerStep", "doubleStep"] {
+        assert!(session
+            .resident
+            .current_binding_in(session.public, name)
+            .is_some());
+    }
+}
+
+#[test]
 fn genuine_let_generalization_and_unused_inner_bottom_match_ghc() {
     let source = include_str!("fixtures/typed-segment-let-generalization.hs");
-    assert_eq!(ghc_trace(source), [7, 11, 13]);
-    let mut session = SemanticSession::new();
-    session.execute("let_generalization", source, 0).unwrap();
-    assert_eq!(session.observed(), [7, 11, 13]);
-    session
-        .execute(
-            "retained_let_generalization",
-            "segmentRecord (segmentIdentity (17 :: Int)); segmentRecord (if segmentIdentity True then 19 else 0)",
-            0,
+    let inline_source = source
+        .replacen(
+            "let segmentIdentity value = value",
+            "let { segmentIdentity value = value }",
+            1,
         )
-        .unwrap();
-    assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        .lines()
+        .collect::<Vec<_>>()
+        .join("; ");
+    let retained_actions = [
+        "segmentRecord (segmentIdentity (17 :: Int))",
+        "segmentRecord (if segmentIdentity True then 19 else 0)",
+    ];
+    for (cold_source, separator) in [(source, "\n"), (inline_source.as_str(), "; ")] {
+        assert_eq!(ghc_trace(cold_source), [7, 11, 13]);
+        let mut session = SemanticSession::new();
+        session
+            .execute("let_generalization", cold_source, 0)
+            .unwrap();
+        assert_eq!(session.observed(), [7, 11, 13]);
+        session
+            .execute(
+                "retained_let_generalization",
+                &retained_actions.join(separator),
+                0,
+            )
+            .unwrap();
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19]);
+        let (multiline_let, multiline_do) = if separator == "; " {
+            (
+                include_str!("fixtures/typed-segment-retained-layout-inline-let.hs"),
+                include_str!("fixtures/typed-segment-retained-layout-inline-do.hs"),
+            )
+        } else {
+            (
+                include_str!("fixtures/typed-segment-retained-layout-newline-let.hs"),
+                include_str!("fixtures/typed-segment-retained-layout-newline-do.hs"),
+            )
+        };
+        for (name, authored, expected_trace) in [
+            ("retained_multiline_let", multiline_let, [29, 32]),
+            ("retained_multiline_do", multiline_do, [37, 41]),
+        ] {
+            assert_eq!(
+                ghc_trace_with_language("", "segmentIdentity value = value", authored),
+                expected_trace
+            );
+            session.execute(name, authored, 0).unwrap();
+        }
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19, 29, 32, 37, 41]);
+        let snapshot = session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap();
+        let error = session
+            .execute("invalid_statement_list", "answer <- ; segmentRecord 23", 0)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(diagnostics))) if !diagnostics.is_empty()),
+            "malformed statements must retain parser diagnostics: {error:?}"
+        );
+        assert_eq!(session.observed(), [7, 11, 13, 17, 19, 29, 32, 37, 41]);
+        assert_eq!(
+            session
+                .resident
+                .public_visibility_snapshot_in(session.public)
+                .unwrap(),
+            snapshot
+        );
+    }
 }
 
 #[test]
@@ -537,7 +656,7 @@ fn cancellation_after_real_effect_preserves_receipt_and_allows_new_intent() {
     assert_eq!(session.observed(), [1, 2, 3, 9]);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 enum HistoryOperation {
     LetInt(i8),
     PureBindInt(i8),
@@ -700,6 +819,102 @@ fn history_config() -> proptest::test_runner::Config {
     config
 }
 
+fn mandatory_capture_operations(seed: i8, flag: bool) -> [HistoryOperation; 11] {
+    [
+        HistoryOperation::ReadInt(seed),
+        HistoryOperation::Observe,
+        HistoryOperation::PureBindInt(seed),
+        HistoryOperation::Tuple(seed, flag),
+        HistoryOperation::UnusedBottom,
+        HistoryOperation::Capture,
+        HistoryOperation::ObserveCapture,
+        HistoryOperation::UnusedBottom,
+        HistoryOperation::Shadow,
+        HistoryOperation::Observe,
+        HistoryOperation::ObserveCapture,
+    ]
+}
+
+fn report_history_input(
+    seed: i8,
+    prefix: &[HistoryOperation],
+    flag: bool,
+    no_mr: bool,
+    operations: &[HistoryOperation],
+    history: &RenderedHistory,
+) {
+    // Emit before either oracle or native execution so shrinking failures retain
+    // their complete input even when the runner's watchdog interrupts the case.
+    eprintln!(
+        "typed-segment-history-input {}",
+        serde_json::json!({
+            "seed": seed, "prefix": prefix, "flag": flag, "no_mr": no_mr,
+            "operations": operations, "source": history.cell,
+            "oracle_source": history.oracle, "expected": history.expected,
+            "captured": history.captured, "declaration_line": history.declaration_line,
+        })
+    );
+}
+
+fn exercise_capture_history(history: &RenderedHistory) {
+    let mut session = SemanticSession::new();
+    session.execute_history("generated_cold", history).unwrap();
+    session.assert_only_publication_join_since_last_effect();
+    assert_eq!(session.observed(), history.expected.clone());
+    session.execute_history("generated_warm", history).unwrap();
+    session.assert_only_publication_join_since_last_effect();
+    let mut expected = history.expected.repeat(2);
+    assert_eq!(session.observed(), expected.clone());
+    let before = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let error = session
+        .execute(
+            "generated_rejected",
+            include_str!("fixtures/typed-segment-illtyped.hs"),
+            1,
+        )
+        .unwrap_err();
+    assert!(matches!(error,
+        ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(ref diagnostics)))
+            if !diagnostics.is_empty()));
+    assert_eq!(
+        session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap(),
+        before
+    );
+    assert_eq!(session.observed(), expected.clone());
+    session
+        .execute("generated_recovery", "segmentRecord historyCaptured", 0)
+        .unwrap();
+    expected.push(history.captured);
+    assert_eq!(session.observed(), expected);
+}
+
+#[test]
+fn deterministic_capture_history_matches_ghc_cold_warm_and_recovery() {
+    // This fixed input preserves the mandatory capture/shadow and
+    // rejection/recovery sequence without a random prefix.
+    let operations = mandatory_capture_operations(0, false);
+    let history = render_history(0, &operations, false);
+    report_history_input(0, &[], false, false, &operations, &history);
+    assert_eq!(history.expected, [1, 0, 1, 0]);
+    assert_eq!(history.captured, 0);
+    assert_ne!(history.mutated_expected, history.expected);
+    assert_eq!(
+        ghc_trace_with_language(
+            "{-# LANGUAGE MonomorphismRestriction #-}",
+            "",
+            &history.oracle,
+        ),
+        history.expected
+    );
+    exercise_capture_history(&history);
+}
+
 proptest::proptest! {
     #![proptest_config(history_config())]
 
@@ -710,21 +925,10 @@ proptest::proptest! {
         flag in proptest::bool::ANY,
         no_mr in proptest::bool::ANY,
     ) {
-        let mut operations = prefix;
-        operations.extend([
-            HistoryOperation::ReadInt(seed),
-            HistoryOperation::Observe,
-            HistoryOperation::PureBindInt(seed),
-            HistoryOperation::Tuple(seed, flag),
-            HistoryOperation::UnusedBottom,
-            HistoryOperation::Capture,
-            HistoryOperation::ObserveCapture,
-            HistoryOperation::UnusedBottom,
-            HistoryOperation::Shadow,
-            HistoryOperation::Observe,
-            HistoryOperation::ObserveCapture,
-        ]);
+        let mut operations = prefix.clone();
+        operations.extend(mandatory_capture_operations(seed, flag));
         let history = render_history(seed, &operations, no_mr);
+        report_history_input(seed, &prefix, flag, no_mr, &operations, &history);
         let language = if no_mr { "NoMonomorphismRestriction" } else { "MonomorphismRestriction" };
         let pragma = format!("{{-# LANGUAGE {language} #-}}");
         proptest::prop_assert_eq!(ghc_trace_with_language(&pragma, "", &history.oracle), history.expected.clone());
@@ -733,24 +937,7 @@ proptest::proptest! {
             && history.coverage.tuples > 0 && history.coverage.observations > 0
             && history.coverage.unused_bottoms > 0 && history.coverage.captures > 0
             && history.coverage.shadows > 0 && history.coverage.captured_uses > 0);
-        let mut session = SemanticSession::new();
-        session.execute_history("generated_cold", &history).unwrap();
-        session.assert_only_publication_join_since_last_effect();
-        proptest::prop_assert_eq!(session.observed(), history.expected.clone());
-        session.execute_history("generated_warm", &history).unwrap();
-        session.assert_only_publication_join_since_last_effect();
-        let mut expected = history.expected.repeat(2);
-        proptest::prop_assert_eq!(session.observed(), expected.clone());
-        let before = session.resident.public_visibility_snapshot_in(session.public).unwrap();
-        let error = session.execute("generated_rejected", include_str!("fixtures/typed-segment-illtyped.hs"), 1).unwrap_err();
-        proptest::prop_assert!(matches!(error,
-            ResidentError::Session(crate::session::SessionError::Compile(crate::CompileError::Diagnostics(ref diagnostics)))
-                if !diagnostics.is_empty()));
-        proptest::prop_assert_eq!(session.resident.public_visibility_snapshot_in(session.public).unwrap(), before);
-        proptest::prop_assert_eq!(session.observed(), expected.clone());
-        session.execute("generated_recovery", "segmentRecord historyCaptured", 0).unwrap();
-        expected.push(history.captured);
-        proptest::prop_assert_eq!(session.observed(), expected);
+        exercise_capture_history(&history);
         eprintln!("typed-segment-history {}", serde_json::json!({
             "operations": operations.len(), "coverage": history.coverage,
             "cold_runs": 1, "warm_runs": 1, "rejections": 1, "recoveries": 1,
@@ -823,14 +1010,290 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
         .unwrap();
     assert_eq!(session.observed(), [23]);
     session.assert_only_publication_join_since_last_effect();
+    let published = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let declaration_surface = session
+        .resident
+        .exact_exports_in_namespace(
+            session.public,
+            tidepool_toolchain::declaration_join::ExportNamespace::Value,
+            &["historyCaptured"],
+        )
+        .unwrap();
+    assert_eq!(
+        declaration_surface.source_module(),
+        Some(tidepool_repr::SessionModule::lib(published.declaration_tip))
+    );
+    let [declaration] = declaration_surface.declarations().unwrap() else {
+        panic!("published barrier must retain exactly one certified declaration export");
+    };
+    assert_eq!(
+        declaration.kind,
+        tidepool_toolchain::declaration_join::DeclarationKind::Value
+    );
+    assert_eq!(
+        declaration.head.namespace,
+        tidepool_toolchain::declaration_join::ExportNamespace::Value
+    );
+    assert_eq!(declaration.head.occurrence, "historyCaptured");
     assert!(session
         .resident
-        .current_binding_in(session.public, "historyCaptured")
+        .current_binding_in(session.public, "historyValue0")
         .is_some());
     session
         .execute("produced_type_reuse", "segmentRecord historyCaptured", 0)
         .unwrap();
     assert_eq!(session.observed(), [23, 23]);
+    session.assert_no_compiler_since_last_effect();
+}
+
+#[test]
+fn warm_target_selects_previously_unselected_original_native_groups() {
+    use std::collections::BTreeSet;
+    use tidepool_toolchain::artifact_inventory::{
+        ArtifactKind, NativeGroupKey, NativeRequirementRoot,
+    };
+
+    fn execution_context(
+        item: &tidepool_toolchain::checked_cell::CellProgramItem,
+    ) -> Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext> {
+        let native = item.native().unwrap();
+        let (table, _) =
+            tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+        let turn: ciborium::value::Value =
+            ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+        let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+        let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+        native
+            .original_execution_context(&native.target_owned(), &table, &sites)
+            .unwrap()
+    }
+
+    let mut session = SemanticSession::new();
+    let mut cold = None;
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "warm_native_cold_baseline",
+        "baselinePlannedValue <- pure (Carrier.carrierBaseline 2)",
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
+        None,
+        |program| {
+            let [item] = program.items() else {
+                panic!("the cold baseline must admit exactly one native binding");
+            };
+            cold = Some((
+                execution_context(item),
+                item.native()
+                    .unwrap()
+                    .value_interface_certificate()
+                    .unwrap(),
+            ));
+        },
+    )
+    .unwrap();
+    assert!(session.observed().is_empty());
+    let (before, baseline_proof) = cold.unwrap();
+    let baseline_binding = session
+        .resident
+        .current_binding_in(session.public, "baselinePlannedValue")
+        .unwrap();
+    assert_eq!(baseline_binding.1, baseline_proof.owner());
+    assert!(Arc::ptr_eq(
+        session
+            .resident
+            .retained_checked_value_artifact(baseline_binding.1)
+            .unwrap(),
+        &baseline_proof,
+    ));
+    let originals = before.recovery_products();
+    let original = originals
+        .iter()
+        .find(|product| product.owner().module == "SegmentProbeSupport")
+        .expect("the real cold compiler must retain the complete probe carrier");
+    let descriptor = before
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.kind == ArtifactKind::OriginalModule
+                && descriptor.owner.unit == original.owner().unit
+                && descriptor.owner.module == original.owner().module
+        })
+        .unwrap();
+    assert_eq!(
+        descriptor.product_sha256,
+        Some(sha2::Sha256::digest(original.product_bytes()).into())
+    );
+    let full = tidepool_repr::execution_schema::parse_module_products(
+        original.product_bytes(),
+        &tidepool_toolchain::prepared_artifact::production_requirements().unwrap(),
+        tidepool_repr::execution_schema::InventoryDecodeLimits::default(),
+    )
+    .unwrap();
+    let [full] = full.as_slice() else {
+        panic!("an original native carrier must contain exactly one owner")
+    };
+    let operation_group = |name: &str| {
+        full.groups
+            .iter()
+            .find(|group| {
+                group.binders().iter().any(|binder| {
+                    binder.module == "SegmentProbeSupport" && binder.occurrence == name
+                })
+            })
+            .unwrap()
+            .original_ordinal()
+    };
+    let baseline = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("carrierBaseline"),
+    };
+    let increment = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("lateCarrierIncrement"),
+    };
+    let double = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("lateCarrierDouble"),
+    };
+    let negate = NativeGroupKey {
+        artifact: descriptor.id,
+        original_ordinal: operation_group("lateCarrierNegate"),
+    };
+    assert_ne!(increment, double);
+    assert_ne!(increment, negate);
+    assert_ne!(double, negate);
+    assert_ne!(baseline, increment);
+    assert_ne!(baseline, double);
+    assert_ne!(baseline, negate);
+    let mut selected_carrier = before
+        .artifact_view()
+        .selected_native_groups()
+        .into_iter()
+        .filter(|key| key.artifact == descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert!(selected_carrier.contains(&baseline));
+    assert!(!selected_carrier.contains(&increment));
+    assert!(!selected_carrier.contains(&double));
+    assert!(!selected_carrier.contains(&negate));
+    let initially_selected_carrier = selected_carrier.clone();
+    let old_owners = originals
+        .iter()
+        .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
+        .collect::<BTreeSet<_>>();
+    let assert_retained =
+        |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+            let retained = context.recovery_products();
+            let retained = retained
+                .iter()
+                .find(|product| product.owner().module == original.owner().module)
+                .unwrap();
+            assert_eq!(retained.owner(), original.owner());
+            assert_eq!(retained.product_bytes(), original.product_bytes());
+            assert!(context.artifact_view().descriptors().contains(&descriptor));
+        };
+    let mut observed = 0;
+    let mut warm = None;
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "warm_native_carrier_demand",
+        include_str!("fixtures/typed-segment-warm-carrier.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::NativeEmissionOwnersAbsent(&old_owners),
+        &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
+        None,
+        |program| {
+            for item in program.items() {
+                let Some(native) = item.native() else {
+                    continue;
+                };
+                observed += 1;
+                let products = item.native_products().unwrap();
+                let context = execution_context(item);
+                assert_retained(&context);
+                if native.item().binders() == ["warmCarrierResult"] {
+                    assert!(warm.is_none());
+                    warm = Some((
+                        context.clone(),
+                        native.value_interface_certificate().unwrap(),
+                    ));
+                }
+                let NativeRequirementRoot::Group {
+                    artifact,
+                    original_ordinal,
+                } = native.typed_entry().unwrap().native_requirement_root()
+                else {
+                    panic!("the warm item must issue an exact native group root");
+                };
+                let selected = products.artifact_view.selected_native_groups();
+                assert!(selected.contains(&NativeGroupKey {
+                    artifact,
+                    original_ordinal
+                }));
+                let carrier_groups = selected
+                    .into_iter()
+                    .filter(|key| key.artifact == descriptor.id)
+                    .collect::<BTreeSet<_>>();
+                assert!(selected_carrier.is_subset(&carrier_groups));
+                selected_carrier = carrier_groups;
+            }
+        },
+    )
+    .unwrap();
+    assert!(observed >= 2, "both warm authored actions must be observed");
+    assert!(selected_carrier.contains(&increment));
+    assert!(selected_carrier.contains(&double));
+    assert!(!selected_carrier.contains(&negate));
+    assert!(selected_carrier.len() < full.groups.len());
+    let (after, result_proof) = warm.unwrap();
+    let result_binding = session
+        .resident
+        .current_binding_in(session.public, "warmCarrierResult")
+        .unwrap();
+    assert_eq!(result_binding.1, result_proof.owner());
+    assert!(Arc::ptr_eq(
+        session
+            .resident
+            .retained_checked_value_artifact(result_binding.1)
+            .unwrap(),
+        &result_proof,
+    ));
+    assert_eq!(
+        session
+            .resident
+            .current_binding_in(session.public, "baselinePlannedValue")
+            .unwrap(),
+        baseline_binding,
+    );
+    assert_retained(&after);
+    let result_selected_carrier = after
+        .artifact_view()
+        .selected_native_groups()
+        .into_iter()
+        .filter(|key| key.artifact == descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert!(initially_selected_carrier.is_subset(&result_selected_carrier));
+    assert!(result_selected_carrier.contains(&increment));
+    assert!(result_selected_carrier.contains(&double));
+    assert!(!result_selected_carrier.contains(&negate));
+    assert!(result_selected_carrier.len() < full.groups.len());
+    assert!(result_selected_carrier.is_subset(&selected_carrier));
+    assert_eq!(session.observed(), [7]);
+    session.assert_no_compiler_since_last_effect();
 }
 
 #[test]
@@ -843,16 +1306,50 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
             0,
         )
         .unwrap();
-    try_execute_cell_with_authority_checks(
-        &mut session.resident, session.public, &session.effects, &session.images, (0, 0),
-        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); sameSegmentFuture <- pure (firstPlannedValue + 9); boundaryCapture :: Int; boundaryCapture = firstPlannedValue; secondPlannedValue <- pure (boundaryCapture + 1); segmentRecord secondPlannedValue", 1,
-        &ScalePublication::Ephemeral, AuthorityChecks::TypedEntryRefusalBranches,
-    ).unwrap();
+    let source = include_str!("fixtures/typed-segment-native-entry.hs");
+    let line = source
+        .lines()
+        .position(|line| line == "boundaryCapture :: Int")
+        .expect("authored capture signature")
+        + 1;
+    try_execute_cell_with_template_imports_expectation(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "native_entry_refusal",
+        source,
+        CellDeclarationExpectation::CapturedAt {
+            name: "boundaryCapture",
+            line,
+        },
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::TypedEntryRefusalBranches,
+        &SourceImports::new(),
+        None,
+    )
+    .unwrap();
     assert_eq!(session.observed(), [4]);
 }
 
 #[test]
 fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
+    let inline = include_str!("fixtures/typed-segment-zero-let-inline.hs");
+    let newline = include_str!("fixtures/typed-segment-zero-let-newline.hs");
+    assert_eq!(ghc_trace(inline), [1, 2]);
+    assert_eq!(ghc_trace(newline), [1, 2]);
+    let invalid = ghc_oracle_with_language(
+        "",
+        "",
+        include_str!("fixtures/typed-segment-zero-let-invalid-layout.hs"),
+    );
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("parse error"),
+        "the implicit inline let must fail GHC's grammar: {}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
     let mut session = SemanticSession::new();
     let before = session.resident.binding_names_in(session.public);
     session
@@ -860,13 +1357,7 @@ fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
         .unwrap();
     assert_eq!(session.resident.binding_names_in(session.public), before);
     assert!(session.observed().is_empty());
-    session
-        .execute(
-            "zero_let_order",
-            "segmentRecord 1; let _ = (undefined :: Int); segmentRecord 2",
-            0,
-        )
-        .unwrap();
+    session.execute("zero_let_order", inline, 0).unwrap();
     assert_eq!(session.observed(), [1, 2]);
 }
 
@@ -877,6 +1368,7 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
+    assert_eq!(before.machine_incarnation, None);
     let error = session.execute("zero_bang_let", "{-# LANGUAGE BangPatterns #-}\nsegmentRecord 1\nlet !_ = (error \"strict discarded let\" :: Int)\nsegmentRecord 2", 1).unwrap_err();
     assert!(
         is_raised_exception(&error),
@@ -884,17 +1376,28 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
     );
     assert_eq!(session.observed(), [1]);
     session.assert_no_compiler_since_last_effect();
-    assert_eq!(
-        session
-            .resident
-            .public_visibility_snapshot_in(session.public)
-            .unwrap(),
-        before
-    );
+    let failed = session
+        .resident
+        .public_visibility_snapshot_in(session.public)
+        .unwrap();
+    let incarnation = failed
+        .machine_incarnation
+        .expect("first native execution establishes a machine even when its cell fails");
+    let mut initialized = before;
+    initialized.machine_incarnation = Some(incarnation);
+    assert_eq!(failed, initialized);
     session
         .execute("zero_bang_retry", "segmentRecord (3 :: Int)", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
+    assert_eq!(
+        session
+            .resident
+            .public_visibility_snapshot_in(session.public)
+            .unwrap()
+            .machine_incarnation,
+        Some(incarnation)
+    );
 }
 
 #[test]
@@ -910,10 +1413,18 @@ fn zero_capture_action_runs_once_before_the_next_item() {
 #[test]
 fn strict_let_group_forces_before_retaining_its_closure_capture() {
     let mut session = SemanticSession::new();
+    session
+        .execute(
+            "strict_closure_prior",
+            "let preservedStrictValue = (3 :: Int)",
+            0,
+        )
+        .unwrap();
     let before = session
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
+    assert!(before.machine_incarnation.is_some());
     let error = session
         .execute(
             "strict_closure_let",
@@ -935,7 +1446,11 @@ fn strict_let_group_forces_before_retaining_its_closure_capture() {
         before
     );
     session
-        .execute("strict_closure_retry", "segmentRecord (3 :: Int)", 0)
+        .execute(
+            "strict_closure_retry",
+            "segmentRecord preservedStrictValue",
+            0,
+        )
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
 }

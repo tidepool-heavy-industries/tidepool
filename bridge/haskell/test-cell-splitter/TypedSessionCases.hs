@@ -55,8 +55,8 @@ import Tidepool.Session
 import Tidepool.SessionArtifacts
 import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TypedSegment
-  ( TypedSegment
-  , typedSegmentItems, typedItemCaptures, typedCaptureIdentifier
+  ( PendingTypedSegment
+  , typedSegmentItems, pendingSegmentItems, typedItemCaptures, typedCaptureIdentifier
   , typedCaptureType, typedCaptureFixity )
 
 data SessionBoundaryFailure = HydrationCompletionRefused | PublicationCompletionRefused
@@ -157,7 +157,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
 
     -- An unrelated real thin interface is already present. Neither a
     -- receipt refusal nor cancellation may remove or overwrite it.
-    answerCapture <- case [capture | item <- typedSegmentItems typed
+    answerCapture <- case [capture | item <- pendingSegmentItems typed
       , capture <- typedItemCaptures item, occurrence (typedCaptureIdentifier capture) == "answer"] of
       [capture] -> pure capture
       _ -> fail "positive capture inventory has no unique answer"
@@ -244,7 +244,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
         _ -> fail "published retry lost its unique actual global"
       let expected = if owner == firstOwner then "minus" else "answer"
       original <- case [typedCaptureIdentifier capture
-            | item <- typedSegmentItems retryTyped, capture <- typedItemCaptures item
+            | item <- pendingSegmentItems retryTyped, capture <- typedItemCaptures item
             , occurrence (typedCaptureIdentifier capture) == expected] of
         [actual] -> pure actual
         _ -> fail "published retry lost its unique original capture"
@@ -325,9 +325,9 @@ verifyOutputProjection root prepared = do
   unless (finalizedInterfaceSeals valid == finalizedInterfaceSeals mixed)
     (fail "unchanged imported/output roles did not re-admit after refusal")
 
-verifyBatch :: [SessionModule] -> TypedSegment -> PreparedTypedSegmentBindings -> IO ()
+verifyBatch :: [SessionModule] -> PendingTypedSegment -> PreparedTypedSegmentBindings -> IO ()
 verifyBatch owners typed prepared = do
-  let captures = concatMap typedItemCaptures (typedSegmentItems typed)
+  let captures = concatMap typedItemCaptures (pendingSegmentItems typed)
       pairs = typedSegmentSessionGlobals prepared
       bindings = concatMap snd (typedSegmentSessionBinders prepared)
       dependencies = typedSegmentSessionRetainedGlobals prepared

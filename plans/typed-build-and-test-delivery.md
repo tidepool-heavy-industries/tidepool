@@ -93,6 +93,40 @@ No Buck in unprovisioned source worktrees. Builds use
 the provisioned main checkout after integration, pinned tools and local-only
 execution. Review focused failure paths and compile all affected targets.
 
+### Current compiler, native selection and shutdown work
+
+Keep the qualified Stage A tag and frozen `c8d622` bundle immutable. That
+bundle passed semantic17, twelve fresh corpus targets, catalog and M1;
+its focused two-child case failed on `OpenItemCore ["respond"]` before a
+typed child reply. Process cleanup completed, but hosted cancellation and
+realm retirement were unconfirmed. Stage B remains unqualified.
+
+- The Haskell compiler owner closes pending item Core against actual GHC
+  binding identities and whole-module definitions. Identity `ABExport`
+  evidence must preserve type and owner; retain complete recursive helper
+  groups, CoreLint and unknown/free-local refusals. Do not grant names.
+- The native selection owner separates immutable carrier custody from one
+  typed active implementation projection per compiler domain. Preserve exact
+  ArtifactIds, original groups and captured source-instance leases; migrate
+  recovery to version 8 with explicit selection. Conflicting implementations
+  actually selected in one domain still refuse.
+- The hosted cleanup owner keeps cancellation and worker retirement channels
+  available until their owning settlements complete. Semantic failure and
+  resource cleanup retain independent outcomes.
+
+Delivery integrates independently reviewed compiler closure first, runs the
+cached production GHC API graph and owning native regression, then builds and
+freezes a fresh matched bundle for the failing two-child case. Integrate the
+reviewed shutdown and native-selection parcels at the next source-safe cut;
+run their real refusal, recovery and current library-consumer controls before
+the final matched semantic/corpus/frozen cohorts. Do not requalify the unchanged
+failing binary. Admit at most two expensive lanes using actual enclosing
+cgroup use and host headroom. Source worktrees do not run Buck.
+
+Retain the deferred telemetry, preview, child validation carry, certification
+batch and native build-owner parcels outside this correctness cutoff. They
+need their own native controls and matched measurements after acceptance.
+
 ## Convergence work before the next qualification
 
 The build/test entrypoint migration does not by itself establish correct test

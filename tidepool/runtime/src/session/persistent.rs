@@ -590,6 +590,39 @@ impl PersistentSession {
         entries
     }
 
+    fn resolve_native_binding_custody(
+        &self,
+        scope: ScopeId,
+        requirements: &[tidepool_toolchain::artifact_inventory::NativeBindingRequirement],
+    ) -> Result<Vec<SessionVarId>, SessionError> {
+        if requirements.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scoped = self.scoped_prepared_bindings_in(scope);
+        let mut ids = Vec::with_capacity(requirements.len());
+        for requirement in requirements {
+            let module = SessionModule::val(Generation(requirement.generation));
+            let entry =
+                scoped
+                    .get(&(&requirement.identity, module))
+                    .ok_or(SessionError::InvalidPublicBindingPromotion(
+                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                ))?;
+            let handle = entry.value.handle;
+            if self
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                != Some(handle)
+            {
+                return Err(SessionError::InvalidPublicBindingPromotion(
+                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                ));
+            }
+            ids.push(entry.id);
+        }
+        Ok(ids)
+    }
+
     /// Resolve the worker's retained imports against the exact inherited
     /// lexical view or owning engine's immutable export ledger, before native
     /// compilation. The worker never supplies a `SessionVarId` or native root
@@ -3045,6 +3078,10 @@ impl PersistentSession {
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = if let Some(declaration) = &ticket.declaration {
+            let binding_custody = self.resolve_native_binding_custody(
+                ticket.private_scope,
+                &declaration.binding_custody,
+            )?;
             self.bindings.prepare_authored_source_publication_in(
                 &self.scopes,
                 ticket.private_scope,
@@ -3052,6 +3089,7 @@ impl PersistentSession {
                 &ticket.write_ids,
                 &ticket.source_keys,
                 &declaration.source_domain_owners,
+                &binding_custody,
             )
         } else {
             self.bindings.prepare_exact_publication_in(
@@ -4495,6 +4533,7 @@ mod checkpoint_scope_tests {
                 &[],
                 &authored_custody,
                 &[owner],
+                &[],
             )
             .unwrap();
         session
@@ -4560,6 +4599,7 @@ mod checkpoint_scope_tests {
                 &[],
                 &keys_a,
                 &[owner.clone()],
+                &[],
             )
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
@@ -4572,7 +4612,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_b,
-                &[owner]
+                &[owner],
+                &[],
             ),
             Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
         ));
@@ -4590,6 +4631,144 @@ mod checkpoint_scope_tests {
             .quiesce_and_collect_now()
             .unwrap();
         assert_eq!(session.residency().unwrap().programs, 0);
+    }
+
+    #[test]
+    fn authored_publication_keeps_exact_hidden_binding_custody_without_visible_aliases() {
+        use super::super::prepared::tests::{
+            install_selected_source_fixture, rooted_publication_fixture,
+        };
+        use tidepool_toolchain::artifact_inventory::{ArtifactId, NativeBindingRequirement};
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 825);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let private = session.mint_detached_scope(public).unwrap();
+        let sibling = session.mint_detached_scope(public).unwrap();
+        let (target, keys) = install_selected_source_fixture(&mut session, private, "a");
+        let owner = selected_sources(&session, private)[0].owner().clone();
+        mint_fixture_origin(&mut session, private, owner.clone());
+        let old = rooted_publication_fixture(&mut session, "captured", 826);
+        let (old_id, old_handle) = (old.id, old.value.handle);
+        let requirement = NativeBindingRequirement {
+            artifact_id: ArtifactId([1; 32]),
+            identity: old.value.identity.clone(),
+            generation: old.module.gen.0,
+        };
+        session.bind_in(private, old).unwrap();
+        let shadow = rooted_publication_fixture(&mut session, "captured", 827);
+        let shadow_id = shadow.id;
+        session.bind_in(private, shadow).unwrap();
+        let unrelated = rooted_publication_fixture(&mut session, "unused", 828);
+        let unrelated_id = unrelated.id;
+        session.bind_in(private, unrelated).unwrap();
+        let foreign = rooted_publication_fixture(&mut session, "foreign", 829);
+        let foreign_id = foreign.id;
+        let foreign_requirement = NativeBindingRequirement {
+            identity: foreign.value.identity.clone(),
+            generation: foreign.module.gen.0,
+            ..requirement.clone()
+        };
+        session.bind_in(sibling, foreign).unwrap();
+        let before = session.bindings.mutation_revision();
+        for invalid in [
+            foreign_requirement,
+            NativeBindingRequirement {
+                generation: 9999,
+                ..requirement.clone()
+            },
+            NativeBindingRequirement {
+                identity: SymbolIdentity {
+                    module: "wrong-owner".into(),
+                    ..requirement.identity.clone()
+                },
+                ..requirement.clone()
+            },
+        ] {
+            assert!(session
+                .resolve_native_binding_custody(private, &[invalid])
+                .is_err());
+        }
+        assert!(session
+            .resolve_native_binding_custody(public, std::slice::from_ref(&requirement))
+            .is_err());
+        assert!(matches!(
+            session.bindings.prepare_authored_source_publication_in(
+                &session.scopes,
+                private,
+                public,
+                &[shadow_id],
+                &keys,
+                std::slice::from_ref(&owner),
+                &[foreign_id]
+            ),
+            Err(tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding)
+        ));
+        assert_eq!(session.bindings.mutation_revision(), before);
+        let custody = session
+            .resolve_native_binding_custody(private, std::slice::from_ref(&requirement))
+            .unwrap();
+        assert_eq!(custody, vec![old_id]);
+        let prepared = session
+            .bindings
+            .prepare_authored_source_publication_in(
+                &session.scopes,
+                private,
+                public,
+                &[shadow_id],
+                &keys,
+                &[owner],
+                &custody,
+            )
+            .unwrap();
+        assert_eq!(session.bindings.mutation_revision(), before);
+        session.bindings.commit_exact_binding_promotion(prepared);
+        assert_eq!(
+            session
+                .bindings
+                .resolve_in(&session.scopes, public, "captured")
+                .unwrap()
+                .id,
+            shadow_id
+        );
+        assert!(session
+            .bindings
+            .resolve_in(&session.scopes, public, "unused")
+            .is_none());
+        assert!(session.prepared_mut().unwrap().unpin(target));
+        session.retire_scope(private);
+        assert!(session.bindings.get(unrelated_id).is_none());
+        assert_eq!(
+            session.bindings.get(old_id).unwrap().value.handle,
+            old_handle
+        );
+        assert_eq!(
+            session
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(old_handle.raw()),
+            Some(old_handle)
+        );
+        assert_eq!(
+            session
+                .resolve_native_binding_custody(public, std::slice::from_ref(&requirement))
+                .unwrap(),
+            vec![old_id]
+        );
+        session.retire_scope(sibling);
+        session.retire_scope(public);
+        assert!(session.bindings.get(old_id).is_none());
+        assert!(session.bindings.get(shadow_id).is_none());
+        assert_eq!(
+            session
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(old_handle.raw()),
+            None
+        );
+        assert!(session
+            .bindings
+            .source_instances_in(&session.scopes, public)
+            .is_empty());
     }
 
     #[test]
@@ -4635,6 +4814,7 @@ mod checkpoint_scope_tests {
                     &[],
                     keys,
                     &[owner],
+                    &[],
                 )
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
@@ -4714,6 +4894,7 @@ mod checkpoint_scope_tests {
                         &[],
                         keys,
                         &[owner.clone()],
+                        &[],
                     )
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);

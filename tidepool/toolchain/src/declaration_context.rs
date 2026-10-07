@@ -433,7 +433,7 @@ fn encode_scope_manifest(
     execution_scope: Option<Value>,
     authorization: Option<Value>,
 ) -> Result<Vec<u8>, CompileError> {
-    fields[1] = text("9");
+    fields[1] = text("10");
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
     let value = Value::Array(fields);
@@ -921,8 +921,47 @@ impl RetainedArtifactMaterialization {
 
 #[derive(Clone)]
 struct RetainedArtifactRow {
-    artifact: DeclarationArtifact,
+    interface: ExactIfaceArtifact,
     interface_evidence: Value,
+    payload: RetainedArtifactPayload,
+}
+
+#[derive(Clone)]
+enum RetainedArtifactPayload {
+    InterfaceOnly,
+    Native {
+        product: ModuleSnapshot,
+        certification_path: PathBuf,
+        certification_sha256: [u8; 32],
+    },
+}
+
+impl RetainedArtifactRow {
+    fn artifact(&self) -> DeclarationArtifact {
+        DeclarationArtifact {
+            interface: self.interface.clone(),
+            product: match &self.payload {
+                RetainedArtifactPayload::InterfaceOnly => None,
+                RetainedArtifactPayload::Native { product, .. } => Some(product.clone()),
+            },
+        }
+    }
+
+    fn native_certification(&self) -> Result<Value, CompileError> {
+        match &self.payload {
+            RetainedArtifactPayload::Native {
+                certification_path,
+                certification_sha256,
+                ..
+            } => Ok(Value::Array(vec![
+                path_value(certification_path)?,
+                text(hex(certification_sha256)),
+            ])),
+            RetainedArtifactPayload::InterfaceOnly => {
+                Err(failure("original certificate anchor is missing"))
+            }
+        }
+    }
 }
 
 /// Native generation demands belong to executable requests. A pure preview
@@ -1446,6 +1485,106 @@ pub(crate) struct ExactSourceAdmission {
         BTreeMap<ExactModuleIdentity, Vec<crate::certified_products::CanonicalSourceImport>>,
     pub(crate) selected_originals:
         BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
+}
+
+/// One physical segment's source receipt is classified only against its
+/// immutable input selection. Native item projections may grow output custody.
+pub(crate) struct ExactProgramSegmentAdmission {
+    request: ExactCompilationRequest,
+    admissions: Vec<ExactSourceAdmission>,
+    original_products: std::sync::OnceLock<crate::certified_products::ParsedModuleProducts>,
+}
+impl ExactProgramSegmentAdmission {
+    fn validate_request(&self, request: &ExactCompilationRequest) -> Result<(), CompileError> {
+        if self.request.request_sha256 != request.request_sha256
+            || self.request.semantic_sha256 != request.semantic_sha256
+            || self.request.producer_sha256 != request.producer_sha256
+        {
+            return Err(failure(
+                "segment source authority has another physical request",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn product_admission<'a>(
+        &'a self,
+        request: &ExactCompilationRequest,
+        path: &Path,
+        source: &str,
+        evidence: &[u8],
+    ) -> Result<ExactProductAdmission<'a>, CompileError> {
+        self.validate_request(request)?;
+        let matched = self
+            .admissions
+            .iter()
+            .filter(|admission| {
+                admission.witness.matches_source(path, source)
+                    && admission.validate_ineligible_evidence(evidence).is_ok()
+            })
+            .collect::<Vec<_>>();
+        let first = matched
+            .first()
+            .ok_or_else(|| failure("projected item lacks its physical segment source receipt"))?;
+        // Repeated projected receipt rows are equal authority, not new source
+        // compilation; retain every validated row for final conflict checks.
+        if matched.iter().any(|admission| {
+            admission.evidence_bytes != first.evidence_bytes
+                || admission.exact_imports != first.exact_imports
+                || admission.exact_source_imports != first.exact_source_imports
+                || admission.scaffold_roots != first.scaffold_roots
+                || admission.selected_originals.len() != first.selected_originals.len()
+                || admission
+                    .selected_originals
+                    .iter()
+                    .any(|(owner, original)| {
+                        first.selected_originals.get(owner).is_none_or(|expected| {
+                            original.interface() != expected.interface()
+                                || original.imports() != expected.imports()
+                        })
+                    })
+        }) {
+            return Err(failure("projected segment source receipts disagree"));
+        }
+        Ok(ExactProductAdmission {
+            request: &self.request,
+            source: first,
+        })
+    }
+    pub(crate) fn original_products(
+        &self,
+        request: &ExactCompilationRequest,
+        bytes: &[u8],
+        package_bundle: &[u8],
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<&crate::certified_products::ParsedModuleProducts, CompileError> {
+        self.validate_request(request)?;
+        if self.original_products.get().is_none() {
+            let parsed = crate::certified_products::ParsedModuleProducts::decode_with_operation(
+                bytes,
+                package_bundle,
+                operation.clone(),
+            )
+            .map_err(compiler_evidence_failure)?;
+            self.original_products
+                .set(parsed)
+                .map_err(|_| failure("segment inventory concurrently initialized"))?;
+        }
+        let parsed = self
+            .original_products
+            .get()
+            .ok_or_else(|| failure("segment inventory absent"))?;
+        parsed
+            .validate_observation(bytes, package_bundle, operation)
+            .map_err(compiler_evidence_failure)?;
+        Ok(parsed)
+    }
+
+    pub(crate) fn admissions(&self) -> &[ExactSourceAdmission] {
+        &self.admissions
+    }
+    pub(crate) fn into_admissions(self) -> Vec<ExactSourceAdmission> {
+        self.admissions
+    }
 }
 
 pub(crate) struct ExactProductAdmission<'a> {
@@ -2111,12 +2250,48 @@ impl ExactCompilationRequest {
         })
     }
 
+    pub(crate) fn admit_program_segment(
+        &self,
+        root: &Path,
+    ) -> Result<ExactProgramSegmentAdmission, CompileError> {
+        Ok(ExactProgramSegmentAdmission {
+            request: self.clone(),
+            admissions: self.validate_outputs(root)?,
+            original_products: std::sync::OnceLock::new(),
+        })
+    }
+    pub(crate) fn admit_program_segment_support(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        segment: &ExactProgramSegmentAdmission,
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        segment.validate_request(self)?;
+        self.admit_program_support_inner(
+            context,
+            support,
+            &segment.admissions,
+            produced_types,
+            Some(&segment.request.context),
+        )
+    }
     pub(crate) fn admit_program_support(
         &mut self,
         context: Arc<ExactDeclarationContext>,
         support: &ArtifactView,
         admissions: &[ExactSourceAdmission],
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.admit_program_support_inner(context, support, admissions, produced_types, None)
+    }
+    fn admit_program_support_inner(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        admissions: &[ExactSourceAdmission],
+        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        segment_input: Option<&ExactDeclarationContext>,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
         let mut selected_originals = BTreeMap::new();
@@ -2151,6 +2326,10 @@ impl ExactCompilationRequest {
         let retained = context
             .artifact_view()
             .entries_for_owners(supplied.keys().cloned())?;
+        let source_input = segment_input.unwrap_or(&context);
+        let retained_source_input = source_input
+            .artifact_view()
+            .entries_for_owners(supplied.keys().cloned())?;
         let fresh = supplied
             .keys()
             .filter(|owner| {
@@ -2181,9 +2360,15 @@ impl ExactCompilationRequest {
                             "source-selected support has another original owner",
                         ));
                     }
-                } else if retained.contains_key(owner) {
+                } else if retained_source_input.contains_key(owner) {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
+                    ));
+                } else if retained.get(owner).is_some_and(|previous| {
+                    canonical_source_interface(previous) != canonical_source_interface(entry)
+                }) {
+                    return Err(failure(
+                        "projected segment source changed its admitted canonical owner",
                     ));
                 } else if canonical_source_interface(entry).is_none() {
                     return Err(failure(
@@ -2419,20 +2604,6 @@ impl ExactCompilationRequest {
             &planned.product().owner().module,
         );
         request.validate_outputs_selected(root, Some(&owner), &self.context)
-    }
-
-    pub(crate) fn validate_outputs_in_context(
-        &self,
-        root: &Path,
-        context: &ExactDeclarationContext,
-    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
-        if context.toolchain_identity_sha256() != self.producer_sha256
-            && !(context.toolchain_identity_sha256() == [0; 32]
-                && context.artifact_view().is_empty())
-        {
-            return Err(failure("same-transaction context has another producer"));
-        }
-        self.validate_outputs_selected(root, None, context)
     }
 
     fn validate_outputs_selected(
@@ -3694,6 +3865,16 @@ impl ExactDeclarationContext {
         }
     }
 
+    /// Read-only lifetime requirements for full original authored bodies.
+    /// This preserves future entry support without selecting executable groups.
+    pub fn authored_native_binding_custody_requirements(
+        &self,
+        owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<crate::artifact_inventory::NativeBindingRequirement>, CompileError> {
+        self.inventory
+            .authored_native_binding_custody_requirements(owners)
+    }
+
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.inventory
             .entries()
@@ -4057,7 +4238,7 @@ impl ExactDeclarationContext {
             }
             if owned
                 .get(&entry.descriptor.id)
-                .is_some_and(|row| row.artifact == *artifact)
+                .is_some_and(|row| row.artifact() == *artifact)
             {
                 continue;
             }
@@ -4443,21 +4624,39 @@ impl ExactDeclarationContext {
         let mut validation = PackageInterfaceValidation::default();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
-        let (materialized, _) = self.materialize_entries_with_validation(
+        let (materialized, references) = self.materialize_entries_with_validation(
             root,
             &new_entries,
             &mut validation,
             MaterializationMode::Scratch,
         )?;
+        let references = references
+            .iter()
+            .map(|reference| (identity(&reference.unit, &reference.module), reference))
+            .collect::<BTreeMap<_, _>>();
         for artifact in materialized.artifacts {
             let entry =
                 &metadata.entries[&identity(&artifact.interface.unit, &artifact.interface.module)];
             let interface_evidence = scope_interface_evidence(entry, root, &mut validation)?;
+            let payload = match artifact.product {
+                Some(product) => {
+                    let reference = references
+                        .get(&entry.descriptor.owner)
+                        .ok_or_else(|| failure("original certificate reference is missing"))?;
+                    RetainedArtifactPayload::Native {
+                        product,
+                        certification_path: root.join(&reference.certification_path),
+                        certification_sha256: reference.certification_sha256,
+                    }
+                }
+                None => RetainedArtifactPayload::InterfaceOnly,
+            };
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
-                    artifact,
+                    interface: artifact.interface,
                     interface_evidence,
+                    payload,
                 },
             );
         }
@@ -4472,7 +4671,7 @@ impl ExactDeclarationContext {
         selected_rows.extend(rows.iter().map(|(id, row)| (*id, row)));
         let artifacts = entries
             .iter()
-            .map(|entry| selected_rows[&entry.descriptor.id].artifact.clone())
+            .map(|entry| selected_rows[&entry.descriptor.id].artifact())
             .collect::<Vec<_>>();
         let start = std::time::Instant::now();
         // The recovery writer issued every row from owned immutable bytes and
@@ -4581,7 +4780,7 @@ impl ExactDeclarationContext {
         let artifacts = metadata
             .entries
             .values()
-            .map(|entry| selected_rows[&entry.descriptor.id].artifact.clone())
+            .map(|entry| selected_rows[&entry.descriptor.id].artifact())
             .collect::<Vec<_>>();
         let groups: Arc<[PendingCertifiedGroup]> =
             RetainedArtifactMaterialization::selected_group_refs([retained.as_ref()], metadata)
@@ -4712,6 +4911,10 @@ impl ExactDeclarationContext {
                                     })
                                     .collect(),
                             ),
+                            selected_rows[&metadata.entries[&identity(&owner.unit, &owner.module)]
+                                .descriptor
+                                .id]
+                                .native_certification()?,
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -4810,6 +5013,73 @@ pub(crate) fn certified_product_artifact_view_with_validation(
         entries.into_iter().map(Arc::new).collect(),
         demand,
     )
+}
+
+/// Admit only the inventory's selected dependency closure. Original byte custody
+/// remains complete; previously admitted groups must survive unchanged.
+pub(crate) fn certify_artifact_view_groups_with_validation(
+    view: &ArtifactView,
+    candidates: &[PendingCertifiedGroup],
+    baseline: &[PendingCertifiedGroup],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+    let metadata = view.metadata_snapshot();
+    metadata.validate_native_selection()?;
+    let entries = metadata.artifacts.values().cloned().collect::<Vec<_>>();
+    let available = original_products_by_id(&entries);
+    let selected_key = |group: &PendingCertifiedGroup| {
+        let entry = metadata
+            .entries
+            .get(&identity(&group.owner().unit, &group.owner().module))
+            .ok_or_else(|| failure("certified group has no available artifact"))?;
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(failure("certified group has no native artifact"));
+        };
+        if product.owner() != group.owner() {
+            return Err(failure("certified group has another native owner"));
+        }
+        Ok(crate::artifact_inventory::NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: group.group().original_ordinal(),
+        })
+    };
+    let mut current = Vec::new();
+    for group in candidates {
+        if metadata
+            .selected_native_groups
+            .contains(&selected_key(group)?)
+        {
+            current.push(group.clone());
+        }
+    }
+    let mut baseline_keys = BTreeSet::new();
+    for group in baseline {
+        let key = selected_key(group)?;
+        if !baseline_keys.insert(key) || !metadata.selected_native_groups.contains(&key) {
+            return Err(failure(
+                "artifact view removed or duplicated a previously selected group",
+            ));
+        }
+        if let Some(candidate) = current.iter().find(|candidate| {
+            candidate.owner() == group.owner()
+                && candidate.group().original_ordinal() == group.group().original_ordinal()
+        }) {
+            if candidate.group() != group.group() || candidate.imports() != group.imports() {
+                return Err(failure("artifact view changed a previously selected group"));
+            }
+        } else {
+            current.push(group.clone());
+        }
+    }
+    let additional = certify_selected_owned_products_in_context_with_validation(
+        &available,
+        &current,
+        &metadata.selected_native_groups,
+        validation,
+    )
+    .map_err(failure)?;
+    current.extend(additional);
+    Ok(current)
 }
 
 pub(crate) fn certified_artifact_view(
@@ -6094,6 +6364,39 @@ mod tests {
             .prepare_compilation(&scratch.path().join("base"), &producer)
             .unwrap();
         assert_eq!(base_request.groups.len(), 1);
+        let native_descriptor = |request: &ExactCompilationRequest| {
+            let bytes = std::fs::read(&request.manifest).unwrap();
+            let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+            assert_eq!(manifest.as_array().unwrap()[1], text("10"));
+            let row = manifest.as_array().unwrap()[6]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row.as_array().unwrap()[1] == text("Native"))
+                .unwrap();
+            let fields = row.as_array().unwrap();
+            assert_eq!(fields.len(), 8);
+            assert_eq!(fields[6].as_array().unwrap().len(), 1);
+            let descriptor = fields[7].as_array().unwrap();
+            let Value::Text(path) = &descriptor[0] else {
+                unreachable!()
+            };
+            assert!(Path::new(path).is_absolute());
+            let certificate = std::fs::read(path).unwrap();
+            assert_eq!(descriptor[1], text(sha256(&certificate)));
+            assert_eq!(
+                certificate,
+                request
+                    .context
+                    .recovery_products()
+                    .iter()
+                    .find(|product| product.owner().module == "Native")
+                    .unwrap()
+                    .certification_bytes()
+            );
+            fields[7].clone()
+        };
+        let base_descriptor = native_descriptor(&base_request);
         let left = extend(&base, product("Left", 8, 12));
         let right = extend(&base, product("Right", 9, 13));
         let left_request = left
@@ -6109,6 +6412,7 @@ mod tests {
         let joined_request = joined
             .prepare_compilation(&scratch.path().join("joined"), &producer)
             .unwrap();
+        assert_eq!(native_descriptor(&joined_request), base_descriptor);
         let joined_owner = joined_request.materialization.as_ref().unwrap();
         assert!(
             joined_owner.groups.is_empty(),
@@ -8768,6 +9072,191 @@ mod tests {
     }
 
     #[test]
+    fn program_segment_preserves_physical_source_authority_across_item_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), baseline.clone());
+        let source = "module Consumer where\n";
+        let source_path = directory.path().join("Consumer.hs");
+        let fixture = import_receipt(directory.path(), &request, "Unadmitted");
+        let mut receipt = read_receipt(&fixture);
+        receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        let output = directory.path().join("outputs");
+        for name in ["first", "second"] {
+            let root = output.join(".exact-compilations").join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let snapshot = root.join("source.hs");
+            std::fs::write(&snapshot, source).unwrap();
+            let mut projected = receipt.clone();
+            projected.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
+            write_receipt(&root.join("receipt.cbor"), &projected);
+        }
+        let segment = request.admit_program_segment(&output).unwrap();
+        assert_eq!(segment.admissions().len(), 2);
+        // These are neutral current-wire definitions, not native/source authority.
+        let original = crate::certified_products::tests::original_groups_fixture(
+            "Observed",
+            vec![(3, vec![]), (11, vec![])],
+            1,
+            &BTreeMap::new(),
+        );
+        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        ));
+        let first = segment
+            .original_products(&request, original.product_bytes(), b"", &operation)
+            .unwrap();
+        assert_eq!(
+            first.products()[0]
+                .groups
+                .iter()
+                .map(|group| group.original_ordinal())
+                .collect::<Vec<_>>(),
+            vec![3, 11]
+        );
+        let spent = operation.work_usage().unwrap().0;
+        let second = segment
+            .original_products(&request, original.product_bytes(), b"", &operation)
+            .unwrap();
+        assert!(std::ptr::eq(first, second));
+        // A repeat pays its physical comparison, not another typed decode/framing.
+        assert_eq!(
+            operation.work_usage().unwrap().0 - spent,
+            original.product_bytes().len()
+        );
+        let mut changed_body = original.product_bytes().to_vec();
+        changed_body[0] ^= 1;
+        for (body, package) in [
+            (changed_body.as_slice(), b"".as_slice()),
+            (original.product_bytes(), b"changed".as_slice()),
+        ] {
+            assert!(
+                matches!(segment.original_products(&request, body, package, &operation),
+                Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                    crate::certified_products::CertificationError::Mismatch("physical segment original inventory changed")))
+            );
+        }
+        let foreign_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        ));
+        assert!(
+            matches!(segment.original_products(&request, original.product_bytes(), b"", &foreign_operation),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Mismatch("shared inventory accounting owner")))
+        );
+        assert_eq!(foreign_operation.work_usage().unwrap().0, 0);
+        let independent = request.admit_program_segment(&output).unwrap();
+        let independently_parsed = independent
+            .original_products(&request, original.product_bytes(), b"", &foreign_operation)
+            .unwrap();
+        assert!(!std::ptr::eq(first, independently_parsed));
+        assert!(foreign_operation.work_usage().unwrap().0 > original.product_bytes().len());
+        let remaining = operation.work_usage().unwrap().1;
+        operation.charge(remaining).unwrap();
+        assert!(
+            matches!(segment.original_products(&request, original.product_bytes(), b"", &operation),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Product(tidepool_repr::execution_schema::ParseError::LimitExceeded("work"))))
+        );
+        assert_eq!(operation.work_usage().unwrap().1, 0);
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(receipt.as_array().unwrap()[7].as_text().unwrap()).unwrap();
+        evidence.cache_safe = false;
+        evidence.selection_complete = false;
+        let evidence = serde_json::to_vec(&evidence).unwrap();
+        let support = support_view(&[support_product("Consumer")]);
+        let context = request
+            .admit_program_segment_support(baseline, &support, &segment, None)
+            .unwrap();
+        assert!(context
+            .interface_owners()
+            .iter()
+            .any(|interface| interface.owner == identity("fixture", "Consumer")));
+
+        // The subsequent item uses the evolved output view, while its source
+        // authority still comes from the same successful physical request.
+        let mut projected = request
+            .in_program_context(&directory.path().join("program-inputs"), context.clone())
+            .unwrap();
+        projected
+            .context
+            .validate_artifacts(&projected.artifacts)
+            .unwrap();
+        let admission = segment
+            .product_admission(&projected, &source_path, source, &evidence)
+            .unwrap();
+        assert!(admission.request.context.interface_owners().is_empty());
+        let repeated = projected
+            .admit_program_segment_support(context.clone(), &support, &segment, None)
+            .unwrap();
+        assert_eq!(repeated.semantic_sha256(), context.semantic_sha256());
+        let ordinary_refusal = projected
+            .admit_program_segment(&output)
+            .err()
+            .expect("a new source receipt cannot replace an admitted owner");
+        let assert_context_refusal = |actual: &CompileError, reason: &str| {
+            let expected = failure(reason);
+            assert!(
+                matches!((actual, &expected),
+                    (CompileError::ExtractFailed(actual), CompileError::ExtractFailed(expected))
+                        if actual == expected),
+                "{actual:?}"
+            );
+        };
+        assert_context_refusal(
+            &ordinary_refusal,
+            "fresh module replaced an admitted exact owner",
+        );
+        let hidden_refusal = projected
+            .admit_program_support(context.clone(), &support, segment.admissions(), None)
+            .unwrap_err();
+        assert_context_refusal(
+            &hidden_refusal,
+            "program support cannot select a retained hidden owner",
+        );
+
+        let before = projected.context.semantic_sha256();
+        let changed = support_view(&[support_product_with_interface(
+            "fixture",
+            "Consumer",
+            b"changed canonical interface".to_vec(),
+        )]);
+        let changed_refusal = projected
+            .admit_program_segment_support(context, &changed, &segment, None)
+            .unwrap_err();
+        assert_context_refusal(
+            &changed_refusal,
+            "projected segment source changed its admitted canonical owner",
+        );
+        assert_eq!(projected.context.semantic_sha256(), before);
+        assert!(segment
+            .product_admission(
+                &projected,
+                &source_path,
+                "module Changed where\n",
+                &evidence
+            )
+            .is_err());
+        assert!(segment
+            .product_admission(&projected, &source_path, source, b"{}")
+            .is_err());
+        for changed in 0..3 {
+            let mut foreign = projected.clone();
+            match changed {
+                0 => foreign.request_sha256 = sha256(b"another request"),
+                1 => foreign.semantic_sha256 = [9; 32],
+                _ => foreign.producer_sha256 = [9; 32],
+            }
+            assert!(segment
+                .product_admission(&foreign, &source_path, source, &evidence)
+                .is_err());
+        }
+        assert_eq!(segment.into_admissions().len(), 2);
+    }
+
+    #[test]
     fn generated_source_owner_accepts_separate_projection_receipts_and_checks_every_snapshot() {
         let directory = tempfile::tempdir().unwrap();
         let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
@@ -9795,6 +10284,10 @@ mod tests {
                     text(hex(&owner.product_sha256)),
                     path_value(&root.join(format!("{}.tpmod", owner.module))).unwrap(),
                     Value::Array(vec![]),
+                    Value::Array(vec![
+                        path_value(&root.join(format!("{}.owners", owner.module))).unwrap(),
+                        text(hex(&[1; 32])),
+                    ]),
                 ])
             })
             .collect();
@@ -9809,7 +10302,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("9"));
+        assert_eq!(decoded.as_array().unwrap()[1], text("10"));
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()

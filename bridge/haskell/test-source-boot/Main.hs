@@ -45,6 +45,7 @@ tests = testGroup "source-boot"
   , testCase "native checked signatures" $ nativeCheckedSignaturesTest
   , testCase "original home thin interface" originalHomeThinInterfaceTest
   , testCase "package-only thin interface" packageOnlyThinInterfaceTest
+  , testCase "wired-in package thin interface" wiredInPackageThinInterfaceTest
   , testCase "host activation purpose" $ hostActivationPurposeTest Nothing
   , testCase "candidate execution sources" $ candidateExecutionSourcesTest
   , testCase "retained exact quoter" $ exactRetainedQuoter

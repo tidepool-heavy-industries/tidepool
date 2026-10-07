@@ -3632,6 +3632,14 @@ where
         self.state.current_val_modules_in(scope)
     }
 
+    #[cfg(test)]
+    pub(super) fn retained_checked_value_artifact(
+        &self,
+        module: SessionModule,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        self.state.retained_checked_value_artifact(module)
+    }
+
     /// Immutable compile environment for `scope`, suitable for carrying out of
     /// a registry peek before a blocking GHC invocation.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<super::SessionCompileView> {

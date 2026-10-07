@@ -9,7 +9,7 @@ import qualified Data.Set as Set
 import GHC
 import GHC.Core (bindersOfBinds)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
-import GHC.Builtin.Types (intTy)
+import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Name (getOccString, nameModule_maybe)
 import GHC.Types.Var (varName)
@@ -47,7 +47,10 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
   withResidentPipelineSelectedRequests includes $ \runRequest ->
     forM_ (zip [0 :: Int ..] preparationCases) $ \(index, (name, expected)) -> do
       body <- readFile (fixtures </> name ++ ".hs")
-      let template = preparationTemplate ("TypedPrepared" ++ show index)
+      helpers <- if name == "template-helper-use"
+        then readFile (fixtures </> "template-helper-definitions.hs")
+        else pure ""
+      let template = preparationTemplateWithHelpers ("TypedPrepared" ++ show index) helpers
       wholePlan <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
       sourcePlan <- fixtureExecutableSegment name wholePlan
       let slots = [(ordinal, fromIntegral (index * 100 + ordinal + 1), observation ordinal item)
@@ -102,6 +105,12 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
             "numeric-action-mr" -> capture "number" >>= assertInt name
             "numeric-action-nomr" -> capture "number" >>= assertInt name
             "read-later" -> capture "number" >>= assertInt name
+            "template-helper-use" -> do
+              capture "replyValue" >>= assertInt name
+              capture "recursiveValue" >>= assertInt name
+              capture "integerStep" >>= assertInt name
+              double <- capture "doubleStep"
+              unless (eqType double doubleTy) (fail "template helper lost its independent Double instantiation")
             "num-scalar-nomr" -> do
               ty <- capture "number"
               let (variables, predicates, _) = tcSplitSigmaTy ty
@@ -151,14 +160,17 @@ preparationCases =
     , "lazy-nested-bottom", "applied-original", "substitution-shadow", "bare-bottom"
     , "constrained-open-let", "zero-let-lazy", "zero-let-bang", "zero-let-strict"
     , "strict-closure-let", "wildcard-action", "bang-wildcard-action"
-    , "refutable-failure", "authored-helper-alias" ]]
+    , "refutable-failure", "authored-helper-alias", "template-helper-use" ]]
   ++ [(name, PrepareTypedRefusal) | name <-
     [ "unresolved-action", "unresolved-dependent"
     , "unresolved-phantom-action", "open-let", "cross-item-existential" ]]
   ++ [(name, PrepareSourceRefusal) | name <- ["wrong-row", "wrong-observation-row", "unresolved-read"]]
 
 preparationTemplate :: String -> String
-preparationTemplate owner = unlines
+preparationTemplate owner = preparationTemplateWithHelpers owner ""
+
+preparationTemplateWithHelpers :: String -> String -> String
+preparationTemplateWithHelpers owner helpers = unlines
   [ "{-# LANGUAGE GHC2024, NamedDefaults, ScopedTypeVariables, TypeApplications, BangPatterns, UndecidableInstances, ExtendedDefaultRules #-}"
   , "{{CELL_PRAGMAS}}"
   , "module " ++ owner ++ " where"
@@ -180,6 +192,7 @@ preparationTemplate owner = unlines
   , "instance {-# OVERLAPPING #-} (effects ~ '[]) => TidepoolCellExpression (Eff effects value) where { __tidepoolCellExpression action = action >> pure () }"
   , "instance {-# OVERLAPPABLE #-} TidepoolCellPure value => TidepoolCellExpression value where { __tidepoolCellExpression _ = pure () }"
   , "{{CELL_DECLS}}"
+  , helpers
   , "__tidepool_cell_check :: Eff '[] ()"
   , "__tidepool_cell_check = do {"
   , "{{CELL_BODY}}"

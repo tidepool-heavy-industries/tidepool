@@ -284,3 +284,108 @@ async fn shutdown_closes_release_admission_and_preserves_queued_exact_actor_wait
         ResourceRelease::Retained(_)
     ));
 }
+
+#[tokio::test]
+async fn draining_join_retains_exact_owner_receipt_and_rejects_wrong_task() {
+    use exomonad_actor::{ActorId, ReleaseAwait, ResourceRelease};
+    let actor = ActorRef::first(ActorId(42));
+    let other = ActorRef {
+        incarnation: exomonad_actor::Incarnation(2),
+        ..actor
+    };
+    let mut tasks = JoinSet::new();
+    let task = tasks.spawn(async {});
+    let wrong_task = tasks.spawn(async {});
+    let owners = Arc::new(Mutex::new(HashMap::from([(
+        actor,
+        InteractiveApplicationOwner::embedded(),
+    )])));
+    update_embedded_state(&owners, actor, |state| {
+        state.live = true;
+        state.task_id = Some(task.id());
+    });
+    let (exact, exact_reply) = ReleaseAwait::channel(actor);
+    let (foreign, foreign_reply) = ReleaseAwait::channel(other);
+    let mut waiters = HashMap::from([(actor, vec![exact]), (other, vec![foreign])]);
+    assert!(application_supervisor::settle_embedded_shutdown(
+        actor,
+        wrong_task.id(),
+        Ok(()),
+        &owners,
+        &mut waiters,
+    )
+    .is_some());
+    assert!(application_supervisor::settle_embedded_shutdown(
+        other,
+        task.id(),
+        Ok(()),
+        &owners,
+        &mut waiters,
+    )
+    .is_some());
+    assert_eq!(observed_resource_release(actor, &owners), None);
+    assert_eq!(waiters.len(), 2);
+    assert_eq!(
+        application_supervisor::settle_embedded_shutdown(
+            actor,
+            task.id(),
+            Ok(()),
+            &owners,
+            &mut waiters,
+        ),
+        None
+    );
+    assert_eq!(exact_reply.await.unwrap(), ResourceRelease::Released);
+    assert_eq!(
+        observed_resource_release(actor, &owners),
+        Some(ResourceRelease::Released)
+    );
+    assert!(waiters.contains_key(&other));
+    retain_unsettled_release_waiters(&mut waiters);
+    assert!(matches!(
+        foreign_reply.await.unwrap(),
+        ResourceRelease::Retained(_)
+    ));
+    while tasks.join_next().await.is_some() {}
+}
+
+#[tokio::test]
+async fn draining_join_retains_failed_cancellation_receipt_for_later_release_waits() {
+    use exomonad_actor::{ActorId, ReleaseAwait, ResourceRelease};
+    let actor = ActorRef::first(ActorId(42));
+    let mut tasks = JoinSet::new();
+    let task = tasks.spawn(async {});
+    let owners = Arc::new(Mutex::new(HashMap::from([(
+        actor,
+        InteractiveApplicationOwner::embedded(),
+    )])));
+    update_embedded_state(&owners, actor, |state| {
+        state.live = true;
+        state.task_id = Some(task.id());
+    });
+    let (request, reply) = ReleaseAwait::channel(actor);
+    let mut waiters = HashMap::from([(actor, vec![request])]);
+    let failure =
+        embedded_service::EmbeddedDriverError::Engine(harness::engine::EngineError::Cleanup {
+            primary: Box::new(harness::engine::EngineError::Cancelled { head_request: None }),
+            cleanup: "exact native owner did not acknowledge cancellation".into(),
+        });
+    assert!(application_supervisor::settle_embedded_shutdown(
+        actor,
+        task.id(),
+        Err(failure),
+        &owners,
+        &mut waiters,
+    )
+    .is_some());
+    let release = reply.await.unwrap();
+    assert!(
+        matches!(&release, ResourceRelease::Retained(detail) if detail.contains("did not acknowledge"))
+    );
+    assert_eq!(observed_resource_release(actor, &owners), Some(release));
+    assert_eq!(
+        with_embedded_state(&owners, actor, |state| state.task_id),
+        Some(None)
+    );
+    while tasks.join_next().await.is_some() {}
+}

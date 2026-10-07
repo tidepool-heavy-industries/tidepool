@@ -2454,6 +2454,86 @@ validateInterfaceMeasurement expectedModule expectedStage expectedReuse row = do
       value -> fail ("non-decimal interface measurement field " ++ name ++ ": " ++ show value)
     rtsCounters = ["allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs"]
 
+semicolonStatementRefinement :: DynFlags -> IO ()
+semicolonStatementRefinement flags = do
+  forM_ cases $ \(label, statements, expected) -> do
+    newline <- analyze (intercalate "\n" statements)
+    inline <- analyze (intercalate "; " statements)
+    assertEqual (label ++ " newline statement identities") expected (identities newline)
+    assertEqual (label ++ " semicolon statement identities") expected (identities inline)
+    assertEqual (label ++ " ordered authored ordinals") [0 .. length statements - 1]
+      (map cellAnalysisSourceOrdinal (concatMap cellAnalysisSourceItems inline))
+    assertEqual (label ++ " positioned text retains exact authored AST slices") statements
+      (map authoredSlice inline)
+    forM_ inline $ \item -> do
+      tokens <- split flags (cellAnalysisSource item)
+      case tokens of
+        first : _ -> assertEqual (label ++ " rendered first token keeps original column")
+          (cellStartColumn (cellAnalysisSpan item)) (cellStartColumn (cellSourceSpan first))
+        [] -> fail (label ++ ": positioned statement has no actual GHC tokens")
+  coordinates <- analyze "pure \"λ;γ\";\tpure \"δ\""
+  assertEqual "Unicode and tab source slices" ["pure \"λ;γ\"", "pure \"δ\""]
+    (map authoredSlice coordinates)
+  assertEqual "GHC tab columns in original source" [1, 17]
+    (map (cellStartColumn . cellAnalysisSpan) coordinates)
+  indented <- analyze "\n  pure \"a\"; pure \"b\""
+  assertEqual "indented statements preserve exact authored token slices"
+    ["pure \"a\"", "pure \"b\""] (map authoredSlice indented)
+  assertEqual "positioned text separates source prefix from authored slice"
+    ["  pure \"a\"", "            pure \"b\""] (map cellAnalysisSource indented)
+  assertEqual "leading blank line remains in authored coordinates" [2, 2]
+    (map (cellStartLine . cellAnalysisSpan) indented)
+  assertEqual "non-column-one original items preserve parser columns" [3, 13]
+    (map (cellStartColumn . cellAnalysisSpan) indented)
+  comments <- analyze "pure (17 :: Int); {- not; a; statement -} pure (19 :: Int) -- trailing; comment"
+  assertEqual "comment semicolons do not become statements" [KExpr, KExpr]
+    (map (sbKind . cellAnalysisVerdict) comments)
+  assertEqual "trailing comment cannot swallow parser terminal"
+    ["pure (17 :: Int)", "pure (19 :: Int)"] (map authoredSlice comments)
+  multiline <- analyze "pure (); let first = (1 :: Int)\n             second = first + 1"
+  assertEqual "later inline implicit let retains complete binder group"
+    [(KExpr, Nothing, []), (KBind, Just LetBinding, ["first", "second"])] (identities multiline)
+  assertEqual "first-line positioning preserves implicit let layout"
+    ["pure ()", "         let first = (1 :: Int)\n             second = first + 1"]
+    (map cellAnalysisSource multiline)
+  forM_ ["pure ();", "pure (); -- trailing; comment", "; pure ()"] $ \source -> do
+    separators <- analyze source
+    assertEqual "parser-owned empty separators do not create authored statements"
+      [(KExpr, Nothing, [])] (identities separators)
+  empty <- analyze "-- only; a comment\n"
+  assertEqual "comment-only cell has no executable statements" [] empty
+  declarations <- analyze "identity :: a -> a; identity value = value"
+  assertEqual "same-line authored declarations remain one original" [KDecl]
+    (map (sbKind . cellAnalysisVerdict) declarations)
+  malformed <- analyzeOrderedCellWithFlags flags checkTemplate "answer <- ; pure answer"
+  case malformed of
+    Left CellStatementParseFailure {} -> pure ()
+    _ -> fail ("invalid statement list received executable identities: " ++ show malformed)
+  where
+    analyze source = analyzeOrderedCellWithFlags flags checkTemplate source
+      >>= either (fail . renderCellSplitError) (pure . cellPlanItems)
+    identities = map (\item ->
+      (sbKind (cellAnalysisVerdict item), cellAnalysisBindingForm item,
+        sbBinders (cellAnalysisVerdict item)))
+    authoredSlice = dropWhile (== ' ') . cellAnalysisSource
+    cases =
+      [ ("two observations", ["pure (17 :: Int)", "pure (19 :: Int)"],
+          [(KExpr, Nothing, []), (KExpr, Nothing, [])])
+      , ("action and observation", ["answer <- pure (7 :: Int)", "pure answer"],
+          [(KBind, Just ActionBinding, ["answer"]), (KExpr, Nothing, [])])
+      , ("let declarations retain nested semicolons",
+          ["let { identity value = value; constant value _ = value }", "pure (identity (7 :: Int))"],
+          [(KBind, Just LetBinding, ["identity", "constant"]), (KExpr, Nothing, [])])
+      , ("nested explicit do", ["answer <- do { pure (); pure (7 :: Int) }", "pure answer"],
+          [(KBind, Just ActionBinding, ["answer"]), (KExpr, Nothing, [])])
+      , ("nested implicit do", ["answer <- (do\n  pure ()\n  pure (7 :: Int))", "pure answer"],
+          [(KBind, Just ActionBinding, ["answer"]), (KExpr, Nothing, [])])
+      , ("strings", ["pure \"left;right\"", "pure \"next\""],
+          [(KExpr, Nothing, []), (KExpr, Nothing, [])])
+      , ("quasiquotes", ["quoted <- [q|left;right|]", "pure quoted"],
+          [(KBind, Just ActionBinding, ["quoted"]), (KExpr, Nothing, [])])
+      ]
+
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do
   items <- split flags lexicalCell

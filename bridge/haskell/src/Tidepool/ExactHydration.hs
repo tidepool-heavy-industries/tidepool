@@ -64,7 +64,7 @@ import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
   , lookupHpt )
-import GHC.Iface.Load (readIface)
+import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Driver.Session (DynFlags, targetProfile, ghcMode, GhcMode(CompManager))
 import GHC.Driver.Config.Parser (initParserOpts)
@@ -74,7 +74,7 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', atomicModifyIORef')
 import GHC.IfaceToCore (typecheckIface)
-import GHC.Tc.Utils.Monad (initIfaceCheck)
+import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLoad)
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
 import GHC.Unit.Module.Graph
   ( ModuleGraph, ModuleGraphNode(..), NodeKey(..), ModNodeKeyWithUid(..)
@@ -933,14 +933,26 @@ originalInterfaceArtifact (OriginalInterfaceArtifacts env originals retained _ d
     serialize interface = seal <$> serializeOriginalInterface env directory interface
     sameOriginal selected actual = mi_module actual == owner
       && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts selected)
-    packageArtifact selected
-      | owner /= gHC_PRIM, Nothing <- selected = pure Nothing
-      | otherwise = do
+    packageArtifact selected = do
+      -- Resolving a wired-in Name can supply its TyThing without loading its
+      -- interface. Sealing still requires the original package interface;
+      -- load it through the pinned module environment before capturing bytes.
+      admitted <- case selected of
+        Just interface -> pure (Just interface)
+        Nothing -> initIfaceLoad env
+          (loadInterface (text "original type witness interface") owner ImportBySystem)
+          >>= \loaded -> pure $ case loaded of
+            MErr.Succeeded interface | mi_module interface == owner -> Just interface
+            MErr.Succeeded _ -> Nothing
+            MErr.Failed _ -> Nothing
+      case admitted of
+        Nothing -> pure Nothing
+        Just original -> do
           full <- readExactInterface env owner
           case full of
             Right (interface, location)
               | mi_module interface == owner
-              , maybe (owner == gHC_PRIM) (`sameOriginal` interface) selected ->
+              , sameOriginal original interface ->
                   if owner == gHC_PRIM then serialize interface else do
                     -- EPS interfaces contain panic-elided declarations. Read
                     -- the installed artifact through the original owner and

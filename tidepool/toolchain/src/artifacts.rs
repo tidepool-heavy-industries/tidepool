@@ -1673,8 +1673,9 @@ impl ModuleCandidateOffer {
                         )
                     })
                     .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
-                admissions
-                    .extend(program_request.validate_outputs_in_context(&segment_root, &context)?);
+                let segment_input = program_request
+                    .in_program_context(&root.join("program-inputs"), context.clone())?;
+                let source_segment = segment_input.admit_program_segment(&segment_root)?;
                 let produced_types = values.capture_produced_types(
                     initial.producer_sha256,
                     planned,
@@ -1694,21 +1695,16 @@ impl ModuleCandidateOffer {
                         &typed_segments,
                         index,
                         specification.admission_digest,
+                        &source_segment,
                         &mut validation,
                     )?;
-                    let source_admissions = effective
-                        .exact
-                        .as_ref()
-                        .expect("exact program offer")
-                        .validate_outputs(&segment_root)?;
                     context = self.admit_program_support(
                         &mut program_request,
                         context,
                         &output,
-                        &source_admissions,
+                        &source_segment,
                         Some(&item_produced_types),
                     )?;
-                    admissions.extend(source_admissions);
                     let generation = match &planned.slots[index] {
                         CheckedPlannedCellSlot::Bind { value } => *value,
                         CheckedPlannedCellSlot::Expression { capture, .. } => *capture,
@@ -1723,6 +1719,7 @@ impl ModuleCandidateOffer {
                     outputs.insert(index, output);
                     index += 1;
                 }
+                admissions.extend(source_segment.into_admissions());
             }
             segment += 1;
         }
@@ -1854,6 +1851,7 @@ impl ModuleCandidateOffer {
         typed_segments: &[crate::checked_cell::CheckedTypedSegmentPlan],
         item_index: usize,
         admission_digest: [u8; 32],
+        source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -1886,6 +1884,7 @@ impl ModuleCandidateOffer {
                 OriginalOutputPublication::Transaction,
                 Some(produced_types),
                 Some((typed_segments, item_index, admission_digest)),
+                Some(source_segment),
                 validation,
             )?
             .ok_or_else(|| {
@@ -1900,12 +1899,12 @@ impl ModuleCandidateOffer {
         request: &mut crate::declaration_context::ExactCompilationRequest,
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
         output: &ProgramNativeOutput,
-        admissions: &[crate::declaration_context::ExactSourceAdmission],
+        source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
         let generated =
             crate::declaration_context::ExactSourceAdmission::matching_generated_source_owner(
-                admissions,
+                source_segment.admissions(),
                 &output.source,
             )?;
         let support = program_support_artifacts(
@@ -1916,7 +1915,7 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             &generated,
         )?;
-        request.admit_program_support(context, &support, admissions, produced_types)
+        request.admit_program_segment_support(context, &support, source_segment, produced_types)
     }
 
     fn admit_program_value(
@@ -2029,6 +2028,7 @@ impl ModuleCandidateOffer {
             Some(&authored),
             OriginalOutputPublication::Transaction,
             produced_types,
+            None,
             None,
             validation,
         )?
@@ -2439,6 +2439,7 @@ fn seal_turn_outputs_inner(
         publication,
         None,
         None,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -2460,6 +2461,7 @@ fn seal_turn_outputs_with_validation(
         usize,
         [u8; 32],
     )>,
+    source_segment: Option<&crate::declaration_context::ExactProgramSegmentAdmission>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -2474,12 +2476,35 @@ fn seal_turn_outputs_with_validation(
     let receipt_bytes =
         CompilerSidecar::CertifiedProducts.read(output_dir, &validation.inventory)?;
     let product_decode_start = Instant::now();
-    let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
-        &product_bytes,
-        &package_bundle_bytes,
-        validation.inventory.clone(),
-    )
-    .map_err(compiler_evidence_failure)?;
+    timing::record_inventory_work("products.decode.before", output_dir, &validation.inventory);
+    let owned_fresh_products = if source_segment.is_none() {
+        Some(
+            certified_products::ParsedModuleProducts::decode_with_operation(
+                &product_bytes,
+                &package_bundle_bytes,
+                validation.inventory.clone(),
+            )
+            .map_err(compiler_evidence_failure)?,
+        )
+    } else {
+        None
+    };
+    let shared_fresh_products = if let Some(segment) = source_segment {
+        Some(segment.original_products(
+            offer.exact.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("segment inventory lacks exact request".into())
+            })?,
+            &product_bytes,
+            &package_bundle_bytes,
+            &validation.inventory,
+        )?)
+    } else {
+        None
+    };
+    let fresh_products = shared_fresh_products
+        .or(owned_fresh_products.as_ref())
+        .ok_or_else(|| CompileError::ExtractFailed("original inventory absent".into()))?;
+    timing::record_inventory_work("products.decode.after", output_dir, &validation.inventory);
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2493,24 +2518,43 @@ fn seal_turn_outputs_with_validation(
             CompileError::ExtractFailed("source evidence accounting overflow".into())
         })?)
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let exact_source = offer
-        .exact
-        .as_ref()
-        .map(|request| {
-            request.admit_source_with_validation(source_path, source, &evidence_bytes, validation)
-        })
-        .transpose()?;
-    let exact = offer
-        .exact
-        .as_ref()
-        .zip(exact_source.as_ref())
-        .map(
-            |(request, source)| crate::declaration_context::ExactProductAdmission {
-                request,
-                source,
-            },
-        );
-    let evidence = match exact_source.as_ref() {
+    let exact_source_owned = match source_segment {
+        Some(_) => None,
+        None => offer
+            .exact
+            .as_ref()
+            .map(|request| {
+                request.admit_source_with_validation(
+                    source_path,
+                    source,
+                    &evidence_bytes,
+                    validation,
+                )
+            })
+            .transpose()?,
+    };
+    let exact = match source_segment {
+        Some(segment) => Some(segment.product_admission(
+            offer.exact.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("projected item lacks its physical request".into())
+            })?,
+            source_path,
+            source,
+            &evidence_bytes,
+        )?),
+        None => offer
+            .exact
+            .as_ref()
+            .zip(exact_source_owned.as_ref())
+            .map(
+                |(request, source)| crate::declaration_context::ExactProductAdmission {
+                    request,
+                    source,
+                },
+            ),
+    };
+    let exact_source = exact.as_ref().map(|admission| admission.source);
+    let evidence = match exact_source {
         Some(source) => Some(source.evidence.clone()),
         None => cache::CompletedSourceEvidence::from_worker(&evidence_bytes, source_path, source),
     };
@@ -2557,10 +2601,11 @@ fn seal_turn_outputs_with_validation(
         }
         return Ok(None);
     };
+    timing::record_inventory_work("products.certify.before", output_dir, &validation.inventory);
     let certified = certified_products::certify_products_with_validation(
         offer.selected.as_deref(),
         &receipt,
-        &fresh_products,
+        fresh_products,
         &evidence_bytes,
         source_path,
         output_dir,
@@ -2576,8 +2621,9 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], Vec::as_slice),
         produced_types,
         validation,
-    )
-    .map_err(compiler_evidence_failure)?;
+    );
+    timing::record_inventory_work("products.certify.after", output_dir, &validation.inventory);
+    let mut certified = certified.map_err(compiler_evidence_failure)?;
     let target_admission_start = Instant::now();
     ensure_ready_module_inventory(&receipt.modules, valid)?;
     let accepted = receipt
@@ -2591,6 +2637,90 @@ fn seal_turn_outputs_with_validation(
     }
     let package_closure =
         merge_package_closure_with_validation(&receipt.packages, offer.exact.as_ref(), validation)?;
+    enum TargetDemand {
+        Checked {
+            entry: crate::checked_cell::CheckedTypedEntry,
+            imports: Vec<certified_products::PendingImportOwner>,
+        },
+        Ordinary(Vec<certified_products::PendingImportOwner>),
+    }
+    let target_demand = match typed_item {
+        Some((plans, index, admission_digest)) => {
+            let admission = exact.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("typed entry lacks exact source admission".into())
+            })?;
+            let entry = crate::checked_cell::CheckedTypedEntry::issue_program_item(
+                output_dir,
+                &admission.request.request_sha256,
+                admission_digest,
+                plans,
+                index,
+                source,
+                prepared,
+                &admission.source.generated_source_owner()?,
+                &certified.recovery_products,
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &offer.producer,
+                )
+                .sha256(),
+            )?;
+            let imports = certified_products::certify_target_available_owners_with_validation(
+                prepared,
+                accepted,
+                &certified.recovery_products,
+                &certified.groups,
+                &package_closure,
+                validation,
+            )
+            .map_err(compiler_evidence_failure)?;
+            TargetDemand::Checked { entry, imports }
+        }
+        None => TargetDemand::Ordinary(
+            certified_products::certify_target_available_owners_with_validation(
+                prepared,
+                accepted,
+                &certified.recovery_products,
+                &certified.groups,
+                &package_closure,
+                validation,
+            )
+            .map_err(compiler_evidence_failure)?,
+        ),
+    };
+    let demand = match &target_demand {
+        TargetDemand::Checked { entry, imports } => {
+            crate::artifact_inventory::NativeArtifactDemand::VerifiedTarget { entry, imports }
+        }
+        TargetDemand::Ordinary(imports) => {
+            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(imports)
+        }
+    };
+    let artifact_view =
+        crate::declaration_context::certified_product_artifact_view_with_validation(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &offer.producer,
+            )
+            .sha256(),
+            &certified.recovery_products,
+            &certified.module_interfaces,
+            &certified.value_interfaces,
+            offer.exact.as_ref().map(|request| request.context.as_ref()),
+            demand,
+            validation,
+        )?;
+    let typed_entry = match target_demand {
+        TargetDemand::Checked { entry, .. } => Some(entry),
+        TargetDemand::Ordinary(_) => None,
+    };
+    certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
+        &artifact_view,
+        &certified.groups,
+        offer
+            .exact
+            .as_ref()
+            .map_or(&[], |request| request.groups.as_ref()),
+        validation,
+    )?;
     let pending_imports = certified_products::certify_target_owners_with_validation(
         prepared,
         accepted,
@@ -2613,75 +2743,7 @@ fn seal_turn_outputs_with_validation(
         0,
         receipt.targets.len(),
     );
-    if publication == OriginalOutputPublication::Transaction {
-        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
-    }
-    if publication == OriginalOutputPublication::Transaction
-        && offer
-            .exact
-            .as_ref()
-            .is_none_or(|exact| empty_exact_context(&exact.context))
-    {
-        let (_, publication) = module_candidates::prepare_publication(
-            &offer.producer,
-            &offer.include,
-            valid,
-            fresh_products,
-            source,
-            exact.as_ref().map_or(
-                module_candidates::CandidateVersionOrigin::Ordinary,
-                |admission| module_candidates::CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.request.semantic_sha256,
-                },
-            ),
-            &certified.recovery_products,
-        );
-        module_candidates::publish_prepared(publication);
-    } else if publication == OriginalOutputPublication::Transaction {
-        module_candidates::record_exact_context_publication_skip(fresh_products.products());
-    }
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let typed_entry = typed_item
-        .map(|(plans, index, admission_digest)| {
-            let admission = exact.as_ref().ok_or_else(|| {
-                CompileError::ExtractFailed("typed entry lacks exact source admission".into())
-            })?;
-            crate::checked_cell::CheckedTypedEntry::issue_program_item(
-                output_dir,
-                &admission.request.request_sha256,
-                admission_digest,
-                plans,
-                index,
-                source,
-                prepared,
-                &admission.source.generated_source_owner()?,
-                &certified.recovery_products,
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &offer.producer,
-                )
-                .sha256(),
-            )
-        })
-        .transpose()?;
-    let demand = typed_entry.as_ref().map_or(
-        crate::artifact_inventory::NativeArtifactDemand::AllGroups,
-        crate::artifact_inventory::NativeArtifactDemand::VerifiedGroupRoot,
-    );
-    let artifact_view =
-        crate::declaration_context::certified_product_artifact_view_with_validation(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                &offer.producer,
-            )
-            .sha256(),
-            &certified.recovery_products,
-            &certified.module_interfaces,
-            &certified.value_interfaces,
-            exact
-                .as_ref()
-                .map(|admission| admission.request.context.as_ref()),
-            demand,
-            validation,
-        )?;
     let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
@@ -2769,6 +2831,40 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    if publication == OriginalOutputPublication::Transaction
+        && offer
+            .exact
+            .as_ref()
+            .is_none_or(|exact| empty_exact_context(&exact.context))
+    {
+        let publication_products = match owned_fresh_products {
+            Some(products) => products,
+            None => shared_fresh_products
+                .ok_or_else(|| CompileError::ExtractFailed("shared inventory absent".into()))?
+                .copy_for_publication()
+                .map_err(compiler_evidence_failure)?,
+        };
+        let (_, publication) = module_candidates::prepare_publication(
+            &offer.producer,
+            &offer.include,
+            valid,
+            publication_products,
+            source,
+            exact.as_ref().map_or(
+                module_candidates::CandidateVersionOrigin::Ordinary,
+                |admission| module_candidates::CandidateVersionOrigin::Exact {
+                    semantic_sha256: admission.request.semantic_sha256,
+                },
+            ),
+            &certified.recovery_products,
+        );
+        module_candidates::publish_prepared(publication);
+    } else if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_exact_context_publication_skip(fresh_products.products());
+    }
+    if publication == OriginalOutputPublication::Transaction {
+        module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
+    }
     Ok(Some(SealedTurnProducts {
         artifact_view,
         typed_entry,
@@ -3806,7 +3902,7 @@ fn compile_invocation_inner(
             .iter()
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
-        let certified = if let Some(valid) = valid_evidence {
+        let mut certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
                 &receipt,
@@ -3918,6 +4014,51 @@ fn compile_invocation_inner(
             exact_request.as_ref(),
             &mut validation,
         )?;
+        let mut target_imports = Vec::new();
+        for (name, target) in &artifacts.targets {
+            let accepted = receipt.targets.get(name).ok_or_else(|| {
+                CompileError::ExtractFailed("target product receipt missing".into())
+            })?;
+            if valid_evidence.is_some() {
+                target_imports.extend(
+                    certified_products::certify_target_available_owners_with_validation(
+                        target.prepared.prepared(),
+                        accepted,
+                        &certified.recovery_products,
+                        &certified.groups,
+                        &package_closure,
+                        &mut validation,
+                    )
+                    .map_err(compiler_evidence_failure)?,
+                );
+            }
+        }
+        artifacts.artifact_view =
+            crate::declaration_context::certified_product_artifact_view_with_validation(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &producer,
+                )
+                .sha256(),
+                &certified.recovery_products,
+                &certified.module_interfaces,
+                &certified.value_interfaces,
+                exact_request
+                    .as_ref()
+                    .map(|request| request.context.as_ref()),
+                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                    &target_imports,
+                ),
+                &mut validation,
+            )?;
+        certified.groups =
+            crate::declaration_context::certify_artifact_view_groups_with_validation(
+                &artifacts.artifact_view,
+                &certified.groups,
+                exact_request
+                    .as_ref()
+                    .map_or(&[], |request| request.groups.as_ref()),
+                &mut validation,
+            )?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -3948,21 +4089,6 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
-        artifacts.artifact_view =
-            crate::declaration_context::certified_product_artifact_view_with_validation(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &producer,
-                )
-                .sha256(),
-                &certified.recovery_products,
-                &certified.module_interfaces,
-                &certified.value_interfaces,
-                exact_request
-                    .as_ref()
-                    .map(|request| request.context.as_ref()),
-                crate::artifact_inventory::NativeArtifactDemand::AllGroups,
-                &mut validation,
-            )?;
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;

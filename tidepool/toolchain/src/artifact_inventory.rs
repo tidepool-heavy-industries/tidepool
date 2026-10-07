@@ -62,7 +62,59 @@ pub struct NativeGroupKey {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NativeArtifactDemand<'a> {
     AllGroups,
-    VerifiedGroupRoot(&'a crate::checked_cell::CheckedTypedEntry),
+    /// A checked authored entry and its same compiled executable wrapper have
+    /// distinct native dependencies. Neither implies whole-carrier demand.
+    VerifiedTarget {
+        entry: &'a crate::checked_cell::CheckedTypedEntry,
+        imports: &'a [crate::certified_products::PendingImportOwner],
+    },
+    /// Existing target certification issued these imports against authenticated
+    /// original membership. Only new products receive whole-module demand.
+    CertifiedTargetImports(&'a [crate::certified_products::PendingImportOwner]),
+}
+
+/// Target imports were issued by the existing target certifier; check exact
+/// original membership again before turning source references into graph roots.
+fn certified_target_source_groups(
+    entries: &[Arc<ArtifactEntry>],
+    imports: &[crate::certified_products::PendingImportOwner],
+) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
+    let mut groups = BTreeSet::new();
+    for import in imports {
+        let crate::certified_products::PendingImportOwner::Source {
+            owner,
+            original_ordinal,
+            binder,
+        } = import
+        else {
+            continue;
+        };
+        let mut originals = entries.iter().filter(|entry| {
+            matches!(&entry.payload, ArtifactPayload::Original(product)
+            if product.owner() == owner
+                && crate::certified_products::authenticates_original_native_entry(
+                    product, *original_ordinal, binder,
+                ))
+        });
+        let original = originals
+            .next()
+            .ok_or_else(|| failure("certified target native membership"))?;
+        if originals.next().is_some() {
+            return Err(failure("certified target native membership"));
+        }
+        groups.insert(NativeGroupKey {
+            artifact: original.descriptor.id,
+            original_ordinal: *original_ordinal,
+        });
+    }
+    Ok(groups)
+}
+
+/// Copying a retained closure preserves its issuing view's root intent. Full
+/// carrier custody does not promote hidden dependencies to explicit roots.
+enum ArtifactRootIntent<'a> {
+    SuppliedArtifacts,
+    RetainedView(&'a ArtifactView),
 }
 
 /// Graph vertices retain one full artifact allocation separately from its
@@ -238,7 +290,8 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
     .into()
 }
 
-/// An exact live value required by the selected original native group closure.
+/// An exact live value required by original native code. Execution selection
+/// and conservative authored-module lifetime custody query this separately.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct NativeBindingRequirement {
     pub artifact_id: ArtifactId,
@@ -1118,11 +1171,37 @@ impl ArtifactInventory {
                         })
                 })
                 .collect(),
-            NativeArtifactDemand::VerifiedGroupRoot(root) => {
-                BTreeSet::from([root.native_group_key()])
+            NativeArtifactDemand::VerifiedTarget { entry, imports } => {
+                let mut groups = certified_target_source_groups(&entries, imports)?;
+                groups.insert(entry.native_group_key());
+                groups
+            }
+            NativeArtifactDemand::CertifiedTargetImports(imports) => {
+                let inherited = parent.artifact_ids().into_iter().collect::<BTreeSet<_>>();
+                let mut groups = entries
+                    .iter()
+                    .filter(|entry| !inherited.contains(&entry.descriptor.id))
+                    .flat_map(|entry| {
+                        entry
+                            .native_group_ordinals
+                            .iter()
+                            .map(move |ordinal| NativeGroupKey {
+                                artifact: entry.descriptor.id,
+                                original_ordinal: *ordinal,
+                            })
+                    })
+                    .collect::<BTreeSet<_>>();
+                groups.extend(certified_target_source_groups(&entries, imports)?);
+                groups
             }
         };
-        self.admit_selected(parent, entries, groups, false)
+        self.admit_selected(
+            parent,
+            entries,
+            groups,
+            false,
+            ArtifactRootIntent::SuppliedArtifacts,
+        )
     }
     /// Persisted keys are checked against full certified bytes and exact closure.
     pub(crate) fn admit_recovery_selection(
@@ -1131,7 +1210,13 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selected_native_groups: &BTreeSet<NativeGroupKey>,
     ) -> Result<ArtifactView, CompileError> {
-        self.admit_selected(parent, entries, selected_native_groups.clone(), true)
+        self.admit_selected(
+            parent,
+            entries,
+            selected_native_groups.clone(),
+            true,
+            ArtifactRootIntent::SuppliedArtifacts,
+        )
     }
     fn admit_selected(
         &self,
@@ -1139,6 +1224,7 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         groups: BTreeSet<NativeGroupKey>,
         exact: bool,
+        root_intent: ArtifactRootIntent<'_>,
     ) -> Result<ArtifactView, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.0.inventory.0) {
             return Err(failure("view belongs to another inventory"));
@@ -1146,6 +1232,14 @@ impl ArtifactInventory {
         if entries.is_empty() && groups.is_empty() {
             return Ok(parent.clone());
         }
+        let mut materialization_parents = Vec::new();
+        let retained_roots = match root_intent {
+            ArtifactRootIntent::SuppliedArtifacts => None,
+            ArtifactRootIntent::RetainedView(source) => {
+                source.collect_materializations(&mut materialization_parents, &mut BTreeSet::new());
+                Some(source.roots())
+            }
+        };
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -1178,12 +1272,14 @@ impl ArtifactInventory {
                 };
             supplied.insert(id, retained);
         }
-        let mut roots = supplied
-            .keys()
-            .copied()
-            .map(InventoryNodeKey::Artifact)
-            .collect::<Vec<_>>();
-        roots.extend(groups.iter().copied().map(InventoryNodeKey::Group));
+        let roots = retained_roots.unwrap_or_else(|| {
+            supplied
+                .keys()
+                .copied()
+                .map(InventoryNodeKey::Artifact)
+                .chain(groups.iter().copied().map(InventoryNodeKey::Group))
+                .collect()
+        });
         let mut selected_ids = parent_ids.clone();
         selected_ids.extend(artifact_ids(&admitted_closure(
             &state,
@@ -1200,6 +1296,12 @@ impl ArtifactInventory {
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
         let mut selected_groups = native_groups(&parent_nodes);
         selected_groups.extend(groups.iter().copied());
+        if roots.iter().any(|root| match root {
+            InventoryNodeKey::Artifact(id) => !selected.contains_key(id),
+            InventoryNodeKey::Group(group) => !selected_groups.contains(group),
+        }) {
+            return Err(failure("retained merge root outside copied selection"));
+        }
         let (edges, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
@@ -1229,7 +1331,7 @@ impl ArtifactInventory {
             inventory: self.clone(),
             roots,
             parents: vec![parent.clone()],
-            materialization_parents: Vec::new(),
+            materialization_parents,
             materialization: Mutex::new(None),
         })))
     }
@@ -1574,6 +1676,74 @@ impl ArtifactView {
         Ok(self.native_requirements_from_roots(roots)?.bindings)
     }
 
+    /// Read-only lifetime requirements for accepted authored owners. Retaining a
+    /// full module also retains private helpers that may be called by a later
+    /// exported entry; this query grants no executable group selection.
+    pub(crate) fn authored_native_binding_custody_requirements(
+        &self,
+        accepted_owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let owned = admitted_closure(&state, self.roots().into_iter());
+        let ids = artifact_ids(&owned);
+        let entries = ids
+            .iter()
+            .map(|id| (*id, Arc::clone(&state.payloads[id])))
+            .collect::<BTreeMap<_, _>>();
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        let owners = SelectedOwners::new(&state, &entries, &ids)?;
+        let roots = entries
+            .values()
+            .filter(|entry| {
+                accepted_owners.contains(&entry.descriptor.owner)
+                    && matches!(&entry.payload, ArtifactPayload::Original(product)
+                        if product.module_interface().is_some_and(|interface|
+                            matches!(interface.origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+            })
+            .flat_map(|entry| entry.native_group_ordinals.iter().map(|ordinal| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: *ordinal,
+            }))
+            .collect();
+        // The same owner/version/ordinal resolver used for executable admission
+        // validates full-body dependencies, without installing its planned edges.
+        let (_, groups) = owners.planned_edges(&state, &entries, &roots)?;
+        let mut requirements = BTreeSet::new();
+        for group in groups {
+            state.graph_visits.fetch_add(1, Ordering::Relaxed);
+            for (owner, dependency) in &entries[&group.artifact].native_requirements {
+                if let ArtifactDependency::NativeBinding {
+                    dependent_ordinal,
+                    generation,
+                    namespace,
+                    occurrence,
+                    record_parent,
+                } = dependency
+                {
+                    if *dependent_ordinal == group.original_ordinal {
+                        let id = owners.interfaces.get(owner).copied().ok_or_else(|| {
+                            failure("validated native binding lacks its interface owner")
+                        })?;
+                        requirements.insert(NativeBindingRequirement {
+                            artifact_id: id,
+                            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                                unit: owner.unit.clone(),
+                                module: owner.module.clone(),
+                                namespace: namespace.clone(),
+                                occurrence: occurrence.clone(),
+                                record_parent: record_parent.clone(),
+                            },
+                            generation: *generation,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(requirements.into_iter().collect())
+    }
+
     pub fn native_requirements_from_roots(
         &self,
         roots: &[NativeRequirementRoot],
@@ -1754,10 +1924,12 @@ impl ArtifactView {
                 materialization: Mutex::new(None),
             })))
         } else {
-            self.0.inventory.admit_recovery_selection(
+            self.0.inventory.admit_selected(
                 self,
                 other.entries(),
-                &other.selected_native_groups(),
+                other.selected_native_groups(),
+                true,
+                ArtifactRootIntent::RetainedView(other),
             )
         }
     }
@@ -1891,7 +2063,8 @@ mod tests {
     fn cold_original_admission_distinguishes_supplied_rows_from_retained_vertices() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let original = native_entry("ColdOriginal", &[]);
+        let original =
+            issued_native_groups("ColdOriginal", vec![(3, Vec::new())], &[], &BTreeMap::new());
         let id = original.descriptor.id;
         let groups = original
             .native_group_ordinals
@@ -1928,7 +2101,8 @@ mod tests {
     #[test]
     fn admitted_closure_never_adds_unknown_artifact_or_group_seeds() {
         let inventory = ArtifactInventory::default();
-        let original = native_entry("Existing", &[]);
+        let original =
+            issued_native_groups("Existing", vec![(11, Vec::new())], &[], &BTreeMap::new());
         let id = original.descriptor.id;
         let retained = inventory
             .admit(&inventory.empty_view(), vec![original])
@@ -1940,6 +2114,10 @@ mod tests {
         };
         let state = inventory.0.lock().unwrap();
         let known = admitted_closure(&state, retained.roots().into_iter());
+        assert!(known.contains(&InventoryNodeKey::Group(NativeGroupKey {
+            artifact: id,
+            original_ordinal: 11
+        })));
         let mixed = admitted_closure(
             &state,
             retained.roots().into_iter().chain([
@@ -2042,19 +2220,7 @@ mod tests {
         )
         .with_module_interface(interface)
         .unwrap();
-        let mut entry = ArtifactEntry::original([2; 32], product).unwrap();
-        for required in ["Original", "Helper"] {
-            entry.native_owners.insert(
-                module(required),
-                NativeOwnerKey {
-                    owner: module(required),
-                    version: [1; 32],
-                    interface: digest(required.as_bytes()),
-                    product: digest(required.as_bytes()),
-                },
-            );
-        }
-        entry
+        ArtifactEntry::original([2; 32], product).unwrap()
     }
 
     fn issued_native_groups(
@@ -2226,54 +2392,31 @@ mod tests {
         ));
     }
 
-    fn native_variant(entry: &ArtifactEntry, version: u8) -> ArtifactEntry {
-        let ArtifactPayload::Original(product) = &entry.payload else {
-            panic!("native fixture")
-        };
-        let interface = product.module_interface().unwrap().clone();
-        let mut owner = product.owner().clone();
-        owner.module_version = ModuleVersion([version; 32]);
-        let certification = crate::certified_products::encode_home_certification_with_module(
-            &owner,
-            &[],
-            &BTreeMap::new(),
-            interface.requirements(),
-            digest(interface.certificate_bytes()),
-        )
-        .unwrap();
-        let variant = CertifiedRecoveryProduct::from_certification(
-            owner,
-            product.interface_bytes().to_vec(),
-            product.product_bytes().to_vec(),
-            product.package_imports_bytes().to_vec(),
-            certification,
-        )
-        .with_module_interface(interface)
-        .unwrap();
-        ArtifactEntry::original(entry.descriptor.producer_sha256, variant).unwrap()
-    }
-
     #[test]
     fn native_variants_keep_exact_carriers_and_require_explicit_materialization_selection() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let first = native_entry("Original", &[]);
-        let second = native_variant(&first, 2);
-        let mut consumer = native_entry("Consumer", &["Original"]);
-        let ArtifactPayload::Original(product) = &second.payload else {
-            unreachable!()
-        };
-        consumer.native_owners.insert(
-            module("Original"),
-            NativeOwnerKey::from_owner(product.owner()),
+        let first = issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
+        let second = ArtifactEntry::original(
+            [2; 32],
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    "Original",
+                    vec![(0, Vec::new())],
+                    2,
+                    &BTreeMap::new(),
+                ),
+                [2; 32],
+            ),
+        )
+        .unwrap();
+        let original_owner = first.descriptor.owner.clone();
+        let consumer = issued_native_groups(
+            "Consumer",
+            vec![(0, vec![issued_source(&second, 0)])],
+            &[&second],
+            &BTreeMap::new(),
         );
-        consumer.native_requirements.push((
-            module("Original"),
-            ArtifactDependency::NativeGroup {
-                dependent_ordinal: 0,
-                required_ordinal: 0,
-            },
-        ));
         let view = inventory
             .admit(
                 &empty,
@@ -2283,10 +2426,10 @@ mod tests {
         let metadata = view.metadata_snapshot();
         assert_eq!(
             metadata.ambiguous_native_owners,
-            BTreeSet::from([module("Original")])
+            BTreeSet::from([original_owner.clone()])
         );
         assert!(view
-            .entries_for_owners(std::iter::once(module("Original")))
+            .entries_for_owners(std::iter::once(original_owner.clone()))
             .is_err());
         let carrier = match &first.payload {
             ArtifactPayload::Original(product) => {
@@ -2327,13 +2470,13 @@ mod tests {
             .is_empty());
         assert_eq!(
             selected
-                .entries_for_owners(std::iter::once(module("Original")))
-                .unwrap()[&module("Original")]
+                .entries_for_owners(std::iter::once(original_owner.clone()))
+                .unwrap()[&original_owner]
                 .descriptor
                 .id,
             first.descriptor.id
         );
-        let types = view.interface_projection(&[module("Original")]).unwrap();
+        let types = view.interface_projection(&[original_owner]).unwrap();
         assert_eq!(types.artifact_ids(), vec![carrier]);
         drop(view);
         assert_eq!(inventory.node_count(), 3);
@@ -2347,18 +2490,27 @@ mod tests {
     fn native_requirement_cannot_select_an_ambient_exact_native_key() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let original = native_entry("Original", &[]);
+        let original =
+            issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
         let ambient = inventory.admit(&empty, vec![original.clone()]).unwrap();
-        let mut consumer = native_entry("Consumer", &["Original"]);
-        consumer.native_requirements.push((
-            module("Original"),
-            ArtifactDependency::NativeGroup {
-                dependent_ordinal: 0,
-                required_ordinal: 0,
-            },
-        ));
-        let types = ambient.interface_projection(&[module("Original")]).unwrap();
+        let consumer = issued_native_groups(
+            "Consumer",
+            vec![(0, vec![issued_source(&original, 0)])],
+            &[&original],
+            &BTreeMap::new(),
+        );
+        let types = ambient
+            .interface_projection(&[original.descriptor.owner.clone()])
+            .unwrap();
+        let before = inventory.node_count();
         assert!(inventory.admit(&types, vec![consumer.clone()]).is_err());
+        assert_eq!(inventory.node_count(), before);
+        assert!(types
+            .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: original.descriptor.id,
+                original_ordinal: 0,
+            }])
+            .is_err());
         let selected = inventory.admit(&ambient, vec![consumer]).unwrap();
         assert!(selected
             .dependencies()

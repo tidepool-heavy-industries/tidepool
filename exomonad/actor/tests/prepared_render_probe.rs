@@ -10,9 +10,7 @@ fn probe(label: &str, text: &str, gen: u64) {
     let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
-    include.push(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"),
-    );
+    include.push(eval_harness::actor_sources_path());
     let mut preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble(&declarations, false),
         "qualified Tidepool.Actors.Exomonad as Exomonad",
