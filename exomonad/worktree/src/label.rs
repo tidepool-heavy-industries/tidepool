@@ -105,6 +105,14 @@ fn sanitize(label: &str, allow_slash: bool, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+    use tidepool_atomic_write::DirectoryAnchor;
+
+    use crate::create::EXOMONAD_BRANCH_PREFIX;
+    use crate::{GitCli, WorktreeRegistry};
 
     /// `(input, agent_expected, branch_expected)`. These outputs participate
     /// in durable identifiers and are compatibility-sensitive.
@@ -216,5 +224,113 @@ mod tests {
     fn policies_genuinely_diverge_on_slash_bearing_labels() {
         let raw = "dev-tree/root";
         assert_ne!(sanitize_agent_label(raw), sanitize_branch_label(raw));
+    }
+
+    fn branch_label_inputs() -> impl Strategy<Value = String> {
+        let token = prop_oneof![
+            Just("word".to_owned()),
+            Just("/".to_owned()),
+            Just(".".to_owned()),
+            Just("..".to_owned()),
+            Just(".lock".to_owned()),
+            Just("---".to_owned()),
+            Just("///".to_owned()),
+            Just(" ".to_owned()),
+            Just("🎉".to_owned()),
+            Just("é".to_owned()),
+            Just("!@#$%^&*()".to_owned()),
+        ];
+        prop_oneof![
+            3 => collection::vec(any::<char>(), 0..260)
+                .prop_map(|chars| chars.into_iter().collect()),
+            2 => collection::vec(token, 0..80).prop_map(|parts| parts.concat()),
+        ]
+    }
+
+    #[derive(Default, Debug)]
+    struct GeneratedCoverage {
+        callbacks: usize,
+        slash_inputs: usize,
+        slash_outputs: usize,
+        unicode_inputs: usize,
+        capped_outputs: usize,
+        lock_components: usize,
+        long_inputs: usize,
+    }
+
+    impl GeneratedCoverage {
+        fn observe(&mut self, raw: &str, label: &str) {
+            self.callbacks += 1;
+            self.slash_inputs += usize::from(raw.contains('/'));
+            self.slash_outputs += usize::from(label.contains('/'));
+            self.unicode_inputs += usize::from(!raw.is_ascii());
+            self.capped_outputs += usize::from(label.len() == 200);
+            self.lock_components += usize::from(raw.contains(".lock"));
+            self.long_inputs += usize::from(raw.len() > 200);
+        }
+    }
+
+    fn property_config(name: &'static str) -> Config {
+        let mut config = Config {
+            test_name: Some(name),
+            ..Config::default()
+        };
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 64;
+        }
+        if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+            config.max_shrink_iters = 1_024;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+            eprintln!("worktree label seed persistence: {path}");
+        }
+        config
+    }
+
+    #[test]
+    fn generated_managed_branch_refs_are_valid_git_refs_and_keep_minted_identity() {
+        let git = GitCli::new();
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git.init_repository(repository.path(), &["--quiet"])
+            .expect("initialize Git oracle repository");
+
+        let storage = tempfile::tempdir().expect("temporary registry storage");
+        let anchor = DirectoryAnchor::open_existing(storage.path()).expect("storage anchor");
+        let registry = WorktreeRegistry::open(&anchor, "registry").expect("open registry");
+        let id = registry.mint_id().expect("mint worktree identity");
+
+        let coverage = RefCell::new(GeneratedCoverage::default());
+        let config = property_config(concat!(
+            module_path!(),
+            "::generated_managed_branch_refs_are_valid_git_refs_and_keep_minted_identity"
+        ));
+        let configured_fresh_cases = config.cases;
+        let result = TestRunner::new(config).run(&branch_label_inputs(), |raw| {
+            let label = sanitize_branch_label(&raw);
+            coverage.borrow_mut().observe(&raw, &label);
+
+            prop_assert!(label.is_ascii(), "sanitizer output must be ASCII");
+            prop_assert!(!label.is_empty(), "fallback must keep the label nonempty");
+            prop_assert!(label.len() <= 200, "label exceeded its byte cap: {}", label.len());
+
+            let branch = format!("{EXOMONAD_BRANCH_PREFIX}/{label}-{}", id.as_str());
+            prop_assert!(
+                branch.ends_with(&format!("-{}", id.as_str())),
+                "managed branch must retain its minted worktree identity"
+            );
+            let full_ref = format!("refs/heads/{branch}");
+            let checked = git.read(repository.path(), &["check-ref-format", &full_ref]);
+            prop_assert!(
+                checked.is_ok(),
+                "Git rejected generated managed branch {branch:?}: {checked:?}"
+            );
+            Ok(())
+        });
+        eprintln!(
+            "worktree label configured fresh cases: {configured_fresh_cases}; generated callback coverage: {:#?}",
+            coverage.borrow()
+        );
+        result.unwrap();
     }
 }
