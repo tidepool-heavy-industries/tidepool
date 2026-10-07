@@ -5876,7 +5876,7 @@ mod tests {
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &fixture.projection,
-                    &fixture.artifacts,
+                    &fixture.artifacts.metadata_snapshot(),
                     &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                 )?;
             self.admit_program_support_with_selection(
@@ -5898,7 +5898,7 @@ mod tests {
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &fixture.projection,
-                    &fixture.artifacts,
+                    &fixture.artifacts.metadata_snapshot(),
                     &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                 )?;
             self.admit_program_segment_support_with_selection(

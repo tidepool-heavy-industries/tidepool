@@ -1534,14 +1534,13 @@ impl CertifiedSourceSelection {
     /// Merely retaining a native artifact does not grant an original offer.
     pub(crate) fn from_compiler_projection(
         projection: &crate::artifact_inventory::CompilerInputProjection,
-        view: &crate::artifact_inventory::ArtifactView,
+        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
-        let metadata = projection
-            .project_metadata(view.metadata_snapshot())
+        let entries = projection
+            .entries_from_metadata(metadata)
             .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
-        let products = metadata
-            .entries
+        let products = entries
             .values()
             .filter_map(|entry| match &entry.payload {
                 crate::artifact_inventory::ArtifactPayload::Original(product) => {
@@ -5855,10 +5854,16 @@ pub(crate) fn certify_products_with_validation(
         }
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
-    let mut source_selection = CertifiedSourceSelection::from_projected_originals(
-        &projected_originals,
-        &validation.inventory,
-    )?;
+    let mut source_selection = match exact {
+        Some(admission) => CertifiedSourceSelection::from_compiler_projection(
+            admission.request.context.compiler_input_projection(),
+            projected_metadata
+                .as_ref()
+                .ok_or(CertificationError::Mismatch("compiler original projection"))?,
+            &validation.inventory,
+        )?,
+        None => CertifiedSourceSelection::default(),
+    };
     for (owner, _, _, _, _, origin) in &module_bytes {
         source_selection.admit_current(owner, *origin, &validation.inventory)?;
     }
