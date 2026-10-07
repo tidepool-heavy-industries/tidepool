@@ -19318,6 +19318,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .close_realm(context.clone(), body_realm)
             .await
             .unwrap();
+        assert!(
+            runner
+                .resume_value(context.clone(), continuation.clone(), ())
+                .await
+                .is_err(),
+            "scope status site rejects a reply with another shape before consuming its continuation"
+        );
         let resumed = runner
             .resume_value(
                 context.clone(),
