@@ -11,6 +11,6 @@ __DECLARATIONS__
 main :: IO ()
 main = do
   observations <- newIORef ([] :: [Int])
-  let record value = modifyIORef' observations (++ [value])
+  let segmentRecord value = modifyIORef' observations (++ [value])
 __BODY__
   readIORef observations >>= print

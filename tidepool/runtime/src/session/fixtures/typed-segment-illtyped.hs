@@ -1,4 +1,4 @@
-record 1
+segmentRecord 1
 let rejectedSegment = (2 :: Int)
 data RejectedSegment = RejectedSegment
-record (True + rejectedSegment)
+segmentRecord (True + rejectedSegment)

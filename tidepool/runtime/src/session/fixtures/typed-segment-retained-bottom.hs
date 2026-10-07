@@ -1,1 +1,1 @@
-retainedBottom <- record 1 >> pure (\() -> error "retained closure bottom" :: Int)
+retainedBottom <- segmentRecord 1 >> pure (\() -> error "retained closure bottom" :: Int)

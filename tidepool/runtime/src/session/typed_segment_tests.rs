@@ -221,7 +221,7 @@ fn genuine_let_generalization_and_unused_inner_bottom_match_ghc() {
     session
         .execute(
             "retained_let_generalization",
-            "record (segmentIdentity (17 :: Int)); record (if segmentIdentity True then 19 else 0)",
+            "segmentRecord (segmentIdentity (17 :: Int)); segmentRecord (if segmentIdentity True then 19 else 0)",
             0,
         )
         .unwrap();
@@ -258,7 +258,7 @@ fn scalar_publication_forces_after_effect_without_publishing_then_recovers() {
             .unwrap(),
         before
     );
-    session.execute("scalar_recovery", "record preservedScalar; valueAfterFailure <- pure (10 :: Int); record valueAfterFailure", 0).unwrap();
+    session.execute("scalar_recovery", "segmentRecord preservedScalar; valueAfterFailure <- pure (10 :: Int); segmentRecord valueAfterFailure", 0).unwrap();
     assert_eq!(session.observed(), [1, 9, 10]);
 }
 
@@ -280,7 +280,7 @@ fn retained_action_closure_demand_does_not_repeat_completed_effect() {
     let error = session
         .execute(
             "demand_closure",
-            "demandedClosure <- pure (retainedBottom ()); record demandedClosure",
+            "demandedClosure <- pure (retainedBottom ()); segmentRecord demandedClosure",
             0,
         )
         .unwrap_err();
@@ -297,7 +297,7 @@ fn retained_action_closure_demand_does_not_repeat_completed_effect() {
         before
     );
     session
-        .execute("closure_recovery", "record (23 :: Int)", 0)
+        .execute("closure_recovery", "segmentRecord (23 :: Int)", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 23]);
 }
@@ -326,8 +326,9 @@ fn bare_observation_retains_lazy_thunk_before_later_demand() {
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
-    let source =
-        format!("demandedObservation <- pure ({observation} ()); record demandedObservation");
+    let source = format!(
+        "demandedObservation <- pure ({observation} ()); segmentRecord demandedObservation"
+    );
     let error = session
         .execute("demand_observation", &source, 0)
         .unwrap_err();
@@ -352,7 +353,7 @@ fn effectful_observation_runs_once_and_retains_its_lazy_result() {
     session
         .execute(
             "effectful_observation",
-            "record 1 >> pure (error \"effectful observation bottom\" :: Int)",
+            "segmentRecord 1 >> pure (error \"effectful observation bottom\" :: Int)",
             0,
         )
         .unwrap();
@@ -369,7 +370,7 @@ fn effectful_observation_runs_once_and_retains_its_lazy_result() {
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
-    let source = format!("demandedEffectfulObservation <- pure ({observation} ()); record demandedEffectfulObservation");
+    let source = format!("demandedEffectfulObservation <- pure ({observation} ()); segmentRecord demandedEffectfulObservation");
     let error = session
         .execute("demand_effectful_observation", &source, 0)
         .unwrap_err();
@@ -419,7 +420,7 @@ fn late_type_error_prevents_all_effects_and_publication_before_new_retry() {
     session
         .execute(
             "compile_retry",
-            "record priorTypedValue; retryTypedValue <- pure (2 :: Int); record retryTypedValue",
+            "segmentRecord priorTypedValue; retryTypedValue <- pure (2 :: Int); segmentRecord retryTypedValue",
             0,
         )
         .unwrap();
@@ -449,7 +450,7 @@ fn cancellation_after_real_effect_preserves_receipt_and_allows_new_intent() {
                 &session.images,
                 (0, 0),
                 "cancel_after_effect",
-                "cancelledValue <- record 1 >> pure (2 :: Int); record cancelledValue",
+                "cancelledValue <- segmentRecord 1 >> pure (2 :: Int); segmentRecord cancelledValue",
                 0,
                 &ScalePublication::Ephemeral,
                 AuthorityChecks::Configured,
@@ -469,7 +470,7 @@ fn cancellation_after_real_effect_preserves_receipt_and_allows_new_intent() {
             .unwrap(),
         before
     );
-    session.execute("cancel_new_intent", "retriedValue <- record 2 >> pure (3 :: Int); record retriedValue; record priorCancelledValue", 0).unwrap();
+    session.execute("cancel_new_intent", "retriedValue <- segmentRecord 2 >> pure (3 :: Int); segmentRecord retriedValue; segmentRecord priorCancelledValue", 0).unwrap();
     assert_eq!(session.observed(), [1, 2, 3, 9]);
 }
 
@@ -555,7 +556,7 @@ fn render_history(seed: i8, operations: &[HistoryOperation], no_mr: bool) -> Ren
                 expected.push(value);
                 mutated_expected.push(value);
                 coverage.observations += 1;
-                format!("record {current}\n")
+                format!("segmentRecord {current}\n")
             }
             HistoryOperation::UnusedBottom => {
                 coverage.unused_bottoms += 1;
@@ -579,8 +580,8 @@ fn render_history(seed: i8, operations: &[HistoryOperation], no_mr: bool) -> Ren
             HistoryOperation::ObserveCapture => {
                 expected.push(captured);
                 coverage.captured_uses += 1;
-                cell.push_str("record historyCaptured\n");
-                oracle.push_str("record historyCaptured\n");
+                cell.push_str("segmentRecord historyCaptured\n");
+                oracle.push_str("segmentRecord historyCaptured\n");
                 // A plausible capture bug resolves the most recent same-spelled
                 // value rather than the original declaration's lexical value.
                 mutated_expected.push(value);
@@ -675,7 +676,7 @@ proptest::proptest! {
                 if !diagnostics.is_empty()));
         proptest::prop_assert_eq!(session.resident.public_visibility_snapshot_in(session.public).unwrap(), before);
         proptest::prop_assert_eq!(session.observed(), expected.clone());
-        session.execute("generated_recovery", "record historyCaptured", 0).unwrap();
+        session.execute("generated_recovery", "segmentRecord historyCaptured", 0).unwrap();
         expected.push(history.captured);
         proptest::prop_assert_eq!(session.observed(), expected);
         eprintln!("typed-segment-history {}", serde_json::json!({
@@ -703,7 +704,7 @@ fn one_four_eight_actions_use_one_completed_inference_segment() {
                 } else {
                     format!("(count{count}Value{} + 1)", ordinal - 1)
                 };
-                format!("count{count}Value{ordinal} <- record {value} >> pure {value}")
+                format!("count{count}Value{ordinal} <- segmentRecord {value} >> pure {value}")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -744,7 +745,7 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
         .unwrap();
     try_execute_cell_with_authority_checks(
         &mut session.resident, session.public, &session.effects, &session.images, (0, 0),
-        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); secondPlannedValue <- pure (firstPlannedValue + 1); record secondPlannedValue", 0,
+        "native_entry_refusal", "firstPlannedValue <- pure (baselinePlannedValue + 1); secondPlannedValue <- pure (firstPlannedValue + 1); segmentRecord secondPlannedValue", 0,
         &ScalePublication::Ephemeral, AuthorityChecks::TypedEntryRefusalBranches,
     ).unwrap();
     assert_eq!(session.observed(), [4]);
@@ -762,7 +763,7 @@ fn zero_capture_let_executes_without_publishing_a_dummy_binding() {
     session
         .execute(
             "zero_let_order",
-            "record 1; let _ = (undefined :: Int); record 2",
+            "segmentRecord 1; let _ = (undefined :: Int); segmentRecord 2",
             0,
         )
         .unwrap();
@@ -791,7 +792,7 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
         before
     );
     session
-        .execute("zero_bang_retry", "record (3 :: Int)", 0)
+        .execute("zero_bang_retry", "segmentRecord (3 :: Int)", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
 }
@@ -800,7 +801,7 @@ fn zero_capture_bang_let_preserves_forcing_and_prior_effects() {
 fn zero_capture_action_runs_once_before_the_next_item() {
     let mut session = SemanticSession::new();
     session
-        .execute("zero_action", "_ <- record 1; record 2", 0)
+        .execute("zero_action", "_ <- segmentRecord 1; segmentRecord 2", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 2]);
     session.assert_no_compiler_since_last_effect();
@@ -834,7 +835,7 @@ fn strict_let_group_forces_before_retaining_its_closure_capture() {
         before
     );
     session
-        .execute("strict_closure_retry", "record (3 :: Int)", 0)
+        .execute("strict_closure_retry", "segmentRecord (3 :: Int)", 0)
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
 }
