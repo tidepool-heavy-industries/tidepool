@@ -5,8 +5,9 @@ effectful functions with Kleisli composition (`>=>`) or `do`. The notebook's
 they sequence effects, while `Tidepool.Async` overlaps independent waits.
 `Control.Lens` is in scope for reusable focuses, updates and traversals.
 
-Typed agent requests use the installed AgentSpec input and reply types. Record
-actors interpret typed calls and events against persistent state; Jev alternatives can carry
+Typed agent request sites select their own input and reply types; the installed
+AgentSpec supplies tools and effects. Record actors interpret typed calls and
+events against persistent state; Jev alternatives can carry
 values, closures or actions into their next transition. Keep one-off definitions
 in the notebook and adapt them as you learn. See `exomonad-workbench` for the
 composing vocabulary, `doc actors` for stateful machines and `doc jev` for semantic

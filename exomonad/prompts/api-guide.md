@@ -66,10 +66,12 @@ Right answer <- await (result pending)
 display answer
 ```
 
-Here `spec` is the actual typed `AgentSpec` for a `Text` input and reply;
-`prompt` and `input` are `Text` values. Spawn and request default to actor ownership. Returning a handle
-does not transfer ownership. A runtime scope is an explicit delimiter; a
-resource joins it only when its options use `InScope scope`.
+Here `spec` is the actual typed `AgentSpec` that installs the child's tools and
+effects. `@Text` selects the request's reply type, while `input :: Text` is its
+raw input; `prompt` is also `Text`. Spawn and request default to actor
+ownership. Returning a handle does not transfer ownership. A runtime scope is
+an explicit delimiter; a resource joins it only when its options use
+`InScope scope`.
 
 `result request` projects a typed `Await` value. Use the single `await` operation
 to observe it. `Await` supports ordinary functor, applicative, and traversal
@@ -85,6 +87,13 @@ returns `Either RequestError (Request Answer)`. `requestWithProgress @Progress
 containing the request and an independent `Progress Progress` handle.
 `result :: Request a -> Await a`; `await` observes an `Await` as either
 `AwaitError` or its typed result.
+
+The short request fence above shows only successful admission and reply. In the
+example workspace's optional Project package, `Project.WorkflowExamples` shows
+a composition that retains spawn and request refusals, traverses admitted
+settlements, and keeps `AwaitError` distinct from an authored result:
+`admitCandidates`, `awaitCandidates`, `scopedCandidates`, and
+`nextCandidateEvent`.
 
 For Git project implementation and delivery, `exomonad-project-work` describes
 an optional authored workflow for scaffolding, assigning ready work, reviewing

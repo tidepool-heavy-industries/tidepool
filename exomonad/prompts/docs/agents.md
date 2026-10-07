@@ -16,8 +16,8 @@ install tools. Workspace names and actor identity are independent of the optiona
 ordinary text label.
 
 When an `AgentRef` is available, a typed request activates it with raw input and
-request options. In this example, `worker` uses an AgentSpec with `Text` input
-and reply:
+request options. Here the `AgentSpec` installs the child's tools and effects;
+`@Text` selects the reply type, and `input :: Text` is the raw request input:
 
 ```haskell
 Right pending <- request @Text worker input defaultRequestOptions

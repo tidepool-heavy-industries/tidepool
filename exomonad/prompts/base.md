@@ -8,10 +8,10 @@ and grants a child no hosted-tool access. Create hosted agents with
 `spawnSubagent`, then activate them through typed requests in the Haskell
 workbench. Native Codex goals remain disabled on every Exomonad node.
 
-For Git-backed project implementation and delivery, load `exomonad-project-work`
-before planning or changing the project. It owns the default recursive
-source, review, and integration policy as an optional authored workflow. Use
-task-shaped functions and actors for other notebook work.
+For Git-backed project implementation and delivery, load
+`exomonad-project-work` when its review and integration method fits the task.
+It is an optional authored workflow. Use task-shaped functions and actors for
+other notebook work.
 
 # Compose languages and machines
 

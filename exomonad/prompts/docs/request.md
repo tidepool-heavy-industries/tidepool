@@ -1,7 +1,8 @@
 A typed request activates an idle or retained agent with raw input and request
-options. In this example, `worker` uses an AgentSpec with `Text` input and reply. A request has one control identity and retains its input, progress, and
-terminal result. Admission errors, execution errors, and errors in the authored
-reply type remain separate outcomes.
+options. Here `@Text` selects the reply type and `task :: Text` is raw input;
+the child's AgentSpec installs its tools and effects. A request has one control
+identity and retains its input, progress, and terminal result. Admission errors,
+execution errors, and errors in the authored reply type remain separate outcomes.
 
 ```haskell
 Right pending <- request @Text worker task defaultRequestOptions
@@ -21,10 +22,11 @@ cancellation does not cancel a request, and cancelling a request does not retire
 the target actor. Scopes are explicit: a request joins a runtime scope only when
 its options use `InScope scope`.
 
-The activation's input and reply types come from the installed `AgentSpec`.
-`result pending` yields an `Await` description; `await` observes it and returns a
-typed success or readiness failure. Use the original request handle for any
-operation that targets this activation. A final reply is the agent's conclusion;
-source evidence, review, and incorporation remain separate.
+The request site's registered types determine its raw input and reply; the
+installed `AgentSpec` supplies tools and effects. `result pending` yields an
+`Await` description; `await` observes it and returns a typed success or
+readiness failure. Use the original request handle for any operation that
+targets this activation. A final reply is the agent's conclusion; source
+evidence, review, and incorporation remain separate.
 
 skill: exomonad-agent-work

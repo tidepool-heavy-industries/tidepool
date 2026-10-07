@@ -13,9 +13,9 @@ optional ordinary text label, lifetime, and limits. A label is descriptive; it
 does not identify an actor, workspace, or group.
 
 A successful spawn returns an idle `AgentRef`. Spawn does not start inference.
-The first typed request or a human message activates it. For example, when `worker`
-is an `AgentRef`, `input` is `Text`, and the AgentSpec declares `Text` as its
-reply type:
+The first typed request or a human message activates it. Here `worker` is an
+`AgentRef`, the `AgentSpec` installs the child's tools and effects, `@Text`
+selects the reply type, and `input :: Text` is raw request input:
 
 ```haskell
 Right pending <- request @Text worker input defaultRequestOptions

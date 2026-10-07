@@ -14,4 +14,5 @@ The reviewer checks an exact candidate and reports its source identity, owned
 scope, acceptance evidence, and remaining uncertainty. The integration owner
 checks the resulting revision after incorporation. A report being delivered does
 not prove it was read or integrated. For Git delivery, load
-`exomonad-project-work` and `exomonad-review`.
+`exomonad-project-work` when its review and integration method fits the task;
+load `exomonad-review` when its exact-candidate review operations fit.

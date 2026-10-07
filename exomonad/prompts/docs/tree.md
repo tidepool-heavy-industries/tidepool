@@ -17,4 +17,5 @@ workspace and actor observations before using source evidence. A child result
 that names a commit is inspectable from the parent's Git view after that object
 is available; never read files through a live child's worktree attachment.
 
-For Git delivery and exact-candidate review, load `exomonad-project-work`.
+For Git delivery and exact-candidate review, load `exomonad-project-work` when
+its review and integration method fits the task.
