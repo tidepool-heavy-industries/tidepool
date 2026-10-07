@@ -8,7 +8,7 @@ load("@toolchains//:tidepool.bzl", "checked_harness_source")
 git_fetch(
     name = "exomonad-harness-5fdd156badd86236.git",
     repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git",
-    rev = "7f6e5e6315610b0a95b6fbf67f87aeeaccf82179",
+    rev = "5f0999723e8e0a5cceb9c340960fbfbb65b57ab7",
     visibility = [],
 )
 
@@ -5729,6 +5729,7 @@ cargo.rust_library(
         ":jsonwebtoken-9",
         ":libc-0.2",
         ":reqwest-0.12",
+        ":roxmltree-0.21",
         ":rusqlite-0.32",
         ":schemars-1",
         ":serde-1",
@@ -10184,6 +10185,46 @@ tidepool_buildscript_run(
     rustc_link_lib = True,
     rustc_link_search = True,
     version = "0.17.14",
+)
+
+http_archive(
+    name = "roxmltree-0.21.1.crate",
+    sha256 = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb",
+    strip_prefix = "roxmltree-0.21.1",
+    urls = ["https://static.crates.io/crates/roxmltree/0.21.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "roxmltree-0.21",
+    srcs = [":roxmltree-0.21.1.crate"],
+    crate = "roxmltree",
+    crate_root = "roxmltree-0.21.1.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "roxmltree",
+        "CARGO_CRATE_NAME": "roxmltree",
+        "CARGO_MANIFEST_DIR": "roxmltree-0.21.1.crate",
+        "CARGO_PKG_AUTHORS": "Yevhenii Reizner <razrfalcon@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Represent an XML as a read-only tree.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "roxmltree",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/RazrFalcon/roxmltree",
+        "CARGO_PKG_RUST_VERSION": "1.60",
+        "CARGO_PKG_VERSION": "0.21.1",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "21",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "positions",
+        "std",
+    ],
+    visibility = [],
+    deps = [":memchr-2"],
 )
 
 alias(
@@ -15399,8 +15440,8 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "7f6e5e6315610b0a95b6fbf67f87aeeaccf82179",
-    nar_hash = "sha256-QQgIjfiwmM+c2Pmrit4oA7iHtvCNaYiQPfqEKu3SuyQ=",
+    revision = "5f0999723e8e0a5cceb9c340960fbfbb65b57ab7",
+    nar_hash = "sha256-jGjygEwtJoRPL8d620VH9K47xXCzTTXGURe2fpVJIZg=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
