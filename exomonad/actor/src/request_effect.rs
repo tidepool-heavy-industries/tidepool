@@ -660,10 +660,10 @@ mod tests {
             let answer: Result<RequestId, RequestError> =
                 Ok(RequestId(u64::try_from(value).unwrap()));
             let encoded = answer.to_value(&table).unwrap();
-            let HaskellValue::Con(right, fields) = encoded else {
+            let HaskellValue::Con(right, fields) = &encoded else {
                 panic!("reservation reply must be Right")
             };
-            assert_eq!(right, DataConId(1));
+            assert_eq!(*right, DataConId(1));
             let [HaskellValue::Con(integer, payload)] = fields.as_slice() else {
                 panic!("reservation reply must contain a boxed Int")
             };
@@ -676,10 +676,10 @@ mod tests {
         let rejected: Result<RequestId, RequestError> =
             Err(RequestError::RequestReservationRejected(ReplyError::Stale));
         let encoded = rejected.to_value(&table).unwrap();
-        let HaskellValue::Con(left, fields) = encoded else {
+        let HaskellValue::Con(left, fields) = &encoded else {
             panic!("reservation refusal must be Left")
         };
-        assert_eq!(left, DataConId(2));
+        assert_eq!(*left, DataConId(2));
         let [HaskellValue::Con(rejection, fields)] = fields.as_slice() else {
             panic!("reservation refusal must retain RequestError")
         };
