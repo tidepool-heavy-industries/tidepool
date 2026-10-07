@@ -14,8 +14,11 @@ import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
 import Data.Dynamic (fromDynamic)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as Text
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
 import GHC.Builtin.Types (intTy, intDataCon)
@@ -63,7 +66,7 @@ import Tidepool.TurnSource
   , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker )
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
-import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExtractUtil (getLibdir, shaHex)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope (readExactScope)
 import Tidepool.CompilerProducts (newPreparedOriginalInterfaceArtifacts)
@@ -71,7 +74,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , originalInterfaceBytes, originalInterfaceSha256 )
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
@@ -368,6 +371,51 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
   -- of all three mutable input files, without manufacturing a source row.
   let encoded = toStrictByteString (encodeFinalizedModuleArtifacts finalized)
   when (BS.null encoded) (fail "captured value finalization envelope is empty")
+  -- Decode the actual packet, rather than predicting its content-addressed
+  -- filenames. Both source and type-only rows must be owned by the new root.
+  let payload fields offset = case drop offset fields of
+        TString path : TString sha : _ -> pure (Text.unpack path,Text.unpack sha)
+        _ -> fail "captured payload descriptor is malformed"
+      modulePayload (TList fields) | length fields == 11 = do
+        ordinary <- mapM (payload fields) [3,6]
+        core <- case fields !! 9 of
+          TNull -> pure []
+          TList descriptor -> (:[]) <$> payload descriptor 0
+          _ -> fail "captured Core descriptor is malformed"
+        pure (ordinary ++ core)
+      modulePayload _ = fail "captured module row is malformed"
+      valuePayload (TList fields) | length fields == 9 = mapM (payload fields) [2,5]
+      valuePayload _ = fail "captured value row is malformed"
+  payloads <- case deserialiseFromBytes decodeTerm (BSL.fromStrict encoded) of
+    Right (remaining,TList [_,_,TList modules,TList values]) | BSL.null remaining, not (null values) ->
+      concat <$> sequence (map modulePayload modules ++ map valuePayload values)
+    _ -> fail "captured envelope lost its genuine type-only value row"
+  let projected = root </> "projected-packet"
+  moved <- materializeFinalizedModuleArtifacts projected finalized
+  unless (toStrictByteString (encodeFinalizedModuleArtifacts moved) == encoded)
+    (fail "packet custody changed captured descriptors or seals")
+  movedAgain <- materializeFinalizedModuleArtifacts projected finalized
+  unless (toStrictByteString (encodeFinalizedModuleArtifacts movedAgain) == encoded)
+    (fail "identical packet materialization changed its evidence")
+  forM_ payloads $ \(path,sha) -> do
+    original <- BS.readFile (root </> path)
+    owned <- BS.readFile (projected </> path)
+    unless (owned == original && shaHex owned == sha)
+      (fail "projected packet omitted or changed a captured payload")
+  let (changedPath,_) = head payloads
+  originalPayload <- BS.readFile (root </> changedPath)
+  BS.appendFile (root </> changedPath) "changed"
+  changed <- try (materializeFinalizedModuleArtifacts (root </> "changed-packet") finalized)
+    `finally` BS.writeFile (root </> changedPath) originalPayload
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  case changed of
+    Left _ -> pure ()
+    Right _ -> fail "changed captured payload acquired new packet custody"
+  forM_ payloads $ \(path,_) -> removeFile (root </> path)
+  forM_ payloads $ \(path,sha) -> do
+    owned <- BS.readFile (projected </> path)
+    unless (shaHex owned == sha)
+      (fail "projected custody depended on the removed capture directory")
   -- Reinject an actually issued interface with altered nominal evidence. The
   -- source census and checking HPT still cannot authorize that sidecar.
   _ <- mkBoundBinders ["captured"] 1 root (pprPipelineResult producer)

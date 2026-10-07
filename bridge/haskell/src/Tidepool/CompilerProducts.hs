@@ -76,7 +76,7 @@ import Tidepool.ExecutionSource
   , executionSourceInheritedOwners )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, LocalFinalizedAdmission
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
@@ -584,7 +584,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
     let dependencies = preparedFreshDependencies prepared
     issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
     finalized <- case issued >>= preparedCurrentOriginalInventory of
-      Just inventory -> pure (currentOriginalFinalized inventory)
+      Just inventory -> materializeFinalizedModuleArtifacts outDir (currentOriginalFinalized inventory)
       Nothing -> timeDetailPhase timing "module_products" "capture_finalization" $
         captureFinalizedModuleArtifacts originalInterfaces hscEnv
           (pprFinalizedModules prepared) (pprPackageImports prepared) dependencies outDir

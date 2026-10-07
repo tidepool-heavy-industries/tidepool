@@ -108,7 +108,7 @@ import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
-  ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
+  ( CertifiedOriginalProducts, writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
   , requireOriginalExecutableGlobals, certifiedExecutionSource
   , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
@@ -3055,6 +3055,33 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (emittedInventory == encodeModuleProducts
       (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
     fail "retained original group encodings changed the emitted native inventory"
+  let packetDirectory = captureDirectory </> "projected-packet"
+  packetCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+    packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  let packetFinalized = certifiedFinalizedArtifacts packetCertificate
+  withFileObservations $ \observations ->
+    forM_ (Map.elems (finalizedLocalAdmissions packetFinalized)) $ \local -> do
+      let (interface,_,_) = localFinalizedInterface local
+      unless (takeDirectory (exactPath interface) == packetDirectory)
+        (fail "reused original packet retained another packet's payload custody")
+      revalidateLocalFinalizedAdmissionWith observations local >>= either fail pure
+  unless (map moduleProductInput (certifiedOriginalProducts packetCertificate)
+      == map moduleProductInput (certifiedOriginalProducts currentCertificate)) $
+    fail "packet payload custody changed the issued original group inventory"
+  let originAdmissions = Map.elems (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate))
+  originInterface <- case originAdmissions of
+    local : _ -> pure (let (interface,_,_) = localFinalizedInterface local in interface)
+    [] -> fail "reused packet control has no actual finalized source owner"
+  originBytes <- BS.readFile (exactPath originInterface)
+  let refusedDirectory = captureDirectory </> "changed-origin-packet"
+  BS.appendFile (exactPath originInterface) "changed"
+  changedOrigin <- try (writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
+      refusedDirectory paired (Just issuedContext) [("usesGood",currentProgram)])
+    `finally` BS.writeFile (exactPath originInterface) originBytes
+    :: IO (Either SomeException CertifiedOriginalProducts)
+  case changedOrigin of
+    Left _ -> pure ()
+    Right _ -> fail "reused inventory published a packet from changed captured origin bytes"
   pendingBodyCache <- newPreparedBodyCache
   pendingRawCache <- newOriginalProjectionCollector
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
