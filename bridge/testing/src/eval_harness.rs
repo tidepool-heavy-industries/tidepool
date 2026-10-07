@@ -41,6 +41,22 @@ pub fn prelude_path() -> PathBuf {
     .dir
 }
 
+/// Actor library paired with the test's selected stdlib resource. Tests using
+/// it must declare the source bundle containing both `lib` and `actors`.
+pub fn actor_sources_path() -> PathBuf {
+    let prelude = prelude_path();
+    let actors = prelude
+        .parent()
+        .expect("the selected stdlib has a source bundle parent")
+        .join("actors");
+    assert!(
+        actors.is_dir(),
+        "declared actor sources are missing at {}",
+        actors.display()
+    );
+    actors
+}
+
 /// The user verb-library dir (`<root>/.tidepool/lib`).
 ///
 /// Tests that exercise `.tidepool/lib` modules need this on the include path.
