@@ -22,6 +22,7 @@ export_file(name = "facade_doc__exomonad_workspace_checks_route_reply_setup_hs",
 export_file(name = "facade_doc__exomonad_workspace_checks_route_reply_worker_hs", src = ".exomonad/workspace/checks/route-reply-worker.hs", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md", src = ".exomonad/workspace/skills/exomonad-jev/SKILL.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md", src = ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md", visibility = ["PUBLIC"])
+export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md", src = ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md", src = ".exomonad/workspace/skills/exomonad-workbench/SKILL.md", visibility = ["PUBLIC"])
 
 export_file(name = "workspace_clippy", src = ".clippy.toml", visibility = ["PUBLIC"])
