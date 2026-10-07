@@ -5614,21 +5614,29 @@ pub(crate) mod tests {
         assert!(support.empty_queries >= 8);
         assert!(support.warm_mutations >= 16);
 
-        let mut runner = TestRunner::new(catalog_config());
-        let mut observed = CatalogCoverage::default();
-        runner
-            .run(&catalog_history(), |ops| {
-                observed.accumulate(replay_catalog_history(
-                    cache.path(),
-                    &roots,
-                    &variants,
-                    &ops,
-                )?);
-                Ok(())
-            })
-            .unwrap();
+        let mut config = proptest::test_runner::contextualize_config(catalog_config());
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::generated_ordinary_catalog_queries_match_a_vec_full_scan"
+        ));
+        let mut runner = TestRunner::new(config);
+        let observed = std::cell::RefCell::new(CatalogCoverage::default());
+        let result = runner.run(&catalog_history(), |ops| {
+            observed.borrow_mut().accumulate(replay_catalog_history(
+                cache.path(),
+                &roots,
+                &variants,
+                &ops,
+            )?);
+            Ok(())
+        });
         eprintln!(
-            "ordinary candidate catalog observations: mixed={observed:?}, targeted={support:?}"
+            "ordinary candidate catalog observations: mixed={:?}, targeted={support:?}",
+            *observed.borrow()
         );
+        if let Err(error) = result {
+            panic!("ordinary candidate catalog property failed: {error}");
+        }
     }
 }
