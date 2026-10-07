@@ -625,7 +625,6 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
         assert!(owner.register_work().is_err());
         assert!(work.register_command("late-command".into()).is_err());
         assert!(work.register_transient_watch(crate::WatchId(7)).is_err());
-        assert!(work.register_group(crate::ForkGroupId(7)).is_err());
         assert!(work.reserve(ActorRef::first(crate::ActorId(2))).is_err());
         // A restaged generation owns its own close receipt. These lifecycle
         // controls perform no compiler command, so actual close is NotStarted.
@@ -646,7 +645,6 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
     )));
     assert!(state.commands.is_empty());
     assert!(state.watches.is_empty());
-    assert!(state.groups.is_empty());
     assert!(state.pending_workers.is_empty());
     drop(state);
     work.close();
@@ -873,7 +871,6 @@ impl Fixture {
             retired: Default::default(),
             requests: Default::default(),
             commands: Default::default(),
-            fork_groups: crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default()),
             actors: Default::default(),
             fork_workspaces: None,
             root_admission_closed: Default::default(),
@@ -974,7 +971,6 @@ async fn closed_invocation_refuses_every_work_registration() {
         Err(crate::ReplyError::CancellationRequested)
     );
     assert!(work.register_worker(fixture.actor.clone()).is_err());
-    assert!(work.register_group(crate::ForkGroupId(1)).is_err());
     fixture.cleanup(&work).await;
     assert!(
         fixture.actor.terminal().get().is_none(),
@@ -1479,26 +1475,8 @@ async fn invocation_cleanup_cancels_owned_command_once_and_closes_detach() {
     fixture.finish().await;
 }
 
-fn group_with_child(fixture: &Fixture, child: ActorRef) -> crate::ForkGroupId {
-    let owner = fixture.actor.identity();
-    let groups = &fixture.environment.fork_groups;
-    let (group, reservations) = groups
-        .begin(
-            owner,
-            crate::ActorPath::parse("root/cleanup").unwrap(),
-            vec![crate::ActorPathSegment::new("child").unwrap()],
-            4,
-        )
-        .unwrap();
-    groups
-        .claim(group, owner, &reservations[0].allocated)
-        .unwrap();
-    groups.attach_child(group, owner, child).unwrap();
-    group
-}
-
 #[tokio::test]
-async fn interrupted_group_cleanup_retains_discovered_actor_owned_worker_for_retry() {
+async fn interrupted_failed_admission_cleanup_retains_worker_for_retry() {
     let fixture = Fixture::start().await;
     let gate = Arc::new(ShutdownGate {
         entered: tokio::sync::Semaphore::new(0),
@@ -1522,13 +1500,9 @@ async fn interrupted_group_cleanup_retains_discovered_actor_owned_worker_for_ret
         .unwrap();
     let _worker_context = receive.await.unwrap();
     let child = worker.identity();
-    let group = group_with_child(&fixture, child);
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.register_group(group).unwrap();
-    assert!(
-        !work.owns_worker(child),
-        "group is the only invocation membership before abort"
-    );
+    work.retain_aborted_children(&fixture.kernel, &[child]);
+    assert!(work.owns_worker(child));
 
     let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1547,13 +1521,6 @@ async fn interrupted_group_cleanup_retains_discovered_actor_owned_worker_for_ret
         .any(|worker| worker.identity() == child));
     assert!(work.cleanup_observation().is_none());
     drop(first_cleanup);
-    assert!(matches!(
-        fixture
-            .environment
-            .fork_groups
-            .abort(group, fixture.actor.identity()),
-        Err(crate::ForkGroupError::Unknown(_))
-    ));
     gate.release.add_permits(1);
 
     fixture.cleanup(&work).await;
@@ -1574,16 +1541,15 @@ async fn interrupted_group_cleanup_retains_discovered_actor_owned_worker_for_ret
 }
 
 #[tokio::test]
-async fn unresolved_aborted_group_worker_remains_uncertain_across_cleanup_retries() {
+async fn unresolved_failed_admission_worker_remains_uncertain_across_cleanup_retries() {
     let fixture = Fixture::start().await;
     let missing = ActorRef {
         id: crate::ActorId(fixture.actor.identity().id.0 + 1_000_000),
         incarnation: crate::Incarnation(2),
     };
     assert!(fixture.kernel.resolve(missing).is_none());
-    let group = group_with_child(&fixture, missing);
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.register_group(group).unwrap();
+    work.retain_aborted_children(&fixture.kernel, &[missing]);
     for _ in 0..2 {
         let cleanup = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1593,7 +1559,7 @@ async fn unresolved_aborted_group_worker_remains_uncertain_across_cleanup_retrie
         .unwrap();
         assert!(
             cleanup.uncertainty().is_some(),
-            "missing worker cannot become confirmed by losing the group row"
+            "missing worker must remain unconfirmed while its lifecycle owner is unavailable"
         );
         assert!(work.state.lock().unresolved_workers.contains(&missing));
         assert!(work.cleanup_observation().unwrap().uncertainty().is_some());
@@ -2117,89 +2083,6 @@ async fn invocation_cleanup_rolls_back_unsubmitted_and_detached_original_reserva
         ),
         "never-published requests must not emit cancellation events"
     );
-    fixture.finish().await;
-}
-
-#[tokio::test]
-async fn interrupted_automatic_group_abort_retains_worker_for_invocation_cleanup() {
-    let fixture = Fixture::start().await;
-    let owner = fixture.actor.identity();
-    let gate = Arc::new(ShutdownGate {
-        entered: tokio::sync::Semaphore::new(0),
-        release: tokio::sync::Semaphore::new(0),
-        calls: AtomicUsize::new(0),
-    });
-    let (send, receive) = tokio::sync::oneshot::channel();
-    let worker = fixture
-        .kernel
-        .spawn_worker(
-            None,
-            Owner {
-                context: Some(send),
-                startup_gate: None,
-                shutdown_gate: Some(gate.clone()),
-                requests: None,
-            },
-            crate::WorkerLifetime::ActorOwned,
-        )
-        .await
-        .unwrap();
-    let _worker_context = receive.await.unwrap();
-    let child = worker.identity();
-    let group = group_with_child(&fixture, child);
-    let work = InvocationWork::new(owner, reservation());
-    work.register_group(group).unwrap();
-    let descriptor = ActorDescriptor::new(
-        "automatic group abort fixture",
-        crate::ActorPlacement {
-            session: tidepool_repr::SessionId(1),
-            resource_scope: RealmId::fresh(),
-            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
-        },
-    );
-    let behavior = ResidentKernelBehavior::with_boot(
-        descriptor,
-        fixture.environment.clone(),
-        ResidentBoot::Workbench,
-        Vec::new(),
-    );
-    let mut abort = Box::pin(behavior.abort_incomplete_groups(
-        &fixture.kernel,
-        owner,
-        None,
-        "reply interrupted group admission",
-        Some(work.as_ref()),
-    ));
-    tokio::time::timeout(Duration::from_secs(1), async {
-        tokio::select! {
-            _ = &mut abort => panic!("automatic abort must wait for the held worker shutdown"),
-            permit = gate.entered.acquire() => permit.unwrap().forget(),
-        }
-    })
-    .await
-    .unwrap();
-    assert!(work.owns_worker(child));
-    assert!(matches!(
-        fixture
-            .environment
-            .fork_groups
-            .children_for_owner(group, owner),
-        Err(crate::ForkGroupError::Unknown(_))
-    ));
-    drop(abort);
-    gate.release.add_permits(1);
-
-    fixture.cleanup(&work).await;
-
-    let cleanup = work.cleanup_observation().unwrap();
-    assert_eq!(cleanup.workers.len(), 1);
-    assert_eq!(cleanup.workers[0].actor, child);
-    assert_eq!(
-        cleanup.workers[0].kernel,
-        Ok(worker.terminal().cleanup().unwrap())
-    );
-    assert_eq!(gate.calls.load(Ordering::Relaxed), 1);
-    drop(behavior);
     fixture.finish().await;
 }
 

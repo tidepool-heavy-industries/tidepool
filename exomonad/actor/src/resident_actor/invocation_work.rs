@@ -40,7 +40,6 @@ struct InvocationWorkState {
     pending_workers: Vec<ActorRef>,
     pending_cancellations: Vec<crate::RequestCancellationNotification>,
     pending_watch_notifications: Vec<crate::request::WatchNotification>,
-    groups: Vec<crate::ForkGroupId>,
     watches: Vec<crate::WatchId>,
     cleanup: Option<InvocationCleanup>,
 }
@@ -828,14 +827,6 @@ impl InvocationWork {
         }
     }
 
-    pub(super) fn register_group(&self, group: crate::ForkGroupId) -> Result<(), String> {
-        self.with_admission_state(|state| {
-            if !state.groups.contains(&group) {
-                state.groups.push(group);
-            }
-        })
-    }
-
     pub(super) fn is_closed(&self) -> bool {
         self.state.lock().phase == InvocationWorkPhase::Closing
     }
@@ -865,7 +856,7 @@ impl InvocationWork {
         O: OutputSink + Sync + 'static,
     {
         let _cleanup = self.cleanup_lock.lock().await;
-        let (commands, mut workers, groups, watches) = {
+        let (commands, mut workers, watches) = {
             let mut state = self.state.lock();
             state.phase = InvocationWorkPhase::Closing;
             if let Some(cleanup) = &state.cleanup {
@@ -876,7 +867,6 @@ impl InvocationWork {
             (
                 state.commands.clone(),
                 state.workers.clone(),
-                state.groups.clone(),
                 state.watches.clone(),
             )
         };
@@ -891,8 +881,8 @@ impl InvocationWork {
             }
         }
         // Reserved identities never reached a target. Preserve the original
-        // rollback fence, including internally detached branch reservations,
-        // before target cancellation changes any request state.
+        // rollback fence even after cleanup ownership transfers, before target
+        // cancellation changes any request state.
         let (_, notifications) = environment
             .requests
             .abort_unsubmitted(self.owner, &self.reservation);
@@ -1035,17 +1025,6 @@ impl InvocationWork {
         {
             cleanup.settlement_notifications_pending =
                 environment.requests.has_settlement_notifications();
-        }
-        for group in groups {
-            match environment.fork_groups.abort(group, self.owner) {
-                Ok(children) => self.retain_aborted_children(kernel, &children),
-                Err(
-                    crate::ForkGroupError::Unknown(_) | crate::ForkGroupError::AlreadyCommitted(_),
-                ) => {}
-                Err(error) => cleanup
-                    .failures
-                    .push(format!("fork group {} release: {error}", group.0)),
-            }
         }
         {
             let mut state = self.state.lock();
