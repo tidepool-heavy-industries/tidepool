@@ -712,3 +712,6 @@ mod tests {
         assert!(catalog.admit(entry, &metrics).unwrap().is_none());
     }
 }
+
+#[cfg(test)]
+mod properties;

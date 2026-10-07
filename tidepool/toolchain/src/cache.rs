@@ -860,6 +860,9 @@ pub(crate) fn artifacts_store(
     tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.bundle")), &bundle).ok();
 }
 
+#[cfg(all(test, unix))]
+mod source_manifest_properties;
+
 #[cfg(test)]
 mod tests {
     use super::*;

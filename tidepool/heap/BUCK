@@ -55,6 +55,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/heap/src/lib.rs",
         "src/managed_reference.rs": "tidepool/heap/src/managed_reference.rs",
         "src/static_region.rs": "tidepool/heap/src/static_region.rs",
+        "src/static_region/properties.rs": "tidepool/heap/src/static_region/properties.rs",
     },
     visibility = ["PUBLIC"],
 )
@@ -68,6 +69,7 @@ tidepool_rust_isolated_test(
     edition = "2021",
     srcs_filegroup = ":tidepool_heap_unit_tests_sources",
     deps = [
+        "//third-party/rust:proptest",
         "//third-party/rust:thiserror",
         "//tidepool/repr:tidepool_repr",
     ],
@@ -92,6 +94,7 @@ tidepool_rust_isolated_test(
     edition = "2021",
     srcs_filegroup = ":gc_unit_sources",
     deps = [
+        "//third-party/rust:proptest",
         "//third-party/rust:thiserror",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_heap",
@@ -117,6 +120,7 @@ tidepool_rust_isolated_test(
     edition = "2021",
     srcs_filegroup = ":raw_scan_validation_sources",
     deps = [
+        "//third-party/rust:proptest",
         "//third-party/rust:thiserror",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_heap",
@@ -140,6 +144,7 @@ filegroup(
         "tidepool/heap/src/lib.rs": "src/lib.rs",
         "tidepool/heap/src/managed_reference.rs": "src/managed_reference.rs",
         "tidepool/heap/src/static_region.rs": "src/static_region.rs",
+        "tidepool/heap/src/static_region/properties.rs": "src/static_region/properties.rs",
         "tidepool/heap/tests/gc_unit.rs": "tests/gc_unit.rs",
         "tidepool/heap/tests/raw_scan_validation.rs": "tests/raw_scan_validation.rs",
     },

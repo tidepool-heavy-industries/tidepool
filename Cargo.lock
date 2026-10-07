@@ -3660,6 +3660,7 @@ dependencies = [
 name = "tidepool-heap"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "thiserror",
  "tidepool-repr",
 ]

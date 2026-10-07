@@ -1467,3 +1467,7 @@ mod tests {
         assert_eq!(reg.peek(id, |machine| machine.turns), Some(99));
     }
 }
+
+#[cfg(test)]
+#[path = "registry_properties.rs"]
+mod properties;
