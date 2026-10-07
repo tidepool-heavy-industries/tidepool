@@ -752,6 +752,13 @@ test-suite model-turn-test
   -- missing generated modules are errors, never a skipped suite.
   hs-source-dirs:   test-model-turn generated/effects generated/protocol lib
   other-modules:
+    FormLifecycleTest
+    Tidepool.Form
+    Tidepool.Form.Algebra
+    Tidepool.Form.Check
+    Tidepool.Form.GForm
+    Tidepool.Form.Wire
+    Tidepool.View
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson
