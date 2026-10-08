@@ -23,6 +23,8 @@ M2_SURVIVAL_TEST = "actor_host::embedded_captured_unfold_tests::embedded_capture
 M2_NOMINAL_JOIN_TEST = "actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication"
 M2_CHECKPOINT_RELEASE_TEST = "actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context"
 M2_SELECTED_CODING_TEST = "actor_host::fresh_child_tests::scaffolded_selected_coding_child_preserves_workspace_input_and_effect_row"
+M2_SHUTDOWN_TEST = "actor_host::embedded_captured_unfold_tests::embedded_host_shutdown_after_child_failure_settles_active_calls"
+M2_COORDINATOR_TEST = "actor_host::embedded_captured_unfold_tests::embedded_coordinator_failure_after_child_failure_preserves_cleanup_proof"
 M2_TESTS = [
     "actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry",
     "actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns",
@@ -31,12 +33,29 @@ M2_TESTS = [
     "actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children",
     M2_CHECKPOINT_RELEASE_TEST,
     M2_SELECTED_CODING_TEST,
+    M2_SHUTDOWN_TEST,
+    M2_COORDINATOR_TEST,
+]
+UNIFIED_REGRESSION_TESTS = [
+    "actor_host::documentation_tests::published_lookup_and_reflect_examples_preserve_boundary_results",
+    "actor_host::documentation_tests::published_human_form_example_handles_unbound_host",
+    "actor_host::embedded_policy::operation_settlement_tests::schema_argument_and_selected_tool_refusals_acknowledge_only_issued_operations",
+    "actor_host::embedded_policy::operation_settlement_tests::sealed_and_retired_mailboxes_keep_no_admission_acknowledgement",
+    "actor_host::embedded_policy::operation_settlement_tests::acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request",
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 PREPARED_CHILD_TESTS = [
     "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
+QUALIFICATION_SCHEMA = 2
+BROWSER_DRIVER_ROOT = "share/exomonad/browser-driver"
+BROWSER_DRIVER_TARGET = "//build/testing/browser:driver_bundle"
+BROWSER_DRIVER_SOURCES = {
+    "driver.mjs": "build/testing/browser/driver.mjs",
+    "package.json": "nix/browser-test/package.json",
+    "package-lock.json": "nix/browser-test/package-lock.json",
+}
 UNSET_ENVIRONMENT = (
     "TIDEPOOL_CACHE_DIR", "TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR",
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT", "TIDEPOOL_COMPILER_MODULES",
@@ -54,7 +73,7 @@ ARTIFACT_TARGETS = {
     "bin/tidepool-tests": "//bridge/facade:tidepool_unit_tests",
 }
 EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
-BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts")
+BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "startup_mode", "source_inputs", "source_inputs_sha256", "artifacts", "browser_driver")
 CATALOG_SOURCE_METADATA = "catalog-sources.json"
 CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors", "jev": "jev/core"}
 RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
@@ -80,6 +99,9 @@ def cohorts() -> dict:
                    "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900,
                                      M2_CHECKPOINT_RELEASE_TEST: 900,
                                      M2_SELECTED_CODING_TEST: 900}},
+            "unified-regressions": {"tests": UNIFIED_REGRESSION_TESTS,
+                                    "expected_count": len(UNIFIED_REGRESSION_TESTS),
+                                    "ignored": False, "timeout": 600},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900},
             "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": 1,
                                "ignored": True, "timeout": 1800,
@@ -629,13 +651,42 @@ def verify_build_contract(source: Path, bundle: Path, contract: dict, expected_p
         raise ValueError("unprepared bundle cannot declare a generated prepared root source")
     verify_artifact_contract(bundle, contract)
 
-def verify_artifact_contract(bundle: Path, contract: dict) -> None:
+def verify_artifact_contract(bundle: Path, contract: dict, observed_inventory: dict | None = None) -> None:
     if set(contract["artifacts"]) != set(ARTIFACT_TARGETS):
         raise ValueError("native build contract does not own every qualified executable")
     for relative, target in ARTIFACT_TARGETS.items():
         artifact = contract["artifacts"][relative]
-        if artifact["target"] != target or artifact["sha256"] != sha256(bundle / relative):
+        actual = (sha256(bundle / relative) if observed_inventory is None
+                  else observed_inventory.get(relative, {}).get("sha256"))
+        if artifact["target"] != target or artifact["sha256"] != actual:
             raise ValueError(f"mixed native build artifact: {relative}")
+    driver_inventory = None
+    if observed_inventory is not None:
+        prefix = BROWSER_DRIVER_ROOT + "/"
+        driver_inventory = {path[len(prefix):]: item for path, item in observed_inventory.items()
+                            if path.startswith(prefix)}
+    verify_browser_driver(bundle / BROWSER_DRIVER_ROOT, contract, driver_inventory)
+
+
+def browser_driver_record(driver: Path, source_inputs: dict, files: dict | None = None) -> dict:
+    """Bind the declared driver action to its authored and locked npm inputs."""
+    files = inventory(driver) if files is None else files
+    for relative, source in BROWSER_DRIVER_SOURCES.items():
+        expected = source_inputs.get(source)
+        if expected is None or files.get(relative, {}).get("sha256") != expected:
+            raise ValueError(f"browser driver differs from its declared source: {source}")
+    if files.get("node_modules", {}).get("kind") != "directory":
+        raise ValueError("browser driver lacks its declared npm dependencies")
+    return {"target": BROWSER_DRIVER_TARGET,
+            "inventory_sha256": digest_inventory(files)}
+
+
+def verify_browser_driver(driver: Path, contract: dict, files: dict | None = None) -> None:
+    expected = contract.get("browser_driver")
+    if not isinstance(expected, dict) or expected.get("target") != BROWSER_DRIVER_TARGET:
+        raise ValueError("native build contract lacks its declared browser driver")
+    if browser_driver_record(driver, contract["source_inputs"], files) != expected:
+        raise ValueError("browser driver differs from its owning build artifact")
 
 TEST_FIXTURE_MANIFEST = "build/test-fixtures.json"
 TEST_FIXTURE_ROOT = "share/exomonad/test-fixtures"
@@ -933,7 +984,7 @@ def assemble(args) -> None:
                          ("tidepool-extract", args.frontend), ("tidepool-extract-bin", args.worker),
                          ("tidepool-tests", args.libtest)):
         shutil.copy2(source.resolve(strict=True), root / "bin" / name)
-    sources = [("web", args.assets / "web")]
+    sources = [("web", args.assets / "web"), ("browser-driver", args.browser_driver)]
     if getattr(args, "catalog", None) is None:
         sources.extend([("stdlib", args.sources / "lib"), ("actors", args.sources / "actors")])
     for name, source in sources:
@@ -956,6 +1007,7 @@ def assemble(args) -> None:
     contract = {
         "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed", "startup_mode": "unprepared",
         "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
+        "browser_driver": browser_driver_record(shared / "browser-driver", source_inputs),
         "test_fixtures": fixture_record,
         "artifacts": {relative: {"target": target, "sha256": sha256(root / relative)}
                       for relative, target in ARTIFACT_TARGETS.items()},
@@ -1035,7 +1087,6 @@ def freeze(args) -> Path:
     shutil.copytree(args.bundle, root, symlinks=False, dirs_exist_ok=True,
                     ignore=lambda directory, names: ["runtime-tools"] if Path(directory).name == "exomonad" else [])
     (root / "share/exomonad/runtime-tools").symlink_to((args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))
-    shutil.copytree(args.browser_driver, root / "share/exomonad/browser-driver", symlinks=False)
     shutil.copy2(source / "build/rust/isolated-libtest.py", root / "share/exomonad/isolated-libtest.py")
     shutil.copy2(source / "build/package/qualification.py", root / "share/exomonad/qualification.py")
     shutil.copy2(source / "build/package/packaged-catalog-consumer.sh", root / "share/exomonad/packaged-catalog-consumer.sh")
@@ -1074,7 +1125,7 @@ def freeze(args) -> Path:
     copied_log = root / "share/exomonad/build.log"
     shutil.copy2(args.build_log, copied_log)
     descriptor = {
-        "schema": 1, "kind": "native-runtime-qualification", "bundle_root": str(root),
+        "schema": QUALIFICATION_SCHEMA, "kind": "native-runtime-qualification", "bundle_root": str(root),
         "source_oid": oid, "harness_revision": revision, **contract,
         "source_submodules": submodules,
         "workspace_gitlink": recorded_workspace,
@@ -1097,22 +1148,24 @@ def freeze(args) -> Path:
     root.chmod(root.stat().st_mode & ~0o222)
     return destination
 
-def verify_frozen_inventory(root: Path, descriptor: dict) -> None:
-    if inventory(root, [DESCRIPTOR]) != descriptor["inventory"]:
+def verify_frozen_inventory(root: Path, descriptor: dict) -> dict:
+    observed = inventory(root, [DESCRIPTOR])
+    if observed != descriptor["inventory"]:
         raise ValueError("frozen runtime inventory changed")
     if digest_inventory(descriptor["inventory"]) != descriptor["inventory_sha256"]:
         raise ValueError("runtime inventory digest mismatch")
+    return observed
 
 def verify(path: Path) -> dict:
     descriptor = json.loads(path.read_text())
     root = Path(descriptor["bundle_root"])
-    if not root.is_absolute() or root != root.resolve(strict=True) or path.absolute() != root / DESCRIPTOR or descriptor["schema"] != 1 or descriptor["kind"] != "native-runtime-qualification":
+    if not root.is_absolute() or root != root.resolve(strict=True) or path.absolute() != root / DESCRIPTOR or descriptor["schema"] != QUALIFICATION_SCHEMA or descriptor["kind"] != "native-runtime-qualification":
         raise ValueError("qualification descriptor was relocated or has an unsupported schema")
     if descriptor["stdlib_mode"] not in ("source-backed", "catalog-backed") or descriptor["feature_profile"] != "embedded-native":
         raise ValueError("qualification is not the selected native source mode")
     if descriptor["programs"] != programs(root) or descriptor["cohorts"] != cohorts():
         raise ValueError("qualification cannot replace its owned programs or mandatory test cohorts")
-    verify_frozen_inventory(root, descriptor)
+    observed_inventory = verify_frozen_inventory(root, descriptor)
     verify_frozen_test_fixtures(root, descriptor["test_fixtures"])
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     verify_fixture_source_contract(descriptor["test_fixtures"], contract)
@@ -1120,7 +1173,7 @@ def verify(path: Path) -> dict:
         raise ValueError("qualification differs from the owning native build contract")
     if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
         raise ValueError("native build source manifest is missing or has an invalid digest")
-    verify_artifact_contract(root, contract)
+    verify_artifact_contract(root, contract, observed_inventory)
     if workspace_gitlink(root / "share/exomonad/workspace-gitlink.json") != descriptor["workspace_gitlink"]:
         raise ValueError("qualification differs from its recorded workspace Gitlink")
     if descriptor["environment"].get("TIDEPOOL_TEST_FIXTURE_ROOT") != str(root / TEST_FIXTURE_ROOT):
@@ -1323,11 +1376,11 @@ def main(argv=None) -> int:
     stage = commands.add_parser("assemble")
     stage.add_argument("--catalog", type=Path)
     stage.add_argument("--root-entry", type=Path)
-    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest", "browser-driver"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")
-    for key in ("bundle", "output", "source-root", "browser-driver", "browser-node", "playwright-browsers", "build-log", "build-commands"):
+    for key in ("bundle", "output", "source-root", "browser-node", "playwright-browsers", "build-log", "build-commands"):
         frozen.add_argument("--" + key, required=True, type=Path)
     frozen.add_argument("--expect-profile", required=True, choices=("fast-dev", "debug", "production"))
     checked = commands.add_parser("verify")

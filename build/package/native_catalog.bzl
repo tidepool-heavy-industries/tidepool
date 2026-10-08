@@ -122,6 +122,7 @@ def native_runtime_bundle(name, catalog_backed):
             "//bridge/haskell:tidepool_extract_bin",
             "//bridge/haskell:facade_embedded_sources",
             "//web:dist",
+            "//build/testing/browser:driver_bundle",
             ":embedded_web_provenance",
             ":tidepool_extract_runtime_libraries",
             ":qualification_script",
@@ -154,6 +155,7 @@ def native_runtime_bundle(name, catalog_backed):
       --worker "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" \
       --sources "$PWD/$(location //bridge/haskell:facade_embedded_sources)" \
       --assets "$PWD/$(location //web:dist)" \
+      --browser-driver "$PWD/$(location //build/testing/browser:driver_bundle)" \
       --libraries "$PWD/$(location :tidepool_extract_runtime_libraries)" \
       --harness-revision "$PWD/$(location :embedded_web_provenance)" \
       --runtime-tools "$PACKAGE_RUNTIME_TOOLS" --ghc-libdir "$PACKAGE_GHC_LIBDIR" \

@@ -1,4 +1,10 @@
-load("@prelude//:rules.bzl", "export_file", "genrule")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule")
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"build/testing/browser/" + path: path for path in glob(["BUCK", "*.mjs"])},
+    visibility = ["PUBLIC"],
+)
 
 export_file(
     name = "driver.mjs",
@@ -40,6 +46,8 @@ genrule(
     srcs = [
         ":npm_dependencies",
         "driver.mjs",
+        "//nix/browser-test:package_json",
+        "//nix/browser-test:package_lock",
     ],
     out = ".",
     bash = """set -euo pipefail
@@ -49,6 +57,8 @@ OUTPUT="$PWD/$OUT"
 mkdir -p "$OUTPUT/node_modules"
 cp -a "$DEPS/." "$OUTPUT/node_modules/"
 cp "$DRIVER" "$OUTPUT/driver.mjs"
+cp "$(location //nix/browser-test:package_json)" "$OUTPUT/package.json"
+cp "$(location //nix/browser-test:package_lock)" "$OUTPUT/package-lock.json"
 """,
     visibility = ["PUBLIC"],
 )

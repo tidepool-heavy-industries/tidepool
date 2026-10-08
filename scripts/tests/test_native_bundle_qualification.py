@@ -30,6 +30,23 @@ def runtime_tools_fixture(root):
     return tools
 
 
+def browser_driver_fixture(source, driver):
+    """Small source/artifact identity fixture; no browser execution evidence."""
+    inputs = {}
+    for relative, original in qualification.BROWSER_DRIVER_SOURCES.items():
+        path = source / original
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('declared browser input: ' + original + '\n')
+        copied = driver / relative
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        copied.write_bytes(path.read_bytes())
+        inputs[original] = qualification.sha256(path)
+    dependency = driver / 'node_modules/playwright/index.js'
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text('locked dependency bytes\n')
+    return inputs
+
+
 def root_entry_source_fixture(root, modules):
     """Generated source declaration fixture, without compilation authority."""
     path = root / qualification.ROOT_ENTRY_SOURCE
@@ -329,6 +346,8 @@ class NativeQualificationTests(unittest.TestCase):
             tools = root / 'runtime-tools'; tools.mkdir()
             ghc = root / 'ghc-libdir'; ghc.mkdir()
             output = root / 'assembled'
+            browser_driver = root / 'browser-driver'
+            browser_driver_fixture(source, browser_driver)
             args = SimpleNamespace(
                 output=output, host=inputs['host'], view_helper=inputs['view-helper'],
                 frontend=inputs['frontend'], worker=inputs['worker'], libtest=inputs['libtest'],
@@ -337,7 +356,7 @@ class NativeQualificationTests(unittest.TestCase):
                 workspace_gitlink=workspace_gitlink, workspace_git_bundle=workspace_bundle,
                 sources=sources, assets=root / 'assets', libraries=libraries,
                 harness_revision=harness_revision, runtime_tools=tools, ghc_libdir=ghc,
-                entrypoint_template=entrypoint, profile='fast-dev')
+                entrypoint_template=entrypoint, browser_driver=browser_driver, profile='fast-dev')
             with patch.object(qualification, 'native_runtime_tools', return_value=tools), \
                  patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
                  patch.object(qualification, 'verify_workspace_bundle'):
@@ -350,6 +369,92 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertFalse((output / qualification.TEST_FIXTURE_ROOT / fixture.relative_to(source)).is_symlink())
             self.assertEqual((output / 'share/exomonad/test-fixtures.json').read_bytes(),
                              (source / qualification.TEST_FIXTURE_MANIFEST).read_bytes())
+            qualification.verify_browser_driver(output / qualification.BROWSER_DRIVER_ROOT, contract)
+            self.assertEqual(qualification.inventory(output / qualification.BROWSER_DRIVER_ROOT),
+                             qualification.inventory(browser_driver))
+
+    def test_browser_driver_rejects_changed_authored_inputs_and_dependency_artifacts(self):
+        for relative in ('driver.mjs', 'package.json', 'package-lock.json',
+                         'node_modules/playwright/index.js'):
+            for change in ('replace', 'delete'):
+                with self.subTest(relative=relative, change=change), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    driver = root / 'driver'
+                    inputs = browser_driver_fixture(root / 'source', driver)
+                    contract = {'source_inputs': inputs,
+                                'browser_driver': qualification.browser_driver_record(driver, inputs)}
+                    qualification.verify_browser_driver(driver, contract)
+                    path = driver / relative
+                    if change == 'replace':
+                        path.write_text('bytes from another build\n')
+                    else:
+                        path.unlink()
+                    with self.assertRaisesRegex(ValueError, 'browser driver differs'):
+                        qualification.verify_browser_driver(driver, contract)
+
+    def test_browser_driver_requires_owned_source_and_complete_dependency_tree(self):
+        for change in ('missing-source', 'missing-contract', 'wrong-target', 'missing-dependencies',
+                       'extra-dependency', 'changed-mode'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                driver = root / 'driver'
+                inputs = browser_driver_fixture(root / 'source', driver)
+                contract = {'source_inputs': inputs,
+                            'browser_driver': qualification.browser_driver_record(driver, inputs)}
+                if change == 'missing-source':
+                    del inputs['build/testing/browser/driver.mjs']
+                elif change == 'missing-contract':
+                    del contract['browser_driver']
+                elif change == 'wrong-target':
+                    contract['browser_driver']['target'] = '//other:driver'
+                elif change == 'missing-dependencies':
+                    shutil.rmtree(driver / 'node_modules')
+                elif change == 'extra-dependency':
+                    (driver / 'node_modules/extra.js').write_text('unowned code')
+                else:
+                    (driver / 'driver.mjs').chmod(0o755)
+                with self.assertRaisesRegex(ValueError, 'browser driver'):
+                    qualification.verify_browser_driver(driver, contract)
+
+    def test_artifact_contract_reuses_the_verified_inventory_without_rehashing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / 'bundle'
+            inputs = browser_driver_fixture(root / 'source', bundle / qualification.BROWSER_DRIVER_ROOT)
+            contract = {'source_inputs': inputs, 'artifacts': {},
+                        'browser_driver': qualification.browser_driver_record(
+                            bundle / qualification.BROWSER_DRIVER_ROOT, inputs)}
+            for relative, target in qualification.ARTIFACT_TARGETS.items():
+                path = bundle / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('artifact: ' + relative)
+                contract['artifacts'][relative] = {'target': target, 'sha256': qualification.sha256(path)}
+            files = qualification.inventory(bundle)
+            descriptor = {'inventory': files, 'inventory_sha256': qualification.digest_inventory(files)}
+            observed = qualification.verify_frozen_inventory(bundle, descriptor)
+            with patch.object(qualification, 'sha256', side_effect=AssertionError('duplicate file scan')):
+                qualification.verify_artifact_contract(bundle, contract, observed)
+                del observed['bin/tidepool-tests']
+                with self.assertRaisesRegex(ValueError, 'mixed native build artifact'):
+                    qualification.verify_artifact_contract(bundle, contract, observed)
+
+    def test_frozen_roster_requires_shutdown_and_restored_settlement_regressions(self):
+        cohorts = qualification.cohorts()
+        self.assertIn(qualification.M2_SHUTDOWN_TEST, cohorts['m2']['tests'])
+        self.assertIn(qualification.M2_COORDINATOR_TEST, cohorts['m2']['tests'])
+        regressions = cohorts['unified-regressions']
+        self.assertEqual(regressions['expected_count'], 5)
+        self.assertEqual(len(set(regressions['tests'])), 5)
+        self.assertFalse(regressions['ignored'])
+
+    def test_old_qualification_schema_requires_its_own_frozen_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / qualification.DESCRIPTOR
+            qualification.write_json(path, {'schema': 1, 'kind': 'native-runtime-qualification',
+                                             'bundle_root': str(root)})
+            with self.assertRaisesRegex(ValueError, 'unsupported schema'):
+                qualification.verify(path)
 
     def test_catalog_resources_cross_frozen_cohort_delegation_without_ambient_selection(self):
         runner_spec = importlib.util.spec_from_file_location(
@@ -442,7 +547,6 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertIn('--ignored', command)
                 self.assertEqual([command[index + 1] for index, value in enumerate(command)
                                   if value == '--exact'], qualification.PREPARED_CHILD_TESTS)
-                self.assertEqual(len(qualification.M2_TESTS), 7)
 
     def test_prepared_child_cohort_refuses_other_compiler_mode_and_parallel_execution(self):
         for options in (['--compiler-mode', 'direct'], ['--jobs', '2']):
@@ -601,7 +705,7 @@ class NativeQualificationTests(unittest.TestCase):
                 'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': compiler_mode, 'timeout_seconds': 600,
                 'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
             self.assertEqual(command[command.index('--compiler-mode') + 1], compiler_mode)
-            self.assertEqual(report['executed_test_count'], 7)
+            self.assertEqual(report['executed_test_count'], len(descriptor['cohorts']['m2']['tests']))
             self.assertTrue(report['completed'])
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
@@ -683,13 +787,16 @@ class NativeQualificationTests(unittest.TestCase):
             source.mkdir()
             subprocess.run(['git', 'init', '-q', str(source)], check=True)
             (source / 'native.rs').write_text('fn shipped() {}\n')
-            subprocess.run(['git', '-C', str(source), 'add', 'native.rs'], check=True)
+            inputs = browser_driver_fixture(source, bundle / qualification.BROWSER_DRIVER_ROOT)
+            subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
             commit = ['git', '-C', str(source), '-c', 'user.name=Qualification test',
                       '-c', 'user.email=qualification@example.invalid', 'commit', '-qm']
             subprocess.run([*commit, 'first revision'], check=True)
-            inputs = {'native.rs': qualification.sha256(source / 'native.rs')}
+            inputs['native.rs'] = qualification.sha256(source / 'native.rs')
             contract = {'profile': 'fast-dev', 'startup_mode': 'unprepared', 'source_inputs': inputs,
-                        'source_inputs_sha256': qualification.digest_inventory(inputs), 'artifacts': {}}
+                        'source_inputs_sha256': qualification.digest_inventory(inputs), 'artifacts': {},
+                        'browser_driver': qualification.browser_driver_record(
+                            bundle / qualification.BROWSER_DRIVER_ROOT, inputs)}
             for relative, target in qualification.ARTIFACT_TARGETS.items():
                 path = bundle / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -826,7 +933,7 @@ class NativeQualificationTests(unittest.TestCase):
             binary.write_bytes(b'original-host')
             descriptor_path = root / qualification.DESCRIPTOR
             descriptor = {
-                'schema': 1, 'kind': 'native-runtime-qualification',
+                'schema': qualification.QUALIFICATION_SCHEMA, 'kind': 'native-runtime-qualification',
                 'bundle_root': str(root), 'stdlib_mode': 'source-backed',
                 'feature_profile': 'embedded-native', 'environment': {},
                 'external_inputs': {}, 'elf_runtime': {},

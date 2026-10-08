@@ -162,8 +162,8 @@ inventories, NAR identity and actual GC registration are rechecked after success
 refusal or timeout. A producer refusal and a later retention failure are
 recorded separately.
 
-Build the native bundle and
-`//build/testing/browser:driver_bundle` in one selected native profile. Retain the
+Build the native bundle in one selected native profile. It owns the declared
+`//build/testing/browser:driver_bundle` dependency. Retain the
 actual successful build log and its argv arrays as JSON. Source must have clean
 tracked/index state and initialized clean submodules at their recorded commits;
 untracked source handoffs and retired directories are preserved.
@@ -194,7 +194,6 @@ future submodule updates. Test execution requires no mutable source repository.
 python3 build/package/qualification.py freeze \
   --bundle "$BUCK_NATIVE_BUNDLE" --output "$FINAL_BUNDLE" \
   --source-root "$SOURCE_ROOT" --expect-profile fast-dev \
-  --browser-driver "$BUCK_BROWSER_DRIVER_BUNDLE" \
   --browser-node "$DECLARED_BROWSER_NODE" \
   --playwright-browsers "$DECLARED_PLAYWRIGHT_BROWSERS" \
   --build-log "$SUCCESSFUL_BUILD_LOG" --build-commands "$BUILD_ARGV_JSON"
@@ -207,6 +206,11 @@ unknown executed count or zero selection cannot qualify a passing cohort.
 `run --jobs N` selects bounded concurrency (default one); `--delegated-service`
 and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
+The browser driver and its locked npm inputs are assembled by the declared
+native bundle action and checked against its source contract. Freeze cannot
+substitute a separately supplied driver. Schema 2 descriptors require that
+contract; historical frozen bundles retain their own qualification program.
+
 The frozen descriptor is the authority for the exact M1/M2 case rosters, counts
 and deadlines. M2 has a 600-second default watchdog; unfinished-parent survival,
 nominal publication join, checkpoint release and
@@ -221,6 +225,9 @@ Checkpoint release retains the issuer settlement, observer creation,
 original-scope read/reply and final cleanup in one watchdog; the measured issuer
 portion already took 538 seconds before those later phases. These outer process
 limits preserve the tests' internal phase and cancellation assertions.
+The M2 roster also checks host shutdown and coordinator failure after child
+failure. The `unified-regressions` cohort runs the published lookup/form examples
+and all three operation-settlement controls through the same frozen libtest.
 
 ```sh
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
@@ -239,7 +246,7 @@ own frozen descriptor. The one-child control
 `actor_host::prepared_runtime_acceptance::production_prepared_toolset_one_child_executes_original_native_probe`
 is the preceding focused gate; schedule the twenty-child cohort only after that
 control passes on the coherent candidate. Both use the same production fixture
-and parameterized child program. This release gate is separate from the seven
+and parameterized child program. This release gate is separate from the nine
 M2 cases and is not part of routine focused spot checks.
 
 ```sh

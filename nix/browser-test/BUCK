@@ -1,4 +1,10 @@
-load("@prelude//:rules.bzl", "export_file")
+load("@prelude//:rules.bzl", "export_file", "filegroup")
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"nix/browser-test/" + path: path for path in glob(["BUCK", "*.json"])},
+    visibility = ["PUBLIC"],
+)
 
 export_file(name = "package_json", src = "package.json", out = "package.json", visibility = ["PUBLIC"])
 export_file(name = "package_lock", src = "package-lock.json", out = "package-lock.json", visibility = ["PUBLIC"])
