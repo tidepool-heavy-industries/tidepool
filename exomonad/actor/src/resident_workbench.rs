@@ -1755,17 +1755,12 @@ impl ParkedHoleAbortRegistration {
         }
     }
 
-    pub(crate) fn scope<F: std::future::Future>(
-        &self,
-        operation: F,
-    ) -> impl std::future::Future<Output = F::Output> {
+    pub(crate) async fn scope<F: std::future::Future>(&self, operation: F) -> F::Output {
         let compiler_owner = self.0.compiler_owner.get().cloned();
         let scoped = SLOT_CONTINUATION_OWNER.scope(self.clone(), operation);
         match compiler_owner {
-            Some(owner) => {
-                futures_util::future::Either::Left(COMPILER_CLOSE_OWNER.scope(owner, scoped))
-            }
-            None => futures_util::future::Either::Right(scoped),
+            Some(owner) => owner.scope(scoped).await,
+            None => scoped.await,
         }
     }
 
