@@ -347,7 +347,11 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .dispatch_boxed(ToolInvocation {
                 context: None,
                 name: crate::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw("pure (capturedValue + 1)".into()),
+                // A notebook retains its result; force the exact value check
+                // before accepting the effectful cell's committed receipt.
+                arguments: ToolArguments::Raw(
+                    "if capturedValue + 1 == (42 :: Int) then pure () else error \"child lost the original captured value\"".into(),
+                ),
             })
             .await
             .expect("child workbench reads the original issuer checkpoint binding");
@@ -355,18 +359,6 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .into_json()
             .expect("resident response serializes for structured receipt assertions");
         assert_committed(&reply);
-        assert_eq!(
-            reply["items"]
-                .as_array()
-                .expect("item receipts")
-                .last()
-                .expect("expression receipt")["output"]
-                .as_str()
-                .expect("rendered value")
-                .trim(),
-            "42",
-            "{reply:?}"
-        );
     }
     for child in children {
         let result = child
