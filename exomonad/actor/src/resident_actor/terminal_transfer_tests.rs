@@ -1,7 +1,7 @@
 //! Request-local native reply helpers and private-publication settlement.
 
 use super::*;
-use crate::request::{ResponseFailure, ResponseObservation};
+use crate::request::{ResponseFailure, ResponseObservation, WatchObservation};
 use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
@@ -210,6 +210,11 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     tokio::time::timeout(std::time::Duration::from_secs(240), async {
         let control = crate::WorkbenchExecutionControl::untracked();
         if let NativeReplyCase::Committed = case {
+            let (watch, _) = forest
+                .environment
+                .requests
+                .register_watch(requester.identity(), vec![request])
+                .expect("watch the exact request before its reply is accepted");
             let reply = execute(&child, "respond (42 :: Int)", Some(control.clone()))
                 .await
                 .expect("request-local helper settles its actual typed request");
@@ -225,6 +230,17 @@ async fn run_native_reply_case(case: NativeReplyCase) {
                     .count(),
                 1,
                 "exactly one native terminal transfer"
+            );
+            // Replied settles this workbench caller before the actor resumes
+            // its request continuation. That continuation owns readiness.
+            assert_eq!(
+                forest
+                    .environment
+                    .requests
+                    .await_watch(requester.identity(), watch)
+                    .await,
+                Ok(WatchObservation::Ready(Vec::new())),
+                "the accepted reply must finish its exact continuation"
             );
             assert_eq!(
                 forest
