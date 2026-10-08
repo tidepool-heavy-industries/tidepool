@@ -2915,7 +2915,7 @@ fn seal_turn_outputs_with_validation(
         .or_else(|| ordinary_receipt.as_ref().map(|receipt| &receipt.packages))
         .expect("admitted package selection");
     let package_catalog = match segment_originals {
-        Some(originals) => segment_package_availability(originals, receipt_packages)?,
+        Some(originals) => segment_package_availability(originals, receipt_packages),
         None => package_availability_with_validation(receipt_packages, &certified, validation)?,
     };
     enum TargetDemand {
