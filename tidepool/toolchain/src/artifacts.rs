@@ -2729,6 +2729,18 @@ fn seal_turn_outputs_with_validation(
         },
         Ordinary(Vec<certified_products::PendingImportOwner>),
     }
+    let original_sources = match source_segment {
+        Some(segment) => segment.available_original_sources(
+            exact.as_ref().expect("segment product admission").request,
+            &certified.recovery_products,
+            &validation.inventory,
+        )?,
+        None => certified_products::AvailableOriginalSources::authenticate(
+            &certified.recovery_products,
+            &validation.inventory,
+        )
+        .map_err(compiler_evidence_failure)?,
+    };
     let target_demand = match typed_item {
         Some((plans, index, admission_digest)) => {
             let admission = exact.as_ref().ok_or_else(|| {
@@ -2749,10 +2761,10 @@ fn seal_turn_outputs_with_validation(
                 )
                 .sha256(),
             )?;
-            let imports = certified_products::certify_target_available_owners_with_validation(
+            let imports = certified_products::certify_target_available_owners_from_membership_with_validation(
                 prepared,
                 accepted,
-                &certified.recovery_products,
+                &original_sources,
                 &certified.groups,
                 &certified.source_selection,
                 &package_catalog.interfaces,
@@ -2762,10 +2774,10 @@ fn seal_turn_outputs_with_validation(
             TargetDemand::Checked { entry, imports }
         }
         None => TargetDemand::Ordinary(
-            certified_products::certify_target_available_owners_with_validation(
+            certified_products::certify_target_available_owners_from_membership_with_validation(
                 prepared,
                 accepted,
-                &certified.recovery_products,
+                &original_sources,
                 &certified.groups,
                 &certified.source_selection,
                 &package_catalog.interfaces,

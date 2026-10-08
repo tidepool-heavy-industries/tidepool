@@ -659,6 +659,14 @@ fn original_group_conflict(
     }))
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum OriginalMembershipFailure {
+    DuplicateOwner(CachedHomeOwner),
+    UnexpectedOwner(CachedHomeOwner),
+    MissingOwner(CachedHomeOwner),
+    OriginalBytes(CachedHomeOwner),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
     #[error("unsupported {format:?} version {found}; expected {expected}")]
@@ -683,6 +691,8 @@ pub enum CertificationError {
     OriginalGroupConflict(Box<OriginalGroupConflict>),
     #[error("compiler product original selection conflict: {0:?}")]
     OriginalSelectionConflict(Box<OriginalSelectionConflict>),
+    #[error("compiler original membership observation rejected: {0:?}")]
+    OriginalMembership(Box<OriginalMembershipFailure>),
     #[error("selected compiler original closure rejected: {0}")]
     OriginalClosure(#[source] Box<crate::CompileError>),
     #[error("finalized module payload capture failed: {0}")]
@@ -2119,6 +2129,134 @@ struct ValidatedPromotionSharing(BTreeSet<CachedHomeOwner>);
 struct SourceGroupMap {
     groups: BTreeMap<SourceGroupKey, (CachedHomeOwner, ProductOrigin)>,
     modules: SourceModuleIndex,
+    original: Option<Arc<AvailableOriginalSources>>,
+}
+
+/// Immutable complete membership authenticated by one compiler admission.
+/// Selected/current groups remain in a separate per-item overlay.
+#[derive(Default)]
+pub(crate) struct AvailableOriginalSources {
+    sources: SourceGroupMap,
+    originals: BTreeMap<CachedHomeOwner, Arc<OriginalNativeWitness>>,
+}
+
+impl AvailableOriginalSources {
+    pub(crate) fn authenticate(
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &InventoryOperation,
+    ) -> CertResult<Arc<Self>> {
+        authenticate_original_source_membership(products, operation).map(Arc::new)
+    }
+
+    pub(crate) fn validate_observation(
+        &self,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    ) -> CertResult<()> {
+        let failure = |reason| CertificationError::OriginalMembership(Box::new(reason));
+        let mut seen = BTreeSet::new();
+        for product in products {
+            if !seen.insert(product.owner()) {
+                return Err(failure(OriginalMembershipFailure::DuplicateOwner(
+                    product.owner().clone(),
+                )));
+            }
+            let original = self.originals.get(product.owner()).ok_or_else(|| {
+                failure(OriginalMembershipFailure::UnexpectedOwner(
+                    product.owner().clone(),
+                ))
+            })?;
+            if !product
+                .original_native()
+                .is_some_and(|witness| witness.matches_original(product))
+                || !original
+                    .anchors
+                    .iter()
+                    .zip(product.original_byte_anchors())
+                    .all(|(expected, actual)| Arc::ptr_eq(expected, actual) || expected == actual)
+            {
+                return Err(failure(OriginalMembershipFailure::OriginalBytes(
+                    product.owner().clone(),
+                )));
+            }
+        }
+        if let Some(owner) = self.originals.keys().find(|owner| !seen.contains(owner)) {
+            return Err(failure(OriginalMembershipFailure::MissingOwner(
+                owner.clone(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn overlay(
+        self: &Arc<Self>,
+        selected: &[PendingCertifiedGroup],
+        operation: &InventoryOperation,
+    ) -> CertResult<SourceGroupMap> {
+        for group in selected {
+            for binder in group.group.binders() {
+                operation.charge(
+                    2 * (group.owner.unit.len() + group.owner.module.len())
+                        + 2 * std::mem::size_of::<SourceGroupKey>(),
+                )?;
+                charge_symbol(operation, binder)?;
+            }
+        }
+        let mut sources = certified_source_map(selected)?;
+        for group in selected {
+            let original = self
+                .originals
+                .get(&group.owner)
+                .and_then(|original| original.group(group.group.original_ordinal()))
+                .ok_or(CertificationError::Mismatch(
+                    "selected original outside availability",
+                ))?;
+            if original.owner != group.owner
+                || original.group != group.group
+                || original.imports != group.imports
+            {
+                return Err(CertificationError::Mismatch("shared original home groups"));
+            }
+        }
+        sources.original = Some(Arc::clone(self));
+        Ok(sources)
+    }
+}
+
+/// A request or physical segment retains one immutable membership per live
+/// admission operation. A fresh admission earns and charges its own index.
+#[derive(Default)]
+pub(crate) struct RetainedOriginalSources {
+    admitted: std::sync::Mutex<
+        Option<(
+            std::sync::Weak<InventoryOperation>,
+            Arc<AvailableOriginalSources>,
+        )>,
+    >,
+}
+
+impl RetainedOriginalSources {
+    pub(crate) fn admit(
+        &self,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &Arc<InventoryOperation>,
+    ) -> CertResult<Arc<AvailableOriginalSources>> {
+        let mut admitted = self
+            .admitted
+            .lock()
+            .expect("original source membership lock");
+        if let Some((previous, sources)) = admitted.as_ref() {
+            if previous
+                .upgrade()
+                .is_some_and(|previous| Arc::ptr_eq(&previous, operation))
+            {
+                sources.validate_observation(products)?;
+                return Ok(Arc::clone(sources));
+            }
+        }
+        let sources = AvailableOriginalSources::authenticate(products, operation)?;
+        *admitted = Some((Arc::downgrade(operation), Arc::clone(&sources)));
+        Ok(sources)
+    }
 }
 
 #[derive(Default)]
@@ -2158,7 +2296,18 @@ impl SourceGroupMap {
     }
 
     fn get(&self, key: &SourceGroupKey) -> Option<&(CachedHomeOwner, ProductOrigin)> {
-        self.groups.get(key)
+        self.groups
+            .get(key)
+            .or_else(|| self.original.as_ref()?.sources.get(key))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&SourceGroupKey, &(CachedHomeOwner, ProductOrigin))> {
+        self.groups.iter().chain(
+            self.original
+                .iter()
+                .flat_map(|original| original.sources.groups.iter())
+                .filter(|(key, _)| !self.groups.contains_key(*key)),
+        )
     }
 
     fn insert_unique(
@@ -2168,6 +2317,13 @@ impl SourceGroupMap {
         phase: SourceBinderPhase,
     ) -> CertResult<()> {
         self.modules.insert(&key.0.unit, &key.0.module);
+        if let Some(existing) = self
+            .original
+            .as_ref()
+            .and_then(|original| original.sources.get(&key))
+        {
+            return Err(duplicate_source_binder(phase, &key, existing.1, owner.1));
+        }
         match self.groups.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(owner);
@@ -2183,6 +2339,10 @@ impl SourceGroupMap {
 
     fn contains_module(&self, unit: &str, module: &str) -> bool {
         self.modules.contains(unit, module)
+            || self
+                .original
+                .as_ref()
+                .is_some_and(|original| original.sources.contains_module(unit, module))
     }
 
     fn promote(
@@ -2197,7 +2357,7 @@ impl SourceGroupMap {
                 key_owner.module_version = version.clone();
             }
             let key = (key_owner, ordinal, binder);
-            if self.groups.contains_key(&key) && sharing.0.contains(&key.0) {
+            if self.get(&key).is_some() && sharing.0.contains(&key.0) {
                 // Two validated provenance paths name one exact original membership.
                 continue;
             }
@@ -2277,17 +2437,13 @@ fn resolve_receipt_owner_with_validation(
                         "source outside compiler selection",
                     ));
                 }
-                let mut matches =
-                    sources
-                        .groups
-                        .iter()
-                        .filter(|((owner, ordinal, candidate), _)| {
-                            owner.unit == unit
-                                && owner.module == module
-                                && &owner.module_version == version
-                                && *ordinal == original_ordinal
-                                && candidate == &binder
-                        });
+                let mut matches = sources.iter().filter(|((owner, ordinal, candidate), _)| {
+                    owner.unit == unit
+                        && owner.module == module
+                        && &owner.module_version == version
+                        && *ordinal == original_ordinal
+                        && candidate == &binder
+                });
                 let (key, _) = matches
                     .next()
                     .ok_or(CertificationError::Mismatch("source binder/group closure"))?;
@@ -2629,11 +2785,19 @@ fn certified_source_map(groups: &[PendingCertifiedGroup]) -> CertResult<SourceGr
 
 /// Read-only source membership from complete authenticated original witnesses.
 /// This index does not admit executable groups or add inventory roots.
+#[cfg(test)]
 fn available_original_source_map(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     selected: &[PendingCertifiedGroup],
     operation: &InventoryOperation,
 ) -> CertResult<SourceGroupMap> {
+    AvailableOriginalSources::authenticate(products, operation)?.overlay(selected, operation)
+}
+
+fn authenticate_original_source_membership(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    operation: &InventoryOperation,
+) -> CertResult<AvailableOriginalSources> {
     // Charge the complete lookup before allocating owned keys. This conservative
     // bound covers the owner/ordinal and binder indices plus source-map copies;
     // it uses the enclosing admission's budget, not a new decoding operation.
@@ -2663,17 +2827,7 @@ fn available_original_source_map(
             }
         }
     }
-    for group in selected {
-        for binder in group.group.binders() {
-            operation.charge(
-                2 * (group.owner.unit.len() + group.owner.module.len())
-                    + 2 * std::mem::size_of::<SourceGroupKey>(),
-            )?;
-            charge_symbol(operation, binder)?;
-        }
-    }
-    let mut sources = certified_source_map(selected)?;
-    let mut owners = BTreeSet::new();
+    let mut sources = SourceGroupMap::new();
     let mut binders = BTreeSet::new();
     let mut originals = BTreeMap::new();
     for product in products {
@@ -2687,7 +2841,10 @@ fn available_original_source_map(
                 "original native witness bytes",
             ));
         }
-        if !owners.insert(witness.owner.clone()) {
+        if originals
+            .insert(witness.owner.clone(), Arc::clone(witness))
+            .is_some()
+        {
             return Err(CertificationError::Mismatch(
                 "duplicate available original owner",
             ));
@@ -2695,9 +2852,9 @@ fn available_original_source_map(
         sources
             .modules
             .insert(&witness.owner.unit, &witness.owner.module);
+        let mut ordinals = BTreeSet::new();
         for group in witness.groups.iter() {
-            let key = (witness.owner.clone(), group.group.original_ordinal());
-            if originals.insert(key, group).is_some() {
+            if !ordinals.insert(group.group.original_ordinal()) {
                 return Err(CertificationError::Mismatch(
                     "duplicate available original ordinal",
                 ));
@@ -2711,35 +2868,18 @@ fn available_original_source_map(
                         "duplicate available original binder",
                     ));
                 }
+                sources.insert(
+                    (
+                        witness.owner.clone(),
+                        group.group.original_ordinal(),
+                        binder.clone(),
+                    ),
+                    (witness.owner.clone(), ProductOrigin::Cached),
+                );
             }
         }
     }
-    for group in selected {
-        let original = originals
-            .get(&(group.owner.clone(), group.group.original_ordinal()))
-            .ok_or(CertificationError::Mismatch(
-                "selected original outside availability",
-            ))?;
-        if original.owner != group.owner
-            || original.group != group.group
-            || original.imports != group.imports
-        {
-            return Err(CertificationError::Mismatch("shared original home groups"));
-        }
-    }
-    for original in originals.values() {
-        for binder in original.group.binders() {
-            let key = (
-                original.owner.clone(),
-                original.group.original_ordinal(),
-                binder.clone(),
-            );
-            if sources.get(&key).is_none() {
-                sources.insert(key, (original.owner.clone(), ProductOrigin::Cached));
-            }
-        }
-    }
-    Ok(sources)
+    Ok(AvailableOriginalSources { sources, originals })
 }
 
 /// Exact artifact authenticated by the run-owned recovery reference.
@@ -6615,11 +6755,11 @@ pub(crate) fn certify_products_with_validation(
     }
     let available_originals = inherited_products;
     let mut source_groups = match exact {
-        Some(admission) => available_original_source_map(
-            &available_originals,
-            &admission.request.groups,
-            &validation.inventory,
-        )?,
+        Some(admission) => admission
+            .request
+            .compiler_inputs()
+            .available_original_sources(&available_originals, &validation.inventory)?
+            .overlay(&admission.request.groups, &validation.inventory)?,
         None => SourceGroupMap::new(),
     };
     for (origin, owner, group, _) in &groups {
@@ -7204,7 +7344,22 @@ pub(crate) fn certify_target_available_owners_with_validation(
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingImportOwner>> {
-    let sources = available_original_source_map(products, selected, &validation.inventory)?;
+    let original = AvailableOriginalSources::authenticate(products, &validation.inventory)?;
+    certify_target_available_owners_from_membership_with_validation(
+        prepared, accepted, &original, selected, selection, packages, validation,
+    )
+}
+
+pub(crate) fn certify_target_available_owners_from_membership_with_validation(
+    prepared: &PreparedProgram,
+    accepted: &[AcceptedGlobal],
+    original: &Arc<AvailableOriginalSources>,
+    selected: &[PendingCertifiedGroup],
+    selection: &CertifiedSourceSelection,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<PendingImportOwner>> {
+    let sources = original.overlay(selected, &validation.inventory)?;
     certify_target_owners_from_sources(
         prepared,
         accepted,
@@ -9071,6 +9226,118 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn retained_original_membership_reuses_only_its_admission_and_exact_bytes() {
+        let product = full_native_fixture("Membership", vec![(8, vec![]), (11, vec![])], 7);
+        let retained = RetainedOriginalSources::default();
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let first = retained
+            .admit(std::slice::from_ref(&product), &operation)
+            .unwrap();
+        let charged = operation.work_usage().unwrap();
+        let repeated = retained
+            .admit(std::slice::from_ref(&product), &operation)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert_eq!(operation.work_usage().unwrap(), charged);
+        let independently_recovered = recovered_witness_fixtures(std::slice::from_ref(&product))
+            .remove(0)
+            .product;
+        assert!(!Arc::ptr_eq(
+            &product.original_byte_anchors()[0],
+            &independently_recovered.original_byte_anchors()[0]
+        ));
+        assert!(
+            Arc::ptr_eq(
+                &first,
+                &retained
+                    .admit(&[independently_recovered], &operation)
+                    .unwrap()
+            ),
+            "equal authenticated bytes may be independently recovered"
+        );
+        let all_keys = first
+            .sources
+            .groups
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for count in 0..=2 {
+            let groups = product.original_native().unwrap().groups[..count]
+                .iter()
+                .map(AuthenticatedOriginalGroup::admitted)
+                .collect::<Vec<_>>();
+            let overlay = first.overlay(&groups, &operation).unwrap();
+            assert_eq!(overlay.groups.len(), count);
+            assert_eq!(
+                overlay
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<BTreeSet<_>>(),
+                all_keys
+            );
+            assert_eq!(
+                first.sources.groups.len(),
+                2,
+                "overlay never modifies retained membership"
+            );
+        }
+        assert!(matches!(retained.admit(&[], &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::MissingOwner(product.owner().clone())));
+        assert!(
+            matches!(retained.admit(&[product.clone(), product.clone()], &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::DuplicateOwner(product.owner().clone()))
+        );
+        let other = full_native_fixture("Membership", vec![(8, vec![]), (11, vec![])], 9);
+        assert!(matches!(retained.admit(&[other.clone()], &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::UnexpectedOwner(other.owner().clone())));
+        let altered = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
+            product.certification_bytes().to_vec(),
+        );
+        assert!(matches!(retained.admit(&[altered], &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::OriginalBytes(product.owner().clone())));
+        assert!(
+            Arc::ptr_eq(
+                &first,
+                &retained
+                    .admit(std::slice::from_ref(&product), &operation)
+                    .unwrap()
+            ),
+            "refusal preserves the prior issued membership"
+        );
+        let exhausted = Arc::new(InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 0,
+            ..Default::default()
+        }));
+        assert!(
+            retained
+                .admit(std::slice::from_ref(&product), &exhausted)
+                .is_err(),
+            "a new admission cannot borrow another operation's paid budget"
+        );
+        let fresh = Arc::new(InventoryOperation::new(Default::default()));
+        let next = retained
+            .admit(std::slice::from_ref(&product), &fresh)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert!(fresh.work_usage().unwrap().0 > 0);
+        let weak = Arc::downgrade(&next);
+        drop(next);
+        drop(retained);
+        assert!(
+            weak.upgrade().is_none(),
+            "retiring the owner releases its retained membership"
+        );
+    }
+
+    #[test]
     fn source_receipts_use_request_selection_without_collapsing_original_versions() {
         let captured = |generation| PendingImportOwner::Retained {
             identity: testing::identity("Val.G1", "captured"),
@@ -9715,6 +9982,118 @@ pub(crate) mod tests {
                     NativeArtifactDemand::CertifiedTargetImports(&imports)
                 )
                 .is_err());
+        }
+    }
+
+    #[test]
+    fn original_consumers_preserve_whole_demand_and_exclude_only_the_probe() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+        let captured = PendingImportOwner::Retained {
+            identity: testing::identity("Tidepool.Session.Val.G4", "delayed"),
+            generation: 4,
+        };
+        let scaffold = full_native_fixture("Scaffold", vec![(3, vec![]), (11, vec![captured])], 7);
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(ArtifactEntry::original([1; 32], scaffold.clone()).unwrap());
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            scaffold.module_interface().unwrap().clone(),
+        ));
+        let entries = vec![native.clone(), canonical];
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let imports = vec![PendingImportOwner::Source {
+            owner: scaffold.owner().clone(),
+            original_ordinal: 3,
+            binder: testing::identity("Scaffold", "entry_3"),
+        }];
+        let early = inventory
+            .admit_shared_with_demand(
+                &available,
+                entries.clone(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+            )
+            .unwrap();
+        crate::declaration_context::certify_artifact_view_groups_with_validation(
+            &early,
+            &[],
+            &[],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let selection = CertifiedSourceSelection::from_projected_originals(
+            std::slice::from_ref(&scaffold),
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+        assert!(
+            selection.selected_original_closure(&early).is_err(),
+            "a legitimate early target must not authorize an unavailable whole original"
+        );
+        assert!(
+            inventory.admit_shared(&available, entries).is_err(),
+            "whole native admission still requires the delayed value carrier"
+        );
+
+        let probe_name = crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE;
+        let probe = full_native_fixture(probe_name, vec![(3, vec![])], 7);
+        let authored = full_native_fixture("Authored", vec![(3, vec![])], 7);
+        let backedge = PendingImportOwner::Source {
+            owner: probe.owner().clone(),
+            original_ordinal: 3,
+            binder: testing::identity(probe_name, "entry_3"),
+        };
+        let invalid = full_native_fixture("Authored", vec![(3, vec![backedge])], 9);
+        for (product, allowed) in [(authored, true), (invalid, false)] {
+            let products = [product.clone(), probe.clone()];
+            let mut validation = PackageInterfaceValidation::default();
+            let inventory = ArtifactInventory::default();
+            let mut entries = Vec::new();
+            for product in &products {
+                entries.push(Arc::new(
+                    ArtifactEntry::original_with_validation(
+                        [1; 32],
+                        product.clone(),
+                        &mut validation,
+                    )
+                    .unwrap(),
+                ));
+                entries.push(Arc::new(ArtifactEntry::canonical(
+                    product.module_interface().unwrap().clone(),
+                )));
+            }
+            let available = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries,
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let selection = CertifiedSourceSelection::from_projected_originals(
+                &products,
+                &validation.inventory,
+            )
+            .unwrap();
+            let result = selection
+                .selected_original_closure_excluding_module(&available, "fixture", probe_name);
+            if allowed {
+                let selected = result.unwrap();
+                assert_eq!(selected.products(), &[product]);
+                assert!(!selected.native_closure.entries().iter().any(|entry| entry
+                    .descriptor
+                    .owner
+                    .module
+                    == probe_name));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "an authored backedge cannot re-admit its excluded transient probe"
+                );
+            }
         }
     }
 
@@ -13472,7 +13851,10 @@ pub(crate) mod tests {
                     )
                     .unwrap();
                     assert_eq!(
-                        sources.groups.keys().cloned().collect::<BTreeSet<_>>(),
+                        sources
+                            .iter()
+                            .map(|(key, _)| key.clone())
+                            .collect::<BTreeSet<_>>(),
                         expected_keys
                     );
                     let binder = SymbolIdentity {

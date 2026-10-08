@@ -266,6 +266,20 @@ pub(crate) struct RequestCompilerInputs {
     pub(crate) metadata: ArtifactMetadataSnapshot,
     pub(crate) artifacts: ArtifactView,
     declaration_semantic_sha256: [u8; 32],
+    original_sources: crate::certified_products::RetainedOriginalSources,
+}
+
+impl RequestCompilerInputs {
+    pub(crate) fn available_original_sources(
+        &self,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<
+        Arc<crate::certified_products::AvailableOriginalSources>,
+        crate::certified_products::CertificationError,
+    > {
+        self.original_sources.admit(products, operation)
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +321,7 @@ impl ProtectedScaffoldRequirements {
             metadata,
             artifacts,
             declaration_semantic_sha256,
+            original_sources: Default::default(),
         })
     }
 }
@@ -1830,6 +1845,7 @@ pub(crate) struct ExactProgramSegmentAdmission {
     request: ExactCompilationRequest,
     admissions: Vec<ExactSourceAdmission>,
     original_products: std::sync::OnceLock<crate::certified_products::ParsedModuleProducts>,
+    original_sources: crate::certified_products::RetainedOriginalSources,
 }
 impl ExactProgramSegmentAdmission {
     fn validate_request(&self, request: &ExactCompilationRequest) -> Result<(), CompileError> {
@@ -1914,6 +1930,18 @@ impl ExactProgramSegmentAdmission {
             .validate_observation(bytes, package_bundle, operation)
             .map_err(compiler_evidence_failure)?;
         Ok(parsed)
+    }
+
+    pub(crate) fn available_original_sources(
+        &self,
+        request: &ExactCompilationRequest,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Arc<crate::certified_products::AvailableOriginalSources>, CompileError> {
+        self.validate_request(request)?;
+        self.original_sources
+            .admit(products, operation)
+            .map_err(compiler_evidence_failure)
     }
 
     pub(crate) fn admissions(&self) -> &[ExactSourceAdmission] {
@@ -2666,6 +2694,7 @@ impl ExactCompilationRequest {
             request: self.clone(),
             admissions: self.validate_outputs(root)?,
             original_products: std::sync::OnceLock::new(),
+            original_sources: Default::default(),
         })
     }
     pub(crate) fn admit_program_segment_support_with_selection(
