@@ -334,6 +334,7 @@ impl ResidentToolEndpoint for ValidationOnlyEndpoint {
 
 #[derive(Clone)]
 struct SchemaRefusalTransport {
+    close_timing: NativeCloseTiming,
     calls: Arc<std::sync::atomic::AtomicUsize>,
     successor: tokio::sync::mpsc::UnboundedSender<RequestId>,
 }
@@ -384,6 +385,7 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
                 Ok(turn)
             }
             1 => {
+                assert_eq!(self.close_timing, NativeCloseTiming::DuringSuccessor);
                 self.successor.send(request.clone()).unwrap();
                 // The successor has pinned its surface and reached transport;
                 // only its owning Engine cancellation may stop this request.
@@ -394,9 +396,16 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
     }
 }
 
-// Retain the real facade acknowledgement before the driver closes the actor
-// during the admitted successor request. This supplies no native execution proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeCloseTiming {
+    AfterAcknowledgement,
+    DuringSuccessor,
+}
+
+// Retain the real facade acknowledgement before native closure. This supplies
+// no native execution proof; the generic actor's realm cleanup is unsupported.
 struct AcknowledgedSchemaRefusal {
+    close_timing: NativeCloseTiming,
     inner: Arc<EmbeddedHostActor>,
     actor: exomonad_actor::LocalActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
@@ -477,6 +486,9 @@ impl HostActor for AcknowledgedSchemaRefusal {
             .unwrap()
             .replace((operation.clone(), output, claims))
             .is_none());
+        if self.close_timing == NativeCloseTiming::AfterAcknowledgement {
+            self.close_native_actor().await;
+        }
         Ok(())
     }
     async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
@@ -527,7 +539,16 @@ impl AcknowledgedSchemaRefusal {
 }
 
 #[tokio::test]
+async fn acknowledged_schema_refusal_then_closed_admission_cancels_successor_without_signal() {
+    schema_refusal_then_native_close(NativeCloseTiming::AfterAcknowledgement).await;
+}
+
+#[tokio::test]
 async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request() {
+    schema_refusal_then_native_close(NativeCloseTiming::DuringSuccessor).await;
+}
+
+async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
     // The schema decoder projects optional nulls; overlapping alternatives
     // must refuse this ambiguous input before native argument admission.
     let schema = harness::finalize::FunctionToolSchema::new(schema_refusal_parameters()).unwrap();
@@ -563,6 +584,7 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
     let round_control = Arc::new(EmbeddedRoundControl::default());
     let round = round_control.begin().unwrap();
     let host = Arc::new(AcknowledgedSchemaRefusal {
+        close_timing,
         inner: Arc::new(
             EmbeddedHostActor::new(
                 identity,
@@ -588,6 +610,7 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
     let engine = conversation
         .engine::<Offline, _>(
             SchemaRefusalTransport {
+                close_timing,
                 calls: calls.clone(),
                 successor,
             },
@@ -615,29 +638,35 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
             incoming,
         );
         tokio::pin!(run);
-        let successor = tokio::select! {
-            request = successors.recv() => request.unwrap(),
-            result = &mut run => panic!("Engine stopped before successor admission: {result:?}"),
+        let successor = match close_timing {
+            NativeCloseTiming::AfterAcknowledgement => None,
+            NativeCloseTiming::DuringSuccessor => {
+                let successor = tokio::select! {
+                    request = successors.recv() => request.unwrap(),
+                    result = &mut run => panic!("Engine stopped before successor admission: {result:?}"),
+                };
+                let (operation, _, _) = host.retained.lock().unwrap().clone().unwrap();
+                assert_ne!(successor, operation.request);
+                assert_eq!(
+                    store.request(&successor).unwrap().unwrap().parent,
+                    Some(operation.request.clone())
+                );
+                assert_eq!(
+                    store
+                        .embedded_round_frontier(host.identity())
+                        .unwrap()
+                        .pending_head,
+                    Some(successor.clone())
+                );
+                assert!(store.latest_tool_surface(&successor).unwrap().is_some());
+                assert!(!*cancellation.borrow());
+                host.close_native_actor().await;
+                // Production's embedded driver forwards actor lifetime stop to this
+                // exact round; native closure alone is not an Engine cancellation signal.
+                round.cancel();
+                Some(successor)
+            }
         };
-        let (operation, _, _) = host.retained.lock().unwrap().clone().unwrap();
-        assert_ne!(successor, operation.request);
-        assert_eq!(
-            store.request(&successor).unwrap().unwrap().parent,
-            Some(operation.request.clone())
-        );
-        assert_eq!(
-            store
-                .embedded_round_frontier(host.identity())
-                .unwrap()
-                .pending_head,
-            Some(successor.clone())
-        );
-        assert!(store.latest_tool_surface(&successor).unwrap().is_some());
-        assert!(!*cancellation.borrow());
-        host.close_native_actor().await;
-        // Production's embedded driver forwards actor lifetime stop to this
-        // exact round; native closure alone is not an Engine cancellation signal.
-        round.cancel();
         let result = run.await;
         (successor, result)
     })
@@ -650,9 +679,17 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
         }) => head,
         result => panic!("expected typed successor cancellation, got {result:?}"),
     };
-    assert_eq!(head, successor);
-    assert!(*cancellation.borrow());
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    match successor {
+        Some(successor) => {
+            assert_eq!(head, successor);
+            assert!(*cancellation.borrow());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        }
+        None => {
+            assert!(!*cancellation.borrow());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
     let (operation, output, claims) = host.retained.lock().unwrap().clone().unwrap();
     assert_eq!(
         store.request(&head).unwrap().unwrap().parent,
@@ -679,7 +716,11 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
     ));
     assert!(matches!(
         host.inner.tool_surface(),
-        Err(harness::embedding::EmbeddedError::Host(_))
+        Err(harness::embedding::EmbeddedError::AdmissionClosed)
+    ));
+    assert!(matches!(
+        host.inner.admit(),
+        Err(harness::embedding::EmbeddedError::AdmissionClosed)
     ));
     // Engine reports the exact settled frontier; the outer driver owns its CAS.
     assert_eq!(store.embedded_agent_head(host.identity()).unwrap(), None);

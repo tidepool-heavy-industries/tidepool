@@ -10,7 +10,7 @@ use parking_lot::Mutex as ParkingMutex;
 
 use exomonad_actor::{
     ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, HostedCheckpointAttachment,
-    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef,
+    HostedCheckpointCapture, HostedCheckpointCaptureError, KernelCallFailure, LocalActorRef,
     LocalResidentInstallation, ResidentToolError, WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
@@ -47,6 +47,13 @@ struct StoreAdmission {
     _lease: ActorAdmissionLease,
 }
 impl AdmissionGuard for StoreAdmission {}
+
+fn embedded_admission_error(error: KernelCallFailure) -> EmbeddedError {
+    match error {
+        KernelCallFailure::MailboxClosed(_) => EmbeddedError::AdmissionClosed,
+        error => EmbeddedError::Host(error.to_string()),
+    }
+}
 
 /// One harness owner for the existing run directory. The default
 /// Codex launch never opens this Store; the embedding owner calls `open` when
@@ -653,7 +660,7 @@ impl HostActor for EmbeddedHostActor {
         self.actor
             .admit_transaction()
             .map(|lease| Box::new(StoreAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
-            .map_err(|error| EmbeddedError::Host(error.to_string()))
+            .map_err(embedded_admission_error)
     }
 
     fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
@@ -662,7 +669,7 @@ impl HostActor for EmbeddedHostActor {
         let _admission = self
             .actor
             .admit_transaction()
-            .map_err(|error| EmbeddedError::Host(error.to_string()))?;
+            .map_err(embedded_admission_error)?;
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -1322,6 +1329,32 @@ mod cancellation_receipt_tests;
 #[cfg(test)]
 mod round_control_tests {
     use super::*;
+
+    #[test]
+    fn admission_mapping_preserves_temporary_and_generic_refusals() {
+        let actor = ActorRef {
+            id: exomonad_actor::ActorId(7),
+            incarnation: exomonad_actor::Incarnation(2),
+        };
+        assert!(matches!(
+            embedded_admission_error(KernelCallFailure::MailboxClosed(actor)),
+            EmbeddedError::AdmissionClosed
+        ));
+        for error in [
+            KernelCallFailure::RetirementPending(actor),
+            KernelCallFailure::TargetUnavailable(actor),
+            KernelCallFailure::Handler {
+                actor,
+                detail: "host request admission closed".into(),
+                diagnostic: None,
+            },
+        ] {
+            assert!(matches!(
+                embedded_admission_error(error),
+                EmbeddedError::Host(_)
+            ));
+        }
+    }
 
     fn readonly_snapshot() -> harness::context::ContextSnapshot {
         use harness::{
