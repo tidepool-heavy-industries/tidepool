@@ -1145,10 +1145,7 @@ mod tests {
         assert_eq!(waiting.requested_shutdown(), Some(terminal));
         assert!(target_changes.has_changed().unwrap());
         assert!(waiting_changes.has_changed().unwrap());
-        assert!(
-            control.request_cancellation(),
-            "ready wake never claimed execution"
-        );
+        assert!(control.claim_expiry(), "ready wake never claimed execution");
         assert!(target.get().is_none());
         assert!(waiting.get().is_none());
         assert!(target.cleanup().is_none());

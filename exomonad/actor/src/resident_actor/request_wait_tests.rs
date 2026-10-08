@@ -415,6 +415,103 @@ async fn prior_retirement_wins_when_watch_settlement_is_also_ready() {
 }
 
 #[tokio::test]
+async fn issued_sibling_retirement_beats_ready_watch_in_both_cleanup_orders() {
+    for target_first in [true, false] {
+        let fixture = crate::resident_actor::invocation_work::tests::Fixture::start().await;
+        let target = fixture.spawn_request_child().await;
+        let waiting = fixture.spawn_request_child().await;
+        let registry = &fixture.environment.requests;
+        let owner = waiting.identity();
+        let request = registry.reserve_labeled_with_reporting(
+            owner,
+            target.identity(),
+            "watched sibling".into(),
+            false,
+        );
+        registry
+            .mark_queued(owner, target.identity(), request)
+            .unwrap();
+        registry.present(target.identity(), request).unwrap();
+        let (watch, notices) = registry
+            .register_watch_labeled(owner, "sibling settlement".into(), vec![(request, true)])
+            .unwrap();
+        assert!(notices.is_empty());
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let mut wait = Box::pin(wait_watch_event(
+            registry,
+            owner,
+            watch,
+            &control,
+            waiting.terminal(),
+            &fixture.environment.fork_groups,
+            None,
+        ));
+        assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
+        let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "selected sibling retirement");
+        let selected = if target_first {
+            vec![target.clone(), waiting.clone()]
+        } else {
+            vec![waiting.clone(), target.clone()]
+        };
+        let batch = crate::kernel::RetirementBatch::issue(
+            selected
+                .into_iter()
+                .map(|child| (child, terminal.clone()))
+                .collect(),
+        );
+        assert_eq!(
+            target.terminal().requested_shutdown(),
+            Some(terminal.clone())
+        );
+        assert_eq!(
+            waiting.terminal().requested_shutdown(),
+            Some(terminal.clone())
+        );
+        assert!(target.terminal().get().is_none());
+        assert!(waiting.terminal().get().is_none());
+        assert!(target.terminal().cleanup().is_none());
+        assert!(waiting.terminal().cleanup().is_none());
+        let mut children = batch.into_actors().into_iter();
+        let (first, intent) = children.next().unwrap();
+        let shutdown =
+            tokio::time::timeout(Duration::from_secs(2), first.shutdown_with_cleanup(intent))
+                .await
+                .expect("responsive sibling must run its actual shutdown hook")
+                .unwrap();
+        assert!(shutdown.cleanup.is_confirmed());
+        assert_eq!(shutdown.terminal, terminal);
+        // The actual actor_stopped hook, rather than an injected reply or exit,
+        // made the parked watch ready before it is polled again.
+        assert!(matches!(
+            registry.observe_watch(owner, watch),
+            Ok(WatchObservation::Ready(_))
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .unwrap();
+        assert!(matches!(event, WatchWaitEvent::Retired(observed) if observed == terminal));
+        assert!(!control.cancellation_requested());
+        assert!(
+            control.claim_expiry(),
+            "retirement must not claim ready native work"
+        );
+        for (child, intent) in children {
+            let shutdown =
+                tokio::time::timeout(Duration::from_secs(2), child.shutdown_with_cleanup(intent))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(shutdown.cleanup.is_confirmed());
+            assert_eq!(shutdown.terminal, terminal);
+        }
+        assert!(target.terminal().cleanup().unwrap().is_confirmed());
+        assert!(waiting.terminal().cleanup().unwrap().is_confirmed());
+        fixture.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledging() {
     let fixture = Fixture::new();
     let retirement = RetainedActorExit::new();

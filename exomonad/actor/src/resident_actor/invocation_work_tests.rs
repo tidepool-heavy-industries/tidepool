@@ -325,6 +325,16 @@ impl Fixture {
         }
     }
 
+    pub(in crate::resident_actor) async fn spawn_request_child(&self) -> LocalActorRef {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let mut behavior = Owner::new(send);
+        behavior.requests = Some(self.environment.requests.clone());
+        let child = self.kernel.spawn_child(None, behavior).await.unwrap();
+        let context = receive.await.unwrap();
+        assert_eq!(context.identity(), child.identity());
+        child
+    }
+
     async fn cleanup(&self, work: &InvocationWork) {
         let cleanup = tokio::time::timeout(
             Duration::from_secs(1),

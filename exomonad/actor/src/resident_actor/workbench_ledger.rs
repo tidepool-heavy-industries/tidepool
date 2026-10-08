@@ -9,12 +9,24 @@ pub(super) async fn settle_provider_child(
             "provider child {child:?} lacks retained cleanup ownership"
         ))
     })?;
+    settle_provider_child_owner(child_owner, provider_child_terminal()).await
+}
+
+fn provider_child_terminal() -> ActorTerminal {
+    ActorTerminal {
+        kind: ActorExitKind::Cancelled,
+        summary: "enclosing provider boundary released incomplete child".into(),
+        diagnostic: None,
+    }
+}
+
+async fn settle_provider_child_owner(
+    child_owner: LocalActorRef,
+    terminal: ActorTerminal,
+) -> Result<(), KernelBehaviorError> {
+    let child = child_owner.identity();
     let shutdown = child_owner
-        .shutdown_with_cleanup(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "enclosing provider boundary released incomplete child".into(),
-            diagnostic: None,
-        })
+        .shutdown_with_cleanup(terminal)
         .await
         .map_err(KernelInvocationFailure::into_behavior_error)?;
     if !shutdown.cleanup.is_confirmed() {
@@ -31,8 +43,23 @@ pub(super) async fn settle_provider_children(
     boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
 ) -> Result<(), KernelBehaviorError> {
     let children = journal.lock().provider_children(boundary)?;
-    for child in children {
-        settle_provider_child(kernel, child).await?;
+    let owners = children
+        .into_iter()
+        .map(|child| {
+            kernel
+                .resolve(child)
+                .map(|owner| (owner, provider_child_terminal()))
+                .ok_or_else(|| {
+                    KernelBehaviorError::new(format!(
+                        "provider child {child:?} lacks retained cleanup ownership"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let batch = crate::kernel::RetirementBatch::issue(owners);
+    for (owner, terminal) in batch.into_actors() {
+        let child = owner.identity();
+        settle_provider_child_owner(owner, terminal).await?;
         journal.lock().provider_child_released(boundary, child)?;
     }
     Ok(())

@@ -349,6 +349,82 @@ impl InvocationWork {
             compilers: self.state.lock().compilers.clone(),
             ..InvocationCleanup::default()
         };
+        {
+            let mut state = self.state.lock();
+            let pending = std::mem::take(&mut state.pending_workers);
+            for actor in pending {
+                if let Some(child) = kernel.resolve(actor) {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.workers.push(child);
+                    }
+                } else {
+                    state.pending_workers.push(actor);
+                    cleanup.failures.push(format!(
+                        "worker {actor:?} admission cleanup remains unconfirmed"
+                    ));
+                }
+            }
+        }
+
+        for group in groups {
+            match environment.fork_groups.abort(group, self.owner) {
+                Ok(children) => self.retain_aborted_children(kernel, &children),
+                Err(
+                    crate::ForkGroupError::Unknown(_) | crate::ForkGroupError::AlreadyCommitted(_),
+                ) => {}
+                Err(error) => cleanup
+                    .failures
+                    .push(format!("fork group {} release: {error}", group.0)),
+            }
+        }
+        {
+            let mut state = self.state.lock();
+            for child in &state.workers {
+                if !workers
+                    .iter()
+                    .any(|worker| worker.identity() == child.identity())
+                {
+                    workers.push(child.clone());
+                }
+            }
+            let unresolved = std::mem::take(&mut state.unresolved_workers);
+            for actor in unresolved {
+                if let Some(child) = kernel.resolve(actor) {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.workers.push(child.clone());
+                    }
+                    if !workers.iter().any(|worker| worker.identity() == actor) {
+                        workers.push(child);
+                    }
+                } else {
+                    state.unresolved_workers.push(actor);
+                    cleanup.failures.push(format!("worker {actor:?} has no retained lifecycle owner; cleanup remains unconfirmed"));
+                }
+            }
+        }
+        let workers = crate::kernel::RetirementBatch::issue(
+            workers
+                .into_iter()
+                .map(|child| {
+                    (
+                        child,
+                        ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "owning tool invocation ended".into(),
+                            diagnostic: None,
+                        },
+                    )
+                })
+                .collect(),
+        );
         // Reserved identities never reached a target. Preserve the original
         // rollback fence, including internally detached branch reservations,
         // before target cancellation changes any request state.
@@ -397,27 +473,6 @@ impl InvocationWork {
                     .retain(|pending| pending != &notification);
             }
         }
-        {
-            let mut state = self.state.lock();
-            let pending = std::mem::take(&mut state.pending_workers);
-            for actor in pending {
-                if let Some(child) = kernel.resolve(actor) {
-                    if !state
-                        .workers
-                        .iter()
-                        .any(|worker| worker.identity() == actor)
-                    {
-                        state.workers.push(child);
-                    }
-                } else {
-                    state.pending_workers.push(actor);
-                    cleanup.failures.push(format!(
-                        "worker {actor:?} admission cleanup remains unconfirmed"
-                    ));
-                }
-            }
-        }
-
         let mut request_cancellations = Vec::new();
         for request in environment
             .requests
@@ -494,46 +549,6 @@ impl InvocationWork {
             cleanup.settlement_notifications_pending =
                 environment.requests.has_settlement_notifications();
         }
-        for group in groups {
-            match environment.fork_groups.abort(group, self.owner) {
-                Ok(children) => self.retain_aborted_children(kernel, &children),
-                Err(
-                    crate::ForkGroupError::Unknown(_) | crate::ForkGroupError::AlreadyCommitted(_),
-                ) => {}
-                Err(error) => cleanup
-                    .failures
-                    .push(format!("fork group {} release: {error}", group.0)),
-            }
-        }
-        {
-            let mut state = self.state.lock();
-            for child in &state.workers {
-                if !workers
-                    .iter()
-                    .any(|worker| worker.identity() == child.identity())
-                {
-                    workers.push(child.clone());
-                }
-            }
-            let unresolved = std::mem::take(&mut state.unresolved_workers);
-            for actor in unresolved {
-                if let Some(child) = kernel.resolve(actor) {
-                    if !state
-                        .workers
-                        .iter()
-                        .any(|worker| worker.identity() == actor)
-                    {
-                        state.workers.push(child.clone());
-                    }
-                    if !workers.iter().any(|worker| worker.identity() == actor) {
-                        workers.push(child);
-                    }
-                } else {
-                    state.unresolved_workers.push(actor);
-                    cleanup.failures.push(format!("worker {actor:?} has no retained lifecycle owner; cleanup remains unconfirmed"));
-                }
-            }
-        }
         let command_cleanup =
             futures_util::future::join_all(commands.into_iter().map(|job| async move {
                 let fallback_job = job.clone();
@@ -577,14 +592,9 @@ impl InvocationWork {
                         )),
                     })
             }));
-        let worker_cleanup =
-            futures_util::future::join_all(workers.into_iter().map(|child| async move {
+        let worker_cleanup = futures_util::future::join_all(workers.into_actors().into_iter().map(
+            |(child, terminal)| async move {
                 let actor = child.identity();
-                let terminal = ActorTerminal {
-                    kind: ActorExitKind::Cancelled,
-                    summary: "owning tool invocation ended".into(),
-                    diagnostic: None,
-                };
                 let (kernel, retained_terminal) = match tokio::time::timeout(
                     crate::local_actor::SHUTDOWN_BUDGET,
                     child.shutdown_with_cleanup(terminal),
@@ -634,7 +644,8 @@ impl InvocationWork {
                     kernel,
                     host,
                 }
-            }));
+            },
+        ));
         let (commands, workers) = tokio::join!(command_cleanup, worker_cleanup);
         cleanup.commands = commands;
         cleanup.workers = workers;

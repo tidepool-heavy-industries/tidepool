@@ -325,18 +325,25 @@ where
             } else {
                 Vec::new()
             };
-            for child in rejected_children {
-                if let Some(child) = kernel.resolve(child) {
-                    if let Err(error) = child
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "captured fork group admission rejected".into(),
-                            diagnostic: None,
-                        })
-                        .await
-                    {
-                        tracing::warn!(child = ?child.identity(), %error, "captured fork child cleanup retained");
-                    }
+            let rejected_children = rejected_children
+                .into_iter()
+                .filter_map(|child| {
+                    kernel.resolve(child).map(|child| {
+                        (
+                            child,
+                            ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: "captured fork group admission rejected".into(),
+                                diagnostic: None,
+                            },
+                        )
+                    })
+                })
+                .collect();
+            let rejected_children = crate::kernel::RetirementBatch::issue(rejected_children);
+            for (child, terminal) in rejected_children.into_actors() {
+                if let Err(error) = child.shutdown(terminal).await {
+                    tracing::warn!(child = ?child.identity(), %error, "captured fork child cleanup retained");
                 }
             }
             match outcome {
