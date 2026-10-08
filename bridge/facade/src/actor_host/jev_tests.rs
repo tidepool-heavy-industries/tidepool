@@ -539,7 +539,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = Arc::clone(campaign.root_installation.policy);
+    let policy = Arc::clone(&campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let command = format!(
         "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic; # {}COMMAND-TAIL",
@@ -665,7 +665,7 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = Arc::clone(campaign.root_installation.policy);
+    let policy = Arc::clone(&campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -731,7 +731,7 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = Arc::clone(campaign.root_installation.policy);
+    let policy = Arc::clone(&campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -857,7 +857,7 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = Arc::clone(campaign.root_installation.policy);
+    let policy = Arc::clone(&campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -931,7 +931,7 @@ async fn template_bash_accepts_undersized_max_output_bytes() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = Arc::clone(campaign.root_installation.policy);
+    let policy = Arc::clone(&campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(

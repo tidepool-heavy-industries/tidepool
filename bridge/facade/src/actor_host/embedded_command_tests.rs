@@ -648,9 +648,9 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         let actor = request.owner;
         supply_resident_command_backend(
             request,
-            campaign.config,
-            campaign.authority,
-            campaign.worktrees,
+            &campaign.config,
+            &campaign.authority,
+            &campaign.worktrees,
             actor,
             Some(resources.clone()),
         );

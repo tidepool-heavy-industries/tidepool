@@ -3531,7 +3531,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
         )
         .await;
     let run = super::runtime_namespace(campaign.session_root.path());
-    super::display_output::publish(campaign.forest, &store, &run, None, None, &initial);
+    super::display_output::publish(&campaign.forest, &store, &run, None, None, &initial);
     let display = serde_json::to_value(&initial.page).unwrap();
     let identity = explicit_display_identity(&display);
     let origin = harness::store::actor_output::ActorOutputOrigin {
@@ -3694,7 +3694,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     assert!(Arc::ptr_eq(&resubmitted, &pending));
     assert_eq!(resubmitted.page_ordinal, 2);
     assert_eq!(resubmitted.host_context(), Some(&frozen_context));
-    super::display_output::publish(campaign.forest, &store, &run, None, None, &resubmitted);
+    super::display_output::publish(&campaign.forest, &store, &run, None, None, &resubmitted);
     let expanded = tokio::time::timeout(Duration::from_secs(30), retried)
         .await
         .unwrap()

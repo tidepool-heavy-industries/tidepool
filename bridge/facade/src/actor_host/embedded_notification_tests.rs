@@ -117,7 +117,7 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
                         campaign.actor.clone(),
                         Arc::new(
                             embedded_policy::EmbeddedPolicyInstallation::from_installation(
-                                campaign.root_installation,
+                                &campaign.root_installation,
                             ),
                         ),
                         None,

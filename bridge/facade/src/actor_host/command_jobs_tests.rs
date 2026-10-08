@@ -1045,15 +1045,15 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         assert_eq!(directories, expected);
     }
     let root_checkout = resident_command_roots(
-        campaign.authority,
-        campaign.worktrees,
+        &campaign.authority,
+        &campaign.worktrees,
         campaign._repository.path(),
         campaign.actor.identity(),
     )
     .unwrap();
     let child_checkout = resident_command_roots(
-        campaign.authority,
-        campaign.worktrees,
+        &campaign.authority,
+        &campaign.worktrees,
         campaign._repository.path(),
         child.actor.identity(),
     )

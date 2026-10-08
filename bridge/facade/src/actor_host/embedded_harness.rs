@@ -2176,7 +2176,7 @@ mod tests {
                 Box::pin(async move {
                     let actor = campaign.actor.identity();
                     let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
-                        campaign.root_installation,
+                        &campaign.root_installation,
                     ));
                     let identity = HostIdentity {
                         run: super::super::runtime_namespace(campaign.session_root.path()),

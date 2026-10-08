@@ -599,8 +599,9 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
 
                 assert!(probe(policy).await.contains("one"));
 
-                let source_layer =
-                    crate::exomonad::source::SourceLayer::new(campaign.config.run_directory.path());
+                let source_layer = crate::exomonad::source::SourceLayer::new(
+                    &campaign.config.run_directory.path(),
+                );
                 let before_source = source_layer.read_active().unwrap();
 
                 std::fs::write(
@@ -648,8 +649,9 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
 
                 assert!(probe(policy).await.contains("one"));
 
-                let source_layer =
-                    crate::exomonad::source::SourceLayer::new(campaign.config.run_directory.path());
+                let source_layer = crate::exomonad::source::SourceLayer::new(
+                    &campaign.config.run_directory.path(),
+                );
                 let before_source = source_layer.read_active().unwrap();
 
                 let broken = tools_module(DESCRIPTION, "one")
@@ -692,8 +694,9 @@ async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.as_ref();
-                let source_layer =
-                    crate::exomonad::source::SourceLayer::new(campaign.config.run_directory.path());
+                let source_layer = crate::exomonad::source::SourceLayer::new(
+                    &campaign.config.run_directory.path(),
+                );
                 let before_source = source_layer.read_active().unwrap();
                 let broken = tools_module(DESCRIPTION, "two").replace(
                     "agentSpec = defaultSpec { specTools = tools }",

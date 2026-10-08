@@ -1258,7 +1258,6 @@ pub(super) fn hosted_test_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exomonad_actor::command_jobs::CommandBackend;
     use std::future::Future;
 
     #[test]

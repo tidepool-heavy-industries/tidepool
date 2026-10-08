@@ -303,7 +303,7 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
     )
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = Arc::clone(campaign.root_installation.policy);
+    let policy = Arc::clone(&campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(

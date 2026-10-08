@@ -79,7 +79,7 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 };
                 let store = Arc::new(Store::memory().unwrap());
                 let installation =
-                    EmbeddedPolicyInstallation::from_installation(campaign.root_installation);
+                    EmbeddedPolicyInstallation::from_installation(&campaign.root_installation);
                 let dispatcher = Arc::new(EmbeddedDispatcher {
                     identity: identity.clone(),
                     issuer: campaign.actor.identity(),
