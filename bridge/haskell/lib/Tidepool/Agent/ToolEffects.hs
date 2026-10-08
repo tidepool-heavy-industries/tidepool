@@ -85,6 +85,8 @@ actorEffectName key = case key of
   EffectSleep -> "Sleep"
   EffectCommands -> "Commands"
   EffectConsole -> "Console"
+  EffectAskUser -> "AskUser"
+  EffectGreen -> "Green"
   EffectNotifications -> "Notifications"
   EffectJev -> "Jev"
   EffectModelCall -> "ModelCall"
