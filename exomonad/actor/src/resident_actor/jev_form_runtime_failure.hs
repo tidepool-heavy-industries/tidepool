@@ -1,5 +1,6 @@
 _ <- do
-  let action marker = F.note marker
+  let action :: Text -> Eff '[Console, AskUser, Jev] ()
+      action marker = F.note marker
       packet = #route J.:= J.choice "Which path?"
         (J.alt #quick "Quick path" (action "unselected-quick") J..| J.alt #careful "Careful path" (action "unselected-careful"))
   prepared <- case J.prepare J.jevLatest (J.rawState (object [])) packet of
