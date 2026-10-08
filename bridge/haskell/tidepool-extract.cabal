@@ -756,7 +756,7 @@ test-suite model-turn-test
   hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
   other-modules:
     JevPreparedTest
-    JevPreparedWorkflow
+    Examples.JevPreparedWorkflow
     Examples.JevFormWorkflow
     FormJevDialogueTest
     Jev.Core
