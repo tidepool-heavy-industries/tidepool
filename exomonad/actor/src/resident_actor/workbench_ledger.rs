@@ -716,9 +716,18 @@ mod tests {
         fn child_exited(&mut self, _: crate::ChildExitNotice) {}
     }
 
-    #[tokio::test]
-    async fn invocation_worker_cleanup_controls_original_provider_acknowledgement() {
-        for fail_cleanup in [false, true] {
+    struct ProviderCleanupFixture {
+        native: super::super::invocation_work::tests::Fixture,
+        behavior: ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        control: Arc<crate::WorkbenchExecutionControl>,
+        execution: WorkbenchExecutionId,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+        request: WorkbenchRequest,
+        work: Arc<InvocationWork>,
+    }
+
+    impl ProviderCleanupFixture {
+        async fn start() -> Self {
             let fixture = super::super::invocation_work::tests::Fixture::start().await;
             let actor = fixture.actor.identity();
             let descriptor = ActorDescriptor::new(
@@ -729,7 +738,7 @@ mod tests {
                     lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
                 },
             );
-            let mut behavior = ResidentKernelBehavior::with_boot(
+            let behavior = ResidentKernelBehavior::with_boot(
                 descriptor,
                 fixture.environment.clone(),
                 ResidentBoot::Workbench,
@@ -763,12 +772,62 @@ mod tests {
                 journal.bind_provider_finalization(&execution, Some(key), Some(&control));
                 journal.retain_invocation_work(work.clone(), Some(&execution), Some(key));
             }
+            Self {
+                native: fixture,
+                behavior,
+                control,
+                execution,
+                boundary,
+                request,
+                work,
+            }
+        }
+
+        fn seal_cell(&self, clean_cell: bool) {
+            let reply = WorkbenchResponse {
+                status: WorkbenchRunStatus::Completed,
+                summary: None,
+                items: Vec::new(),
+                next_index: 0,
+                total: 0,
+                publication: None,
+            };
+            let exit = self.control.finish_cell(
+                self.execution.clone(),
+                &Ok(KernelStep::Continue(reply.clone())),
+                clean_cell,
+            );
+            self.control.settle(Ok(reply.clone()));
+            self.native.actor.hosted_cell().complete(&self.control);
+            let mut journal = self.behavior.workbench_executions.lock();
+            journal.record(
+                self.execution.clone(),
+                self.request.clone(),
+                Ok(reply.clone()),
+                self.control
+                    .cancellation_outcome(self.execution.clone(), Ok(reply)),
+                self.control.invocation.as_ref(),
+            );
+            journal.retain_cell_terminal(&self.execution, self.control.invocation.as_ref(), exit);
+        }
+    }
+
+    #[tokio::test]
+    async fn invocation_worker_cleanup_controls_original_provider_acknowledgement() {
+        // Separate cell eligibility from worker cleanup. In particular, a
+        // sealed successful cell cannot excuse failed resource cleanup.
+        for (clean_cell, fail_cleanup) in [(true, false), (true, true), (false, true)] {
+            let mut fixture = ProviderCleanupFixture::start().await;
+            let work = fixture.work.clone();
+            let boundary = fixture.boundary.clone();
+            let publications = fixture.native.actor.hosted_cell().clone();
             // Admit both workers through the same startup owner used by Green
             // and scoped actor calls, including a nested invocation scope.
             let scope = work.new_scope().unwrap();
             let mut children = Vec::new();
             for failed in [false, fail_cleanup] {
                 let child = fixture
+                    .native
                     .kernel
                     .spawn_worker_scoped(
                         None,
@@ -784,32 +843,15 @@ mod tests {
                 assert!(scope.owns_worker(child.identity()));
                 children.push(child);
             }
-            let reply = WorkbenchResponse {
-                status: WorkbenchRunStatus::Completed,
-                summary: None,
-                items: Vec::new(),
-                next_index: 0,
-                total: 0,
-                publication: None,
-            };
-            let exit = control.finish_cell(
-                execution.clone(),
-                &Ok(KernelStep::Continue(reply.clone())),
-                !fail_cleanup,
+            fixture.seal_cell(clean_cell);
+            assert_eq!(
+                fixture
+                    .behavior
+                    .workbench_executions
+                    .lock()
+                    .cell_allows_publication(&boundary),
+                clean_cell
             );
-            control.settle(Ok(reply.clone()));
-            publications.complete(&control);
-            {
-                let mut journal = behavior.workbench_executions.lock();
-                journal.record(
-                    execution.clone(),
-                    request,
-                    Ok(reply.clone()),
-                    control.cancellation_outcome(execution.clone(), Ok(reply)),
-                    Some(key),
-                );
-                journal.retain_cell_terminal(&execution, Some(key), exit);
-            }
             let owner = publications.retained_boundary(&boundary).unwrap();
             assert!(matches!(
                 owner.finalization(),
@@ -820,7 +862,9 @@ mod tests {
             // its abort path, which still must clean the retained scope tree.
             let result = tokio::time::timeout(
                 Duration::from_secs(1),
-                behavior.tool_completed(&fixture.kernel, boundary.clone()),
+                fixture
+                    .behavior
+                    .tool_completed(&fixture.native.kernel, boundary.clone()),
             )
             .await
             .unwrap();
@@ -846,25 +890,35 @@ mod tests {
                     "uncertainty retains native custody"
                 );
                 assert_eq!(
-                    behavior
+                    fixture
+                        .behavior
                         .workbench_executions
                         .lock()
                         .pending_provider_boundaries(),
                     vec![boundary.clone()]
                 );
-                assert!(fixture.kernel.forget_terminal_actor(children[1].identity()));
-                assert!(fixture.kernel.resolve(children[1].identity()).is_none());
+                assert!(fixture
+                    .native
+                    .kernel
+                    .forget_terminal_actor(children[1].identity()));
+                assert!(fixture
+                    .native
+                    .kernel
+                    .resolve(children[1].identity())
+                    .is_none());
                 // The scope's retained LocalActorRef, not a fresh directory
                 // lookup, carries the same failed cleanup across retries.
-                assert!(behavior
-                    .tool_aborted(&fixture.kernel, boundary.clone())
+                assert!(fixture
+                    .behavior
+                    .tool_aborted(&fixture.native.kernel, boundary.clone())
                     .await
                     .is_err());
                 assert!(owner.acknowledge().await.is_err());
                 assert!(scope.owns_worker(children[1].identity()));
                 // An erroneous success caller also cannot overwrite the
                 // finalizer's first retained cleanup refusal.
-                behavior
+                fixture
+                    .behavior
                     .workbench_executions
                     .lock()
                     .finalize_provider_boundary(
@@ -886,7 +940,8 @@ mod tests {
                     crate::ProviderFinalizationKind::Completed
                 );
                 assert!(owner.control().is_none());
-                assert!(behavior
+                assert!(fixture
+                    .behavior
                     .workbench_executions
                     .lock()
                     .pending_provider_boundaries()
@@ -897,11 +952,79 @@ mod tests {
                 "turn".into(),
                 "other".into(),
             );
-            assert!(behavior
-                .settle_provider_resources(&fixture.kernel, &other)
+            assert!(fixture
+                .behavior
+                .settle_provider_resources(&fixture.native.kernel, &other)
                 .await
                 .is_err());
-            fixture.finish().await;
+            fixture.native.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_finalizer_refuses_unobserved_or_uncertain_invocation_cleanup() {
+        for observe_cleanup in [false, true] {
+            let fixture = ProviderCleanupFixture::start().await;
+            let child = fixture
+                .native
+                .kernel
+                .spawn_worker_scoped(
+                    None,
+                    CleanupProbe {
+                        context: Arc::default(),
+                        fail_cleanup: true,
+                    },
+                    crate::WorkerLifetime::InvocationOwned,
+                    fixture.work.clone(),
+                )
+                .await
+                .unwrap();
+            if observe_cleanup {
+                let cleanup = fixture
+                    .work
+                    .cleanup(&fixture.native.environment, &fixture.native.kernel)
+                    .await;
+                assert!(cleanup.uncertainty().is_some());
+                assert!(!child.terminal().cleanup().unwrap().is_confirmed());
+            } else {
+                assert!(fixture.work.cleanup_observation().is_none());
+                assert!(child.terminal().cleanup().is_none());
+            }
+            fixture.seal_cell(true);
+            let owner = fixture
+                .native
+                .actor
+                .hosted_cell()
+                .retained_boundary(&fixture.boundary)
+                .unwrap();
+            assert!(matches!(
+                owner.finalization(),
+                crate::HostedOperationFinalization::Pending
+            ));
+            // This owner has never been finalized: its refusal discriminates
+            // the invocation-observation guard from first-result retention.
+            fixture
+                .behavior
+                .workbench_executions
+                .lock()
+                .finalize_provider_boundary(
+                    &fixture.boundary,
+                    Ok(crate::ProviderFinalizationKind::Completed),
+                );
+            assert_eq!(
+                owner.finalization(),
+                crate::HostedOperationFinalization::Settled(Err(
+                    "provider invocation cleanup remains unconfirmed".into()
+                ))
+            );
+            assert!(owner.acknowledge().await.is_err());
+            assert!(owner.control().is_some());
+            let cleanup = fixture
+                .work
+                .cleanup(&fixture.native.environment, &fixture.native.kernel)
+                .await;
+            assert!(cleanup.uncertainty().is_some());
+            fixture.native.finish().await;
         }
     }
 
