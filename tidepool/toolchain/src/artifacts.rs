@@ -1374,7 +1374,7 @@ impl ModuleCandidateOffer {
         match &self.checked {
             Some(NativeCheckedOffer::ActivationPreview(preview)) => {
                 let exact = self.exact.as_ref().expect("preview has exact offer");
-                exact.context.validate_artifacts(&exact.artifacts)?;
+                exact.context().validate_artifacts(&exact.artifacts)?;
                 preview.unavailable(root, &exact.request_sha256)
             }
             _ => {
@@ -1463,7 +1463,7 @@ impl ModuleCandidateOffer {
             root,
             &self.producer,
             exact.semantic_sha256,
-            exact.context.clone(),
+            exact.context().clone(),
             self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
@@ -1515,7 +1515,7 @@ impl ModuleCandidateOffer {
             specification,
             planned,
         )?;
-        let mut context = initial.context.clone();
+        let mut context = initial.context().clone();
         let mut program_request = initial.clone();
         // One host admission observes package bytes once across all original
         // outputs. The next admission starts a fresh filesystem observation.
@@ -1712,7 +1712,7 @@ impl ModuleCandidateOffer {
             root,
             &self.producer,
             initial.semantic_sha256,
-            initial.context.clone(),
+            initial.context().clone(),
             self.checked_projections.clone(),
             &initial.request_sha256,
             specification,
@@ -2060,7 +2060,7 @@ impl ModuleCandidateOffer {
         if string(&fields[5])? != digest || original.interface_bytes() != iface {
             return Err(fail());
         }
-        let baseline = &exact.context;
+        let baseline = exact.context();
         let empty = baseline.recovery_products().is_empty()
             && baseline.joined_interfaces().is_empty()
             && baseline.lexical_graph().is_empty()
@@ -2726,8 +2726,7 @@ fn seal_turn_outputs_with_validation(
     let compiler_inputs = offer
         .exact
         .as_ref()
-        .map(|request| request.compiler_inputs())
-        .transpose()?;
+        .map(|request| request.compiler_inputs());
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -2890,7 +2889,7 @@ fn seal_turn_outputs_with_validation(
         && offer
             .exact
             .as_ref()
-            .is_none_or(|exact| empty_exact_context(&exact.context))
+            .is_none_or(|exact| empty_exact_context(exact.context()))
     {
         let publication_products = match owned_fresh_products {
             Some(products) => products,
@@ -2982,7 +2981,7 @@ fn checked_output_context(
     let support = program_support_artifacts(artifacts, &generated)?;
     let mut request = exact.clone();
     let context = request.admit_program_support_with_selection(
-        exact.context.clone(),
+        exact.context().clone(),
         &support,
         std::slice::from_ref(source_admission),
         produced_types,
@@ -3823,7 +3822,7 @@ fn compile_invocation_inner(
         let actual =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
                 .sha256();
-        if actual != request.context.toolchain_identity_sha256() {
+        if actual != request.context().toolchain_identity_sha256() {
             return Err(CompileError::ExtractFailed(
                 "exact compile rebound to a different producer".into(),
             ));
@@ -4156,8 +4155,7 @@ fn compile_invocation_inner(
         }
         let compiler_inputs = exact_request
             .as_ref()
-            .map(|request| request.compiler_inputs())
-            .transpose()?;
+            .map(|request| request.compiler_inputs());
         artifacts.artifact_view =
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(

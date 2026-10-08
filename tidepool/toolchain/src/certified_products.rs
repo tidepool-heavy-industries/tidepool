@@ -5665,10 +5665,7 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let compiler_inputs = exact
-        .map(|admission| admission.request.compiler_inputs())
-        .transpose()
-        .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
+    let compiler_inputs = exact.map(|admission| admission.request.compiler_inputs());
     let projected_metadata = compiler_inputs.as_ref().map(|inputs| &inputs.metadata);
     let inherited_module_interfaces =
         projected_metadata
@@ -5745,7 +5742,7 @@ pub(crate) fn certify_products_with_validation(
         validate_exact_cached_closure_with_validation(
             candidates,
             receipt,
-            &admission.request.context,
+            admission.request.context(),
             projected_metadata
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?,
             final_evidence,
@@ -12052,7 +12049,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(request.compiler_original_products().unwrap().is_empty());
             assert_eq!(
-                request.context.recovery_products().len(),
+                request.context().recovery_products().len(),
                 expected_owners.len()
             );
             let mut worker = current_evidence.clone();
@@ -12491,12 +12488,11 @@ pub(crate) mod tests {
             assert!(request.groups.is_empty());
             assert!(request
                 .compiler_inputs()
-                .unwrap()
                 .metadata
                 .selected_native_groups
                 .is_empty());
             assert!(request.compiler_original_products().unwrap().is_empty());
-            let effective = request.compiler_inputs().unwrap();
+            let effective = request.compiler_inputs();
             assert_eq!(
                 effective
                     .metadata
@@ -12810,7 +12806,7 @@ pub(crate) mod tests {
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
                 let inventory = ArtifactInventory::default();
-                let mut private_entries = request.compiler_inputs().unwrap().artifacts.entries();
+                let mut private_entries = request.compiler_inputs().artifacts.entries();
                 private_entries.extend(context.artifact_view().entries());
                 let private_view = inventory
                     .admit_recovery_selection(
@@ -12836,7 +12832,6 @@ pub(crate) mod tests {
                 assert!(cached_request.groups.is_empty());
                 assert!(cached_request
                     .compiler_inputs()
-                    .unwrap()
                     .metadata
                     .selected_native_groups
                     .is_empty());
@@ -13054,7 +13049,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(effective.artifacts.len(), 1);
         effective
-            .context
+            .context()
             .validate_artifacts(&effective.artifacts)
             .unwrap();
         std::fs::create_dir(directory.path().join("wrong-producer")).unwrap();
