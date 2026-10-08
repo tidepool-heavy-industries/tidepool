@@ -48,6 +48,16 @@ check that the new safeguard detects or prevents the original failure.
 A mock supplied with the correct answer cannot establish that production
 constructs it correctly.
 
+Use a bug or code smell to expand property coverage beyond the failing line.
+Inspect the surrounding component and its immediate conceptual neighbors: the
+producer and consumer of the same fact, alternate operations over the same state,
+and analogous mechanisms elsewhere. Ask both why the defect occurred and why
+existing generators or observations missed it. Add or strengthen meaningful
+properties at those boundaries; where a property has no useful independent
+oracle, retain the reason and a stronger applicable check. Follow the bounded
+[expansion method](property-testing.md#expand-from-a-finding), rather than opening
+an unrelated repository-wide audit for every finding.
+
 Put the durable lesson where it changes future work: an invariant in the owner,
 a regression or generator in the test suite, automation in the existing tool,
 or a concise decision rule in the nearest guide. Link retained evidence from

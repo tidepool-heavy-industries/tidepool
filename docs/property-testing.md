@@ -45,6 +45,38 @@ prove concurrent linearizability; a concurrency claim also needs histories,
 ordering observations and schedules that can expose its violation. A single
 fixed defect may be adequately covered by a deterministic regression.
 
+## Expand from a finding
+
+A bug, failed invariant, or suspiciously awkward implementation is a signal to
+review and strengthen property coverage in its vicinity. A code smell supplies
+a hypothesis; establish the contract before calling it a defect. Start with the
+owning component and expand one hop through conceptual relationships, not just
+neighboring files:
+
+- Producers, consumers, and alternate APIs carrying the same fact or authority.
+- Other mutations, reads, rejection paths, and recovery operations over the same
+  state, including caches and secondary indexes.
+- Analogous mechanisms sharing an invariant or failure mode, such as two caches
+  with invalidation responsibilities or two resource owners with release rules.
+
+For each neighbor, state the relationship, the property that could expose this
+failure family, and what the existing generator and oracle actually reach and
+observe. Add or extend maintained Rust proptest or Haskell QuickCheck suites at
+the relevant component or cluster boundary. Generate interacting histories and
+nearby valid and invalid cases, preserve shrinking, and check sensitivity to the
+original defect or a plausible isolated mutation. Do not copy the production
+algorithm into the oracle or treat more cases as a substitute for missing
+operations. Retain a deterministic regression for a confirmed bug.
+
+If an independent property would be misleading or less useful than a typed
+compile check, deterministic fault injection, or real integration scenario,
+record that reason and use the stronger check. Track uncovered neighbors and
+their owners rather than implying complete coverage. Expand farther when a
+neighbor reveals another concrete mechanism or defect; this is a bounded search
+following evidence, not an automatic new repository-wide audit. Merge useful
+properties into their owning suites alongside fixes, and report source-only
+coverage separately from executed campaigns.
+
 ## Choose an independent oracle
 
 Start from the observable contract. Model an incremental index with a list and

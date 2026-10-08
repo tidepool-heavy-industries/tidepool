@@ -119,6 +119,12 @@ procedure and unresolved uncertainty. Follow [property testing](docs/property-te
 [compiler profiling](docs/compiler-profiling.md), or [workflow audits](docs/rsi-loop.md)
 for the evidence needed by that method.
 
+Treat bugs and suspiciously awkward code as signals to strengthen property
+coverage around the mechanism and its immediate conceptual neighbors, including
+related producers, consumers and implementations of the same invariant. Follow
+[property testing](docs/property-testing.md#expand-from-a-finding) for the bounded
+search and evidence; a code smell is a lead, not a confirmed defect.
+
 Learn from each mistake, including mistakes in tests, tooling and our own
 reasoning. Ask both why it happened and why the existing checks missed it;
 repair the mechanism and the detection gap. Prefer an enforced invariant or
