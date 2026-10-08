@@ -26,11 +26,17 @@ impl Catalog {
                             unit: format!("unit{}", target % 2),
                             module: format!("Read{target}"),
                         };
-                        ((owner.unit, owner.module.clone()), digest(owner.module.as_bytes()))
+                        (
+                            (owner.unit, owner.module.clone()),
+                            digest(owner.module.as_bytes()),
+                        )
                     })
                     .collect();
                 ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
-                    [seed; 32], &unit, &module, requirements,
+                    [seed; 32],
+                    &unit,
+                    &module,
+                    requirements,
                 ))
             })
             .collect::<Vec<_>>();
@@ -44,9 +50,7 @@ impl Catalog {
             ArtifactEntry::original(
                 [2; 32],
                 crate::certified_products::fixture_finalized_product_with_requirements(
-                    product,
-                    [2; 32],
-                    None,
+                    product, [2; 32], None,
                 ),
             )
             .expect("native fixture is finalized"),
@@ -194,8 +198,7 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
     for entry in &expected.entries {
         if !entry.is_native() {
             expected_interfaces.insert(entry.descriptor.owner.clone(), Arc::clone(entry));
-            expected_metadata_entries
-                .insert(entry.descriptor.owner.clone(), Arc::clone(entry));
+            expected_metadata_entries.insert(entry.descriptor.owner.clone(), Arc::clone(entry));
         } else {
             expected_natives
                 .entry(entry.descriptor.owner.clone())
@@ -204,7 +207,11 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         }
     }
     for (owner, native_entries) in expected_natives {
-        prop_assert_eq!(native_entries.len(), 1, "fixture keeps native owners unique");
+        prop_assert_eq!(
+            native_entries.len(),
+            1,
+            "fixture keeps native owners unique"
+        );
         expected_metadata_entries.insert(owner, Arc::clone(&native_entries[0]));
     }
     let mut expected_owners = expected_interfaces
@@ -226,16 +233,25 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         .into_iter()
         .map(|entry| entry.descriptor.id)
         .collect::<BTreeSet<_>>();
-    prop_assert_eq!(view.artifact_ids().into_iter().collect::<BTreeSet<_>>(), expected_id_set.clone());
+    prop_assert_eq!(
+        view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+        expected_id_set.clone()
+    );
     prop_assert_eq!(descriptors, expected_descriptors);
     prop_assert_eq!(root_ids, expected_roots);
     prop_assert_eq!(view.dependencies(), expected.dependencies);
     prop_assert_eq!(view.selected_native_groups(), expected_groups);
     prop_assert_eq!(view.interface_owners(), expected_owners);
-    prop_assert_eq!(metadata.dependencies(), exhaustive_oracle(view).dependencies);
+    prop_assert_eq!(
+        metadata.dependencies(),
+        exhaustive_oracle(view).dependencies
+    );
     prop_assert_eq!(metadata.selected_native_groups, expected_groups);
     prop_assert!(metadata.ambiguous_native_owners.is_empty());
-    prop_assert_eq!(metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(), expected_id_set);
+    prop_assert_eq!(
+        metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
+        expected_id_set
+    );
     prop_assert_eq!(metadata.entries, expected_metadata_entries);
     prop_assert!(root_ids.len() <= expected.closure.len());
     Ok(())
@@ -459,8 +475,14 @@ fn first_read_and_inventory_extension_settle_without_lock_recursion() {
     gate.wait();
     let first = receive.recv_timeout(Duration::from_secs(5));
     let second = receive.recv_timeout(Duration::from_secs(5));
-    assert!(first.is_ok() && second.is_ok(), "first read and admission must settle");
-    assert_eq!(BTreeSet::from([first.unwrap(), second.unwrap()]), BTreeSet::from(["read", "admit"]));
+    assert!(
+        first.is_ok() && second.is_ok(),
+        "first read and admission must settle"
+    );
+    assert_eq!(
+        BTreeSet::from([first.unwrap(), second.unwrap()]),
+        BTreeSet::from(["read", "admit"])
+    );
     reader.join().unwrap();
     admission.join().unwrap();
     check_read_projection(&view).unwrap();

@@ -1526,15 +1526,25 @@ fn projected_dependencies(
     state: &InventoryState,
     nodes: &BTreeSet<InventoryNodeKey>,
 ) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
-    nodes.iter().flat_map(|key| {
+    let mut dependencies = BTreeSet::new();
+    for key in nodes {
         #[cfg(test)]
-        state.dependency_graph_visits.fetch_add(1, Ordering::Relaxed);
-        state.graph.edges(state.indices[key]).filter_map(move |edge| {
-        let target = state.graph[edge.target()];
-        // The internal group-to-carrier custody edge has no public dependency row.
-        if matches!(key, InventoryNodeKey::Group(group) if target == InventoryNodeKey::Artifact(group.artifact)) && matches!(edge.weight(), ArtifactDependency::Interface) { None }
-        else { Some((key.artifact(), target.artifact(), edge.weight().clone())) }
-    })}).collect::<BTreeSet<_>>().into_iter().collect()
+        state
+            .dependency_graph_visits
+            .fetch_add(1, Ordering::Relaxed);
+        for edge in state.graph.edges(state.indices[key]) {
+            let target = state.graph[edge.target()];
+            // The group-to-carrier custody edge has no public dependency row.
+            if matches!(key, InventoryNodeKey::Group(group)
+                if target == InventoryNodeKey::Artifact(group.artifact))
+                && matches!(edge.weight(), ArtifactDependency::Interface)
+            {
+                continue;
+            }
+            dependencies.insert((key.artifact(), target.artifact(), edge.weight().clone()));
+        }
+    }
+    dependencies.into_iter().collect()
 }
 /// Cloning a view retains its roots without copying the graph or artifact bytes.
 #[derive(Clone)]
@@ -1596,7 +1606,7 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
-    // All projection initializers receive an already locked inventory. Nothing
+    // Closure and dependency initializers receive an already locked inventory. Nothing
     // initialized under either OnceLock acquires that mutex, so concurrent first
     // reads and admission always take inventory -> projection in that order.
     fn read_projection(&self, state: &InventoryState) -> &ViewReadProjection {
@@ -2201,6 +2211,9 @@ mod native_history_properties;
 
 #[cfg(test)]
 mod compiler_projection_properties;
+
+#[cfg(test)]
+mod view_read_properties;
 
 #[cfg(test)]
 mod tests {
