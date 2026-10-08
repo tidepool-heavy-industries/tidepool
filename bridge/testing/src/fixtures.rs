@@ -51,7 +51,13 @@ mod tests {
     #[test]
     fn fixture_names_cannot_select_outside_the_declared_root() {
         let root = tempfile::tempdir().unwrap();
-        for name in ["", "/Fixture.hs", "../Fixture.hs", "nested/../Fixture.hs", "."] {
+        for name in [
+            "",
+            "/Fixture.hs",
+            "../Fixture.hs",
+            "nested/../Fixture.hs",
+            ".",
+        ] {
             assert!(std::panic::catch_unwind(|| read_fixture(root.path(), name)).is_err());
         }
     }
