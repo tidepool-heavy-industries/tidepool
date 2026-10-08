@@ -1512,6 +1512,9 @@ else:
         raise SystemExit("new runtime Haskell fixture inputs need complete native graph regeneration")
     # Preserve the global roster when regenerating one resource owner. Only the
     # complete source walk may replace the manifest and retire fixture exports.
+    # Transitional includes keep their compiler edge until that complete walk;
+    # they cannot silently enlarge the runtime tree beside a retained manifest.
+    HASKELL_TEST_FIXTURES.clear()
     for relative in manifest.get("files", []):
         register_test_fixture(ROOT / relative, EXTERNAL_SOURCE_LABELS)
     fixture_resource_outputs(complete=False)

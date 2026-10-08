@@ -309,6 +309,27 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 self.assertIn(expected, result.stderr)
                 self.assertEqual((self.root / "bridge/facade/BUCK").read_text(), "retained graph\n")
 
+    def test_partial_projection_keeps_manifest_and_tree_coherent_for_new_includes(self):
+        old = "bridge/facade/src/actor_host/old.hs"
+        new = "bridge/facade/src/actor_host/new.hs"
+        for path in (old, new):
+            self.write(path, "value = 1\n")
+        self.write("bridge/facade/src/actor_host/tests.rs",
+                   'const SOURCE: &str = include_str!("new.hs");')
+        manifest = json.dumps({"schema": 1, "kind": "haskell-test-fixtures", "files": [old]})
+        self.write("build/test-fixtures.json", manifest)
+        result = self.generate("--package", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tree = self.rule("bridge/testing", "haskell_test_fixtures", "filegroup")
+        self.assertEqual(set(tree["srcs"]), {old})
+        self.assertEqual((self.root / "build/test-fixtures.json").read_text(), manifest)
+        old_label = tree["srcs"][old].partition(":")[2]
+        self.assertEqual(self.rule("bridge/facade", old_label, "export_file")["src"],
+                         "src/actor_host/old.hs")
+        # The unmigrated source remains an ordinary compiler input until the
+        # complete projection can issue its matching runtime manifest entry.
+        self.assertIn("src/actor_host/new.hs", self.groups("bridge/facade")[1]["tidepool_unit_tests_sources"])
+
     def test_fixture_loader_cohort_has_no_compiler_or_browser_resources(self):
         self.write("bridge/testing/src/lib.rs", "pub fn fixtures() {}\n")
         result = self.generate("--package", "tidepool-testing")
