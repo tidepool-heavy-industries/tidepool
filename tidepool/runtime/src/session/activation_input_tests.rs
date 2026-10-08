@@ -1818,7 +1818,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     }
 
     // The fixture's shared action calls one OPAQUE home function. Its actual
-    // original wire supplies the site ID; the other action owns one local site.
+    // original wire supplies the site ID; the other action's input is Int.
     // Neither expected membership set uses the provenance admission algorithm.
     let shared_sites = outputs[1]
         .certification
@@ -1832,14 +1832,13 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .map(|site| site.site)
         .collect::<std::collections::BTreeSet<_>>();
     let local_sites = outputs[2]
-        .prepared
-        .sites()
+        .asks
         .iter()
-        .filter(|site| !site.inputs.is_empty())
+        .filter(|site| site.inputs.first().is_some_and(|input| input.ty == "Int"))
         .map(|site| site.site)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(shared_sites.len(), 1, "genuine imported native site");
-    assert_eq!(local_sites.len(), 1, "genuine target-local native site");
+    assert_eq!(local_sites.len(), 1, "genuine authored Int request site");
     assert!(shared_sites.is_disjoint(&local_sites));
     let expected = [
         std::collections::BTreeSet::new(),
